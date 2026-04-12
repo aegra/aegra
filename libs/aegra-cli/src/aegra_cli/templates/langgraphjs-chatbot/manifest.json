@@ -1,0 +1,12 @@
+{
+  "name": "LangGraph.js Chatbot",
+  "description": "A simple chatbot built with LangGraph.js (TypeScript).",
+  "runtime": "langgraphjs",
+  "files": {
+    "graph.ts.template": "src/$slug/graph.ts",
+    "state.ts.template": "src/$slug/state.ts",
+    "package.json.template": "package.json",
+    "tsconfig.json.template": "tsconfig.json",
+    "README.md.template": "README.md"
+  }
+}

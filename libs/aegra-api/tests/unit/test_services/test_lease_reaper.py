@@ -85,8 +85,14 @@ class TestReenqueue:
     @pytest.mark.asyncio
     async def test_pushes_to_redis(self) -> None:
         mock_client = AsyncMock()
+        session = AsyncMock()
+        session.scalar = AsyncMock(return_value=None)
+        session.execute = AsyncMock()
+        session.commit = AsyncMock()
+        maker = _make_session_maker(session)
 
         with (
+            patch("aegra_api.services.lease_reaper._get_session_maker", return_value=maker),
             patch("aegra_api.services.lease_reaper.redis_manager") as mock_rm,
             patch("aegra_api.services.lease_reaper.settings") as mock_settings,
         ):
@@ -99,7 +105,14 @@ class TestReenqueue:
 
     @pytest.mark.asyncio
     async def test_logs_warning_when_redis_unavailable(self) -> None:
+        session = AsyncMock()
+        session.scalar = AsyncMock(return_value=None)
+        session.execute = AsyncMock()
+        session.commit = AsyncMock()
+        maker = _make_session_maker(session)
+
         with (
+            patch("aegra_api.services.lease_reaper._get_session_maker", return_value=maker),
             patch("aegra_api.services.lease_reaper.redis_manager") as mock_rm,
             patch("aegra_api.services.lease_reaper.settings") as mock_settings,
         ):
@@ -112,8 +125,13 @@ class TestReenqueue:
     @pytest.mark.asyncio
     async def test_noop_when_empty_list(self) -> None:
         mock_client = AsyncMock()
+        session = AsyncMock()
+        session.scalar = AsyncMock(return_value=None)
+        session.commit = AsyncMock()
+        maker = _make_session_maker(session)
 
         with (
+            patch("aegra_api.services.lease_reaper._get_session_maker", return_value=maker),
             patch("aegra_api.services.lease_reaper.redis_manager") as mock_rm,
             patch("aegra_api.services.lease_reaper.settings") as mock_settings,
         ):

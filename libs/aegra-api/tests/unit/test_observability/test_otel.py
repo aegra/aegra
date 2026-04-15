@@ -97,6 +97,25 @@ class TestOpenTelemetryProviderInit:
             assert provider.is_enabled() is True
             assert mock_target in provider._active_targets
 
+    def test_add_custom_target_attaches_exporter_after_setup(self) -> None:
+        """Test that adding a target after setup() wires its exporter immediately."""
+        with patch("aegra_api.observability.otel.settings") as mock_settings:
+            mock_settings.observability.OTEL_TARGETS = ""
+            mock_settings.observability.OTEL_CONSOLE_EXPORT = True
+
+            provider = OpenTelemetryProvider()
+            provider.setup()
+
+            mock_target = MagicMock(spec=BaseOtelTarget)
+            mock_target.name = "Late"
+            mock_exporter = MagicMock()
+            mock_target.get_exporter.return_value = mock_exporter
+
+            provider.add_custom_target(mock_target)
+
+            mock_target.get_exporter.assert_called_once()
+            assert provider._tracer_provider is not None
+
 
 class TestOpenTelemetryProviderSetup:
     """Tests for the setup() method and tracer configuration."""
@@ -260,6 +279,45 @@ class TestOpenTelemetryProviderRuntime:
                 "session_id": "thread-456",
                 "user_id": "user-789",
             }
+
+    def test_get_metadata_includes_langfuse_keys_when_langfuse_active(self) -> None:
+        """Test that langfuse_* keys are emitted only when Langfuse target is active."""
+        with patch("aegra_api.observability.otel.settings") as mock_settings:
+            mock_settings.observability.OTEL_TARGETS = "LANGFUSE"
+            mock_settings.observability.OTEL_CONSOLE_EXPORT = False
+
+            provider = OpenTelemetryProvider()
+
+            meta = provider.get_metadata(run_id="run-123", thread_id="thread-456", user_identity="user-789")
+
+            assert meta["langfuse_session_id"] == "thread-456"
+            assert meta["langfuse_user_id"] == "user-789"
+
+    def test_get_metadata_langfuse_without_user_identity(self) -> None:
+        """Test that langfuse_session_id is present but langfuse_user_id absent when user_identity is None."""
+        with patch("aegra_api.observability.otel.settings") as mock_settings:
+            mock_settings.observability.OTEL_TARGETS = "LANGFUSE"
+            mock_settings.observability.OTEL_CONSOLE_EXPORT = False
+
+            provider = OpenTelemetryProvider()
+
+            meta = provider.get_metadata(run_id="run-123", thread_id="thread-456")
+
+            assert meta["langfuse_session_id"] == "thread-456"
+            assert "langfuse_user_id" not in meta
+
+    def test_get_metadata_excludes_langfuse_keys_when_langfuse_inactive(self) -> None:
+        """Test that langfuse_* keys are NOT emitted when only non-Langfuse targets are active."""
+        with patch("aegra_api.observability.otel.settings") as mock_settings:
+            mock_settings.observability.OTEL_TARGETS = ""
+            mock_settings.observability.OTEL_CONSOLE_EXPORT = True
+
+            provider = OpenTelemetryProvider()
+
+            meta = provider.get_metadata(run_id="run-123", thread_id="thread-456", user_identity="user-789")
+
+            assert "langfuse_session_id" not in meta
+            assert "langfuse_user_id" not in meta
 
     def test_get_metadata_empty_when_disabled(self):
         """Test metadata returns empty dict when disabled."""

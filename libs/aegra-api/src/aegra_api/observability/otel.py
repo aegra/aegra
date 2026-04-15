@@ -36,6 +36,7 @@ class OpenTelemetryProvider(ObservabilityProvider):
 
         # Defining the list of active targets
         self._active_targets: list[BaseOtelTarget] = self._resolve_targets()
+        self._has_langfuse = any(isinstance(target, LangfuseTarget) for target in self._active_targets)
 
         if self._active_targets or settings.observability.OTEL_CONSOLE_EXPORT:
             self._enabled = True
@@ -69,7 +70,18 @@ class OpenTelemetryProvider(ObservabilityProvider):
     def add_custom_target(self, target: BaseOtelTarget) -> None:
         """Allow registering custom targets dynamically."""
         self._active_targets.append(target)
+        if isinstance(target, LangfuseTarget):
+            self._has_langfuse = True
         self._enabled = True
+
+        if self._tracer_provider is not None:
+            try:
+                exporter = target.get_exporter()
+                if exporter:
+                    self._tracer_provider.add_span_processor(BatchSpanProcessor(exporter))
+                    logger.info(f"Observability: Attached target '{target.name}'")
+            except Exception as e:
+                logger.error(f"Observability: Failed to attach target '{target.name}': {e}")
 
     def setup(self) -> None:
         """Initializes the Global Tracer Provider. Runs once."""
@@ -122,13 +134,21 @@ class OpenTelemetryProvider(ObservabilityProvider):
         if not self.is_enabled():
             return {}
 
-        meta = {
+        meta: dict[str, Any] = {
             "run_id": run_id,
             "thread_id": thread_id,
             "session_id": thread_id,
         }
         if user_identity:
             meta["user_id"] = user_identity
+
+        if self._has_langfuse:
+            # Langfuse CallbackHandler only promotes langfuse_* prefixed keys
+            # to trace-level fields; plain session_id stays in generic metadata.
+            meta["langfuse_session_id"] = thread_id
+            if user_identity:
+                meta["langfuse_user_id"] = user_identity
+
         return meta
 
 

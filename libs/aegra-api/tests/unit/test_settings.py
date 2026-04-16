@@ -1,8 +1,9 @@
 """Tests for AppSettings, DatabaseSettings, and WorkerSettings."""
 
 import pytest
+from pydantic import ValidationError
 
-from aegra_api.settings import AppSettings, DatabaseSettings, WorkerSettings
+from aegra_api.settings import AppSettings, CronSettings, DatabaseSettings, WorkerSettings
 
 
 class TestAppSettingsServerURL:
@@ -205,3 +206,23 @@ class TestWorkerSettingsLeaseValidation:
         monkeypatch.setenv("HEARTBEAT_INTERVAL_SECONDS", "10")
         ws = WorkerSettings(_env_file=None)
         assert ws.LEASE_DURATION_SECONDS == 21
+
+
+class TestCronSettingsValidation:
+    """Test that cron scheduler timing is validated at startup."""
+
+    def _clear_cron_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        for var in ("CRON_ENABLED", "CRON_POLL_INTERVAL_SECONDS"):
+            monkeypatch.delenv(var, raising=False)
+
+    def test_defaults_pass_validation(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        self._clear_cron_env(monkeypatch)
+        cron = CronSettings(_env_file=None)
+        assert cron.CRON_POLL_INTERVAL_SECONDS == 60
+
+    def test_rejects_non_positive_poll_interval(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        self._clear_cron_env(monkeypatch)
+        monkeypatch.setenv("CRON_POLL_INTERVAL_SECONDS", "0")
+
+        with pytest.raises((ValueError, ValidationError), match="CRON_POLL_INTERVAL_SECONDS"):
+            CronSettings(_env_file=None)

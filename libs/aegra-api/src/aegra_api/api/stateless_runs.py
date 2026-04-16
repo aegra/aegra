@@ -6,14 +6,12 @@ endpoint functions, and clean up the thread afterward (unless the caller
 explicitly sets ``on_completion="keep"``).
 """
 
-import asyncio
 from collections.abc import AsyncIterator
 from uuid import uuid4
 
 import structlog
 from fastapi import APIRouter, Depends
 from fastapi.responses import StreamingResponse
-from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from aegra_api.api.runs import (
@@ -21,21 +19,18 @@ from aegra_api.api.runs import (
     create_run,
     wait_for_run,
 )
-from aegra_api.core.active_runs import active_runs
 from aegra_api.core.auth_deps import auth_dependency, get_current_user
-from aegra_api.core.orm import Run as RunORM
-from aegra_api.core.orm import Thread as ThreadORM
-from aegra_api.core.orm import _get_session_maker, get_session
+from aegra_api.core.orm import get_session
 from aegra_api.models import Run, RunCreate, User
 from aegra_api.models.errors import CONFLICT, NOT_FOUND, SSE_RESPONSE
-from aegra_api.services.executor import executor
-from aegra_api.services.streaming_service import streaming_service
+from aegra_api.services.run_cleanup import (
+    cleanup_after_background_run,
+    delete_thread_by_id,
+    schedule_background_cleanup,
+)
 
 router = APIRouter(tags=["Stateless Runs"], dependencies=auth_dependency)
 logger = structlog.getLogger(__name__)
-
-# Strong references to fire-and-forget cleanup tasks to prevent GC
-_background_cleanup_tasks: set[asyncio.Task[None]] = set()
 
 
 # ---------------------------------------------------------------------------
@@ -44,63 +39,13 @@ _background_cleanup_tasks: set[asyncio.Task[None]] = set()
 
 
 async def _delete_thread_by_id(thread_id: str, user_id: str) -> None:
-    """Delete an ephemeral thread and cascade-delete its runs.
-
-    Opens its own DB session so it can be called after the request session has
-    been closed (e.g. in a ``finally`` block or background task).
-    """
-    maker = _get_session_maker()
-    async with maker() as session:
-        # Cancel any still-active runs on this thread
-        active_runs_stmt = select(RunORM).where(
-            RunORM.thread_id == thread_id,
-            RunORM.user_id == user_id,
-            RunORM.status.in_(["pending", "running"]),
-        )
-        active_runs_list = (await session.scalars(active_runs_stmt)).all()
-
-        for run in active_runs_list:
-            run_id = run.run_id
-            await streaming_service.cancel_run(run_id)
-            task = active_runs.pop(run_id, None)
-            if task and not task.done():
-                task.cancel()
-                try:
-                    await task
-                except asyncio.CancelledError:
-                    pass
-                except Exception:
-                    logger.exception("Error awaiting cancelled task during thread cleanup", run_id=run_id)
-
-        # Delete thread (cascade deletes runs via FK)
-        thread = await session.scalar(
-            select(ThreadORM).where(
-                ThreadORM.thread_id == thread_id,
-                ThreadORM.user_id == user_id,
-            )
-        )
-        if thread:
-            await session.delete(thread)
-            await session.commit()
+    """Delete an ephemeral thread and cascade-delete its runs."""
+    await delete_thread_by_id(thread_id, user_id)
 
 
 async def _cleanup_after_background_run(run_id: str, thread_id: str, user_id: str) -> None:
-    """Wait for a background run to finish, then delete the ephemeral thread.
-
-    Uses executor.wait_for_completion which works both in-process (dev)
-    and cross-instance (prod with Redis workers).
-    """
-    try:
-        await executor.wait_for_completion(run_id, timeout=3600.0)
-    except (asyncio.CancelledError, TimeoutError):
-        pass
-    except Exception:
-        logger.exception("Error waiting for background run", run_id=run_id)
-
-    try:
-        await _delete_thread_by_id(thread_id, user_id)
-    except Exception:
-        logger.exception("Failed to delete ephemeral thread", thread_id=thread_id, run_id=run_id)
+    """Wait for a background run to finish, then delete the ephemeral thread."""
+    await cleanup_after_background_run(run_id, thread_id, user_id)
 
 
 # ---------------------------------------------------------------------------
@@ -265,8 +210,6 @@ async def stateless_create_run(
         raise
 
     if should_delete:
-        task = asyncio.create_task(_cleanup_after_background_run(result.run_id, thread_id, user.identity))
-        _background_cleanup_tasks.add(task)
-        task.add_done_callback(_background_cleanup_tasks.discard)
+        schedule_background_cleanup(result.run_id, thread_id, user.identity)
 
     return result

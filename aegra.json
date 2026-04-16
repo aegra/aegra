@@ -7,7 +7,8 @@
     "subgraph_hitl_agent": "./examples/subgraph_hitl_agent/graph.py:graph",
     "factory": "./examples/factory/graph.py:graph",
     "stress_test": "./examples/stress_test/graph.py:graph",
-    "stress_tool_agent": "./examples/stress_tool_agent/graph.py:graph"
+    "stress_tool_agent": "./examples/stress_tool_agent/graph.py:graph",
+    "cron_example": "./examples/cron_example/graph.py:graph"
   },
   "http": {
     "app": "./examples/custom_routes_example.py:app"

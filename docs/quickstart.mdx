@@ -61,7 +61,7 @@ from langgraph_sdk import get_client
 async def main():
     client = get_client(url="http://localhost:2026")
 
-    # Each graph in aegra.json gets a default assistant with the same ID
+    # Each graph in aegra.json gets a default assistant, and run/cron APIs accept the graph ID directly
     thread = await client.threads.create()
 
     async for chunk in client.runs.stream(

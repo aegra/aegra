@@ -128,6 +128,17 @@ In dev mode (`REDIS_BROKER_ENABLED=false`), runs execute as in-process asyncio t
 
 Total capacity per instance = `WORKER_COUNT` x `N_JOBS_PER_WORKER` (default: 30 concurrent runs).
 
+## Cron scheduler
+
+The background scheduler polls the database for due cron jobs and fires them as runs.
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `CRON_ENABLED` | `true` | Enable the background cron scheduler |
+| `CRON_POLL_INTERVAL_SECONDS` | `60` | How often (in seconds) the scheduler checks for due jobs |
+
+Set `CRON_ENABLED=false` to disable scheduling without removing cron records. Jobs will not fire but can still be created, updated, and queried.
+
 ## Prometheus metrics
 
 | Variable | Default | Description |

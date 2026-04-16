@@ -50,7 +50,8 @@
               "guides/assistants",
               "guides/threads-and-state",
               "guides/streaming",
-              "guides/human-in-the-loop"
+              "guides/human-in-the-loop",
+              "guides/cron"
             ]
           },
           {

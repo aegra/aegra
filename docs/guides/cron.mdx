@@ -1,0 +1,177 @@
+---
+title: "Cron / scheduled jobs"
+description: "Trigger agent runs automatically on a schedule using cron expressions."
+---
+
+Aegra supports scheduled runs via a background cron scheduler. Cron jobs are stored in PostgreSQL and fired by a polling loop that runs inside every server instance.
+
+## Prerequisites
+
+Enable the scheduler (it is on by default):
+
+```bash
+CRON_ENABLED=true           # default: true
+CRON_POLL_INTERVAL_SECONDS=60  # default: 60
+```
+
+See the [environment variables reference](/reference/environment-variables#cron-scheduler) for all options.
+
+## Creating a stateless cron
+
+A stateless cron fires against a new thread on every occurrence:
+
+```python
+import asyncio
+from langgraph_sdk import get_client
+
+async def main():
+    client = get_client(url="http://localhost:2026")
+
+    run = await client.crons.create(
+        assistant_id="agent",
+        schedule="0 9 * * *",   # every day at 09:00 UTC
+        input={"messages": [{"role": "user", "content": "Good morning report"}]},
+    )
+    print(f"Cron ID: {run['cron_id']}")
+
+asyncio.run(main())
+```
+
+Aegra accepts the graph ID directly in `assistant_id` for cron creation and resolves it to the default assistant for that graph at request time.
+
+By default, each stateless cron run deletes its ephemeral thread after the run completes, including the immediate first run that is triggered when the cron is created.
+
+<Note>
+  The snippets below assume you are inside an `async def` function with an initialized `client`.
+</Note>
+
+## Thread cleanup for stateless crons
+
+Stateless crons create a fresh thread for every execution. Control what happens to that thread after the run finishes with `on_run_completed`:
+
+- `"delete"` (default) deletes the ephemeral thread automatically after the run completes.
+- `"keep"` preserves the thread so you can inspect its state or runs later.
+
+```python
+run = await client.crons.create(
+        assistant_id="agent",
+        schedule="0 9 * * *",
+        on_run_completed="keep",
+        input={"messages": [{"role": "user", "content": "Daily report"}]},
+)
+
+print(run["cron_id"])
+```
+
+When you keep stateless cron threads, you are responsible for cleaning them up. For long-lived deployments, use thread TTL policies or a separate cleanup job if you do not want preserved threads to accumulate.
+
+## Creating a thread-bound cron
+
+Bind a cron to a specific thread so every firing continues the same conversation:
+
+```python
+thread = await client.threads.create()
+
+run = await client.crons.create_for_thread(
+    thread_id=thread["thread_id"],
+    assistant_id="agent",
+    schedule="0 8 * * 1",   # every Monday at 08:00 UTC
+    input={"messages": [{"role": "user", "content": "Weekly digest"}]},
+)
+print(f"Cron ID: {run['cron_id']}")
+```
+
+## Cron expression format
+
+Aegra uses [croniter](https://github.com/kiorky/croniter) for schedule parsing.
+
+### Standard 5-field format
+
+```
+┌──── minute (0-59)
+│ ┌──── hour (0-23)
+│ │ ┌──── day of month (1-31)
+│ │ │ ┌──── month (1-12)
+│ │ │ │ ┌──── day of week (0-6, Sunday=0)
+│ │ │ │ │
+* * * * *
+```
+
+| Expression | Meaning |
+|---|---|
+| `0 9 * * *` | Every day at 09:00 |
+| `*/15 * * * *` | Every 15 minutes |
+| `0 9 * * 1` | Every Monday at 09:00 |
+| `0 0 1 * *` | First day of every month at midnight |
+
+### Seconds-level 6-field format
+
+Prefix the standard expression with a seconds field for sub-minute scheduling:
+
+```
+*/30 * * * * *   # every 30 seconds
+```
+
+## Timezone support
+
+By default schedules use UTC. Pass an [IANA timezone name](https://en.wikipedia.org/wiki/List_of_tz_database_time_zones) to fire in local time:
+
+```python
+run = await client.crons.create(
+    assistant_id="agent",
+    schedule="0 9 * * *",       # 09:00 in New York time
+    timezone="America/New_York",
+    input={"messages": [{"role": "user", "content": "Morning standup"}]},
+)
+```
+
+The server stores the timezone alongside the cron record and converts to UTC internally. Passing an invalid timezone name results in an HTTP 422 error.
+
+<Note>
+  When updating a cron's schedule without changing its timezone, the existing timezone is preserved automatically.
+</Note>
+
+## Listing and searching
+
+```python
+# Search by assistant
+crons = await client.crons.search(assistant_id="agent")
+
+# Search by thread
+crons = await client.crons.search(thread_id="<thread_id>")
+
+# Count matching crons
+total = await client.crons.count(assistant_id="agent")
+```
+
+## Updating a cron
+
+```python
+updated = await client.crons.update(
+    cron_id="<cron_id>",
+    schedule="0 10 * * *",  # new schedule
+    enabled=False,           # pause without deleting
+)
+```
+
+Supported update fields: `schedule`, `enabled`, `input`, `config`, `metadata`, `timezone`.
+
+## Disabling and re-enabling
+
+```python
+# Pause
+await client.crons.update(cron_id="<cron_id>", enabled=False)
+
+# Resume
+await client.crons.update(cron_id="<cron_id>", enabled=True)
+```
+
+Disabled crons are ignored by the scheduler but remain in the database.
+
+## Deleting a cron
+
+```python
+await client.crons.delete(cron_id="<cron_id>")
+```
+
+Deletion is permanent. The underlying thread (for thread-bound crons) is not affected.

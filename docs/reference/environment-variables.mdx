@@ -48,7 +48,7 @@ POSTGRES_USER=user
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `DATABASE_URL` | — | Full PostgreSQL connection string |
+| `DATABASE_URL` | — | Full PostgreSQL connection string. Supports comma-separated hosts for [high availability](/guides/high-availability) (e.g. `host1:5432,host2:5432`) |
 | `POSTGRES_DB` | `aegra` | Database name |
 | `POSTGRES_HOST` | `localhost` | Database host |
 | `POSTGRES_PASSWORD` | `password` | Database password |

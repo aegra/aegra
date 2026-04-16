@@ -1,0 +1,66 @@
+---
+title: "High availability"
+description: "Configure Aegra for PostgreSQL high availability with multi-host failover."
+---
+
+Aegra supports native PostgreSQL multi-host connections for automatic failover. When the primary database becomes unreachable, both connection pools (SQLAlchemy and LangGraph) transparently reconnect to a standby host with no application restart required.
+
+This works with any PostgreSQL HA setup that exposes multiple endpoints: Patroni, Stolon, CloudNativePG, Amazon RDS Multi-AZ, Google Cloud SQL HA, or manual streaming replication.
+
+## Configuration
+
+Pass comma-separated hosts in `DATABASE_URL`:
+
+```bash
+DATABASE_URL=postgresql://user:password@primary:5432,standby1:5432,standby2:5432/aegra
+```
+
+Aegra automatically handles the driver split:
+- **psycopg** (LangGraph pool) receives the URL as-is -- libpq natively supports comma-separated hosts
+- **asyncpg** (SQLAlchemy pool) receives a rewritten URL with hosts and ports as query parameters, which is the format asyncpg requires for multi-host connections
+
+No code changes or extra configuration needed.
+
+## target_session_attrs
+
+PostgreSQL's `target_session_attrs` parameter controls which host is selected from the list. Append it as a query parameter:
+
+```bash
+# Connect to any available host (default behavior without the parameter)
+DATABASE_URL=postgresql://user:pass@primary:5432,standby:5432/aegra?target_session_attrs=any
+
+# Only connect to a read-write host (primary)
+DATABASE_URL=postgresql://user:pass@primary:5432,standby:5432/aegra?target_session_attrs=read-write
+
+# Prefer standby for read traffic, fall back to primary
+DATABASE_URL=postgresql://user:pass@primary:5432,standby:5432/aegra?target_session_attrs=prefer-standby
+```
+
+| Value | Behavior |
+|-------|----------|
+| `any` | Connect to the first available host |
+| `read-write` | Only connect to a host accepting writes (primary) |
+| `read-only` | Only connect to a read-only host (standby) |
+| `prefer-standby` | Prefer standby, fall back to primary |
+| `primary` | Only connect to the primary |
+| `standby` | Only connect to a standby |
+
+For most deployments, omit `target_session_attrs` or use `any` -- Aegra needs a writable connection for metadata and checkpoints, and standalone primaries satisfy all session attribute filters.
+
+## Pool recovery
+
+Aegra's SQLAlchemy pool is configured with `pool_pre_ping=True`. This means each connection is validated with a lightweight ping before use. When a host goes down:
+
+1. Existing pooled connections to the dead host fail the ping check
+2. The pool discards the dead connection
+3. A new connection is created using the multi-host URL
+4. The driver tries each host in order until one responds
+
+No manual intervention or restart is needed. The LangGraph pool (psycopg) handles this natively through its built-in connection health checks.
+
+## Limitations
+
+- **IPv6 addresses** must use bracket notation: `[::1]:5432,[::2]:5433`
+- **Ports** must be numeric. Non-numeric ports (e.g. `host:abc`) are rejected at startup with a clear error
+- **Individual `POSTGRES_*` fields** do not support multi-host -- use `DATABASE_URL`
+- Multi-host does not provide load balancing -- the driver connects to the first responsive host

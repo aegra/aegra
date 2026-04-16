@@ -161,6 +161,132 @@ class TestDatabaseURLSupport:
         assert db.DATABASE_URL == "not-a-url"
 
 
+class TestMultiHostDatabaseURL:
+    """Test multi-host DATABASE_URL support for native PostgreSQL HA."""
+
+    def test_multihost_converted_for_asyncpg(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Multi-host libpq URL is converted to SQLAlchemy query-param format for asyncpg."""
+        monkeypatch.setenv("DATABASE_URL", "postgresql://user:pass@h1:5432,h2:5433/db")
+
+        db = DatabaseSettings(_env_file=None)
+
+        assert db.database_url == "postgresql+asyncpg://user:pass@/db?host=h1,h2&port=5432,5433"
+
+    def test_multihost_preserved_for_psycopg(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Multi-host URL is kept in libpq format for psycopg (database_url_sync)."""
+        monkeypatch.setenv("DATABASE_URL", "postgresql://user:pass@h1:5432,h2:5433/db")
+
+        db = DatabaseSettings(_env_file=None)
+
+        assert db.database_url_sync == "postgresql://user:pass@h1:5432,h2:5433/db"
+
+    def test_multihost_preserves_query_params(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Query params like target_session_attrs are preserved after conversion."""
+        monkeypatch.setenv(
+            "DATABASE_URL",
+            "postgresql://user:pass@h1:5432,h2:5432/db?target_session_attrs=read-write&sslmode=require",
+        )
+
+        db = DatabaseSettings(_env_file=None)
+
+        url = db.database_url
+        assert url.startswith("postgresql+asyncpg://user:pass@/db?")
+        assert "host=h1,h2" in url
+        assert "port=5432,5432" in url
+        assert "target_session_attrs=read-write" in url
+        assert "sslmode=require" in url
+
+    @pytest.mark.parametrize(
+        ("env_url", "expected_hosts", "expected_ports"),
+        [
+            pytest.param(
+                "postgresql://user:pass@h1,h2/db",
+                "host=h1,h2",
+                "port=5432,5432",
+                id="defaults_port_when_omitted",
+            ),
+            pytest.param(
+                "postgresql://user:pass@h1:5432,h2/db",
+                "host=h1,h2",
+                "port=5432,5432",
+                id="mixed_ports",
+            ),
+            pytest.param(
+                "postgresql://u:p@h1:5432,h2:5432,h3:5432/db",
+                "host=h1,h2,h3",
+                "port=5432,5432,5432",
+                id="three_hosts",
+            ),
+            pytest.param(
+                "postgresql://u:p@h1:,h2:5433/db",
+                "host=h1,h2",
+                "port=5432,5433",
+                id="trailing_colon_defaults_port",
+            ),
+            pytest.param(
+                "postgresql://u:p@[::1]:5432,[::2]:5433/db",
+                "host=[::1],[::2]",
+                "port=5432,5433",
+                id="ipv6_hosts",
+            ),
+            pytest.param(
+                "postgresql://u:p@[::1],[::2]/db",
+                "host=[::1],[::2]",
+                "port=5432,5432",
+                id="ipv6_without_port",
+            ),
+        ],
+    )
+    def test_multihost_host_port_matrix(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        env_url: str,
+        expected_hosts: str,
+        expected_ports: str,
+    ) -> None:
+        """Multi-host URLs are parsed into correct host/port query params."""
+        monkeypatch.setenv("DATABASE_URL", env_url)
+
+        db = DatabaseSettings(_env_file=None)
+
+        assert expected_hosts in db.database_url
+        assert expected_ports in db.database_url
+
+    def test_malformed_ipv6_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Malformed bracketed IPv6 (missing closing bracket) raises at startup."""
+        monkeypatch.setenv("DATABASE_URL", "postgresql://u:p@[::1:5432,[::2]:5433/db")
+
+        db = DatabaseSettings(_env_file=None)
+
+        with pytest.raises(ValueError, match="missing closing bracket"):
+            _ = db.database_url
+
+    def test_non_integer_port_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Non-integer port in multi-host URL raises at startup."""
+        monkeypatch.setenv("DATABASE_URL", "postgresql://u:p@h1:abc,h2:5433/db")
+
+        db = DatabaseSettings(_env_file=None)
+
+        with pytest.raises(ValueError, match="Non-integer port"):
+            _ = db.database_url
+
+    def test_single_host_unchanged(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Single-host URL is not rewritten."""
+        monkeypatch.setenv("DATABASE_URL", "postgresql://user:pass@h1:5432/db")
+
+        db = DatabaseSettings(_env_file=None)
+
+        assert db.database_url == "postgresql+asyncpg://user:pass@h1:5432/db"
+
+    def test_multihost_no_userinfo(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Multi-host URL without userinfo is converted correctly."""
+        monkeypatch.setenv("DATABASE_URL", "postgresql://h1:5432,h2:5432/db")
+
+        db = DatabaseSettings(_env_file=None)
+
+        assert db.database_url == "postgresql+asyncpg:///db?host=h1,h2&port=5432,5432"
+
+
 class TestWorkerSettingsLeaseValidation:
     """Test that lease timing invariants are enforced at startup."""
 

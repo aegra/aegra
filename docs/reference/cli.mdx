@@ -46,7 +46,7 @@ What it does:
 1. Starts a PostgreSQL container via Docker Compose
 2. Loads your `.env` file
 3. Applies database migrations automatically
-4. Runs uvicorn with `--reload`
+4. Runs uvicorn with `--reload` by default
 
 | Option | Default | Description |
 |--------|---------|-------------|
@@ -56,6 +56,7 @@ What it does:
 | `--env-file` / `-e` | `.env` | Path to `.env` file |
 | `--file` / `-f` | Auto-detected | Path to `docker-compose.yml` |
 | `--no-db-check` | — | Skip database readiness check |
+| `--no-reload` | — | Disable auto-reload |
 | `--debug-port` | — | When set, run the server under `debugpy` and listen on this port (enables remote debugging) |
 | `--wait-for-client` | `false` | When used with `--debug-port`, `debugpy` will wait for a debugger client to attach before starting the app |
 | `--debug-host` | - | Host for the debugger to bind to (defaults to loopback). Binding to a non-loopback address is unsafe. |

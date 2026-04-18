@@ -81,6 +81,20 @@ class TestDevCommand:
                 assert "aegra_api.main:app" in call_args
                 assert "--reload" in call_args
 
+    def test_dev_no_reload_skips_reload_flag(self, cli_runner: CliRunner, tmp_path: Path) -> None:
+        """Test that --no-reload disables uvicorn auto-reload."""
+        with cli_runner.isolated_filesystem(temp_dir=tmp_path):
+            Path("aegra.json").write_text('{"graphs": {}}')
+
+            with patch("aegra_cli.cli.subprocess.Popen") as mock_popen:
+                mock_popen.return_value = create_mock_popen(0)
+                result = cli_runner.invoke(cli, ["dev", "--no-db-check", "--no-reload"])
+
+                assert result.exit_code == 0
+                mock_popen.assert_called_once()
+                call_args = mock_popen.call_args[0][0]
+                assert "--reload" not in call_args
+
     def test_dev_default_host_and_port(self, cli_runner: CliRunner, tmp_path: Path) -> None:
         """Test that dev command uses default host and port."""
         with cli_runner.isolated_filesystem(temp_dir=tmp_path):
@@ -282,6 +296,29 @@ class TestDevCommand:
                 # Ensure uvicorn still present
                 assert "uvicorn" in call_args
                 assert "--reload" in call_args
+
+    def test_dev_no_reload_with_debug_port_skips_reload(
+        self, cli_runner: CliRunner, tmp_path: Path
+    ) -> None:
+        """Test that --no-reload disables reload even when debugpy is enabled."""
+        with cli_runner.isolated_filesystem(temp_dir=tmp_path):
+            Path("aegra.json").write_text('{"graphs": {}}')
+
+            with (
+                patch("importlib.util.find_spec", return_value=object()),
+                patch("aegra_cli.cli.subprocess.Popen") as mock_popen,
+            ):
+                mock_popen.return_value = create_mock_popen(0)
+                result = cli_runner.invoke(
+                    cli,
+                    ["dev", "--no-db-check", "--debug-port", "5678", "--no-reload"],
+                )
+
+                assert result.exit_code == 0
+                mock_popen.assert_called_once()
+                call_args = mock_popen.call_args[0][0]
+                assert "debugpy" in call_args
+                assert "--reload" not in call_args
 
     def test_dev_with_ipv6_debug_host_formats_listen(
         self, cli_runner: CliRunner, tmp_path: Path

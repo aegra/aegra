@@ -386,7 +386,7 @@ def dev(
         )
 
         # Always bind debugpy to the debug host (default loopback) regardless of --host
-        listen = debug_port
+        listen = str(debug_port)
         is_loopback = True
 
         # If debug_host is specified, warn if it's not loopback. Also handle ip v4 and v6 addresses

@@ -278,7 +278,8 @@ class TestDevCommand:
                 # Ensure debugpy is used and listening on given port bound to loopback
                 assert "debugpy" in call_args
                 assert "--listen" in call_args
-                assert "5678" in " ".join(map(str, call_args))
+                listen_idx = call_args.index("--listen")
+                assert call_args[listen_idx + 1] == "5678"
                 # Ensure uvicorn still present
                 assert "uvicorn" in call_args
                 assert "--reload" in call_args
@@ -361,7 +362,7 @@ class TestDevCommand:
                 mock_popen.assert_called_once()
                 call_args = mock_popen.call_args[0][0]
                 listen_idx = call_args.index("--listen")
-                assert call_args[listen_idx + 1] == 5678
+                assert call_args[listen_idx + 1] == "5678"
                 assert "not-a-valid-host:5678" not in " ".join(map(str, call_args))
 
     def test_dev_debug_host_non_loopback_warns(self, cli_runner: CliRunner, tmp_path: Path) -> None:

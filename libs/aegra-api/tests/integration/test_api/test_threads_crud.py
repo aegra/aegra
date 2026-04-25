@@ -450,6 +450,49 @@ class TestSearchThreads:
         data = resp.json()
         assert isinstance(data, list)
 
+    def test_search_accepts_order_by_asc(self, client):
+        """order_by='created_at ASC' is accepted without error."""
+        resp = client.post("/threads/search", json={"order_by": "created_at ASC"})
+        assert resp.status_code == 200
+        assert isinstance(resp.json(), list)
+
+    def test_search_malformed_order_by_does_not_500(self, client):
+        """Malformed order_by falls back to default and returns 200."""
+        for bad in ["password; DROP TABLE", "nonexistent_col", ""]:
+            resp = client.post("/threads/search", json={"order_by": bad})
+            assert resp.status_code == 200, f"order_by={bad!r} raised {resp.status_code}"
+
+    def test_search_accepts_sdk_sort_shape(self, client):
+        """SDK-style sort_by/sort_order is accepted."""
+        resp = client.post(
+            "/threads/search",
+            json={"sort_by": "updated_at", "sort_order": "asc"},
+        )
+        assert resp.status_code == 200
+        assert isinstance(resp.json(), list)
+
+    def test_search_sdk_state_updated_at_falls_back(self, client):
+        """sort_by='state_updated_at' (valid SDK literal, no column here) falls back without 500."""
+        resp = client.post(
+            "/threads/search",
+            json={"sort_by": "state_updated_at", "sort_order": "desc"},
+        )
+        assert resp.status_code == 200
+
+    def test_search_rejects_invalid_sort_order(self, client):
+        """sort_order is a Literal['asc','desc']; other values are rejected by Pydantic."""
+        resp = client.post(
+            "/threads/search",
+            json={"sort_by": "created_at", "sort_order": "sideways"},
+        )
+        assert resp.status_code == 422
+
+    def test_search_accepts_bool_metadata_filter(self, client):
+        """metadata={'active': True} is accepted end-to-end (real matching verified in E2E)."""
+        resp = client.post("/threads/search", json={"metadata": {"active": True}})
+        assert resp.status_code == 200
+        assert isinstance(resp.json(), list)
+
 
 class TestThreadGetState:
     """Test GET /threads/{thread_id}/state endpoint"""

@@ -9,8 +9,10 @@ from uuid import uuid4
 
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy import select
+from sqlalchemy import bindparam, cast, select
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.types import JSON
 
 from aegra_api.core.active_runs import active_runs
 from aegra_api.core.auth_deps import auth_dependency, get_current_user
@@ -40,6 +42,37 @@ router = APIRouter(tags=["Threads"], dependencies=auth_dependency)
 logger = structlog.getLogger(__name__)
 
 thread_state_service = ThreadStateService()
+
+
+# --- Sort resolution for /threads/search ---
+
+_ALLOWED_SORT_FIELDS: frozenset[str] = frozenset({"created_at", "updated_at", "thread_id", "status"})
+_DEFAULT_SORT_FIELD = "created_at"
+_DEFAULT_SORT_ASC = False
+
+
+def _resolve_sort(request: ThreadSearchRequest) -> tuple[Any, bool]:
+    """Resolve (ORM column, is_ascending) for /threads/search.
+
+    Precedence: SDK-style ``sort_by`` (with optional ``sort_order``) wins over the
+    legacy ``order_by`` string. Unknown columns or malformed input silently fall
+    back to the default (``created_at DESC``) — never 500.
+    """
+    field = _DEFAULT_SORT_FIELD
+    asc = _DEFAULT_SORT_ASC
+
+    if request.sort_by:
+        candidate = request.sort_by.strip().lower()
+        if candidate in _ALLOWED_SORT_FIELDS:
+            field = candidate
+            asc = (request.sort_order or "desc").lower() == "asc"
+    elif request.order_by:
+        parts = request.order_by.strip().split()
+        if parts and parts[0].lower() in _ALLOWED_SORT_FIELDS:
+            field = parts[0].lower()
+            asc = len(parts) > 1 and parts[1].lower() == "asc"
+
+    return getattr(ThreadORM, field), asc
 
 
 # --- Helper for safe ORM -> Pydantic conversion (Test/Mock compatible) ---
@@ -842,11 +875,14 @@ async def search_threads(
 
     if request.metadata:
         for key, value in request.metadata.items():
-            stmt = stmt.where(ThreadORM.metadata_json[key].as_string() == str(value))
+            # Compare as JSONB so Python bools/ints/None match their JSON
+            # counterparts (str(True) == "True" was the previous bug).
+            stmt = stmt.where(ThreadORM.metadata_json[key] == cast(bindparam(None, value=value, type_=JSON), JSONB))
 
     offset = request.offset or 0
     limit = request.limit or 20
-    stmt = stmt.order_by(ThreadORM.created_at.desc()).offset(offset).limit(limit)
+    column, asc = _resolve_sort(request)
+    stmt = stmt.order_by(column.asc() if asc else column.desc()).offset(offset).limit(limit)
 
     result = await session.scalars(stmt)
     rows = result.all()

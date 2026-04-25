@@ -1,7 +1,7 @@
 """Thread-related Pydantic models for Agent Protocol"""
 
 from datetime import datetime
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
@@ -71,7 +71,18 @@ class ThreadSearchRequest(BaseModel):
     status: str | None = Field(None, description="Thread status filter (idle, busy, interrupted, error)")
     limit: int | None = Field(20, le=100, ge=1, description="Maximum results")
     offset: int | None = Field(0, ge=0, description="Results offset")
-    order_by: str | None = Field("created_at DESC", description="Sort order")
+    order_by: str | None = Field(
+        "created_at DESC",
+        description="Sort order (legacy single-field form, e.g. 'updated_at ASC')",
+    )
+    sort_by: str | None = Field(
+        None,
+        description="Field to sort by (SDK-compatible). Takes precedence over order_by.",
+    )
+    sort_order: Literal["asc", "desc"] | None = Field(
+        None,
+        description="Sort direction (SDK-compatible). Defaults to 'desc' when sort_by is set.",
+    )
 
     @field_validator("status")
     @classmethod

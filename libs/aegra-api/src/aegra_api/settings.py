@@ -1,5 +1,6 @@
 import re
 from typing import Annotated
+from urllib.parse import quote_plus
 
 from pydantic import BeforeValidator, computed_field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -164,7 +165,7 @@ class DatabaseSettings(EnvBase):
             url = self._normalize_scheme(self.DATABASE_URL, "postgresql+asyncpg")
             return self._to_sqlalchemy_multihost(url)
         return (
-            f"postgresql+asyncpg://{self.POSTGRES_USER}:{self.POSTGRES_PASSWORD}@"
+            f"postgresql+asyncpg://{quote_plus(self.POSTGRES_USER)}:{quote_plus(self.POSTGRES_PASSWORD)}@"
             f"{self.POSTGRES_HOST}:{self.POSTGRES_PORT}/{self.POSTGRES_DB}"
         )
 
@@ -175,7 +176,7 @@ class DatabaseSettings(EnvBase):
         if self.DATABASE_URL:
             return self._normalize_scheme(self.DATABASE_URL, "postgresql")
         return (
-            f"postgresql://{self.POSTGRES_USER}:{self.POSTGRES_PASSWORD}@"
+            f"postgresql://{quote_plus(self.POSTGRES_USER)}:{quote_plus(self.POSTGRES_PASSWORD)}@"
             f"{self.POSTGRES_HOST}:{self.POSTGRES_PORT}/{self.POSTGRES_DB}"
         )
 

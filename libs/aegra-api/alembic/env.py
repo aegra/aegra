@@ -4,7 +4,7 @@ import asyncio
 import threading
 from logging.config import fileConfig
 
-from sqlalchemy import pool
+from sqlalchemy import pool, text
 from sqlalchemy.engine import Connection
 from sqlalchemy.ext.asyncio import async_engine_from_config
 
@@ -56,15 +56,26 @@ def run_migrations_offline() -> None:
         target_metadata=target_metadata,
         literal_binds=True,
         dialect_opts={"paramstyle": "named"},
+        version_table_schema=settings.db.POSTGRES_SCHEMA,
     )
 
     with context.begin_transaction():
+        if settings.db.POSTGRES_SCHEMA:
+            context.execute(f'CREATE SCHEMA IF NOT EXISTS "{settings.db.POSTGRES_SCHEMA}"')
+            context.execute(f'SET search_path TO "{settings.db.POSTGRES_SCHEMA}", public')
         context.run_migrations()
 
 
 def do_run_migrations(connection: Connection) -> None:
     """Run migrations with the given connection."""
-    context.configure(connection=connection, target_metadata=target_metadata)
+    if settings.db.POSTGRES_SCHEMA:
+        connection.execute(text(f'CREATE SCHEMA IF NOT EXISTS "{settings.db.POSTGRES_SCHEMA}"'))
+        connection.execute(text(f'SET search_path TO "{settings.db.POSTGRES_SCHEMA}", public'))
+        connection.commit()
+
+    context.configure(
+        connection=connection, target_metadata=target_metadata, version_table_schema=settings.db.POSTGRES_SCHEMA
+    )
 
     with context.begin_transaction():
         context.run_migrations()

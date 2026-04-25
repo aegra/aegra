@@ -90,6 +90,7 @@ class DatabaseSettings(EnvBase):
     POSTGRES_HOST: str = "localhost"
     POSTGRES_PORT: str = "5432"
     POSTGRES_DB: str = "aegra"
+    POSTGRES_SCHEMA: str | None = None
     DB_ECHO_LOG: bool = False
 
     @staticmethod

@@ -3,6 +3,7 @@
 import structlog
 from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 from langgraph.store.postgres.aio import AsyncPostgresStore
+from psycopg import sql as psycopg_sql
 from psycopg.rows import dict_row
 from psycopg_pool import AsyncConnectionPool
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
@@ -34,13 +35,17 @@ class DatabaseManager:
         # 1. SQLAlchemy Engine (app metadata, uses asyncpg)
         # We strictly limit this pool because the main load
         # is handled by LangGraph components.
+        connect_args: dict = {"prepared_statement_cache_size": 0}  # PgBouncer compatibility
+        if settings.db.POSTGRES_SCHEMA:
+            connect_args["server_settings"] = {"search_path": f"{settings.db.POSTGRES_SCHEMA}, public"}
+
         self.engine = create_async_engine(
             self._database_url,
             pool_size=settings.pool.SQLALCHEMY_POOL_SIZE,
             max_overflow=settings.pool.SQLALCHEMY_MAX_OVERFLOW,
             pool_pre_ping=True,
             echo=settings.db.DB_ECHO_LOG,
-            connect_args={"prepared_statement_cache_size": 0},  # PgBouncer compatibility
+            connect_args=connect_args,
         )
 
         lg_max = settings.pool.LANGGRAPH_MAX_POOL_SIZE
@@ -49,6 +54,16 @@ class DatabaseManager:
             "prepare_threshold": None,  # Disable prepared statements for PgBouncer compatibility
             "row_factory": dict_row,  # LangGraph requires dictionary rows, not tuples
         }
+
+        # Build per-connection configure callback when schema isolation is active.
+        pool_configure = None
+        if settings.db.POSTGRES_SCHEMA:
+            set_sp = psycopg_sql.SQL("SET search_path TO {}, public").format(
+                psycopg_sql.Identifier(settings.db.POSTGRES_SCHEMA)
+            )
+
+            async def pool_configure(conn):  # noqa: E303
+                await conn.execute(set_sp)
 
         # Create a single shared pool.
         # 'open=False' is important to avoid RuntimeWarning; we open it explicitly below.
@@ -59,10 +74,20 @@ class DatabaseManager:
             open=False,
             kwargs=lg_kwargs,
             check=AsyncConnectionPool.check_connection,
+            configure=pool_configure,
         )
 
         # Explicitly open the pool
         await self.lg_pool.open()
+
+        # Create the target schema if it doesn't exist yet.
+        if settings.db.POSTGRES_SCHEMA:
+            async with self.lg_pool.connection() as conn:
+                await conn.execute(
+                    psycopg_sql.SQL("CREATE SCHEMA IF NOT EXISTS {}").format(
+                        psycopg_sql.Identifier(settings.db.POSTGRES_SCHEMA)
+                    )
+                )
 
         # 2. Initialize LangGraph components using the shared pool
         # Passing 'conn=self.lg_pool' prevents components from creating their own pools.

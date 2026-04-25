@@ -28,7 +28,7 @@ def upgrade() -> None:
     """Create initial database schema for Aegra Agent Protocol server."""
 
     # Create PostgreSQL extensions
-    op.execute('CREATE EXTENSION IF NOT EXISTS "uuid-ossp";')
+    op.execute('CREATE EXTENSION IF NOT EXISTS "uuid-ossp" SCHEMA public;')
 
     # Create assistant table
     op.create_table(

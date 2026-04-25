@@ -287,6 +287,48 @@ class TestMultiHostDatabaseURL:
         assert db.database_url == "postgresql+asyncpg:///db?host=h1,h2&port=5432,5432"
 
 
+class TestPostgresSchema:
+    """Test POSTGRES_SCHEMA setting for schema isolation."""
+
+    def _clear_db_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Remove env vars that affect DatabaseSettings."""
+        for var in (
+            "DATABASE_URL",
+            "POSTGRES_USER",
+            "POSTGRES_PASSWORD",
+            "POSTGRES_HOST",
+            "POSTGRES_PORT",
+            "POSTGRES_DB",
+            "POSTGRES_SCHEMA",
+            "DB_ECHO_LOG",
+        ):
+            monkeypatch.delenv(var, raising=False)
+
+    def test_defaults_to_none(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """POSTGRES_SCHEMA defaults to None when not set."""
+        self._clear_db_env(monkeypatch)
+        db = DatabaseSettings(_env_file=None)
+
+        assert db.POSTGRES_SCHEMA is None
+
+    def test_set_via_env_var(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """POSTGRES_SCHEMA can be configured via environment variable."""
+        self._clear_db_env(monkeypatch)
+        monkeypatch.setenv("POSTGRES_SCHEMA", "tenant_a")
+        db = DatabaseSettings(_env_file=None)
+
+        assert db.POSTGRES_SCHEMA == "tenant_a"
+
+    def test_empty_string_is_treated_as_none(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Empty POSTGRES_SCHEMA env var is kept as empty string (falsy)."""
+        self._clear_db_env(monkeypatch)
+        monkeypatch.setenv("POSTGRES_SCHEMA", "")
+        db = DatabaseSettings(_env_file=None)
+
+        assert db.POSTGRES_SCHEMA == ""
+        assert not db.POSTGRES_SCHEMA
+
+
 class TestWorkerSettingsLeaseValidation:
     """Test that lease timing invariants are enforced at startup."""
 

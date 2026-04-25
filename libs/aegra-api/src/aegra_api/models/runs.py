@@ -82,8 +82,10 @@ class RunCreate(BaseModel):
                 raise ValueError("Cannot specify both 'input' and 'command' - they are mutually exclusive")
         if self.input is None and self.command is None:
             if self.checkpoint is not None:
-                # Allow checkpoint-only requests by treating input as empty dict
-                self.input = {}
+                # Keep input as None so LangGraph resumes from the checkpoint.
+                # Coercing to {} makes Pregel treat it as fresh input and restart
+                # from __start__ instead of continuing from next=[...].
+                pass
             else:
                 raise ValueError("Must specify either 'input' or 'command'")
         return self

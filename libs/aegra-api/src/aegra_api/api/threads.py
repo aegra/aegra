@@ -391,11 +391,17 @@ async def update_thread_state(
 
     When `values` is provided, creates a new checkpoint with the updated state.
     Use `as_node` to attribute the update to a specific graph node. When
-    `values` is null, this endpoint acts as a POST-based alternative to the
-    GET state endpoint (useful when passing complex checkpoint/subgraph
-    parameters in the request body).
+    `values` is null AND `as_node` is not provided, this endpoint acts as a
+    POST-based alternative to the GET state endpoint (useful when passing
+    complex checkpoint/subgraph parameters in the request body).
+
+    When `values` is null AND `as_node` is provided (e.g. ``as_node="__copy__"``
+    as LangGraph Studio sends for "Re-run from here"), this creates a new
+    checkpoint derived from the supplied ``checkpoint_id`` without applying
+    any state change — used to anchor a subsequent run as a fork of that
+    checkpoint rather than of the thread's latest state.
     """
-    if request.values is None:
+    if request.values is None and request.as_node is None:
         return await get_thread_state(
             thread_id=thread_id,
             subgraphs=request.subgraphs or False,

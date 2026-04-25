@@ -23,7 +23,7 @@ class TestRunIdentity:
 class TestRunExecution:
     def test_defaults(self) -> None:
         execution = RunExecution()
-        assert execution.input_data == {}
+        assert execution.input_data is None
         assert execution.config == {}
         assert execution.context == {}
         assert execution.stream_mode is None
@@ -121,5 +121,5 @@ class TestRunJob:
             identity=RunIdentity(run_id="r1", thread_id="t1", graph_id="g1"),
             user=User(identity="u1"),
         )
-        assert job.execution.input_data == {}
+        assert job.execution.input_data is None
         assert job.behavior.subgraphs is False

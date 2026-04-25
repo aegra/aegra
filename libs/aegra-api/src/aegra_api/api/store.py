@@ -82,7 +82,7 @@ async def get_store_item(
     if isinstance(namespace, str):
         ns_list = [part for part in namespace.split(".") if part]
     elif isinstance(namespace, list):
-        ns_list = namespace
+        ns_list = [part for part in namespace if part]
     else:
         ns_list = []
 

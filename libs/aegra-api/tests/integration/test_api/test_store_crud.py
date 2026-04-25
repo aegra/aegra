@@ -211,6 +211,22 @@ class TestGetStoreItem:
         data = resp.json()
         assert data["key"] == "test-key"
 
+    def test_get_item_with_empty_namespace_query_param(self, client, mock_store):
+        """Test empty namespace query param is treated as no namespace"""
+        mock_item = DummyStoreItem(
+            key="test-key",
+            value={"data": "test"},
+            namespace=("users", "test-user"),
+        )
+        mock_store.aget.return_value = mock_item
+
+        resp = client.get("/store/items?namespace=&key=test-key")
+
+        assert resp.status_code == 200
+        call_args = mock_store.aget.call_args
+        namespace = call_args[0][0]
+        assert namespace == ("users", "test-user")
+
 
 class TestDeleteStoreItem:
     """Test DELETE /store/items"""

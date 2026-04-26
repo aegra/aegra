@@ -183,6 +183,8 @@ async for chunk in client.runs.stream(
 | `"cancel"` (default) | Cancel the run when client disconnects |
 | `"continue"` | Run continues in the background; reconnect later to get results |
 
+The server sends SSE keepalive comments (`: heartbeat`) every `KEEPALIVE_INTERVAL_SECS` (default 5s, truncated to whole seconds, minimum 1s), so idle proxies (Nginx 60s, AWS ALB, Cloudflare) won't drop long-running silent agents — for example, a graph node holding an upstream WebSocket without emitting events. The wire-format matches LangGraph Platform, so existing SSE clients (the LangGraph SDK, browser `EventSource`, `httpx-sse`) silently ignore these lines per the W3C spec. Only a real client disconnect — not an idle proxy timeout — triggers automatic cancellation.
+
 ## Background runs
 
 For long-running tasks, you can create a run in the background and check on it later:

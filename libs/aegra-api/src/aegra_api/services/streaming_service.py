@@ -85,9 +85,14 @@ class StreamingService:
         self,
         run: Run,
         last_event_id: str | None = None,
-        cancel_on_disconnect: bool = False,
     ) -> AsyncIterator[str]:
-        """Stream run execution with unified producer-consumer pattern."""
+        """Stream run execution with unified producer-consumer pattern.
+
+        Cancellation on client disconnect is handled at the transport layer
+        via ``EventSourceResponse(client_close_handler_callable=...)`` — the
+        generator only propagates ``CancelledError`` cleanup without side
+        effects on the broker.
+        """
         run_id = run.run_id
         try:
             # Replay stored events first
@@ -108,8 +113,6 @@ class StreamingService:
 
         except asyncio.CancelledError:
             logger.debug(f"Stream cancelled for run {run_id}")
-            if cancel_on_disconnect:
-                await broker_manager.request_cancel(run_id, "cancel")
             raise
         except Exception as e:
             logger.error(f"Error in stream_run_execution for run {run_id}: {e}")

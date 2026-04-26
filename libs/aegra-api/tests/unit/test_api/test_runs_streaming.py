@@ -98,6 +98,119 @@ class TestRunsStreamingEndpoints:
             mock_create_task.assert_called_once()
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "on_disconnect,expect_handler,expect_request_cancel",
+        [
+            (None, True, True),  # default → cancel
+            ("cancel", True, True),
+            ("continue", False, False),
+        ],
+    )
+    async def test_create_and_stream_run_disconnect_handler_wiring(
+        self,
+        mock_user: User,
+        mock_session: AsyncMock,
+        sample_assistant: AssistantORM,
+        on_disconnect: str | None,
+        expect_handler: bool,
+        expect_request_cancel: bool,
+    ) -> None:
+        """``client_close_handler_callable`` is wired only when on_disconnect cancels.
+
+        Invokes the handler manually with a fake ``http.disconnect`` message
+        and verifies it routes to ``broker_manager.request_cancel``. Regression
+        for the transport-layer cancel wiring introduced alongside the
+        EventSourceResponse migration.
+        """
+        thread_id = "t"
+        run_id = str(uuid4())
+        if on_disconnect is None:
+            request = RunCreate(assistant_id="test-assistant", input={})
+        else:
+            request = RunCreate(
+                assistant_id="test-assistant",
+                input={},
+                on_disconnect=on_disconnect,
+            )
+
+        async def _fake_stream() -> AsyncGenerator:
+            yield "data"
+
+        with (
+            patch("aegra_api.services.run_preparation._validate_resume_command", new_callable=AsyncMock),
+            patch("aegra_api.services.run_preparation.get_langgraph_service") as mock_lg_service,
+            patch("aegra_api.services.run_preparation.resolve_assistant_id", return_value="test-assistant"),
+            patch("aegra_api.services.run_preparation.update_thread_metadata", new_callable=AsyncMock),
+            patch("aegra_api.services.run_preparation.set_thread_status", new_callable=AsyncMock),
+            patch("aegra_api.services.run_preparation.uuid4", return_value=run_id),
+            patch("aegra_api.api.runs.asyncio.create_task"),
+            patch("aegra_api.api.runs.active_runs", {}),
+            patch("aegra_api.api.runs.streaming_service.stream_run_execution", return_value=_fake_stream()),
+            patch("aegra_api.api.runs.broker_manager.request_cancel", new_callable=AsyncMock) as mock_cancel,
+        ):
+            mock_lg_service.return_value.list_graphs.return_value = ["test-graph"]
+            mock_session.scalar.return_value = sample_assistant
+
+            response = await create_and_stream_run(thread_id, request, mock_user, mock_session)
+
+            handler = response.client_close_handler_callable
+            if not expect_handler:
+                assert handler is None
+                return
+
+            assert handler is not None
+            await handler({"type": "http.disconnect"})
+            if expect_request_cancel:
+                mock_cancel.assert_awaited_once_with(run_id, "cancel")
+            else:
+                mock_cancel.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_create_and_stream_run_handler_swallows_broker_errors(
+        self,
+        mock_user: User,
+        mock_session: AsyncMock,
+        sample_assistant: AssistantORM,
+    ) -> None:
+        """Broker failures in disconnect handler are logged, not re-raised.
+
+        If the broker is unreachable when a client disconnects, the handler
+        must not propagate the exception into sse-starlette's task group —
+        otherwise the response teardown path breaks and the run leaks.
+        """
+        thread_id = "t"
+        run_id = str(uuid4())
+        request = RunCreate(assistant_id="test-assistant", input={})
+
+        async def _fake_stream() -> AsyncGenerator:
+            yield "data"
+
+        with (
+            patch("aegra_api.services.run_preparation._validate_resume_command", new_callable=AsyncMock),
+            patch("aegra_api.services.run_preparation.get_langgraph_service") as mock_lg_service,
+            patch("aegra_api.services.run_preparation.resolve_assistant_id", return_value="test-assistant"),
+            patch("aegra_api.services.run_preparation.update_thread_metadata", new_callable=AsyncMock),
+            patch("aegra_api.services.run_preparation.set_thread_status", new_callable=AsyncMock),
+            patch("aegra_api.services.run_preparation.uuid4", return_value=run_id),
+            patch("aegra_api.api.runs.asyncio.create_task"),
+            patch("aegra_api.api.runs.active_runs", {}),
+            patch("aegra_api.api.runs.streaming_service.stream_run_execution", return_value=_fake_stream()),
+            patch(
+                "aegra_api.api.runs.broker_manager.request_cancel",
+                new_callable=AsyncMock,
+                side_effect=RuntimeError("broker down"),
+            ),
+        ):
+            mock_lg_service.return_value.list_graphs.return_value = ["test-graph"]
+            mock_session.scalar.return_value = sample_assistant
+
+            response = await create_and_stream_run(thread_id, request, mock_user, mock_session)
+            handler = response.client_close_handler_callable
+            assert handler is not None
+            # Must not raise even though the broker side-effect blows up
+            await handler({"type": "http.disconnect"})
+
+    @pytest.mark.asyncio
     async def test_stream_run_success(self, mock_user: User, mock_session: AsyncMock) -> None:
         """Test reconnecting to existing run stream."""
         thread_id = "test-thread"
@@ -138,6 +251,61 @@ class TestRunsStreamingEndpoints:
             # First arg is run object, second is last_event_id
             assert call_args[0][0].run_id == run_id
             assert call_args[0][1] == "evt-1"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "run_status,last_event_id",
+        [
+            ("running", None),  # active branch
+            ("success", None),  # terminal branch
+        ],
+    )
+    async def test_stream_run_never_wires_close_handler(
+        self,
+        mock_user: User,
+        mock_session: AsyncMock,
+        run_status: str,
+        last_event_id: str | None,
+    ) -> None:
+        """``stream_run`` (reconnect) must never wire ``client_close_handler_callable``.
+
+        The endpoint is a reconnect-style join: multiple clients can attach
+        to the same run. A single client disconnecting must NOT cancel the
+        shared run — hence the endpoint deliberately omits the close handler.
+        Covers both the terminal branch (early return with ``end`` event) and
+        the active branch (live streaming via broker).
+        """
+        thread_id = "test-thread"
+        run_id = "run-42"
+
+        run_orm = RunORM(
+            run_id=run_id,
+            thread_id=thread_id,
+            assistant_id="agent",
+            user_id=mock_user.identity,
+            status=run_status,
+            input={},
+            created_at=datetime.now(UTC),
+            updated_at=datetime.now(UTC),
+        )
+        mock_session.scalar.return_value = run_orm
+
+        async def _fake_stream() -> AsyncGenerator:
+            yield "data"
+
+        with patch(
+            "aegra_api.api.runs.streaming_service.stream_run_execution",
+            return_value=_fake_stream(),
+        ):
+            response = await stream_run(
+                thread_id,
+                run_id,
+                last_event_id=last_event_id,
+                user=mock_user,
+                session=mock_session,
+            )
+
+        assert response.client_close_handler_callable is None
 
     @pytest.mark.asyncio
     async def test_stream_run_not_found(self, mock_user: User, mock_session: AsyncMock) -> None:

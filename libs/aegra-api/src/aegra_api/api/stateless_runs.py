@@ -15,6 +15,7 @@ from fastapi import APIRouter, Depends
 from fastapi.responses import StreamingResponse
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sse_starlette import EventSourceResponse
 
 from aegra_api.api.runs import (
     create_and_stream_run,
@@ -26,10 +27,12 @@ from aegra_api.core.auth_deps import auth_dependency, get_current_user
 from aegra_api.core.orm import Run as RunORM
 from aegra_api.core.orm import Thread as ThreadORM
 from aegra_api.core.orm import _get_session_maker, get_session
+from aegra_api.core.sse import heartbeat_factory
 from aegra_api.models import Run, RunCreate, User
 from aegra_api.models.errors import CONFLICT, NOT_FOUND, SSE_RESPONSE
 from aegra_api.services.executor import executor
 from aegra_api.services.streaming_service import streaming_service
+from aegra_api.settings import settings
 
 router = APIRouter(tags=["Stateless Runs"], dependencies=auth_dependency)
 logger = structlog.getLogger(__name__)
@@ -178,7 +181,7 @@ async def stateless_stream_run(
     request: RunCreate,
     user: User = Depends(get_current_user),
     session: AsyncSession = Depends(get_session),
-) -> StreamingResponse:
+) -> EventSourceResponse:
     """Create a stateless run and stream its execution.
 
     Generates an ephemeral thread, delegates to the threaded
@@ -206,30 +209,48 @@ async def stateless_stream_run(
     if not should_delete:
         return response
 
-    # Wrap the body_iterator so cleanup happens after the stream ends
+    # Wrap the body_iterator so cleanup happens after the stream ends.
+    # The inner EventSourceResponse is never served directly — we only
+    # steal its iterator and close-handler, then re-wrap in a new
+    # EventSourceResponse so the outer ping/listen-for-disconnect tasks
+    # run against the cleaned-up iterator.
     original_iterator = response.body_iterator
+    inner_close_handler = response.client_close_handler_callable
 
-    async def _wrapped_iterator() -> AsyncIterator[str | bytes]:
+    async def _wrapped_iterator() -> AsyncIterator[bytes]:
+        completed = False
         try:
             async for chunk in original_iterator:
                 yield chunk
+            completed = True
         finally:
-            # Close the underlying iterator if it supports aclose()
             aclose = getattr(original_iterator, "aclose", None)
             if aclose is not None:
                 await aclose()
-            try:
-                await _delete_thread_by_id(thread_id, user.identity)
-            except Exception:
-                logger.exception(
-                    "Failed to delete ephemeral thread after stream",
+            if completed:
+                try:
+                    await _delete_thread_by_id(thread_id, user.identity)
+                except Exception:
+                    logger.exception(
+                        "Failed to delete ephemeral thread after stream",
+                        thread_id=thread_id,
+                    )
+            else:
+                # Early client disconnect: deleting the thread here would
+                # cancel the still-running background execution (via
+                # _delete_thread_by_id) and break the on_disconnect="continue"
+                # contract. Mirror stateless_wait_for_run and keep the thread.
+                logger.info(
+                    "Client disconnected before stream completed, keeping ephemeral thread",
                     thread_id=thread_id,
                 )
 
-    return StreamingResponse(
+    return EventSourceResponse(
         _wrapped_iterator(),
         status_code=response.status_code,
-        media_type=response.media_type,
+        ping=settings.app.sse_ping_interval_secs,
+        ping_message_factory=heartbeat_factory,
+        client_close_handler_callable=inner_close_handler,
         headers=dict(response.headers),
     )
 

@@ -61,6 +61,18 @@ class AppSettings(EnvBase):
     ENV_MODE: UpperStr = "LOCAL"
     DEBUG: bool = False
 
+    @computed_field
+    @property
+    def sse_ping_interval_secs(self) -> int:
+        """Integer ping interval for ``EventSourceResponse``.
+
+        sse-starlette accepts only ``int`` seconds; the underlying setting is
+        ``float`` to support sub-second heartbeats in the legacy JSON-wait
+        endpoints and in tests. Clamp to ``>= 1`` so 0/negative floats can't
+        produce a zero ping interval.
+        """
+        return max(1, int(self.KEEPALIVE_INTERVAL_SECS))
+
     # Logging
     LOG_LEVEL: UpperStr = "INFO"
     LOG_VERBOSITY: LowerStr = "verbose"

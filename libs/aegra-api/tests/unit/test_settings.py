@@ -73,6 +73,37 @@ class TestAppSettingsServerURL:
         assert app.PORT == 2026
 
 
+class TestSsePingIntervalSecs:
+    """``sse_ping_interval_secs`` derives an int ping value from the float setting."""
+
+    def _clear(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv("KEEPALIVE_INTERVAL_SECS", raising=False)
+
+    def test_default_matches_default_keepalive(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        self._clear(monkeypatch)
+        app = AppSettings(_env_file=None)
+
+        assert app.KEEPALIVE_INTERVAL_SECS == 5
+        assert app.sse_ping_interval_secs == 5
+
+    def test_truncates_floats_to_int(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """sse-starlette requires int seconds; fractional part is dropped."""
+        self._clear(monkeypatch)
+        monkeypatch.setenv("KEEPALIVE_INTERVAL_SECS", "10.9")
+        app = AppSettings(_env_file=None)
+
+        assert app.sse_ping_interval_secs == 10
+
+    def test_clamps_sub_second_to_one(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Sub-second heartbeats (used by legacy JSON endpoints and tests)
+        must not yield a zero ping interval that would flood the client."""
+        self._clear(monkeypatch)
+        monkeypatch.setenv("KEEPALIVE_INTERVAL_SECS", "0.5")
+        app = AppSettings(_env_file=None)
+
+        assert app.sse_ping_interval_secs == 1
+
+
 class TestDatabaseURLSupport:
     """Test that DATABASE_URL is used directly for computed URLs."""
 

@@ -30,6 +30,10 @@ def parse_sse_event(chunk: str) -> dict | None:
     event_data = {}
 
     for line in lines:
+        # SSE comment lines (W3C §9.2.6): must be ignored. sse-starlette emits
+        # `: heartbeat` every KEEPALIVE_INTERVAL_SECS as an idle keepalive.
+        if line.startswith(":"):
+            continue
         if line.startswith("event: "):
             event_data["event"] = line.replace("event: ", "").strip()
         elif line.startswith("data: "):
@@ -42,6 +46,38 @@ def parse_sse_event(chunk: str) -> dict | None:
             event_data["id"] = line.replace("id: ", "").strip()
 
     return event_data if event_data else None
+
+
+class TestParseSseEvent:
+    """Unit tests for the local ``parse_sse_event`` helper.
+
+    Not marked ``e2e`` — pure function, runs in the default suite. Covers the
+    heartbeat-comment path because ``sse-starlette`` now emits
+    ``: heartbeat\\r\\n\\r\\n`` on every ping, so the parser must ignore it
+    per the W3C EventSource spec §9.2.6.
+    """
+
+    def test_heartbeat_comment_returns_none(self) -> None:
+        assert parse_sse_event(": heartbeat") is None
+
+    def test_heartbeat_mixed_with_event_parses_event_only(self) -> None:
+        chunk = ': heartbeat\nevent: values\ndata: {"x": 1}\nid: evt-1'
+        assert parse_sse_event(chunk) == {
+            "event": "values",
+            "data": {"x": 1},
+            "id": "evt-1",
+        }
+
+    def test_empty_chunk_returns_none(self) -> None:
+        assert parse_sse_event("") is None
+        assert parse_sse_event("   \n  ") is None
+
+    def test_plain_event_still_parses(self) -> None:
+        chunk = 'event: end\ndata: {"status":"success"}'
+        assert parse_sse_event(chunk) == {
+            "event": "end",
+            "data": {"status": "success"},
+        }
 
 
 @pytest.mark.e2e

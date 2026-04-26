@@ -2,15 +2,33 @@
 
 import json
 import re
-from collections.abc import Callable
+from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
+
+from sse_starlette import ServerSentEvent
 
 from aegra_api.core.serializers import GeneralSerializer
 
 # Global serializer instance
 _serializer = GeneralSerializer()
+
+# Cached SSE keepalive payload: ``: heartbeat\r\n\r\n`` (15 bytes).
+# Matches langgraph-api's wire-format so tcpdump/logs line up with LangGraph
+# Platform, and avoids per-tick datetime formatting that sse-starlette's
+# default ping does.
+_HEARTBEAT_EVENT = ServerSentEvent(comment="heartbeat")
+
+
+def heartbeat_factory() -> ServerSentEvent:
+    """Ping factory for ``EventSourceResponse(ping_message_factory=...)``.
+
+    Returns the same cached ``ServerSentEvent`` on every call — the encoded
+    payload is identical on every tick, so there's no reason to allocate.
+    """
+    return _HEARTBEAT_EVENT
+
 
 # Some LLMs stream tool_call_chunks.args with literal \uXXXX sequences
 # instead of actual Unicode characters. After json.dumps these become \\uXXXX (double-escaped).
@@ -50,6 +68,17 @@ def get_sse_headers() -> dict[str, str]:
         "Access-Control-Allow-Origin": "*",
         "Access-Control-Allow-Headers": "Last-Event-ID",
     }
+
+
+async def sse_to_bytes(inner: AsyncIterator[str]) -> AsyncIterator[bytes]:
+    """Adapt an ``AsyncIterator[str]`` of pre-formatted SSE messages to bytes.
+
+    ``sse_starlette.EventSourceResponse`` wraps plain strings as *new* SSE
+    events (double-encoding them). Pass bytes through its iterator so our
+    already-formatted messages reach the wire untouched.
+    """
+    async for chunk in inner:
+        yield chunk.encode("utf-8")
 
 
 def format_sse_message(

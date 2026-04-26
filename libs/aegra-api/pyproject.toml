@@ -50,6 +50,9 @@ dependencies = [
 
     # Redis (optional broker backend for multi-instance streaming)
     "redis[hiredis]>=5.0.0",
+
+    # Cron expression parsing
+    "croniter>=6.0.0",
 ]
 
 [project.urls]

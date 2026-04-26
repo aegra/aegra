@@ -18,6 +18,7 @@ from datetime import datetime
 
 from sqlalchemy import (
     TIMESTAMP,
+    Boolean,
     ForeignKey,
     Index,
     Integer,
@@ -131,6 +132,35 @@ class Run(Base):
         Index("idx_runs_assistant_id", "assistant_id"),
         Index("idx_runs_created_at", "created_at"),
         Index("idx_runs_lease_reaper", "status", "lease_expires_at"),
+    )
+
+
+class Cron(Base):
+    __tablename__ = "crons"
+
+    cron_id: Mapped[str] = mapped_column(Text, primary_key=True, server_default=text("public.uuid_generate_v4()::text"))
+    assistant_id: Mapped[str] = mapped_column(
+        Text, ForeignKey("assistant.assistant_id", ondelete="CASCADE"), nullable=False
+    )
+    thread_id: Mapped[str | None] = mapped_column(
+        Text, ForeignKey("thread.thread_id", ondelete="SET NULL"), nullable=True
+    )
+    user_id: Mapped[str] = mapped_column(Text, nullable=False)
+    schedule: Mapped[str] = mapped_column(Text, nullable=False)
+    payload: Mapped[dict] = mapped_column(JSONB, server_default=text("'{}'::jsonb"))
+    metadata_dict: Mapped[dict] = mapped_column(JSONB, server_default=text("'{}'::jsonb"), name="metadata")
+    on_run_completed: Mapped[str | None] = mapped_column(Text, nullable=True)
+    enabled: Mapped[bool] = mapped_column(Boolean, server_default=text("true"), nullable=False)
+    end_time: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True), nullable=True)
+    next_run_date: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), server_default=text("now()"))
+    updated_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), server_default=text("now()"))
+
+    __table_args__ = (
+        Index("idx_cron_user", "user_id"),
+        Index("idx_cron_assistant_id", "assistant_id"),
+        Index("idx_cron_thread_id", "thread_id"),
+        Index("idx_cron_next_run", "enabled", "next_run_date"),
     )
 
 

@@ -24,6 +24,8 @@ UpperStr = Annotated[str, BeforeValidator(parse_upper)]
 
 
 class EnvBase(BaseSettings):
+    """Base settings model that ignores unknown environment variables."""
+
     model_config = SettingsConfigDict(
         extra="ignore",
     )
@@ -42,6 +44,7 @@ class AppSettings(EnvBase):
 
     @model_validator(mode="after")
     def _validate_keepalive_interval(self) -> "AppSettings":
+        """Reject non-positive keepalive intervals during settings validation."""
         if self.KEEPALIVE_INTERVAL_SECS <= 0:
             raise ValueError(f"KEEPALIVE_INTERVAL_SECS must be greater than 0, got {self.KEEPALIVE_INTERVAL_SECS}")
         return self
@@ -260,6 +263,7 @@ class WorkerSettings(EnvBase):
 
     @model_validator(mode="after")
     def _validate_lease_timing(self) -> "WorkerSettings":
+        """Ensure the worker lease safely outlives missed heartbeat intervals."""
         if self.LEASE_DURATION_SECONDS <= 2 * self.HEARTBEAT_INTERVAL_SECONDS:
             raise ValueError(
                 f"LEASE_DURATION_SECONDS ({self.LEASE_DURATION_SECONDS}) must be "
@@ -269,14 +273,37 @@ class WorkerSettings(EnvBase):
         return self
 
 
+class CronSettings(EnvBase):
+    """Cron scheduler configuration.
+
+    Controls the background scheduler that fires cron jobs.
+    """
+
+    CRON_ENABLED: bool = True
+    CRON_POLL_INTERVAL_SECONDS: int = 60
+
+    @model_validator(mode="after")
+    def _validate_poll_interval(self) -> "CronSettings":
+        """Reject non-positive cron poll intervals during settings validation."""
+        if self.CRON_POLL_INTERVAL_SECONDS <= 0:
+            raise ValueError(
+                f"CRON_POLL_INTERVAL_SECONDS must be greater than 0, got {self.CRON_POLL_INTERVAL_SECONDS}"
+            )
+        return self
+
+
 class Settings:
+    """Container object that instantiates all application settings groups."""
+
     def __init__(self) -> None:
+        """Build the settings tree from environment-backed settings models."""
         self.app = AppSettings()
         self.db = DatabaseSettings()
         self.pool = PoolSettings()
         self.observability = ObservabilitySettings()
         self.redis = RedisSettings()
         self.worker = WorkerSettings()
+        self.cron = CronSettings()
 
 
 settings = Settings()

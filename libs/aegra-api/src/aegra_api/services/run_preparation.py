@@ -4,6 +4,7 @@ Contains the shared run-creation helper, thread metadata updates,
 resume-command validation, and config/context merging logic.
 """
 
+import time
 from datetime import UTC, datetime
 from typing import Any
 from uuid import uuid4
@@ -249,6 +250,7 @@ async def _prepare_run(
         "thread_id": thread_id,
         "graph_id": assistant.graph_id,
     }
+    exec_params["_enqueued_at"] = time.time()
 
     now = datetime.now(UTC)
     run_orm = RunORM(

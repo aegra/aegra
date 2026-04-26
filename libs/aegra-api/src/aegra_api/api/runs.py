@@ -19,6 +19,8 @@ from aegra_api.core.orm import _get_session_maker, get_session
 from aegra_api.core.sse import create_end_event, get_sse_headers
 from aegra_api.models import Run, RunCreate, RunStatus, User
 from aegra_api.models.errors import CONFLICT, NOT_FOUND, SSE_RESPONSE
+from aegra_api.observability.metrics import get_worker_metrics
+from aegra_api.services.run_executor import mark_user_cancellation, unmark_user_cancellation
 from aegra_api.services.run_preparation import _prepare_run
 from aegra_api.services.run_waiters import TERMINAL_STATES, encode_output, heartbeat_wait_body
 from aegra_api.services.streaming_service import streaming_service
@@ -428,23 +430,76 @@ async def cancel_run_endpoint(
     if not run_orm:
         raise HTTPException(404, f"Run '{run_id}' not found")
 
-    if action == "interrupt":
+    if run_orm.status == "pending":
+        # Atomic CAS: only update if still pending (prevents TOCTOU with worker pickup)
+        cas_result = await session.execute(
+            update(RunORM)
+            .where(RunORM.run_id == run_id, RunORM.status == "pending")
+            .values(status="interrupted", updated_at=datetime.now(UTC))
+        )
+        if cas_result.rowcount > 0:  # type: ignore[union-attr]
+            await session.commit()
+            logger.info(f"[cancel_run] cancelled pending run_id={run_id}")
+            # Run never went through execute_run, so increment completed here
+            metrics = get_worker_metrics()
+            if metrics is not None:
+                graph_id = (run_orm.execution_params or {}).get("graph_id", "unknown")
+                metrics.runs_completed.labels(graph_id=graph_id, status="interrupted").inc()
+        else:
+            # Worker picked it up between SELECT and CAS — now running.
+            # Fall through to the running-cancel path.
+            await session.rollback()
+            run_orm = await session.scalar(select(RunORM).where(RunORM.run_id == run_id))
+            if run_orm is None:
+                raise HTTPException(404, f"Run '{run_id}' not found")
+            if run_orm.status in TERMINAL_STATES:
+                # Run already completed between CAS and re-fetch
+                return Run.model_validate(run_orm)
+            mark_user_cancellation(run_id)
+            try:
+                if action == "interrupt":
+                    logger.info(f"[cancel_run] interrupt (was pending) run_id={run_id}")
+                    await streaming_service.interrupt_run(run_id)
+                else:
+                    logger.info(f"[cancel_run] cancel (was pending) run_id={run_id}")
+                    await streaming_service.cancel_run(run_id)
+            except Exception:
+                unmark_user_cancellation(run_id)
+                raise
+            # Safety-net UPDATE: only if execute_run hasn't finalized yet.
+            # execute_run handles finalization via _user_cancellations path,
+            # but the cancel is async — this catches the gap.
+            await session.execute(
+                update(RunORM)
+                .where(RunORM.run_id == run_id, RunORM.status.notin_(TERMINAL_STATES))
+                .values(status="interrupted", updated_at=datetime.now(UTC))
+            )
+            await session.commit()
+    elif action == "interrupt":
         logger.info(f"[cancel_run] interrupt run_id={run_id} user={user.identity} thread_id={thread_id}")
-        await streaming_service.interrupt_run(run_id)
-        # Persist status as interrupted
+        mark_user_cancellation(run_id)
+        try:
+            await streaming_service.interrupt_run(run_id)
+        except Exception:
+            unmark_user_cancellation(run_id)
+            raise
         await session.execute(
             update(RunORM)
-            .where(RunORM.run_id == str(run_id))
+            .where(RunORM.run_id == str(run_id), RunORM.status.notin_(TERMINAL_STATES))
             .values(status="interrupted", updated_at=datetime.now(UTC))
         )
         await session.commit()
     else:
         logger.info(f"[cancel_run] cancel run_id={run_id} user={user.identity} thread_id={thread_id}")
-        await streaming_service.cancel_run(run_id)
-        # Persist status as interrupted
+        mark_user_cancellation(run_id)
+        try:
+            await streaming_service.cancel_run(run_id)
+        except Exception:
+            unmark_user_cancellation(run_id)
+            raise
         await session.execute(
             update(RunORM)
-            .where(RunORM.run_id == str(run_id))
+            .where(RunORM.run_id == str(run_id), RunORM.status.notin_(TERMINAL_STATES))
             .values(status="interrupted", updated_at=datetime.now(UTC))
         )
         await session.commit()

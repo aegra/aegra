@@ -74,7 +74,7 @@ class TestExecuteRunSuccess:
 
 class TestExecuteRunCancelledError:
     @pytest.mark.asyncio
-    async def test_cancelled_error_sets_interrupted_and_signals(self) -> None:
+    async def test_user_cancelled_error_sets_interrupted_and_signals(self) -> None:
         mock_update = AsyncMock()
         mock_finalize = AsyncMock()
 
@@ -92,10 +92,15 @@ class TestExecuteRunCancelledError:
             mock_streaming.signal_run_cancelled = AsyncMock()
             mock_streaming.cleanup_run = AsyncMock()
 
-            from aegra_api.services.run_executor import execute_run
+            from aegra_api.services.run_executor import _user_cancellations, execute_run
 
-            with pytest.raises(asyncio.CancelledError):
-                await execute_run(_make_job())
+            # Mark as user cancel so execute_run finalizes as interrupted
+            _user_cancellations.add("run-1")
+            try:
+                with pytest.raises(asyncio.CancelledError):
+                    await execute_run(_make_job())
+            finally:
+                _user_cancellations.discard("run-1")
 
         # update_run_status called once for "running"
         assert mock_update.await_count == 1
@@ -276,7 +281,7 @@ class TestLeaseLossCancellation:
 
     @pytest.mark.asyncio
     async def test_user_cancel_still_finalizes(self) -> None:
-        """Normal (user-initiated) cancellation must still finalize and signal."""
+        """User-initiated cancellation (run_id in _user_cancellations) must finalize and signal."""
         mock_update = AsyncMock()
         mock_finalize = AsyncMock()
         mock_signal_done = AsyncMock()
@@ -295,15 +300,20 @@ class TestLeaseLossCancellation:
             mock_streaming.signal_run_cancelled = AsyncMock()
             mock_streaming.cleanup_run = AsyncMock()
 
-            from aegra_api.services.run_executor import execute_run
+            from aegra_api.services.run_executor import _user_cancellations, execute_run
 
-            with pytest.raises(asyncio.CancelledError):
-                await execute_run(_make_job())
+            # Mark as user cancel so execute_run finalizes as interrupted
+            _user_cancellations.add("run-1")
+            try:
+                with pytest.raises(asyncio.CancelledError):
+                    await execute_run(_make_job())
+            finally:
+                _user_cancellations.discard("run-1")
 
-        # Normal cancel: finalize and signal MUST happen
+        # User cancel: finalize and signal MUST happen
         mock_finalize.assert_awaited_once()
         assert mock_finalize.await_args.kwargs["status"] == "interrupted"
         mock_streaming.signal_run_cancelled.assert_awaited_once_with("run-1")
-        # Done-key and cleanup MUST happen on normal cancel
+        # Done-key and cleanup MUST happen on user cancel
         mock_signal_done.assert_awaited_once_with("run-1")
         mock_streaming.cleanup_run.assert_awaited_once_with("run-1")

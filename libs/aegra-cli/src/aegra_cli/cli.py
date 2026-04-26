@@ -163,6 +163,140 @@ def ensure_docker_files(project_path: Path, slug: str) -> Path:
     return compose_path
 
 
+def _ensure_js_dependencies(config_path: Path) -> None:
+    """Check for LangGraph.js graphs and install Node.js dependencies.
+
+    Reads the config file and checks if any graphs use the ``langgraphjs``
+    runtime. If so, verifies Node.js is installed and runs ``npm install``
+    in directories containing a ``package.json`` alongside the graph file.
+
+    Args:
+        config_path: Resolved path to aegra.json.
+    """
+    try:
+        with config_path.open(encoding="utf-8") as f:
+            config = json.load(f)
+    except (OSError, json.JSONDecodeError) as exc:
+        console.print(f"[yellow]Warning:[/yellow] Could not read {config_path}: {exc}")
+        return
+
+    if not isinstance(config, dict):
+        console.print(
+            f"[yellow]Warning:[/yellow] Invalid config format in {config_path}:"
+            " expected JSON object"
+        )
+        return
+
+    graphs = config.get("graphs", {})
+    if not isinstance(graphs, dict):
+        console.print(
+            f"[yellow]Warning:[/yellow] Invalid 'graphs' section in {config_path}: expected object"
+        )
+        return
+
+    js_graphs = {}
+    for graph_id, entry in graphs.items():
+        if isinstance(entry, dict) and entry.get("runtime") == "langgraphjs":
+            js_graphs[graph_id] = entry
+
+    if not js_graphs:
+        return
+
+    # Verify Node.js is available
+    node_path = shutil.which("node")
+    if not node_path:
+        console.print(
+            "[bold yellow]Warning:[/bold yellow] Node.js not found but LangGraph.js "
+            "graphs are configured.\n"
+            "Install Node.js 18+ from [cyan]https://nodejs.org/[/cyan] to use JS graphs."
+        )
+        return
+
+    # Check Node.js version
+    try:
+        result = subprocess.run(
+            [node_path, "--version"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        version_str = result.stdout.strip().lstrip("v")
+        major = int(version_str.split(".")[0])
+        if major < 18:
+            console.print(
+                f"[bold yellow]Warning:[/bold yellow] Node.js {version_str} detected "
+                "but LangGraph.js requires Node.js 18+.\n"
+                "Upgrade from [cyan]https://nodejs.org/[/cyan]"
+            )
+            return
+        console.print(f"[dim]Node.js {version_str} detected for LangGraph.js graphs[/dim]")
+    except (OSError, ValueError, subprocess.SubprocessError) as exc:
+        console.print(f"[yellow]Warning:[/yellow] Could not determine Node.js version: {exc}")
+        return
+
+    # Install npm dependencies for each JS graph's directory
+    config_dir = config_path.parent
+    installed_dirs: set[str] = set()
+
+    for graph_id, entry in js_graphs.items():
+        graph_path_value = entry.get("path", "")
+        if not isinstance(graph_path_value, str) or not graph_path_value:
+            console.print(
+                f"[yellow]Warning:[/yellow] Graph '{graph_id}' has invalid 'path';"
+                " skipping npm install"
+            )
+            continue
+        graph_path_str = graph_path_value
+        if ":" in graph_path_str:
+            file_part = graph_path_str.rsplit(":", 1)[0]
+        else:
+            file_part = graph_path_str
+
+        graph_dir = (config_dir / Path(file_part)).resolve().parent
+
+        # Look for package.json in the graph dir or its parents (up to config_dir)
+        pkg_dir = graph_dir
+        while True:
+            pkg_json = pkg_dir / "package.json"
+            if pkg_json.exists():
+                dir_key = str(pkg_dir)
+                if dir_key not in installed_dirs:
+                    installed_dirs.add(dir_key)
+                    node_modules = pkg_dir / "node_modules"
+                    if not node_modules.exists():
+                        console.print(
+                            f"[cyan]Installing[/cyan] Node.js dependencies "
+                            f"for graph '{graph_id}' in {pkg_dir}"
+                        )
+                        try:
+                            subprocess.run(
+                                ["npm", "install"],
+                                cwd=str(pkg_dir),
+                                check=True,
+                                capture_output=True,
+                                timeout=120,
+                            )
+                            console.print("  [green]✓[/green] npm install completed")
+                        except subprocess.CalledProcessError as exc:
+                            console.print(
+                                f"  [red]✗[/red] npm install failed: {exc.stderr.decode()[:200]}"
+                            )
+                        except subprocess.TimeoutExpired:
+                            console.print(
+                                "  [red]✗[/red] npm install timed out after 120 s. "
+                                "Run 'npm install' manually in the graph directory."
+                            )
+                        except FileNotFoundError:
+                            console.print(
+                                "[bold yellow]Warning:[/bold yellow] npm not found. "
+                                "Install Node.js 18+ from [cyan]https://nodejs.org/[/cyan]"
+                            )
+                break
+            if pkg_dir == config_dir or pkg_dir == pkg_dir.parent:
+                break
+            pkg_dir = pkg_dir.parent
+
+
 @cli.command()
 @click.option(
     "--host",
@@ -361,6 +495,10 @@ def dev(
     ]
     if loaded_env:
         info_lines.append(f"[cyan]Env:[/cyan] {loaded_env}")
+
+    # Check for LangGraph.js graphs and install Node.js dependencies if needed
+    _ensure_js_dependencies(resolved_config)
+
     if debug_port is not None:
         info_lines.append(f"[cyan]Debug port:[/cyan] {debug_port}")
         if debug_host is not None:

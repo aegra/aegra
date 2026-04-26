@@ -32,6 +32,7 @@ services:
       - REDIS_URL=redis://redis:6379/0
       - WORKER_COUNT=3
       - N_JOBS_PER_WORKER=10
+      - AEGRA_JS_BRIDGE_DIR=/app/libs/aegra-js-bridge
     depends_on:
       postgres:
         condition: service_healthy
@@ -48,6 +49,7 @@ services:
       - ./examples:/app/examples:ro
       - ./libs/aegra-api/src:/app/src:ro  # Mount full src for PYTHONPATH to work
       - ./libs/aegra-api/alembic:/app/alembic:ro # for migrations
+      - ./libs/aegra-js-bridge:/app/libs/aegra-js-bridge  # JS bridge (rw for npm install)
     command: ["uvicorn", "aegra_api.main:app", "--host", "0.0.0.0", "--port", "${PORT:-2026}", "--reload"]
 
   # Redis - enables multi-instance SSE streaming with pub/sub + replay

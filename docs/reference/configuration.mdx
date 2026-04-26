@@ -80,7 +80,11 @@ Define your LangGraph agents.
 {
   "graphs": {
     "agent": "./src/react_agent/graph.py:graph",
-    "custom_agent": "./src/custom/graph.py:my_graph"
+    "custom_agent": "./src/custom/graph.py:my_graph",
+    "agent_js": {
+      "runtime": "langgraphjs",
+      "path": "./src/agent-js/graph.ts:graph"
+    }
   }
 }
 ```
@@ -88,7 +92,47 @@ Define your LangGraph agents.
 | Field | Type | Description |
 |-------|------|-------------|
 | Key | `string` | Graph ID (used in API calls to identify the graph) |
-| Value | `string` | Import path in format `./path/to/file.py:variable` |
+| Value | `string \| object` | Graph definition (Python string path or runtime object) |
+
+### Graph value formats
+
+`graphs.<graph_id>` supports either format:
+
+1. Legacy string format (Python):
+
+```json
+{
+  "graphs": {
+    "agent": "./src/react_agent/graph.py:graph"
+  }
+}
+```
+
+2. Runtime object format:
+
+```json
+{
+  "graphs": {
+    "agent_py": {
+      "runtime": "python",
+      "path": "./src/react_agent/graph.py:graph"
+    },
+    "agent_js": {
+      "runtime": "langgraphjs",
+      "path": "./src/agent-js/graph.ts:graph"
+    }
+  }
+}
+```
+
+Runtime object fields:
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `runtime` | `"python" \| "langgraphjs"` | No | Graph runtime. Defaults to `"python"` when omitted. |
+| `path` | `string` | Yes | Export path in format `./path/to/file.ext:export_name` |
+
+For `langgraphjs` graphs, Aegra automatically manages a Node.js bridge subprocess. Requires Node.js 18+ installed on the server. Run `npm install` in your graph's directory to install JavaScript dependencies. See the [LangGraph.js guide](/guides/langgraphjs) for details.
 
 The variable can be:
 

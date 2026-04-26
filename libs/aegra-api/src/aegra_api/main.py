@@ -34,6 +34,7 @@ from aegra_api.observability.metrics import setup_prometheus_metrics
 from aegra_api.observability.setup import setup_observability
 from aegra_api.services.broker import broker_manager
 from aegra_api.services.executor import executor
+from aegra_api.services.js_bridge import stop_js_bridge
 from aegra_api.services.langgraph_service import get_langgraph_service
 from aegra_api.services.lease_reaper import lease_reaper
 from aegra_api.settings import settings
@@ -127,11 +128,14 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
 
     yield
 
-    # Shutdown order: reaper → executor (drains jobs) → broker → Redis → DB
+    # Shutdown order: reaper → executor (drains jobs) → broker → JS bridge → Redis → DB
     if settings.redis.REDIS_BROKER_ENABLED:
         await lease_reaper.stop()
     await executor.stop()
     await broker_manager.stop()
+
+    # Stop JS bridge subprocess (if running)
+    await stop_js_bridge()
 
     # Close Redis broker (if enabled)
     if settings.redis.REDIS_BROKER_ENABLED:

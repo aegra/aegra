@@ -110,18 +110,39 @@ def _write_file(path: Path, content: str, force: bool) -> bool:
     return True
 
 
+def _resolve_template_by_name(query: str, templates: Sequence[Mapping[str, str]]) -> int:
+    """Match a template by id or name substring.
+
+    Returns:
+        1-based template index, or -1 if no match found.
+    """
+    q = query.lower()
+    for i, t in enumerate(templates, 1):
+        if q == t["id"].lower():
+            return i
+    # Fallback: substring match on id or name
+    for i, t in enumerate(templates, 1):
+        if q in t["id"].lower() or q in t["name"].lower():
+            return i
+    console.print(
+        f"[bold red]Error:[/bold red] Unknown template '{query}'. "
+        f"Available: {', '.join(t['id'] for t in templates)}"
+    )
+    return -1
+
+
 @click.command()
 @click.argument("path", default=".", required=False)
 @click.option(
     "--template",
     "-t",
-    type=int,
+    type=str,
     default=None,
-    help=f"Template number (1-{len(get_template_choices())}).",
+    help="Template number or name (e.g. 1, langgraphjs, react).",
 )
 @click.option("--name", "-n", default=None, help="Project name (defaults to directory name).")
 @click.option("--force", is_flag=True, help="Overwrite existing files.")
-def init(path: str, template: int | None, name: str | None, force: bool) -> None:
+def init(path: str, template: str | None, name: str | None, force: bool) -> None:
     """Initialize a new Aegra project.
 
     Creates a complete project structure from a template, including:
@@ -145,7 +166,8 @@ def init(path: str, template: int | None, name: str | None, force: bool) -> None
         aegra init                           # Interactive mode
         aegra init ./my-agent                # Create at path
         aegra init ./my-agent -t 1           # New Aegra Project
-        aegra init ./my-agent -t 2           # ReAct Agent
+        aegra init ./my-agent -t react       # ReAct Agent (by name)
+        aegra init ./my-agent -t langgraphjs # LangGraph.js Chatbot
         aegra init ./my-agent -t 1 -n "My Agent"
     """
     templates = get_template_choices()
@@ -166,7 +188,11 @@ def init(path: str, template: int | None, name: str | None, force: bool) -> None
             # Non-interactive: default to template 1
             choice = 1
     else:
-        choice = template
+        # Try numeric index first, then match by id/name substring
+        try:
+            choice = int(template)
+        except ValueError:
+            choice = _resolve_template_by_name(template, templates)
 
     if choice < 1 or choice > len(templates):
         console.print(f"[bold red]Error:[/bold red] Invalid template number: {choice}")
@@ -201,11 +227,27 @@ def init(path: str, template: int | None, name: str | None, force: bool) -> None
             files_skipped += 1
 
     # --- aegra.json ---
-    aegra_config = {
-        "name": project_name,
-        "dependencies": ["./src"],
-        "graphs": {slug: f"./src/{slug}/graph.py:graph"},
-    }
+    manifest = load_template_manifest(selected["id"])
+    is_js_template = manifest.get("runtime") == "langgraphjs"
+
+    if is_js_template:
+        # LangGraph.js templates use the runtime object format
+        aegra_config = {
+            "name": project_name,
+            "dependencies": ["./src"],
+            "graphs": {
+                slug: {
+                    "runtime": "langgraphjs",
+                    "path": f"./src/{slug}/graph.ts:graph",
+                }
+            },
+        }
+    else:
+        aegra_config = {
+            "name": project_name,
+            "dependencies": ["./src"],
+            "graphs": {slug: f"./src/{slug}/graph.py:graph"},
+        }
     _write("aegra.json", json.dumps(aegra_config, indent=2) + "\n")
 
     # --- Template files (from manifest) ---
@@ -229,7 +271,7 @@ def init(path: str, template: int | None, name: str | None, force: bool) -> None
 
     # --- Docker files ---
     _write("docker-compose.yml", get_docker_compose(slug))
-    _write("Dockerfile", get_dockerfile())
+    _write("Dockerfile", get_dockerfile(runtime="langgraphjs" if is_js_template else "python"))
 
     # --- Summary ---
     click.echo()
@@ -246,5 +288,9 @@ def init(path: str, template: int | None, name: str | None, force: bool) -> None
     click.echo(click.style("Next steps:", bold=True))
     click.echo(f"  cd {project_path.name}")
     click.echo("  cp .env.example .env       # Configure your environment")
-    click.echo("  uv sync                    # Install dependencies")
+    if is_js_template:
+        click.echo("  npm install                # Install Node.js dependencies")
+        click.echo("  pip install aegra-cli      # Install Aegra CLI (if needed)")
+    else:
+        click.echo("  uv sync                    # Install dependencies")
     click.echo("  uv run aegra dev           # Start developing!")

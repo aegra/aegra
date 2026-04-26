@@ -1,0 +1,217 @@
+---
+title: "LangGraph.js"
+description: "Run LangGraph.js (TypeScript) graphs on Aegra alongside Python graphs."
+---
+
+# LangGraph.js Support
+
+Aegra supports running [LangGraph.js](https://github.com/langchain-ai/langgraphjs) graphs alongside Python graphs. This lets you build agents in TypeScript while using Aegra's full infrastructure — PostgreSQL persistence, streaming, authentication, and observability.
+
+## Prerequisites
+
+- **Node.js 18+** installed on the server
+- **npm** (comes with Node.js)
+- LangGraph.js packages: `@langchain/langgraph`, `@langchain/core`
+
+## Quick Start
+
+### 1. Create a LangGraph.js project
+
+```bash
+aegra init my-js-agent -t langgraphjs   # LangGraph.js Chatbot template
+cd my-js-agent
+```
+
+Or add a JS graph to an existing project:
+
+```bash
+mkdir -p src/js_agent
+```
+
+### 2. Define your graph
+
+Create `src/js_agent/state.ts`:
+
+```typescript
+import { Annotation, MessagesAnnotation } from "@langchain/langgraph";
+
+export const ChatState = Annotation.Root({
+  ...MessagesAnnotation.spec,
+});
+
+export type ChatStateType = typeof ChatState.State;
+```
+
+Create `src/js_agent/graph.ts`:
+
+```typescript
+import { StateGraph } from "@langchain/langgraph";
+import { ChatOpenAI } from "@langchain/openai";
+import { ChatState, type ChatStateType } from "./state.js";
+
+const model = new ChatOpenAI({
+  modelName: process.env.MODEL_NAME || "gpt-4o-mini",
+});
+
+async function chatbot(state: ChatStateType): Promise<Partial<ChatStateType>> {
+  const response = await model.invoke(state.messages);
+  return { messages: [response] };
+}
+
+const builder = new StateGraph(ChatState)
+  .addNode("chatbot", chatbot)
+  .addEdge("__start__", "chatbot")
+  .addEdge("chatbot", "__end__");
+
+// Export the uncompiled StateGraph — the Aegra bridge compiles it with
+// a native PostgresSaver checkpointer for interrupt/resume/time-travel.
+export const graph = builder;
+```
+
+### 3. Add a `package.json`
+
+```json
+{
+  "name": "my-js-agent",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@langchain/langgraph": "^1.2.0",
+    "@langchain/core": "^1.1.36",
+    "@langchain/openai": "^1.3.0"
+  }
+}
+```
+
+### 4. Configure `aegra.json`
+
+```json
+{
+  "dependencies": ["./src"],
+  "graphs": {
+    "js_agent": {
+      "runtime": "langgraphjs",
+      "path": "./src/js_agent/graph.ts:graph"
+    }
+  }
+}
+```
+
+### 5. Install and run
+
+```bash
+npm install          # Install Node.js dependencies
+aegra dev            # Starts PostgreSQL + server (auto-installs JS deps)
+```
+
+## Configuration
+
+### Graph entry format
+
+LangGraph.js graphs use the **runtime object format** in `aegra.json`:
+
+```json
+{
+  "graphs": {
+    "my_graph": {
+      "runtime": "langgraphjs",
+      "path": "./path/to/graph.ts:exportName"
+    }
+  }
+}
+```
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `runtime` | `"langgraphjs"` | Yes | Specifies the JS runtime |
+| `path` | `string` | Yes | File path and export name, separated by `:` |
+
+### Mixed Python + JS projects
+
+You can run Python and LangGraph.js graphs side by side:
+
+```json
+{
+  "graphs": {
+    "python_agent": "./src/python_agent/graph.py:graph",
+    "js_agent": {
+      "runtime": "langgraphjs",
+      "path": "./src/js_agent/graph.ts:graph"
+    }
+  }
+}
+```
+
+Both graphs are accessible through the same API and SDK.
+
+## How It Works
+
+Aegra uses a **Node.js bridge** architecture:
+
+1. When a `langgraphjs` graph is configured, Aegra spawns a Node.js subprocess
+2. The subprocess loads your TypeScript graph using `tsx` (no build step needed)
+3. Communication happens via JSON-RPC over stdin/stdout
+4. The JS bridge compiles the graph with a native `@langchain/langgraph-checkpoint-postgres` checkpointer, using the same PostgreSQL database as Aegra
+5. Streaming events flow through the bridge back to clients via SSE
+
+This means:
+- **No separate Node.js server** to manage
+- **Same API** for Python and JS graphs
+- **Same PostgreSQL** database for all state
+- **Same authentication** and middleware applies
+- **Full checkpoint support** — interrupts, resume, and time-travel work natively
+
+<Note>
+**Export an uncompiled `StateGraph`.** The Aegra bridge compiles your graph with a native `PostgresSaver` checkpointer. If you export a pre-compiled graph (calling `builder.compile()` yourself), the bridge cannot inject the checkpointer and persistence features (interrupt, resume, time-travel) will not work. Always export the uncompiled `StateGraph` and let the bridge handle compilation.
+</Note>
+
+## Streaming
+
+JS graphs support the same streaming modes as Python graphs:
+
+- `values` — Full state after each node
+- `updates` — Partial state changes per node
+- `messages` — LLM message chunks
+- `debug` — Checkpoint and task events
+
+```python
+from langgraph_sdk import get_client
+
+client = get_client(url="http://localhost:2026")
+thread = await client.threads.create()
+
+async for chunk in client.runs.stream(
+    thread_id=thread["thread_id"],
+    assistant_id="js_agent",
+    input={"messages": [{"type": "human", "content": "Hello!"}]},
+    stream_mode=["values", "messages"],
+):
+    print(chunk)
+```
+
+## Limitations
+
+- **Static graphs only** — Factory functions (per-request graph customization) are not yet supported for JS graphs
+- **No subgraph nesting** — JS graphs cannot contain Python subgraphs or vice versa
+- **TypeScript files** are loaded via `tsx` — ensure it's installed (included with the bridge)
+
+## Troubleshooting
+
+### "Node.js not found"
+
+Install Node.js 18+ from [nodejs.org](https://nodejs.org/).
+
+### "npm install failed"
+
+Run `npm install` manually in your graph's directory to see detailed error messages.
+
+### "JS bridge did not send ready signal"
+
+Check that:
+1. Node.js 18+ is installed: `node --version`
+2. Run `aegra dev` again — it automatically installs bridge dependencies on startup
+3. No port conflicts or permission issues
+
+### Graph file not found
+
+Ensure the path in `aegra.json` is relative to the config file location and includes the `:exportName` suffix.

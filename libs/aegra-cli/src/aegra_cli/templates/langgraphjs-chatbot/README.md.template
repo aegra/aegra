@@ -1,0 +1,58 @@
+# $project_name
+
+Built with [LangGraph.js](https://github.com/langchain-ai/langgraphjs) and [Aegra](https://github.com/ibbybuilds/aegra) — a self-hosted LangSmith Deployments alternative.
+
+## Setup
+
+```bash
+cp .env.example .env       # Configure your environment
+npm install                # Install Node.js dependencies
+pip install aegra-cli      # Install Aegra CLI (if not already)
+aegra dev                  # Start developing!
+```
+
+## Project Structure
+
+```
+$slug/
+|-- aegra.json            # Graph configuration
+|-- package.json          # Node.js dependencies
+|-- tsconfig.json         # TypeScript configuration
+|-- .env.example          # Environment variable template
+|-- src/$slug/
+|   |-- graph.ts          # Your agent graph
+|   +-- state.ts          # State annotations
+|-- docker-compose.yml    # Docker Compose (PostgreSQL + API)
++-- Dockerfile
+```
+
+## Development
+
+Start the development server:
+
+```bash
+aegra dev
+```
+
+This will:
+1. Start PostgreSQL via Docker Compose
+2. Auto-install Node.js dependencies
+3. Launch the Aegra API server on port 2026
+
+## Usage
+
+Use the LangGraph SDK to interact with your agent:
+
+```python
+from langgraph_sdk import get_client
+
+client = get_client(url="http://localhost:2026")
+thread = await client.threads.create()
+
+async for chunk in client.runs.stream(
+    thread_id=thread["thread_id"],
+    assistant_id="$slug",
+    input={"messages": [{"type": "human", "content": "Hello!"}]},
+):
+    print(chunk)
+```

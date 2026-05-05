@@ -22,6 +22,8 @@ one such recent addition).
 import json
 from typing import TYPE_CHECKING, Any
 
+from psycopg import sql as pgsql
+
 from aegra_api.core.database import db_manager
 
 if TYPE_CHECKING:
@@ -56,16 +58,31 @@ async def _copy_checkpoint_table(
     src_thread_id: str,
     new_thread_id: str,
 ) -> None:
-    """Copy all rows of ``table`` matching ``src_thread_id`` under ``new_thread_id``."""
+    """Copy all rows of ``table`` matching ``src_thread_id`` under ``new_thread_id``.
+
+    Raises ``RuntimeError`` if the introspected schema lacks ``thread_id`` —
+    a silent skip would let the surrounding transaction commit a partial
+    copy (the new thread row plus the tables that did succeed), violating
+    the atomicity guarantee. Raising lets ``conn.transaction()`` roll back
+    the whole operation.
+
+    Identifiers (table name + column names) are composed via
+    ``psycopg.sql.Identifier`` rather than f-string quoting. The inputs
+    come from ``information_schema``, so an exotic identifier containing a
+    literal double-quote would silently break naive ``f'"{c}"'`` quoting;
+    using the typed composer eliminates that class of bug.
+    """
     cols = await _table_columns(conn, table)
     if "thread_id" not in cols:
-        # Defensive: schema unexpected, skip rather than raise to avoid
-        # breaking the whole copy on a transient introspection issue.
-        return
+        raise RuntimeError(f"Table {table!r} has no 'thread_id' column; aborting copy to preserve atomicity")
     other_cols = [c for c in cols if c != "thread_id"]
-    cols_csv = ", ".join(f'"{c}"' for c in other_cols)
-    sql = f'INSERT INTO "{table}" ("thread_id", {cols_csv}) SELECT %s, {cols_csv} FROM "{table}" WHERE thread_id = %s'
-    await conn.execute(sql, (new_thread_id, src_thread_id))
+    table_id = pgsql.Identifier(table)
+    tid_id = pgsql.Identifier("thread_id")
+    cols_composed = pgsql.SQL(", ").join(pgsql.Identifier(c) for c in other_cols)
+    stmt = pgsql.SQL("INSERT INTO {table} ({tid}, {cols}) SELECT %s, {cols} FROM {table} WHERE thread_id = %s").format(
+        table=table_id, tid=tid_id, cols=cols_composed
+    )
+    await conn.execute(stmt, (new_thread_id, src_thread_id))
 
 
 async def copy_thread_atomically(

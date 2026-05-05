@@ -4,6 +4,7 @@ import json
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from psycopg import sql as pgsql
 
 from aegra_api.services.thread_copy import (
     _CHECKPOINT_TABLES,
@@ -59,25 +60,31 @@ class TestCopyCheckpointTable:
         # Two execute calls: information_schema lookup + INSERT...SELECT
         assert conn.execute.await_count == 2
         insert_call = conn.execute.await_args_list[1]
-        sql, params = insert_call.args
-        assert sql.startswith('INSERT INTO "checkpoints"')
-        assert '"thread_id"' in sql
-        assert '"checkpoint_ns"' in sql
-        assert '"checkpoint_id"' in sql
-        assert '"metadata"' in sql
-        assert "WHERE thread_id = %s" in sql
+        stmt, params = insert_call.args
+        # The statement is composed via psycopg.sql.Identifier rather than
+        # an f-string, so render it once for content assertions.
+        assert isinstance(stmt, pgsql.Composed)
+        sql_str = stmt.as_string(None)
+        assert sql_str.startswith('INSERT INTO "checkpoints"')
+        assert '"thread_id"' in sql_str
+        assert '"checkpoint_ns"' in sql_str
+        assert '"checkpoint_id"' in sql_str
+        assert '"metadata"' in sql_str
+        assert "WHERE thread_id = %s" in sql_str
         # First param is the new thread_id, second is the source — order matters
         assert params == ("new-uuid", "src-uuid")
 
     @pytest.mark.asyncio()
-    async def test_skips_when_thread_id_column_missing(self) -> None:
-        """Defensive: unexpected schema → skip table without raising."""
+    async def test_raises_when_thread_id_column_missing(self) -> None:
+        """Unexpected schema (no ``thread_id`` col) raises so the surrounding
+        transaction rolls back rather than committing a partial copy."""
         cols_cursor = _make_async_cursor(["checkpoint_id"])
         conn = _make_async_connection([cols_cursor])
 
-        await _copy_checkpoint_table(conn, "checkpoints", "src", "new")
+        with pytest.raises(RuntimeError, match="thread_id"):
+            await _copy_checkpoint_table(conn, "checkpoints", "src", "new")
 
-        # Only the introspection call — no INSERT issued.
+        # Only the introspection call — no INSERT issued before the raise.
         assert conn.execute.await_count == 1
 
     @pytest.mark.asyncio()
@@ -89,10 +96,11 @@ class TestCopyCheckpointTable:
 
         await _copy_checkpoint_table(conn, "checkpoints", "src", "new")
 
-        sql = conn.execute.await_args_list[1].args[0]
+        stmt = conn.execute.await_args_list[1].args[0]
+        sql_str = stmt.as_string(None)
         # Non-thread_id column listed once after explicit thread_id literal.
-        assert sql.count('"checkpoint_id"') == 2  # in INSERT cols + SELECT cols
-        assert sql.count('"thread_id"') == 1  # only in INSERT cols
+        assert sql_str.count('"checkpoint_id"') == 2  # in INSERT cols + SELECT cols
+        assert sql_str.count('"thread_id"') == 1  # only in INSERT cols
 
 
 def _make_atomic_pool_mocks() -> tuple[MagicMock, MagicMock]:

@@ -890,13 +890,21 @@ async def copy_thread(
     # Atomic INSERT thread row + checkpoint INSERT...SELECT inside a single
     # Postgres transaction on the checkpointer pool. Avoids the cross-pool
     # split that would leave orphaned checkpoint rows on partial failure.
-    await copy_thread_atomically(
-        src_thread_id=thread_id,
-        new_thread_id=new_id,
-        src_status=src.status,
-        src_metadata=src.metadata_json or {},
-        user_identity=user.identity,
-    )
+    try:
+        await copy_thread_atomically(
+            src_thread_id=thread_id,
+            new_thread_id=new_id,
+            src_status=src.status,
+            src_metadata=src.metadata_json or {},
+            user_identity=user.identity,
+        )
+    except Exception:
+        logger.exception(
+            "Failed to copy thread",
+            src_thread_id=thread_id,
+            new_thread_id=new_id,
+        )
+        raise HTTPException(500, "Failed to copy thread") from None
 
     # Reload the freshly-inserted row through the ORM so the response is
     # built from the same shape ``_serialize_thread`` expects elsewhere.

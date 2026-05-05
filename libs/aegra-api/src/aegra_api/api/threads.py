@@ -906,6 +906,14 @@ async def copy_thread(
         )
         raise HTTPException(500, "Failed to copy thread") from None
 
+    # End the implicit session transaction before reloading. Postgres' default
+    # READ COMMITTED snapshot would let the lg_pool INSERT show through anyway,
+    # but stricter isolation levels (REPEATABLE READ / SERIALIZABLE) freeze the
+    # session snapshot at transaction start and the new row would be invisible.
+    # Committing here makes the reload robust regardless of the engine's
+    # isolation_level setting.
+    await session.commit()
+
     # Reload the freshly-inserted row through the ORM so the response is
     # built from the same shape ``_serialize_thread`` expects elsewhere.
     new_thread = await session.scalar(select(ThreadORM).where(ThreadORM.thread_id == new_id))

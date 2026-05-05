@@ -35,6 +35,7 @@ from aegra_api.models import (
 )
 from aegra_api.models.errors import CONFLICT, NOT_FOUND
 from aegra_api.services.streaming_service import streaming_service
+from aegra_api.services.thread_copy import copy_thread_atomically
 from aegra_api.services.thread_state_service import ThreadStateService
 from aegra_api.utils.run_utils import strip_pinned_config_keys
 
@@ -852,6 +853,59 @@ async def delete_thread(
     await session.commit()
 
     return {"status": "deleted"}
+
+
+@router.post("/threads/{thread_id}/copy", response_model=Thread, responses={**NOT_FOUND})
+async def copy_thread(
+    thread_id: str,
+    user: User = Depends(get_current_user),
+    session: AsyncSession = Depends(get_session),
+) -> Thread:
+    """Deep-copy a thread, preserving its checkpoint history.
+
+    Creates a new thread with a freshly generated ``thread_id`` whose
+    checkpoint chain is identical to the source: ``checkpoint_id`` and
+    ``parent_checkpoint_id`` are kept as-is so the new thread can be
+    queried by the same checkpoint identifiers as the source. Thread-level
+    metadata and status are deep-copied as-is — including statuses such
+    as ``running`` or ``error`` if present on the source — matching
+    LangSmith Deployments behaviour. ``created_at`` and ``updated_at``
+    are regenerated to the time of the copy.
+    """
+    # Authorization check — modelled on POST /threads (creation event).
+    ctx = build_auth_context(user, "threads", "create")
+    await handle_event(ctx, {"thread_id": thread_id})
+
+    src = await session.scalar(
+        select(ThreadORM).where(
+            ThreadORM.thread_id == thread_id,
+            ThreadORM.user_id == user.identity,
+        )
+    )
+    if not src:
+        raise HTTPException(404, f"Thread '{thread_id}' not found")
+
+    new_id = str(uuid4())
+
+    # Atomic INSERT thread row + checkpoint INSERT...SELECT inside a single
+    # Postgres transaction on the checkpointer pool. Avoids the cross-pool
+    # split that would leave orphaned checkpoint rows on partial failure.
+    await copy_thread_atomically(
+        src_thread_id=thread_id,
+        new_thread_id=new_id,
+        src_status=src.status,
+        src_metadata=src.metadata_json or {},
+        user_identity=user.identity,
+    )
+
+    # Reload the freshly-inserted row through the ORM so the response is
+    # built from the same shape ``_serialize_thread`` expects elsewhere.
+    new_thread = await session.scalar(select(ThreadORM).where(ThreadORM.thread_id == new_id))
+    if new_thread is None:
+        # Should be unreachable: the atomic INSERT just committed.
+        raise HTTPException(500, "Thread copy committed but the row could not be reloaded")
+
+    return _serialize_thread(new_thread)
 
 
 @router.post("/threads/search", response_model=list[Thread])

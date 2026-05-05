@@ -873,8 +873,19 @@ async def copy_thread(
     are regenerated to the time of the copy.
     """
     # Authorization check — modelled on POST /threads (creation event).
+    # We generate ``new_id`` up-front and pass it inside the event payload
+    # so handlers that provision per-thread resources (tenant_id, quota
+    # markers, billing tags) key those resources to the new row rather
+    # than the source.  We also capture the handler return value the same
+    # way ``create_thread`` does, so handler-enforced metadata mutations
+    # propagate to the copy — without that capture, ``/copy`` would be a
+    # bypass path for invariants every directly-created thread carries.
+    new_id = str(uuid4())
     ctx = build_auth_context(user, "threads", "create")
-    await handle_event(ctx, {"thread_id": thread_id})
+    filters = await handle_event(
+        ctx,
+        {"thread_id": new_id, "src_thread_id": thread_id},
+    )
 
     src = await session.scalar(
         select(ThreadORM).where(
@@ -885,7 +896,16 @@ async def copy_thread(
     if not src:
         raise HTTPException(404, f"Thread '{thread_id}' not found")
 
-    new_id = str(uuid4())
+    # Apply handler-returned metadata mutations on top of the source's
+    # metadata before the copy lands.  Mirrors ``create_thread`` lines
+    # 172–180.  ``copy_thread_atomically`` then rewrites
+    # ``metadata["owner"] = user.identity`` last, so the security
+    # invariant wins over any owner field a handler might inject.
+    src_metadata = dict(src.metadata_json or {})
+    if filters and "metadata" in filters:
+        handler_meta = filters["metadata"]
+        if isinstance(handler_meta, dict):
+            src_metadata = {**src_metadata, **handler_meta}
 
     # Atomic INSERT thread row + checkpoint INSERT...SELECT inside a single
     # Postgres transaction on the checkpointer pool. Avoids the cross-pool
@@ -895,7 +915,7 @@ async def copy_thread(
             src_thread_id=thread_id,
             new_thread_id=new_id,
             src_status=src.status,
-            src_metadata=src.metadata_json or {},
+            src_metadata=src_metadata,
             user_identity=user.identity,
         )
     except Exception:

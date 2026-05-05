@@ -382,6 +382,113 @@ class TestDeleteThread:
         assert resp.json()["status"] == "deleted"
 
 
+class TestCopyThread:
+    """Test POST /threads/{thread_id}/copy endpoint."""
+
+    def _session_class(self, src_thread, new_thread):
+        """Build a session class whose scalar() returns ``src`` first, then ``new``.
+
+        Mirrors the endpoint's call order: ownership lookup, then post-commit
+        reload of the freshly-inserted row.
+        """
+
+        class Session(DummySessionBase):
+            _calls = 0
+
+            async def scalar(self, _stmt):
+                Session._calls += 1
+                return src_thread if Session._calls == 1 else new_thread
+
+            async def commit(self):
+                return None
+
+        return Session
+
+    def test_copy_thread_applies_handler_metadata_mutations(self):
+        """A handler that returns ``{"metadata": {...}}`` from ``handle_event``
+        must have its mutations merged onto the copied thread's metadata.
+
+        Without this capture (the original PR discarded the return value),
+        the ``/copy`` endpoint would be a bypass path for handler-enforced
+        invariants — tenant_id, quota markers, billing tags — that
+        ``create_thread`` applies to every directly-created thread.
+        """
+        src = _thread_row("src-123", metadata={"graph_id": "agent"})
+        new = _thread_row("new-456", metadata={"graph_id": "agent", "tenant_id": "acme"})
+
+        captured_call: dict = {}
+
+        async def fake_copy(**kwargs):
+            captured_call.update(kwargs)
+
+        async def mock_handle_event(_ctx, _value):
+            return {"metadata": {"tenant_id": "acme"}}
+
+        app = create_test_app(include_runs=False, include_threads=True)
+        app.dependency_overrides[core_get_session] = override_get_session_dep(self._session_class(src, new))
+
+        with (
+            patch(
+                "aegra_api.api.threads.handle_event",
+                new=AsyncMock(side_effect=mock_handle_event),
+            ),
+            patch(
+                "aegra_api.api.threads.copy_thread_atomically",
+                new=AsyncMock(side_effect=fake_copy),
+            ),
+        ):
+            client = make_client(app)
+            resp = client.post("/threads/src-123/copy")
+
+        assert resp.status_code == 200
+        # Handler-injected key reaches the service call site.
+        assert captured_call["src_metadata"]["tenant_id"] == "acme"
+        # Source metadata is preserved on the same dict.
+        assert captured_call["src_metadata"]["graph_id"] == "agent"
+
+    def test_copy_thread_event_payload_includes_new_thread_id(self):
+        """Handlers that provision per-thread resources need the *new* thread
+        id keyed in the event payload — not just the source id.  The original
+        PR passed ``{"thread_id": <source>}``, leaving the handler with stale
+        data and no way to bind a resource to the row about to be created.
+        """
+        src = _thread_row("src-123")
+        new = _thread_row("new-456")
+
+        captured_payload: dict = {}
+
+        async def mock_handle_event(_ctx, value):
+            captured_payload.update(value)
+            return None
+
+        async def fake_copy(**_kwargs):
+            return None
+
+        app = create_test_app(include_runs=False, include_threads=True)
+        app.dependency_overrides[core_get_session] = override_get_session_dep(self._session_class(src, new))
+
+        with (
+            patch(
+                "aegra_api.api.threads.handle_event",
+                new=AsyncMock(side_effect=mock_handle_event),
+            ),
+            patch(
+                "aegra_api.api.threads.copy_thread_atomically",
+                new=AsyncMock(side_effect=fake_copy),
+            ),
+        ):
+            client = make_client(app)
+            resp = client.post("/threads/src-123/copy")
+
+        assert resp.status_code == 200
+        # Source thread id is still surfaced under a dedicated key for context.
+        assert captured_payload.get("src_thread_id") == "src-123"
+        # The ``thread_id`` key carries the NEW (server-generated) id.
+        new_id_in_payload = captured_payload.get("thread_id")
+        assert new_id_in_payload is not None
+        assert new_id_in_payload != "src-123"
+
+
 class TestSearchThreads:
     """Test POST /threads/search endpoint"""
 

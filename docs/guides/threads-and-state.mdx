@@ -152,6 +152,35 @@ Deleting a thread cancels any active runs and removes all state:
 await client.threads.delete(thread_id)
 ```
 
+## Copying threads
+
+`POST /threads/{thread_id}/copy` produces a new thread whose checkpoint history is identical to the source, matching the `client.threads.copy()` semantics on LangSmith Deployments. The `checkpoint_id` and `parent_checkpoint_id` chain are preserved verbatim, so the new thread can be queried by the same checkpoint identifiers as the source and `get_state_at_checkpoint(...)` returns the same values on both sides.
+
+```python
+new_thread = await client.threads.copy(thread_id)
+print(new_thread["thread_id"])  # freshly generated UUID
+```
+
+### What is preserved
+
+- The full checkpoint history (`checkpoints`, `checkpoint_writes`, `checkpoint_blobs` rows) under the new `thread_id`.
+- Thread `status` from the source — including non-idle states like `running` or `error` if present at the time of the copy.
+- Thread metadata, with two adjustments described below.
+
+### What is regenerated
+
+- `thread_id`: a fresh UUID is always generated server-side.
+- `created_at` and `updated_at`: set to the time of the copy, not inherited from the source.
+- `metadata.owner`: rewritten to the caller's identity, matching `POST /threads` (creation) behaviour. The source thread's owner attribution is intentionally not inherited so any code reading `metadata.owner` instead of the canonical `user_id` column stays consistent.
+
+### Atomicity
+
+Both the new thread row and the three checkpoint-table `INSERT...SELECT` statements run inside a single Postgres transaction at `REPEATABLE READ` isolation on the checkpointer pool. A concurrent writer on the source thread (for example a run mid-execution) cannot leave the new thread with a partially-copied checkpoint history: the snapshot is pinned at transaction start, and on any failure the whole copy is rolled back. There is no intermediate state where a new thread row exists without its checkpoint chain or vice versa.
+
+### Authorization
+
+The endpoint requires the caller to own the source thread (`user_id == user.identity`); a missing or non-owned source thread returns `404`. Custom auth handlers registered for `threads:create` see the new `thread_id` in the event payload (alongside `src_thread_id`) so they can provision per-thread resources keyed to the new row.
+
 ## Thread metadata
 
 Threads automatically track metadata about their usage:

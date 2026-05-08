@@ -861,25 +861,13 @@ async def copy_thread(
     user: User = Depends(get_current_user),
     session: AsyncSession = Depends(get_session),
 ) -> Thread:
-    """Deep-copy a thread, preserving its checkpoint history.
+    """Deep-copy a thread, preserving its ``checkpoint_id`` chain.
 
-    Creates a new thread with a freshly generated ``thread_id`` whose
-    checkpoint chain is identical to the source: ``checkpoint_id`` and
-    ``parent_checkpoint_id`` are kept as-is so the new thread can be
-    queried by the same checkpoint identifiers as the source. Thread-level
-    metadata and status are deep-copied as-is — including statuses such
-    as ``running`` or ``error`` if present on the source — matching
-    LangSmith Deployments behaviour. ``created_at`` and ``updated_at``
-    are regenerated to the time of the copy.
+    Status and metadata are inherited from the source (including ``running``
+    or ``error``); ``created_at``/``updated_at`` are regenerated.
     """
-    # Authorization check — modelled on POST /threads (creation event).
-    # We generate ``new_id`` up-front and pass it inside the event payload
-    # so handlers that provision per-thread resources (tenant_id, quota
-    # markers, billing tags) key those resources to the new row rather
-    # than the source.  We also capture the handler return value the same
-    # way ``create_thread`` does, so handler-enforced metadata mutations
-    # propagate to the copy — without that capture, ``/copy`` would be a
-    # bypass path for invariants every directly-created thread carries.
+    # ``new_id`` is generated up-front and exposed to the auth event so handlers
+    # can key per-thread resources (tenant, quota, billing) to the new row.
     new_id = str(uuid4())
     ctx = build_auth_context(user, "threads", "create")
     filters = await handle_event(
@@ -896,20 +884,14 @@ async def copy_thread(
     if not src:
         raise HTTPException(404, f"Thread '{thread_id}' not found")
 
-    # Apply handler-returned metadata mutations on top of the source's
-    # metadata before the copy lands.  Mirrors ``create_thread`` lines
-    # 172–180.  ``copy_thread_atomically`` then rewrites
-    # ``metadata["owner"] = user.identity`` last, so the security
-    # invariant wins over any owner field a handler might inject.
+    # Mirror ``create_thread``: handler metadata wins over source, then
+    # ``copy_thread_atomically`` rewrites ``owner`` last as security invariant.
     src_metadata = dict(src.metadata_json or {})
     if filters and "metadata" in filters:
         handler_meta = filters["metadata"]
         if isinstance(handler_meta, dict):
             src_metadata = {**src_metadata, **handler_meta}
 
-    # Atomic INSERT thread row + checkpoint INSERT...SELECT inside a single
-    # Postgres transaction on the checkpointer pool. Avoids the cross-pool
-    # split that would leave orphaned checkpoint rows on partial failure.
     try:
         await copy_thread_atomically(
             src_thread_id=thread_id,
@@ -926,19 +908,13 @@ async def copy_thread(
         )
         raise HTTPException(500, "Failed to copy thread") from None
 
-    # End the implicit session transaction before reloading. Postgres' default
-    # READ COMMITTED snapshot would let the lg_pool INSERT show through anyway,
-    # but stricter isolation levels (REPEATABLE READ / SERIALIZABLE) freeze the
-    # session snapshot at transaction start and the new row would be invisible.
-    # Committing here makes the reload robust regardless of the engine's
-    # isolation_level setting.
+    # Commit before reload so REPEATABLE READ/SERIALIZABLE engines see the row
+    # (the lg_pool INSERT is invisible to a frozen session snapshot otherwise).
     await session.commit()
 
-    # Reload the freshly-inserted row through the ORM so the response is
-    # built from the same shape ``_serialize_thread`` expects elsewhere.
     new_thread = await session.scalar(select(ThreadORM).where(ThreadORM.thread_id == new_id))
     if new_thread is None:
-        # Should be unreachable: the atomic INSERT just committed.
+        # Unreachable: the atomic INSERT just committed.
         raise HTTPException(500, "Thread copy committed but the row could not be reloaded")
 
     return _serialize_thread(new_thread)

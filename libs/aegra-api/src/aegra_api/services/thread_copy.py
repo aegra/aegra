@@ -1,35 +1,11 @@
-"""Thread copy service.
+"""SQL-level deep-copy of a thread row + its checkpoint history.
 
-Implements deep-copy of a thread (its row in ``thread`` plus its checkpoint
-history) at the SQL level so that ``checkpoint_id`` and the
-``parent_checkpoint_id`` chain are preserved end-to-end, matching the
-semantics of ``POST /threads/{id}/copy`` on LangSmith Deployments.
-
-Both the thread row INSERT and the three checkpoint-table INSERT...SELECT
-statements run inside a single Postgres transaction on the
-``langgraph-checkpoint-postgres`` connection pool, raised to
-REPEATABLE READ isolation. Without that level, a concurrent writer on the
-source thread (e.g. a run mid-execution) could commit between the three
-INSERT...SELECT statements, leaving the new thread with an inconsistent
-slice of the checkpoint history. REPEATABLE READ pins the snapshot at
-transaction start so the three SELECTs see the same consistent view, and
-on any failure the whole copy is rolled back.
-
-Going through one pool also avoids cross-pool tx coordination between
-SQLAlchemy and the checkpointer pool, which would otherwise leave
-orphaned checkpoint rows on partial failures.
-
-Column lists for the checkpoint tables are introspected at runtime via
-``pg_catalog.pg_attribute`` keyed on ``to_regclass(<table>)``. This is
-the same path the unqualified ``INSERT INTO <table>`` statements use to
-resolve their target relation — they both follow the connection's
-``search_path``. Using ``information_schema.columns`` filtered by
-``current_schema()`` would only inspect the *first* schema in the
-search path, which is fine for default deployments but breaks under
-non-default ``search_path`` configurations (the introspection returns
-zero rows even though the unqualified DML still finds the table in a
-later schema). Forward-compat: new columns added upstream
-(``task_path`` was one such recent addition) are picked up automatically.
+One Postgres transaction on the checkpointer pool at REPEATABLE READ:
+no cross-pool coordination, no orphan rows on failure, snapshot pinned
+against concurrent writers. Column lists resolved via
+``pg_catalog.pg_attribute`` + ``to_regclass`` so introspection follows
+the same ``search_path`` as the unqualified DML (forward-compat with
+upstream column additions).
 """
 
 from typing import TYPE_CHECKING, Any
@@ -51,18 +27,10 @@ _CHECKPOINT_TABLES: tuple[str, ...] = ("checkpoints", "checkpoint_writes", "chec
 
 
 async def _table_columns(conn: "AsyncConnection", table: str) -> list[str]:
-    """Return the column names of ``table`` in declaration order.
+    """Return live column names of ``table`` via ``pg_attribute``+``to_regclass``.
 
-    Resolves ``table`` through ``to_regclass`` so the introspection
-    follows the connection's ``search_path`` exactly the way an
-    unqualified ``INSERT INTO <table>`` would. Filters out dropped
-    columns via ``attisdropped`` — ``pg_attribute`` retains tombstone
-    rows for dropped columns, unlike ``information_schema.columns``.
-
-    The aegra connection pool is configured with ``dict_row`` (see
-    ``core/database.py`` — LangGraph requires dictionary rows), so each
-    fetched row is a ``dict``. The ``AS column_name`` alias preserves
-    that contract for callers (and existing tests).
+    Filters dropped-column tombstones (``attisdropped``); ``AS column_name``
+    matches the pool's ``dict_row`` factory used by callers.
     """
     cur = await conn.execute(
         "SELECT attname AS column_name FROM pg_catalog.pg_attribute "
@@ -81,19 +49,11 @@ async def _copy_checkpoint_table(
     src_thread_id: str,
     new_thread_id: str,
 ) -> None:
-    """Copy all rows of ``table`` matching ``src_thread_id`` under ``new_thread_id``.
+    """Copy ``src_thread_id`` rows of ``table`` under ``new_thread_id``.
 
-    Raises ``RuntimeError`` if the introspected schema lacks ``thread_id`` —
-    a silent skip would let the surrounding transaction commit a partial
-    copy (the new thread row plus the tables that did succeed), violating
-    the atomicity guarantee. Raising lets ``conn.transaction()`` roll back
-    the whole operation.
-
-    Identifiers (table name + column names) are composed via
-    ``psycopg.sql.Identifier`` rather than f-string quoting. The inputs
-    come from ``pg_attribute``, so an exotic identifier containing a
-    literal double-quote would silently break naive ``f'"{c}"'`` quoting;
-    using the typed composer eliminates that class of bug.
+    Raises on missing ``thread_id`` so the outer transaction rolls back;
+    identifiers composed via ``psycopg.sql.Identifier`` (input from
+    ``pg_attribute`` may contain quotes that break f-string quoting).
     """
     cols = await _table_columns(conn, table)
     if "thread_id" not in cols:
@@ -109,48 +69,28 @@ async def _copy_checkpoint_table(
 
 
 async def copy_thread_atomically(
+    *,
     src_thread_id: str,
     new_thread_id: str,
     src_status: str,
     src_metadata: dict[str, Any],
     user_identity: str,
 ) -> None:
-    """Atomically insert the new thread row and copy the checkpoint history.
+    """Insert thread row + copy checkpoint history in one REPEATABLE READ tx.
 
-    Runs the thread-row INSERT and the three checkpoint INSERT...SELECT
-    statements inside one Postgres transaction at REPEATABLE READ
-    isolation. On any failure the whole copy is rolled back, preventing
-    orphaned checkpoint rows or a thread row without its history.
-
-    The new thread's ``metadata.owner`` is rewritten to ``user_identity``
-    (mirroring ``create_thread``, which enforces the same invariant for
-    fresh threads). Without this, the source thread's owner attribution
-    would be inherited by the copy — an internal-consistency bug for any
-    code that reads ``metadata.owner`` instead of the canonical
-    ``thread.user_id`` column. ``user_id`` is correctly bound to the
-    caller via the dedicated parameter.
-
-    ``created_at`` and ``updated_at`` are set to ``NOW()`` to mark the
-    time of the copy (matching LangSmith Deployments behaviour) rather
-    than inheriting the source timestamps. Status is inherited from the
-    source as-is — including statuses such as ``running`` or ``error``
-    if present.
+    ``metadata["owner"]`` is rewritten to ``user_identity`` (mirrors
+    ``create_thread``), timestamps regenerated to copy time, status
+    inherited from source.
     """
     if db_manager.lg_pool is None:
         raise RuntimeError("Checkpoint pool is not initialized")
 
-    # Shallow copy is sufficient — we only mutate the top-level ``owner``
-    # key, so any nested values shared with the caller's dict are safe to
-    # alias.  ``dict(None or {})`` also defends against a ``None`` argument
-    # without an explicit branch.
+    # Shallow copy: only top-level ``owner`` mutates; ``or {}`` defends None.
     metadata = dict(src_metadata or {})
     metadata["owner"] = user_identity
 
     async with db_manager.lg_pool.connection() as conn, conn.transaction():
-        # Pin the transaction snapshot so the three checkpoint INSERT...SELECT
-        # statements see a consistent view of the source thread, even if a
-        # concurrent run on that thread is committing checkpoints. Must be
-        # the first statement in the transaction for PostgreSQL to honour it.
+        # First statement in tx — required for Postgres to honour the level.
         await conn.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
         await conn.execute(
             'INSERT INTO "thread" ("thread_id", "status", "metadata_json", "user_id", '
@@ -160,10 +100,7 @@ async def copy_thread_atomically(
         )
         for table in _CHECKPOINT_TABLES:
             await _copy_checkpoint_table(conn, table, src_thread_id, new_thread_id)
-    # Audit log on success — ISO 27017/27018 expect data-duplication events
-    # to be traceable to caller, source, target, and timestamp. The failure
-    # path emits ``logger.exception`` from the API layer; this completes the
-    # pair so the operation is observable in both outcomes.
+    # Audit pair: API layer logs on failure via ``logger.exception``.
     logger.info(
         "thread.copy",
         src_thread_id=src_thread_id,

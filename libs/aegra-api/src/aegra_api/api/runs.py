@@ -24,6 +24,7 @@ from aegra_api.core.sse import create_end_event, get_sse_headers, make_sse_respo
 from aegra_api.models import Run, RunCreate, RunStatus, User
 from aegra_api.models.errors import CONFLICT, NOT_FOUND, SSE_RESPONSE
 from aegra_api.services.broker import broker_manager
+from aegra_api.services.run_cancellation import CancelAction, cancel_running_run, try_cancel_pending
 from aegra_api.services.run_preparation import _prepare_run
 from aegra_api.services.run_waiters import TERMINAL_STATES, encode_output, heartbeat_wait_body
 from aegra_api.services.streaming_service import streaming_service
@@ -435,9 +436,8 @@ async def cancel_run_endpoint(
     thread_id: str,
     run_id: str,
     wait: int = Query(0, ge=0, le=1, description="Set to 1 to wait for the run task to settle before returning."),
-    action: str = Query(
+    action: CancelAction = Query(
         "cancel",
-        pattern="^(cancel|interrupt)$",
         description="Cancellation strategy: 'cancel' for hard cancel, 'interrupt' for cooperative interrupt.",
     ),
     user: User = Depends(get_current_user),
@@ -461,26 +461,32 @@ async def cancel_run_endpoint(
     if not run_orm:
         raise HTTPException(404, f"Run '{run_id}' not found")
 
-    if action == "interrupt":
-        logger.info(f"[cancel_run] interrupt run_id={run_id} user={user.identity} thread_id={thread_id}")
-        await streaming_service.interrupt_run(run_id)
-        # Persist status as interrupted
-        await session.execute(
-            update(RunORM)
-            .where(RunORM.run_id == str(run_id))
-            .values(status="interrupted", updated_at=datetime.now(UTC))
-        )
-        await session.commit()
+    # Terminal-state idempotency: clients commonly retry cancel after a run
+    # has already finalized. Returning early prevents the user-cancellation
+    # set from being seeded for a run whose execute_run cleanup has already
+    # discarded the entry — that path leaks unbounded under repeated
+    # cancel-after-finish.
+    if run_orm.status in TERMINAL_STATES:
+        return Run.model_validate(run_orm)
+
+    if run_orm.status == "pending":
+        if await try_cancel_pending(session, run_orm):
+            # CAS hit — pending run is now interrupted, no broadcast needed.
+            pass
+        else:
+            # Worker claimed the run between our SELECT and CAS. Re-fetch
+            # to confirm it is actually still active before broadcasting
+            # the cancel — the run may have already finished.
+            run_orm = await session.scalar(select(RunORM).where(RunORM.run_id == run_id))
+            if run_orm is None:
+                raise HTTPException(404, f"Run '{run_id}' not found")
+            if run_orm.status in TERMINAL_STATES:
+                return Run.model_validate(run_orm)
+            logger.info(f"[cancel_run] {action} (was pending) run_id={run_id}")
+            await cancel_running_run(session, run_id, action)
     else:
-        logger.info(f"[cancel_run] cancel run_id={run_id} user={user.identity} thread_id={thread_id}")
-        await streaming_service.cancel_run(run_id)
-        # Persist status as interrupted
-        await session.execute(
-            update(RunORM)
-            .where(RunORM.run_id == str(run_id))
-            .values(status="interrupted", updated_at=datetime.now(UTC))
-        )
-        await session.commit()
+        logger.info(f"[cancel_run] {action} run_id={run_id} user={user.identity} thread_id={thread_id}")
+        await cancel_running_run(session, run_id, action)
 
     # Optionally wait for the run to settle
     if wait:

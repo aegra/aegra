@@ -1,7 +1,11 @@
 """Integration tests for runs CRUD operations"""
 
 from unittest.mock import AsyncMock, MagicMock, patch
+from uuid import uuid4
 
+import pytest
+
+from aegra_api.core.cancellation_state import cancellations
 from tests.fixtures.clients import create_test_app, make_client
 from tests.fixtures.database import DummySessionBase
 from tests.fixtures.session_fixtures import BasicSession, override_session_dependency
@@ -335,6 +339,102 @@ class TestCancelRun:
             resp = client.post("/threads/test-thread-123/runs/test-run-123/cancel")
 
             assert resp.status_code == 200
+
+    def test_cancel_pending_falls_through_to_running_when_worker_won_cas_race(self) -> None:
+        """If a worker picks up a pending run between our SELECT and the CAS
+        UPDATE, ``try_cancel_pending`` returns ``False`` and the endpoint
+        must (a) re-fetch, (b) confirm the run is still active, (c) hand off
+        to ``cancel_running_run`` to broadcast + write the safety-net status.
+
+        The CAS-success metric must NOT be incremented on this path —
+        execute_run owns the completed counter once the worker has it."""
+        app = create_test_app(include_runs=True, include_threads=False)
+
+        pending_run = _run_row(status="pending")
+        pending_run.execution_params = {"graph_id": "graph-cas"}
+        running_run = _run_row(status="running")
+        running_run.execution_params = {"graph_id": "graph-cas"}
+
+        scalar_call_count = 0
+
+        class Session(DummySessionBase):
+            async def scalar(self, _stmt: object) -> object:
+                nonlocal scalar_call_count
+                scalar_call_count += 1
+                # 1st call: initial SELECT (pending)
+                # 2nd call: re-fetch after CAS rowcount=0 (now running)
+                # 3rd+ call: final reload at end of endpoint (still running)
+                if scalar_call_count == 1:
+                    return pending_run
+                return running_run
+
+            async def execute(self, _stmt: object) -> object:
+                # CAS UPDATE returns rowcount=0 — worker already claimed.
+                # mark_interrupted_unless_terminal also calls execute() but
+                # rowcount isn't read on that path.
+                class Result:
+                    rowcount = 0
+
+                return Result()
+
+            async def rollback(self) -> None:
+                pass
+
+            async def commit(self) -> None:
+                pass
+
+        override_session_dependency(app, Session)
+        client = make_client(app)
+
+        with (
+            patch("aegra_api.services.run_cancellation.streaming_service") as mock_streaming,
+            patch(
+                "aegra_api.services.run_cancellation.get_worker_metrics",
+                return_value=None,
+            ) as mock_metrics,
+        ):
+            mock_streaming.cancel_run = AsyncMock()
+
+            resp = client.post("/threads/test-thread-123/runs/test-run-123/cancel")
+
+            assert resp.status_code == 200
+            # CAS lost → fall-through path broadcasts via streaming_service.
+            mock_streaming.cancel_run.assert_awaited_once_with("test-run-123")
+            # CAS-success metric path must not run; get_worker_metrics is only
+            # called inside try_cancel_pending on a CAS hit.
+            mock_metrics.assert_not_called()
+
+    def test_cancel_terminal_run_short_circuits_without_marking(self) -> None:
+        """Cancel for a run already in a terminal state must NOT seed the
+        user-cancellation set — leaving an entry behind would leak across
+        future runs that reuse the same run_id (or just grow unbounded)."""
+        app = create_test_app(include_runs=True, include_threads=False)
+        # Use a fresh UUID so we don't share state with other tests in the worker.
+        run_id = str(uuid4())
+        run = _run_row(run_id=run_id, status="success")
+
+        class Session(DummySessionBase):
+            async def scalar(self, _stmt: object) -> object:
+                return run
+
+            async def execute(self, _stmt: object) -> object:
+                pytest.fail("execute() must not be called for a terminal-state cancel")
+
+            async def commit(self) -> None:
+                pytest.fail("commit() must not be called for a terminal-state cancel")
+
+        override_session_dependency(app, Session)
+        client = make_client(app)
+
+        with patch("aegra_api.api.runs.streaming_service") as mock_streaming:
+            mock_streaming.cancel_run = AsyncMock()
+
+            resp = client.post(f"/threads/test-thread-123/runs/{run_id}/cancel")
+
+        assert resp.status_code == 200
+        # Critical: terminal guard means we never marked the run
+        assert cancellations.reason_of(run_id) is None
+        mock_streaming.cancel_run.assert_not_awaited()
 
 
 class TestDeleteRun:

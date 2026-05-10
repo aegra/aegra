@@ -20,6 +20,7 @@ import structlog
 from redis import RedisError
 
 from aegra_api.core.active_runs import active_runs
+from aegra_api.core.cancellation_state import cancellations
 from aegra_api.core.redis_manager import redis_manager
 from aegra_api.core.serializers import GeneralSerializer
 from aegra_api.services.base_broker import BaseBrokerManager, BaseRunBroker
@@ -41,6 +42,12 @@ _REPLAY_MAX_EVENTS = 10_000
 _BACKOFF_BASE = 0.5
 _BACKOFF_MAX = 30.0
 _BACKOFF_FACTOR = 2.0
+# Maximum total time an SSE consumer will keep retrying when Redis is
+# unreachable. After this deadline the consumer gives up so the ASGI
+# connection can close instead of holding memory and a worker slot
+# indefinitely. Bounded by ``BG_JOB_TIMEOUT_SECS`` so a stuck consumer
+# can never outlive the underlying run.
+_RECONNECT_DEADLINE_SECONDS = 600.0
 
 
 def _serialize_payload(payload: Any) -> str:
@@ -120,15 +127,25 @@ class RedisRunBroker(BaseRunBroker):
 
     async def aiter(self) -> AsyncIterator[tuple[str, Any]]:
         attempt = 0
+        deadline = time.monotonic() + _RECONNECT_DEADLINE_SECONDS
         while not self._finished:
             try:
                 async for event_id, payload in self._subscribe_and_listen():
                     attempt = 0
+                    deadline = time.monotonic() + _RECONNECT_DEADLINE_SECONDS
                     yield event_id, payload
                 # Clean exit from _subscribe_and_listen (end event or finished)
                 break
             except RedisError as e:
                 attempt += 1
+                if time.monotonic() >= deadline:
+                    logger.error(
+                        f"Redis pub/sub unavailable for run {self.run_id} after "
+                        f"{_RECONNECT_DEADLINE_SECONDS:.0f}s, giving up: {e}",
+                        attempt=attempt,
+                    )
+                    self._finished = True
+                    break
                 delay = _backoff_delay(attempt)
                 logger.warning(
                     f"Redis pub/sub error for run {self.run_id}, retrying in {delay:.1f}s: {e}",
@@ -385,6 +402,20 @@ class RedisBrokerManager(BaseBrokerManager):
         """Cancel a locally-owned task and signal the broker."""
         task = active_runs.get(run_id)
         if task is None or task.done():
+            return
+
+        # Mark before cancel so execute_run's CancelledError handler classifies
+        # this as a user cancel (not a timeout). The HTTP cancel endpoint
+        # already marks on the originating instance; this covers the
+        # cross-instance case where the cancel arrives via Redis pub/sub.
+        cancellations.mark(run_id, "user")
+
+        # Recheck task.done() after marking: if the task finished between the
+        # initial check and now, execute_run's finally has already cleared
+        # the cancellation entry — leaving our mark behind would leak.
+        # Unconditional ``clear`` also drops any leaked lease_loss tag.
+        if task.done():
+            cancellations.clear(run_id)
             return
 
         logger.info(f"Cancelling run {run_id} (local task found)")

@@ -4,11 +4,13 @@ This file contains shared fixtures and configuration that are available
 to all tests across the test suite.
 """
 
+from collections.abc import Iterator
 from unittest.mock import AsyncMock
 
 import pytest
 from httpx import HTTPStatusError
 
+from aegra_api.core.cancellation_state import cancellations
 from tests.fixtures.auth import DummyUser
 from tests.fixtures.clients import (
     create_test_app,
@@ -134,6 +136,20 @@ def clear_auth_cache():
     get_auth_instance.cache_clear()
     yield
     get_auth_instance.cache_clear()
+
+
+@pytest.fixture(autouse=True)
+def _clear_cancellation_registry() -> Iterator[None]:
+    """Drop any cancellation tags between tests.
+
+    The ``cancellations`` registry in ``aegra_api.core.cancellation_state`` is a
+    process-wide singleton. A test that crashes between ``cancellations.mark(rid, ...)``
+    and the matching ``cancellations.clear(rid)`` would otherwise leak into every
+    subsequent test in the same worker, causing flaky failures that are hard to debug.
+    """
+    cancellations.clear_all()
+    yield
+    cancellations.clear_all()
 
 
 # --- AUTO-SKIP GEO-BLOCK FAILURES ---

@@ -30,7 +30,11 @@ from aegra_api.core.route_merger import (
 )
 from aegra_api.middleware import ContentTypeFixMiddleware, StructLogMiddleware
 from aegra_api.models.errors import AgentProtocolError, get_error_type
-from aegra_api.observability.metrics import setup_prometheus_metrics
+from aegra_api.observability.metrics import (
+    get_worker_metrics,
+    setup_prometheus_metrics,
+    setup_worker_metrics,
+)
 from aegra_api.observability.setup import setup_observability
 from aegra_api.services.broker import broker_manager
 from aegra_api.services.executor import executor
@@ -124,6 +128,17 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
 
     # Start executor (spawns worker coroutines when Redis is enabled)
     await executor.start()
+
+    # Register worker metrics (metrics are zero-valued when Redis is disabled).
+    # Seed redis_up from an explicit PING — without it dashboards would show
+    # "Redis up" for up to 5s on cold start (until the first BLPOP returns)
+    # even if Redis was unreachable from the very first second.
+    if settings.observability.ENABLE_PROMETHEUS_METRICS:
+        setup_worker_metrics()
+        if settings.redis.REDIS_BROKER_ENABLED:
+            metrics = get_worker_metrics()
+            if metrics is not None:
+                metrics.redis_up.set(1 if await redis_manager.is_reachable() else 0)
 
     # Start lease reaper (recovers crashed worker runs, Redis mode only)
     if settings.redis.REDIS_BROKER_ENABLED:

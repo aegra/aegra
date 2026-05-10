@@ -13,8 +13,10 @@ import structlog
 
 from aegra_api.core.active_runs import active_runs
 from aegra_api.core.auth_ctx import with_auth_ctx
+from aegra_api.core.cancellation_state import cancellations
 from aegra_api.core.redis_manager import redis_manager
 from aegra_api.models.run_job import RunJob
+from aegra_api.observability.metrics import get_worker_metrics
 from aegra_api.services.broker import broker_manager
 from aegra_api.services.graph_streaming import stream_graph_events
 from aegra_api.services.langgraph_service import create_run_config, get_langgraph_service
@@ -27,15 +29,12 @@ logger = structlog.getLogger(__name__)
 
 _DEFAULT_STREAM_MODES = ["values"]
 
-# Run IDs whose cancellation was triggered by lease loss (not user action).
-# When a heartbeat detects lease loss, it adds the run_id here before
-# cancelling the job task. execute_run's CancelledError handler checks
-# this set to skip finalize_run and SSE signaling — the reaper has already
-# re-enqueued the run and another worker will execute it. Without this,
-# the old worker would write status="interrupted" and send an SSE end event,
-# prematurely closing client streams and potentially overwriting the new
-# worker's status.
-_lease_loss_cancellations: set[str] = set()
+
+def _increment_completed(graph_id: str, status: str) -> None:
+    """Increment runs_completed counter. No-op if metrics not enabled."""
+    metrics = get_worker_metrics()
+    if metrics is not None:
+        metrics.runs_completed.labels(graph_id=graph_id, status=status).inc()
 
 
 async def execute_run(job: RunJob) -> None:
@@ -43,9 +42,22 @@ async def execute_run(job: RunJob) -> None:
 
     Handles the full lifecycle: status transitions, event streaming,
     interrupt detection, cancellation, and error signaling.
+
+    CancelledError discrimination (three sources):
+    - **Lease-loss**: heartbeat tags via ``cancellations.mark(rid, "lease_loss")``
+      before cancelling — skip finalize, reaper re-enqueues.
+    - **User cancel**: API tags via ``cancellations.mark(rid, "user")`` before
+      cancelling — finalize as interrupted, increment completed metric.
+    - **Timeout** (default): ``asyncio.wait_for`` cancels — skip finalize,
+      ``_handle_timeout`` (worker_executor) finalizes as error.
+
+    The tag is NOT cleared here — the executor owns that cleanup so the
+    worker can read the reason after ``await job_task`` raises (cancel
+    propagates through ``_fut_waiter.cancel`` and would race our finally).
     """
     run_id = job.identity.run_id
     thread_id = job.identity.thread_id
+    graph_id = job.identity.graph_id
     is_lease_loss = False
 
     try:
@@ -61,6 +73,7 @@ async def execute_run(job: RunJob) -> None:
                 thread_status="interrupted",
                 output=final_output.data,
             )
+            _increment_completed(graph_id, "interrupted")
         else:
             await finalize_run(
                 run_id,
@@ -69,28 +82,55 @@ async def execute_run(job: RunJob) -> None:
                 thread_status="idle",
                 output=final_output.data,
             )
+            _increment_completed(graph_id, "success")
 
     except asyncio.CancelledError:
-        if run_id in _lease_loss_cancellations:
+        # Precedence: lease_loss > user > timeout (default). The registry
+        # uses last-writer-wins, but the order of checks here is the only
+        # place that documents which reason "wins" if both were set —
+        # lease_loss takes precedence because the reaper will rerun the
+        # job on another worker and finalizing here would clobber that
+        # future run's outcome. User-cancel comes second; the default
+        # (timeout) branch is reached only when no tag is present.
+        reason = cancellations.reason_of(run_id)
+        if reason == "lease_loss":
             # Lease was lost — the reaper re-enqueued this run for another
             # worker.  Do NOT finalize, signal done, or clean up the broker.
             # The new worker owns the run now.
             is_lease_loss = True
             logger.info("Lease-loss cancel, skipping finalize", run_id=run_id)
-        else:
+        elif reason == "user":
+            # User cancel — finalize as interrupted
             await finalize_run(run_id, thread_id, status="interrupted", thread_status="idle", output={})
+            _increment_completed(graph_id, "interrupted")
             await _best_effort_signal(streaming_service.signal_run_cancelled, run_id)
+        else:
+            # Timeout (default) — skip finalize AND skip the completed metric.
+            # INVARIANT: ``runs_completed{status="error"}`` for timeouts is
+            # incremented exactly once, by ``_handle_timeout`` in
+            # worker_executor.py (the ``except TimeoutError`` branch of
+            # ``_execute_and_release``). Adding ``_increment_completed``
+            # here would double-count every timeout.
+            pass
         raise
     except Exception as exc:
-        logger.exception("Run failed", run_id=run_id)
+        # Both ``str(exc)`` and the formatted traceback may carry hostnames,
+        # file paths, or credentials bubbled up from underlying libraries
+        # (DB drivers, HTTP clients). Project policy is to keep that out of
+        # logs entirely — log only the structural error type and run_id.
+        # Operators who need a full traceback can reproduce the failure
+        # locally with DEBUG-level logging enabled or attach a debugger.
         safe_message = f"{type(exc).__name__}: execution failed"
-        await finalize_run(run_id, thread_id, status="error", thread_status="error", output={}, error=str(exc))
+        logger.error("Run failed", run_id=run_id, error_type=type(exc).__name__)
+        await finalize_run(run_id, thread_id, status="error", thread_status="error", output={}, error=safe_message)
+        _increment_completed(graph_id, "error")
         await _best_effort_signal(streaming_service.signal_run_error, run_id, safe_message, type(exc).__name__)
     else:
         status = "interrupted" if final_output.has_interrupt else "success"
         await _best_effort_signal(_signal_end_event, run_id, status)
     finally:
-        _lease_loss_cancellations.discard(run_id)
+        # Tag clear is the executor's job — it must survive our finally so
+        # the worker can peek the reason after ``await job_task`` raises.
         active_runs.pop(run_id, None)
         if not is_lease_loss:
             await streaming_service.cleanup_run(run_id)

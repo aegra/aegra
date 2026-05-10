@@ -136,6 +136,12 @@ Total capacity per instance = `WORKER_COUNT` x `N_JOBS_PER_WORKER` (default: 30 
 
 When enabled, a `/metrics` endpoint serves standard HTTP request metrics (request count, latency histograms, in-progress requests) using [prometheus-fastapi-instrumentator](https://github.com/trallnag/prometheus-fastapi-instrumentator). Compatible with any Prometheus/Grafana stack.
 
+<Warning>
+The `/metrics` endpoint is **not** protected by Aegra's authentication middleware — Prometheus scrapers typically don't support application-level auth. If the endpoint must be restricted (production deployments exposing it publicly), use network-level controls: firewall rules, an internal load balancer, or a sidecar proxy. See `setup_prometheus_metrics` in `observability/metrics.py` for details.
+</Warning>
+
+When `REDIS_BROKER_ENABLED=true` is also set, custom worker and reaper metrics are registered (15 worker + 5 reaper). See [Worker architecture → Prometheus metrics](/guides/worker-architecture#prometheus-metrics) for the full metric reference, including bucket boundaries, label cardinality, and example PromQL queries. Series count is bounded — labels only ever carry operator-defined identifiers (`graph_id` from `aegra.json`), enum values (`status`, `reason`), and a small integer (`retry_number`, capped by `BG_JOB_MAX_RETRIES`).
+
 ## Observability (OpenTelemetry)
 
 | Variable | Default | Description |

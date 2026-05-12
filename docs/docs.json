@@ -69,6 +69,7 @@
               "guides/authentication",
               "guides/custom-routes",
               "guides/dependencies",
+              "guides/langgraphjs",
               "guides/observability",
               "guides/deployment",
               "guides/worker-architecture",

@@ -467,8 +467,8 @@ class TestLangGraphServiceGraphs:
         """Test listing available graphs"""
         service = LangGraphService()
         service._graph_registry = {
-            "graph1": {"file_path": "path1.py"},
-            "graph2": {"file_path": "path2.py"},
+            "graph1": {"file_path": "path1.py", "runtime": "python"},
+            "graph2": {"file_path": "path2.py", "runtime": "langgraphjs"},
         }
 
         result = service.list_graphs()
@@ -483,6 +483,75 @@ class TestLangGraphServiceGraphs:
         result = service.list_graphs()
 
         assert result == {}
+
+    def test_parse_graph_entry_string_defaults_to_python(self) -> None:
+        """Legacy string graph config defaults to python runtime."""
+        service = LangGraphService()
+
+        result = service._parse_graph_entry("agent", "./graphs/agent.py:graph")
+
+        assert result == {
+            "runtime": "python",
+            "file_path": "./graphs/agent.py",
+            "export_name": "graph",
+        }
+
+    def test_parse_graph_entry_object_langgraphjs(self) -> None:
+        """Object graph config supports explicit langgraphjs runtime."""
+        service = LangGraphService()
+
+        result = service._parse_graph_entry(
+            "agent_js",
+            {
+                "runtime": "langgraphjs",
+                "path": "./graphs/agent.ts:graph",
+            },
+        )
+
+        assert result == {
+            "runtime": "langgraphjs",
+            "file_path": "./graphs/agent.ts",
+            "export_name": "graph",
+        }
+
+    def test_parse_graph_entry_invalid_runtime(self) -> None:
+        """Unknown graph runtime raises a clear validation error."""
+        service = LangGraphService()
+
+        with pytest.raises(ValueError, match="Invalid runtime"):
+            service._parse_graph_entry(
+                "agent_bad",
+                {
+                    "runtime": "ruby",
+                    "path": "./graphs/agent.rb:graph",
+                },
+            )
+
+    @pytest.mark.asyncio
+    async def test_load_graph_from_file_dispatches_to_langgraphjs_loader(self) -> None:
+        """LangGraphJS runtime dispatches to dedicated loader path."""
+        service = LangGraphService()
+        expected_graph = Mock()
+
+        with patch.object(service, "_load_langgraphjs_graph", return_value=expected_graph) as mock_js_loader:
+            result = await service._load_graph_from_file(
+                "agent_js",
+                {
+                    "runtime": "langgraphjs",
+                    "file_path": "./graphs/agent.ts",
+                    "export_name": "graph",
+                },
+            )
+
+        assert result is expected_graph
+        mock_js_loader.assert_called_once_with(
+            "agent_js",
+            {
+                "runtime": "langgraphjs",
+                "file_path": "./graphs/agent.ts",
+                "export_name": "graph",
+            },
+        )
 
 
 class TestLangGraphServiceCache:

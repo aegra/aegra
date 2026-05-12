@@ -1,0 +1,24 @@
+{
+  "name": "@aegra/js-bridge",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Node.js bridge for executing LangGraph.js graphs via JSON-RPC over stdio",
+  "type": "module",
+  "main": "./dist/index.js",
+  "scripts": {
+    "start": "tsx src/index.ts",
+    "build": "tsc",
+    "test": "vitest"
+  },
+  "dependencies": {
+    "@langchain/core": "^1.1.36",
+    "@langchain/langgraph": "^1.2.0",
+    "@langchain/langgraph-checkpoint-postgres": "^1.0.1",
+    "tsx": "^4.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^25.5.0",
+    "typescript": "^5.5.0",
+    "vitest": "^2.0.0"
+  }
+}

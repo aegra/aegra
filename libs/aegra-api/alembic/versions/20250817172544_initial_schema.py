@@ -27,16 +27,13 @@ depends_on = None
 def upgrade() -> None:
     """Create initial database schema for Aegra Agent Protocol server."""
 
-    # Create PostgreSQL extensions
-    op.execute('CREATE EXTENSION IF NOT EXISTS "uuid-ossp";')
-
     # Create assistant table
     op.create_table(
         "assistant",
         sa.Column(
             "assistant_id",
             sa.Text(),
-            server_default=sa.text("public.uuid_generate_v4()::text"),
+            server_default=sa.text("gen_random_uuid()::text"),
             nullable=False,
         ),
         sa.Column("name", sa.Text(), nullable=False),
@@ -114,7 +111,7 @@ def upgrade() -> None:
         sa.Column(
             "run_id",
             sa.Text(),
-            server_default=sa.text("public.uuid_generate_v4()::text"),
+            server_default=sa.text("gen_random_uuid()::text"),
             nullable=False,
         ),
         sa.Column("thread_id", sa.Text(), nullable=False),

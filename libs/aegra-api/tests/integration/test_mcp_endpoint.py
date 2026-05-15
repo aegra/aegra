@@ -49,6 +49,7 @@ def _reset_module_state() -> None:
 
     mcp_adapter._final_response_only = None
     mcp_adapter._mcp_app_lifespan = None
+    mcp_adapter._mcp_oauth_enabled = False
     mcp_adapter.mcp_server._local_provider._components.clear()
 
 

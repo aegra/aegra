@@ -168,6 +168,8 @@ class _GraphTool(Tool):
                     run_id, _run, _job = await _prepare_run(session, thread_id, request, user, initial_status="pending")
             except HTTPException as exc:
                 raise ToolError(exc.detail) from exc
+            except Exception as exc:
+                raise ToolError(f"Run preparation failed: {exc}") from exc
 
             try:
                 await executor.wait_for_completion(run_id, timeout=settings.worker.BG_JOB_TIMEOUT_SECS)

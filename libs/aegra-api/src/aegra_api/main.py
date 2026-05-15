@@ -14,6 +14,7 @@ from fastapi.routing import APIRoute
 from starlette.requests import HTTPConnection
 
 from aegra_api import __version__
+from aegra_api.adapters.mcp_adapter import mcp_lifespan, mount_mcp, register_mcp_tools
 from aegra_api.api.assistants import router as assistants_router
 from aegra_api.api.crons import router as crons_router
 from aegra_api.api.event_streaming import router as event_streaming_router
@@ -117,6 +118,10 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
         langgraph_service = get_langgraph_service()
         await langgraph_service.initialize()
 
+        # Register graph tools in MCP adapter (skip when MCP is disabled)
+        if not (load_http_config() or {}).get("disable_mcp", False):
+            await register_mcp_tools(langgraph_service)
+
         # Initialize Redis broker (if enabled)
         if settings.redis.REDIS_BROKER_ENABLED:
             try:
@@ -162,7 +167,8 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
             await thread_ttl_sweeper.start()
             stack.push_async_callback(thread_ttl_sweeper.stop)
 
-        yield
+        async with mcp_lifespan():
+            yield
 
 
 # Define core exception handlers
@@ -432,6 +438,10 @@ def create_app() -> FastAPI:
             application.exception_handler(exc_type)(handler)
 
         application.get("/")(root_handler)
+
+    # Mount MCP adapter unless disabled
+    if not (http_config or {}).get("disable_mcp", False):
+        mount_mcp(application)
 
     setup_prometheus_metrics(application)
 

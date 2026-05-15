@@ -3,7 +3,7 @@ title: "Configuration"
 description: "Complete reference for the aegra.json configuration file."
 ---
 
-Aegra uses a JSON configuration file (`aegra.json`) to define graphs, authentication, HTTP settings, the semantic store, and checkpointer settings (thread TTL and the default checkpoint durability).
+Aegra uses a JSON configuration file (`aegra.json`) to define graphs, authentication, HTTP settings, MCP behavior, the semantic store, and checkpointer settings (thread TTL and the default checkpoint durability).
 
 ## Config file resolution
 
@@ -41,6 +41,12 @@ aegra dev
       "allow_origins": ["https://example.com"],
       "allow_origin_regex": "^https://[a-z0-9-]+\\.example\\.com$",
       "allow_credentials": true
+    }
+  },
+  "mcp": {
+    "final_response_only": false,
+    "auth": {
+      "path": "./mcp_auth.py:mcp_auth"
     }
   },
   "store": {
@@ -246,6 +252,7 @@ Configure custom routes and CORS.
   "http": {
     "app": "./custom_routes.py:app",
     "enable_custom_route_auth": false,
+    "disable_mcp": false,
     "cors": {
       "allow_origin_regex": "^https://[a-z0-9-]+\\.example\\.com$"
     }
@@ -257,6 +264,7 @@ Configure custom routes and CORS.
 |-------|------|---------|-------------|
 | `app` | `string` | `None` | Import path to custom FastAPI app |
 | `enable_custom_route_auth` | `bool` | `false` | Require Aegra auth on every FastAPI route in the custom app. See [custom routes](/guides/custom-routes#authentication-on-custom-routes) for what it covers |
+| `disable_mcp` | `bool` | `false` | Disable the MCP (Model Context Protocol) endpoint at `/mcp` |
 | `cors.allow_origins` | `list[str]` | `["*"]` (`[]` if `allow_origin_regex` is set) | Allowed CORS origins |
 | `cors.allow_origin_regex` | `string` | `None` | Regular expression for additional allowed origins; when present without `allow_origins`, the origin-list default is `[]` |
 | `cors.allow_credentials` | `bool` | `false` with a regex or wildcard origins, `true` with concrete origins and no regex | Allow credentials in CORS requests |
@@ -266,6 +274,47 @@ When `allow_origin_regex` is non-null, it is passed to Starlette's `CORSMiddlewa
 Note: the `allow_credentials` default only recognizes an exact `["*"]` or `"*"`. A wildcard mixed with other concrete origins (e.g. `["*", "https://example.com"]`) currently still defaults `allow_credentials` to `true`, even though Starlette treats that list as allow-all — [tracked in #633](https://github.com/aegra/aegra/issues/633). Set `allow_credentials` explicitly if you use a mixed list.
 
 See [custom routes guide](/guides/custom-routes) for details.
+
+### `disable_mcp`
+- **Type:** `boolean`
+- **Default:** `false`
+- Disable the MCP (Model Context Protocol) endpoint at `/mcp`.
+
+## `mcp`
+
+Configure MCP (Model Context Protocol) behavior.
+
+```json
+{
+  "mcp": {
+    "final_response_only": true,
+    "auth": {
+      "path": "./mcp_auth.py:mcp_auth"
+    }
+  }
+}
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `final_response_only` | `bool` | `false` | Return only the last AI message from tool calls instead of the full graph state |
+| `auth` | `object` | — | Auth provider config for spec-compliant MCP OAuth |
+| `auth.path` | `string` | — | Import path to a Python file exporting a [FastMCP auth provider](https://gofastmcp.com/servers/auth) |
+
+### `final_response_only`
+- **Type:** `boolean`
+- **Default:** `false`
+- When `true`, MCP tool call responses contain only the last AI message (as a JSON object) instead of the full graph state. Useful when MCP clients don't need intermediate reasoning, tool calls, and tool responses.
+
+### `auth`
+
+Enables spec-compliant MCP OAuth authentication by pointing to a Python file that exports a [FastMCP auth provider](https://gofastmcp.com/servers/auth).
+
+The `path` format is the same as `auth.path`: `./file.py:variable` or `module:variable`. Relative paths are resolved from the `aegra.json` directory.
+
+Because the provider is constructed in Python, you can use any FastMCP auth provider and have full control over all constructor parameters.
+
+See [MCP guide](/mcp) for details and examples.
 
 ## `store`
 

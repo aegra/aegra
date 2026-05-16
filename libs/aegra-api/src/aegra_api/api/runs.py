@@ -41,6 +41,24 @@ logger = structlog.getLogger(__name__)
 DEFAULT_STREAM_MODES = ["values"]
 
 
+async def _apply_create_run_auth(user: User, thread_id: str, request: RunCreate) -> None:
+    """Authorize threads.create_run and merge config/context overrides into request.
+
+    Handler-returned filter dict wins; otherwise fall back to in-place value mutations.
+    """
+    ctx = build_auth_context(user, "threads", "create_run")
+    value = {**request.model_dump(), "thread_id": thread_id}
+    filters = await handle_event(ctx, value)
+
+    source = filters if filters is not None else value
+    config_overrides = source.get("config")
+    if isinstance(config_overrides, dict):
+        request.config = {**(request.config or {}), **config_overrides}
+    context_overrides = source.get("context")
+    if isinstance(context_overrides, dict):
+        request.context = {**(request.context or {}), **context_overrides}
+
+
 @router.post("/threads/{thread_id}/runs", response_model=Run, responses={**NOT_FOUND, **CONFLICT})
 async def create_run(
     thread_id: str,
@@ -59,25 +77,7 @@ async def create_run(
     if existing_thread and existing_thread.user_id != user.identity:
         raise HTTPException(404, f"Thread '{thread_id}' not found")
 
-    # Authorization check (create_run action on threads resource)
-    ctx = build_auth_context(user, "threads", "create_run")
-    value = {**request.model_dump(), "thread_id": thread_id}
-    filters = await handle_event(ctx, value)
-
-    # If handler modified config/context, update request
-    if filters:
-        if "config" in filters and isinstance(filters["config"], dict):
-            request.config = {**(request.config or {}), **filters["config"]}
-        if "context" in filters and isinstance(filters["context"], dict):
-            request.context = {**(request.context or {}), **filters["context"]}
-    else:
-        value_config = value.get("config")
-        if isinstance(value_config, dict):
-            request.config = {**(request.config or {}), **value_config}
-
-        value_context = value.get("context")
-        if isinstance(value_context, dict):
-            request.context = {**(request.context or {}), **value_context}
+    await _apply_create_run_auth(user, thread_id, request)
 
     _run_id, run, _job = await _prepare_run(session, thread_id, request, user, initial_status="pending")
 
@@ -109,6 +109,8 @@ async def create_and_stream_run(
         existing_thread = await session.scalar(select(ThreadORM).where(ThreadORM.thread_id == thread_id))
         if existing_thread and existing_thread.user_id != user.identity:
             raise HTTPException(404, f"Thread '{thread_id}' not found")
+
+        await _apply_create_run_auth(user, thread_id, request)
 
         run_id, run, _job = await _prepare_run(session, thread_id, request, user, initial_status="pending")
 
@@ -340,6 +342,8 @@ async def wait_for_run(
         existing_thread = await session.scalar(select(ThreadORM).where(ThreadORM.thread_id == thread_id))
         if existing_thread and existing_thread.user_id != user.identity:
             raise HTTPException(404, f"Thread '{thread_id}' not found")
+
+        await _apply_create_run_auth(user, thread_id, request)
 
         run_id, _run, _job = await _prepare_run(session, thread_id, request, user, initial_status="pending")
 

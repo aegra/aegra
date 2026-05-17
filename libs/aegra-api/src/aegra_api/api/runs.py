@@ -109,6 +109,26 @@ async def create_and_stream_run(
     if existing_thread and existing_thread.user_id != user.identity:
         raise HTTPException(404, f"Thread '{thread_id}' not found")
 
+    # Authorization check (create_run action on threads resource)
+    ctx = build_auth_context(user, "threads", "create_run")
+    value = {**request.model_dump(), "thread_id": thread_id}
+    filters = await handle_event(ctx, value)
+
+    # If handler modified config/context, update request
+    if filters:
+        if "config" in filters and isinstance(filters["config"], dict):
+            request.config = {**(request.config or {}), **filters["config"]}
+        if "context" in filters and isinstance(filters["context"], dict):
+            request.context = {**(request.context or {}), **filters["context"]}
+    else:
+        value_config = value.get("config")
+        if isinstance(value_config, dict):
+            request.config = {**(request.config or {}), **value_config}
+
+        value_context = value.get("context")
+        if isinstance(value_context, dict):
+            request.context = {**(request.context or {}), **value_context}
+
     run_id, run, _job = await _prepare_run(session, thread_id, request, user, initial_status="pending")
 
     # Default to cancel on disconnect - this matches user expectation that clicking
@@ -339,6 +359,26 @@ async def wait_for_run(
         existing_thread = await session.scalar(select(ThreadORM).where(ThreadORM.thread_id == thread_id))
         if existing_thread and existing_thread.user_id != user.identity:
             raise HTTPException(404, f"Thread '{thread_id}' not found")
+
+        # Authorization check (create_run action on threads resource)
+        ctx = build_auth_context(user, "threads", "create_run")
+        value = {**request.model_dump(), "thread_id": thread_id}
+        filters = await handle_event(ctx, value)
+
+        # If handler modified config/context, update request
+        if filters:
+            if "config" in filters and isinstance(filters["config"], dict):
+                request.config = {**(request.config or {}), **filters["config"]}
+            if "context" in filters and isinstance(filters["context"], dict):
+                request.context = {**(request.context or {}), **filters["context"]}
+        else:
+            value_config = value.get("config")
+            if isinstance(value_config, dict):
+                request.config = {**(request.config or {}), **value_config}
+
+            value_context = value.get("context")
+            if isinstance(value_context, dict):
+                request.context = {**(request.context or {}), **value_context}
 
         run_id, _run, _job = await _prepare_run(session, thread_id, request, user, initial_status="pending")
 

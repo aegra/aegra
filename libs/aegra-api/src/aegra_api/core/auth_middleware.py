@@ -276,6 +276,7 @@ class LangGraphAuthBackend(AuthenticationBackend):
             raise AuthenticationError("Authentication system error") from e
 
 
+@functools.lru_cache(maxsize=1)
 def get_auth_backend() -> AuthenticationBackend:
     """
     Get authentication backend based on AUTH_TYPE environment variable.

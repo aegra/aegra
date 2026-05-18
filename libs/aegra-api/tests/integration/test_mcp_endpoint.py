@@ -50,6 +50,7 @@ def _reset_module_state() -> None:
     mcp_adapter._final_response_only = None
     mcp_adapter._mcp_app_lifespan = None
     mcp_adapter._mcp_oauth_enabled = False
+    mcp_adapter.mcp_server.auth = None
     mcp_adapter.mcp_server._local_provider._components.clear()
 
 
@@ -220,8 +221,6 @@ def test_mount_mcp_with_auth_provider() -> None:
 def test_mount_mcp_without_auth_config() -> None:
     """When no mcp.auth config, mount_mcp uses _AuthMiddleware only (auth stays None)."""
     from aegra_api.adapters import mcp_adapter
-
-    mcp_adapter.mcp_server.auth = None
 
     app = FastAPI()
 

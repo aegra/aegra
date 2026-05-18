@@ -4,10 +4,12 @@ import json
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import httpx
 import pytest
 from fastmcp.exceptions import ToolError
 from fastmcp.server.auth.auth import AccessToken
 from mcp.server.auth.middleware.bearer_auth import AuthenticatedUser
+from starlette.responses import JSONResponse
 
 from aegra_api.adapters.mcp_adapter import (
     _AuthMiddleware,
@@ -32,6 +34,7 @@ def _reset_module_state() -> None:
 
     mcp_adapter._final_response_only = None
     mcp_adapter._mcp_oauth_enabled = False
+    mcp_adapter.mcp_server.auth = None
     mcp_adapter.mcp_server._local_provider._components.clear()
 
 
@@ -376,8 +379,6 @@ async def test_auth_middleware_sets_anonymous_when_backend_returns_none() -> Non
 
     async def _capture_app(scope: Any, receive: Any, send: Any) -> None:
         captured_users.append(_current_user.get())
-        from starlette.responses import JSONResponse
-
         response = JSONResponse({"ok": True})
         await response(scope, receive, send)
 
@@ -387,8 +388,6 @@ async def test_auth_middleware_sets_anonymous_when_backend_returns_none() -> Non
     mock_backend.authenticate = AsyncMock(return_value=None)
 
     with patch("aegra_api.adapters.mcp_adapter.get_auth_backend", return_value=mock_backend):
-        import httpx
-
         async with httpx.AsyncClient(
             transport=httpx.ASGITransport(app=middleware),
             base_url="http://test",
@@ -437,8 +436,6 @@ async def test_auth_middleware_passes_through_when_oauth_enabled() -> None:
     async def _inner_app(scope: Any, receive: Any, send: Any) -> None:
         nonlocal inner_called
         inner_called = True
-        from starlette.responses import JSONResponse
-
         response = JSONResponse({"ok": True})
         await response(scope, receive, send)
 
@@ -448,8 +445,6 @@ async def test_auth_middleware_passes_through_when_oauth_enabled() -> None:
     mock_backend.authenticate = AsyncMock(side_effect=AuthenticationError("Missing token"))
 
     with patch("aegra_api.adapters.mcp_adapter.get_auth_backend", return_value=mock_backend):
-        import httpx
-
         async with httpx.AsyncClient(
             transport=httpx.ASGITransport(app=middleware),
             base_url="http://test",
@@ -478,8 +473,6 @@ async def test_auth_middleware_rejects_when_oauth_disabled() -> None:
     mock_backend.authenticate = AsyncMock(side_effect=AuthenticationError("Missing token"))
 
     with patch("aegra_api.adapters.mcp_adapter.get_auth_backend", return_value=mock_backend):
-        import httpx
-
         async with httpx.AsyncClient(
             transport=httpx.ASGITransport(app=middleware),
             base_url="http://test",
@@ -513,8 +506,6 @@ async def test_auth_middleware_swaps_upstream_token() -> None:
     responses: list[dict[str, Any]] = []
 
     async def _inner_app(scope: Any, receive: Any, send: Any) -> None:
-        from starlette.responses import JSONResponse
-
         response = JSONResponse({"ok": True})
         await response(scope, receive, send)
 
@@ -548,8 +539,6 @@ async def test_auth_middleware_no_swap_without_authenticated_user() -> None:
     mock_backend.authenticate = AsyncMock(side_effect=_capture_authenticate)
 
     async def _inner_app(scope: Any, receive: Any, send: Any) -> None:
-        from starlette.responses import JSONResponse
-
         response = JSONResponse({"ok": True})
         await response(scope, receive, send)
 

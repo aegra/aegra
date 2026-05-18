@@ -20,6 +20,7 @@ from fastmcp.tools.base import Tool, ToolResult
 from mcp.server.auth.middleware.bearer_auth import AuthenticatedUser
 from pydantic import SkipValidation
 from sqlalchemy import select
+from starlette.authentication import AuthenticationError
 from starlette.middleware import Middleware
 from starlette.requests import Request as StarletteRequest
 from starlette.responses import JSONResponse as StarletteJSONResponse
@@ -119,7 +120,7 @@ class _AuthMiddleware:
 
         try:
             result = await backend.authenticate(request)
-        except Exception as exc:
+        except (AuthenticationError, HTTPException) as exc:
             if _mcp_oauth_enabled:
                 await self._app(scope, receive, send)
                 return

@@ -140,16 +140,27 @@ class LangGraphService:
                 )
             seen_modules[mod_name] = graph_id
 
-        for graph_id, graph_path in graphs_config.items():
-            # Parse path format: "./graphs/weather_agent.py:graph"
+        for graph_id, graph_value in graphs_config.items():
+            # Support both string format ("./path.py:export") and dict format
+            # ({"path": "./path.py:export", "description": "..."})
+            if isinstance(graph_value, dict):
+                graph_path = graph_value.get("path", "")
+                description = graph_value.get("description")
+            else:
+                graph_path = graph_value
+                description = None
+
             if ":" not in graph_path:
                 raise ValueError(f"Invalid graph path format: {graph_path}")
 
             file_path, export_name = graph_path.split(":", 1)
-            self._graph_registry[graph_id] = {
+            registry_entry: dict[str, Any] = {
                 "file_path": file_path,
                 "export_name": export_name,
             }
+            if description:
+                registry_entry["description"] = description
+            self._graph_registry[graph_id] = registry_entry
 
     async def _load_all_graph_modules(self) -> None:
         """Eagerly load all graph modules, classifying factories without calling them.

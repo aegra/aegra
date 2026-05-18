@@ -1,8 +1,8 @@
-"""Configuration management for Aegra HTTP settings"""
+"""Configuration management for Aegra settings (HTTP, auth, store, MCP)"""
 
 import json
 from pathlib import Path
-from typing import TypedDict
+from typing import Any, TypedDict
 
 import structlog
 
@@ -23,7 +23,7 @@ class CorsConfig(TypedDict, total=False):
 
 
 class HttpConfig(TypedDict, total=False):
-    """HTTP configuration options for custom routes"""
+    """HTTP configuration options for custom routes and protocol adapters"""
 
     app: str
     """Import path for custom Starlette/FastAPI app to mount"""
@@ -31,6 +31,8 @@ class HttpConfig(TypedDict, total=False):
     """Apply Aegra authentication dependency to custom routes (uses FastAPI dependencies, not middleware)"""
     cors: CorsConfig | None
     """Custom CORS configuration"""
+    disable_mcp: bool
+    """Disable MCP (Model Context Protocol) endpoint. Default: False (enabled)."""
 
 
 class StoreIndexConfig(TypedDict, total=False):
@@ -80,6 +82,31 @@ class AuthConfig(TypedDict, total=False):
     """Disable authentication for LangGraph Studio connections"""
 
 
+class McpAuthConfig(TypedDict, total=False):
+    """MCP auth provider configuration.
+
+    Points to a Python file exporting a FastMCP auth provider.
+    """
+
+    path: str
+    """Import path for MCP auth provider in format './file.py:variable' or 'module:variable'.
+    Examples:
+    - './mcp_auth.py:mcp_auth' - Load from mcp_auth.py
+    - './src/auth/mcp.py:provider' - Load from nested path
+    - 'mypackage.mcp_auth:provider' - Load from installed package
+    """
+
+
+class McpConfig(TypedDict, total=False):
+    """MCP (Model Context Protocol) behavior configuration."""
+
+    final_response_only: bool
+    """Return only the last AI message instead of the full graph state. Default: False."""
+    auth: McpAuthConfig | None
+    """Auth provider config for spec-compliant MCP OAuth. Points to a Python file
+    exporting a FastMCP auth provider."""
+
+
 def _resolve_config_path() -> Path | None:
     """Resolve config file path using standard resolution order.
 
@@ -111,7 +138,7 @@ def _resolve_config_path() -> Path | None:
     return None
 
 
-def load_config() -> dict | None:
+def load_config() -> dict[str, Any] | None:
     """Load full config file using standard resolution order.
 
     Returns:
@@ -192,6 +219,27 @@ def load_auth_config() -> AuthConfig | None:
         config_path = _resolve_config_path()
         logger.info(f"Loaded auth config from {config_path}")
         return auth_config
+
+    return None
+
+
+def load_mcp_config() -> McpConfig | None:
+    """Load MCP config from aegra.json or langgraph.json.
+
+    Uses standard config resolution order.
+
+    Returns:
+        MCP configuration dict or None if not found
+    """
+    config = load_config()
+    if config is None:
+        return None
+
+    mcp_config = config.get("mcp")
+    if mcp_config:
+        config_path = _resolve_config_path()
+        logger.info(f"Loaded MCP config from {config_path}")
+        return mcp_config
 
     return None
 

@@ -48,6 +48,7 @@ aegra/
 │   ├── aegra-api/                    # Core API package
 │   │   ├── src/aegra_api/            # Main application code
 │   │   │   ├── api/                  # Agent Protocol endpoints
+│   │   │   ├── adapters/             # Protocol adapters (MCP)
 │   │   │   ├── services/             # Business logic layer
 │   │   │   ├── core/                 # Infrastructure (database, auth, orm, health, migrations)
 │   │   │   ├── models/               # Pydantic request/response schemas
@@ -70,7 +71,7 @@ aegra/
 │
 ├── examples/                         # Example agents and configs
 ├── docs/                             # Documentation
-├── aegra.json                        # Project configuration (graphs, auth, http, store)
+├── aegra.json                        # Project configuration (graphs, auth, http, mcp, store)
 └── docker-compose.yml                # Local development setup
 ```
 
@@ -253,6 +254,11 @@ Aegra runs against user-managed Postgres including multi-host HA (PR #299). DB c
 
 ## Architecture
 
+### Protocol Adapters
+The `adapters/` directory contains protocol bridge implementations that expose Aegra agents via additional protocols:
+
+- **MCP adapter** — Implements [Model Context Protocol](https://modelcontextprotocol.io/) at `/mcp` using Streamable HTTP transport via [FastMCP](https://gofastmcp.com). Exposes each configured graph as an MCP tool (one tool per graph, name = graph_id). Enabled by default; disable via `aegra.json` (`http.disable_mcp`). Configure response filtering via `mcp.final_response_only` in `aegra.json` to return only the last AI message instead of the full graph state. Uses the same auth stack as the Agent Protocol endpoints. Optional auth provider (`mcp.auth.path` in `aegra.json`) points to a Python file exporting a FastMCP auth provider for spec-compliant MCP OAuth flow, while Aegra's `@auth.authenticate` handler remains the final authority.
+
 ### Database Architecture
 The system uses two connection pools:
 1. **SQLAlchemy Pool** (asyncpg driver) - Metadata tables: assistants, threads, runs
@@ -261,7 +267,7 @@ The system uses two connection pools:
 **URL format:** LangGraph requires `postgresql://` while SQLAlchemy uses `postgresql+asyncpg://`
 
 ### Configuration
-**aegra.json** defines graphs, auth, HTTP config, and store settings. See `docs/configuration.md` for full reference.
+**aegra.json** defines graphs, auth, HTTP config, MCP behavior, and store settings. See `docs/configuration.md` for full reference.
 
 ### Graph Loading
 Agents are Python modules exporting a `graph` variable. This can be:

@@ -1,6 +1,6 @@
 [project]
 name = "aegra-cli"
-version = "0.9.16"
+version = "0.9.17"
 description = "Aegra CLI - Manage your self-hosted agent deployments"
 readme = "README.md"
 requires-python = ">=3.12"

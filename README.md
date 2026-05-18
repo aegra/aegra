@@ -97,6 +97,7 @@ async for chunk in client.runs.stream(
 ## ✨ Features
 
 - **[Agent Protocol](https://github.com/langchain-ai/agent-protocol) compliant** - Works with Agent Chat UI, LangGraph Studio, CopilotKit
+- **[MCP support](https://modelcontextprotocol.io/)** - Use deployed agents as tools in Claude Desktop, Cursor, and any MCP client
 - **[Worker architecture](https://docs.aegra.dev/guides/worker-architecture)** - Redis job queue with 30 concurrent runs per instance, lease-based crash recovery, and horizontal scaling across multiple instances
 - **[Human-in-the-loop](https://docs.aegra.dev/guides/human-in-the-loop)** - Approval gates and user intervention points
 - **[Streaming](https://docs.aegra.dev/guides/streaming)** - Real-time SSE streaming with cross-instance pub/sub and automatic reconnection with event replay

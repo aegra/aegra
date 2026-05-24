@@ -34,21 +34,23 @@ logger = structlog.getLogger(__name__)
 
 
 def _build_payload(request: CronCreate | CronUpdate) -> dict[str, Any]:
-    """Extract run-related fields into the payload JSONB blob."""
+    """Extract run-related fields into the payload JSONB blob.
+
+    Keep this list in sync with the fields _build_run_create maps onto
+    RunCreate — accepting a field here without forwarding it there means
+    every scheduled run silently drops the user's value.
+    """
     payload: dict[str, Any] = {}
     for field in (
         "input",
         "config",
         "context",
-        "checkpoint_during",
         "interrupt_before",
         "interrupt_after",
         "webhook",
         "multitask_strategy",
         "stream_mode",
         "stream_subgraphs",
-        "stream_resumable",
-        "durability",
         "timezone",
     ):
         value = getattr(request, field, None)

@@ -51,7 +51,6 @@ class CronCreate(BaseModel):
     metadata: dict[str, Any] | None = None
     config: dict[str, Any] | None = None
     context: dict[str, Any] | None = None
-    checkpoint_during: bool | None = None
     interrupt_before: Literal["*"] | list[str] | None = None
     interrupt_after: Literal["*"] | list[str] | None = None
     webhook: str | None = Field(None, max_length=_WEBHOOK_MAX_LEN)
@@ -61,9 +60,10 @@ class CronCreate(BaseModel):
     enabled: bool | None = None
     stream_mode: str | list[str] | None = None
     stream_subgraphs: bool | None = None
-    stream_resumable: bool | None = None
-    durability: str | None = Field(None, max_length=_STR_FIELD_MAX_LEN)
     timezone: str | None = Field(None, max_length=_TIMEZONE_MAX_LEN)
+    # NOTE: checkpoint_during, stream_resumable, and durability are NOT exposed
+    # here because RunCreate has no matching fields yet. Accepting them silently
+    # drops the value at firing time. Re-add once those land on RunCreate.
 
     @model_validator(mode="after")
     def _check(self) -> "CronCreate":
@@ -108,7 +108,6 @@ class CronUpdate(BaseModel):
     metadata: dict[str, Any] | None = None
     config: dict[str, Any] | None = None
     context: dict[str, Any] | None = None
-    checkpoint_during: bool | None = None
     webhook: str | None = Field(None, max_length=_WEBHOOK_MAX_LEN)
     interrupt_before: Literal["*"] | list[str] | None = None
     interrupt_after: Literal["*"] | list[str] | None = None
@@ -117,9 +116,9 @@ class CronUpdate(BaseModel):
     enabled: bool | None = None
     stream_mode: str | list[str] | None = None
     stream_subgraphs: bool | None = None
-    stream_resumable: bool | None = None
-    durability: str | None = Field(None, max_length=_STR_FIELD_MAX_LEN)
     timezone: str | None = Field(None, max_length=_TIMEZONE_MAX_LEN)
+    # See CronCreate: checkpoint_during/stream_resumable/durability omitted
+    # until RunCreate gains matching fields.
 
     @model_validator(mode="after")
     def _check(self) -> "CronUpdate":

@@ -497,42 +497,34 @@ class TestBuildPayloadExtended:
             input={"x": 1},
             config={"y": 2},
             context={"z": 3},
-            checkpoint_during=True,
             interrupt_before=["node_a"],
             interrupt_after="*",
             webhook="https://example.com/hook",
             multitask_strategy="reject",
             stream_mode="values",
             stream_subgraphs=True,
-            stream_resumable=False,
-            durability="ephemeral",
         )
         payload = _build_payload(req)
         assert payload["input"] == {"x": 1}
         assert payload["config"] == {"y": 2}
         assert payload["context"] == {"z": 3}
-        assert payload["checkpoint_during"] is True
         assert payload["interrupt_before"] == ["node_a"]
         assert payload["interrupt_after"] == "*"
         assert payload["webhook"] == "https://example.com/hook"
         assert payload["multitask_strategy"] == "reject"
         assert payload["stream_mode"] == "values"
         assert payload["stream_subgraphs"] is True
-        assert payload["stream_resumable"] is False
-        assert payload["durability"] == "ephemeral"
 
     def test_works_with_cron_update(self) -> None:
         req = CronUpdate(
             input={"new": "data"},
             config={"cfg": True},
-            checkpoint_during=True,
             multitask_strategy="enqueue",
         )
         payload = _build_payload(req)
         assert payload == {
             "input": {"new": "data"},
             "config": {"cfg": True},
-            "checkpoint_during": True,
             "multitask_strategy": "enqueue",
         }
 

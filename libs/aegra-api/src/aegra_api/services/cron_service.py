@@ -312,12 +312,12 @@ class CronService:
             timezone = existing_payload.get("timezone")
             values["next_run_date"] = _compute_next_run(schedule, timezone=timezone)
 
-        result = await self.session.execute(
+        result: CursorResult[Any] = await self.session.execute(
             update(CronORM).where(CronORM.cron_id == cron_id, CronORM.user_id == user_identity).values(**values)
         )
-        # DML execute() returns CursorResult, but the static type is the broader
-        # Result union — cast so .rowcount is reachable without a noqa.
-        if cast("CursorResult[Any]", result).rowcount == 0:
+        # DML execute() returns CursorResult; the explicit annotation makes
+        # ``.rowcount`` reachable without a type: ignore.
+        if result.rowcount == 0:
             raise HTTPException(404, f"Cron '{cron_id}' not found")
         await self.session.commit()
 

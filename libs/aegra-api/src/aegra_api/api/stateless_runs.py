@@ -30,8 +30,8 @@ from aegra_api.services.broker import broker_manager
 from aegra_api.services.run_cleanup import (
     _CLEANUP_ERRORS,
     _background_cleanup_tasks,
-    cleanup_after_background_run,
     delete_thread_by_id,
+    schedule_background_cleanup,
 )
 
 router = APIRouter(tags=["Stateless Runs"], dependencies=auth_dependency)
@@ -304,8 +304,6 @@ async def stateless_create_run(
         raise
 
     if should_delete:
-        task = asyncio.create_task(cleanup_after_background_run(result.run_id, thread_id, user.identity))
-        _background_cleanup_tasks.add(task)
-        task.add_done_callback(_background_cleanup_tasks.discard)
+        schedule_background_cleanup(result.run_id, thread_id, user.identity)
 
     return result

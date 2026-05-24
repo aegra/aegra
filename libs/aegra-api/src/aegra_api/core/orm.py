@@ -194,7 +194,8 @@ class Run(Base):
 class Cron(Base):
     __tablename__ = "crons"
 
-    cron_id: Mapped[str] = mapped_column(Text, primary_key=True, server_default=text("public.uuid_generate_v4()::text"))
+    # gen_random_uuid() is in Postgres 13+ core; no extension needed.
+    cron_id: Mapped[str] = mapped_column(Text, primary_key=True, server_default=text("gen_random_uuid()::text"))
     assistant_id: Mapped[str] = mapped_column(
         Text, ForeignKey("assistant.assistant_id", ondelete="CASCADE"), nullable=False
     )
@@ -203,8 +204,9 @@ class Cron(Base):
     )
     user_id: Mapped[str] = mapped_column(Text, nullable=False)
     schedule: Mapped[str] = mapped_column(Text, nullable=False)
-    payload: Mapped[dict] = mapped_column(JSONB, server_default=text("'{}'::jsonb"))
-    metadata_dict: Mapped[dict] = mapped_column(JSONB, server_default=text("'{}'::jsonb"), name="metadata")
+    # JsonbSafe strips NULL bytes from user payloads — same protection as runs.input.
+    payload: Mapped[dict] = mapped_column(JsonbSafe, server_default=text("'{}'::jsonb"))
+    metadata_dict: Mapped[dict] = mapped_column(JsonbSafe, server_default=text("'{}'::jsonb"), name="metadata")
     on_run_completed: Mapped[str | None] = mapped_column(Text, nullable=True)
     enabled: Mapped[bool] = mapped_column(Boolean, server_default=text("true"), nullable=False)
     end_time: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True), nullable=True)

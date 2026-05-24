@@ -52,6 +52,7 @@ async def delete_thread_by_id(thread_id: str, user_id: str) -> None:
                 try:
                     await task
                 except asyncio.CancelledError:
+                    # Expected: we just called task.cancel(). Nothing to log.
                     pass
                 except _CLEANUP_ERRORS:
                     logger.exception("Error awaiting cancelled task during thread cleanup", run_id=run_id)
@@ -76,6 +77,8 @@ async def cleanup_after_background_run(run_id: str, thread_id: str, user_id: str
     try:
         await executor.wait_for_completion(run_id, timeout=3600.0)
     except (asyncio.CancelledError, TimeoutError):
+        # Cancellation = shutdown; timeout = run exceeded 1h cap. Either way we
+        # still proceed to delete the thread below — no need to log.
         pass
     except _CLEANUP_ERRORS:
         logger.exception("Error waiting for background run", run_id=run_id)

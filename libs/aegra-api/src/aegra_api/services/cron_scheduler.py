@@ -110,17 +110,22 @@ class CronScheduler:
         """Tick then sleep so overdue crons are claimed on the very first iteration.
 
         Sleep-before-tick would delay post-restart recovery by the full poll
-        interval (default 60s) for any cron that was due during downtime.
+        interval (default 60s) for any cron that was due during downtime. The
+        sleep is in a ``finally`` block so a persistent _tick failure (DB down,
+        session factory not initialised) cannot spin the loop at CPU speed.
         """
         interval = settings.cron.CRON_POLL_INTERVAL_SECONDS
         while self._running:
             try:
                 await self._tick()
-                await asyncio.sleep(interval)
             except asyncio.CancelledError:
                 break
             except Exception:
                 logger.exception("Error in cron scheduler tick")
+            try:
+                await asyncio.sleep(interval)
+            except asyncio.CancelledError:
+                break
 
     async def _tick(self) -> None:
         """Find all due crons and fire a run for each one.

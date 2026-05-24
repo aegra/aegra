@@ -20,6 +20,7 @@ from typing import Any
 import structlog
 from sqlalchemy import (
     TIMESTAMP,
+    Boolean,
     ForeignKey,
     Index,
     Integer,
@@ -190,6 +191,36 @@ class Run(Base):
     )
 
 
+class Cron(Base):
+    __tablename__ = "crons"
+
+    cron_id: Mapped[str] = mapped_column(Text, primary_key=True, server_default=text("public.uuid_generate_v4()::text"))
+    assistant_id: Mapped[str] = mapped_column(
+        Text, ForeignKey("assistant.assistant_id", ondelete="CASCADE"), nullable=False
+    )
+    thread_id: Mapped[str | None] = mapped_column(
+        Text, ForeignKey("thread.thread_id", ondelete="CASCADE"), nullable=True
+    )
+    user_id: Mapped[str] = mapped_column(Text, nullable=False)
+    schedule: Mapped[str] = mapped_column(Text, nullable=False)
+    payload: Mapped[dict] = mapped_column(JSONB, server_default=text("'{}'::jsonb"))
+    metadata_dict: Mapped[dict] = mapped_column(JSONB, server_default=text("'{}'::jsonb"), name="metadata")
+    on_run_completed: Mapped[str | None] = mapped_column(Text, nullable=True)
+    enabled: Mapped[bool] = mapped_column(Boolean, server_default=text("true"), nullable=False)
+    end_time: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True), nullable=True)
+    next_run_date: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True), nullable=True)
+    claimed_until: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), server_default=text("now()"))
+    updated_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), server_default=text("now()"))
+
+    __table_args__ = (
+        Index("idx_cron_user", "user_id"),
+        Index("idx_cron_assistant_id", "assistant_id"),
+        Index("idx_cron_thread_id", "thread_id"),
+        Index("idx_cron_next_run", "enabled", "next_run_date"),
+    )
+
+
 # ---------------------------------------------------------------------------
 # Session factory
 # ---------------------------------------------------------------------------
@@ -197,7 +228,7 @@ class Run(Base):
 async_session_maker: async_sessionmaker[AsyncSession] | None = None
 
 
-def _get_session_maker() -> async_sessionmaker[AsyncSession]:
+def get_session_maker() -> async_sessionmaker[AsyncSession]:
     """Return a cached async_sessionmaker bound to db_manager.engine."""
     global async_session_maker
     if async_session_maker is None:
@@ -208,8 +239,12 @@ def _get_session_maker() -> async_sessionmaker[AsyncSession]:
     return async_session_maker
 
 
+# Backwards-compatible alias for callers that imported the private symbol.
+_get_session_maker = get_session_maker
+
+
 async def get_session() -> AsyncIterator[AsyncSession]:
     """FastAPI dependency that yields an AsyncSession."""
-    maker = _get_session_maker()
+    maker = get_session_maker()
     async with maker() as session:
         yield session

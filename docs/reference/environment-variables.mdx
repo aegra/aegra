@@ -149,6 +149,26 @@ In dev mode (`REDIS_BROKER_ENABLED=false`), runs execute as in-process asyncio t
 
 Total capacity per instance = `WORKER_COUNT` x `N_JOBS_PER_WORKER` (default: 30 concurrent runs).
 
+## Cron scheduler
+
+The background scheduler polls the database for due cron jobs and fires them as runs.
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `CRON_ENABLED` | `true` | Enable the background cron scheduler |
+| `CRON_POLL_INTERVAL_SECONDS` | `60` | How often (in seconds) the scheduler checks for due jobs |
+| `CRON_CLAIM_DURATION_SECONDS` | `300` | Lease duration applied when claiming a cron for firing. Must comfortably exceed worst-case run preparation time so a slow firing cannot be re-claimed by the next tick |
+| `CRON_MAX_PER_USER` | `100` | Maximum number of crons a single user may own. `0` disables the cap |
+| `CRON_ALLOW_SECONDS_SCHEDULE` | `false` | Allow 6-field (seconds-first) cron schedules. Sub-minute schedules multiply scheduler load and DB writes |
+| `CRON_TICK_BATCH_SIZE` | `100` | Cap on how many crons a single tick fires per instance |
+| `CRON_MAX_PAYLOAD_BYTES` | `65536` | Soft cap on the JSONB payload size accepted on create/update |
+
+Set `CRON_ENABLED=false` to disable scheduling without removing cron records. Jobs will not fire but can still be created, updated, and queried.
+
+<Note>
+Cron firing is **at-least-once**: if a worker crashes after claiming a cron but before the run setup commits, the claim eventually expires (after `CRON_CLAIM_DURATION_SECONDS`) and another tick re-fires the cron. Make agent runs idempotent if duplicate firings are unacceptable.
+</Note>
+
 ## Prometheus metrics
 
 | Variable | Default | Description |

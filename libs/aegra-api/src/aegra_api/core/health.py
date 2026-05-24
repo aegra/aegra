@@ -9,6 +9,7 @@ from sqlalchemy import text
 from aegra_api import __version__
 from aegra_api.core.database import db_manager
 from aegra_api.models.errors import UNAVAILABLE
+from aegra_api.settings import settings
 
 router = APIRouter(tags=["Health"])
 
@@ -44,7 +45,7 @@ async def info(_request: Request) -> InfoResponse:
         version=__version__,
         description="Production-ready Agent Protocol server built on LangGraph",
         status="running",
-        flags={"assistants": True, "crons": False},
+        flags={"assistants": True, "crons": settings.cron.CRON_ENABLED},
     )
 
 

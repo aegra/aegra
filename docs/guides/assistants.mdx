@@ -7,7 +7,7 @@ An assistant is a configured instance of a LangGraph graph. While graphs define 
 
 ## Default assistants
 
-When the server starts, Aegra automatically creates a default assistant for each graph defined in `aegra.json`. The default assistant uses the graph ID as its assistant ID, so you can use graph IDs directly in runs without creating assistants manually.
+When the server starts, Aegra automatically creates a default assistant for each graph defined in `aegra.json`. Aegra accepts the graph ID directly in run and cron APIs and resolves it to that default assistant for you, so you can use graph IDs without creating assistants manually.
 
 ```json
 {
@@ -17,7 +17,7 @@ When the server starts, Aegra automatically creates a default assistant for each
 }
 ```
 
-This automatically creates an assistant with ID `"agent"` that you can use immediately.
+This automatically creates a default assistant for the `agent` graph that run and cron APIs can target immediately by passing `assistant_id="agent"`.
 
 ## Creating assistants
 

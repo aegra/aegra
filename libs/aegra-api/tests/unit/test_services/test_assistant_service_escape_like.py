@@ -31,7 +31,5 @@ def test_escape_like_is_idempotent_under_repeated_escape_then_unescape() -> None
     raw = "weird%_\\input"
     escaped = _escape_like(raw)
     # Simulate the ILIKE engine consuming '\\' as an escape character.
-    unescaped = (
-        escaped.replace(r"\%", "%").replace(r"\_", "_").replace("\\\\", "\\")
-    )
+    unescaped = escaped.replace(r"\%", "%").replace(r"\_", "_").replace("\\\\", "\\")
     assert unescaped == raw

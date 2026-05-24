@@ -12,7 +12,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 import structlog
 from croniter import croniter
 from fastapi import Depends, HTTPException
-from sqlalchemy import func, select, update
+from sqlalchemy import CursorResult, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from aegra_api.core.orm import Assistant as AssistantORM
@@ -315,7 +315,9 @@ class CronService:
         result = await self.session.execute(
             update(CronORM).where(CronORM.cron_id == cron_id, CronORM.user_id == user_identity).values(**values)
         )
-        if result.rowcount == 0:  # type: ignore[union-attr]
+        # DML execute() returns CursorResult, but the static type is the broader
+        # Result union — cast so .rowcount is reachable without a noqa.
+        if cast("CursorResult[Any]", result).rowcount == 0:
             raise HTTPException(404, f"Cron '{cron_id}' not found")
         await self.session.commit()
 

@@ -121,7 +121,7 @@ class TestStatelessWaitForRun:
         with (
             patch("aegra_api.api.runs._get_session_maker", return_value=mock_maker),
             patch("aegra_api.services.run_preparation.get_langgraph_service") as mock_service,
-            patch("aegra_api.api.stateless_runs._delete_thread_by_id", new_callable=AsyncMock),
+            patch("aegra_api.api.stateless_runs.delete_thread_by_id", new_callable=AsyncMock),
         ):
             mock_service.return_value.list_graphs.return_value = ["test-graph"]
 
@@ -224,7 +224,7 @@ class TestStatelessWaitForRun:
             patch("aegra_api.services.run_waiters._get_session_maker", return_value=mock_maker),
             patch("aegra_api.services.run_waiters.executor", mock_executor),
             patch("aegra_api.services.run_preparation.get_langgraph_service") as mock_service,
-            patch("aegra_api.api.stateless_runs._delete_thread_by_id", new_callable=AsyncMock),
+            patch("aegra_api.api.stateless_runs.delete_thread_by_id", new_callable=AsyncMock),
         ):
             mock_service.return_value.list_graphs.return_value = ["test-graph"]
 
@@ -270,7 +270,7 @@ class TestStatelessStreamRun:
 
         with (
             patch("aegra_api.services.run_preparation.get_langgraph_service") as mock_service,
-            patch("aegra_api.api.stateless_runs._delete_thread_by_id", new_callable=AsyncMock),
+            patch("aegra_api.api.stateless_runs.delete_thread_by_id", new_callable=AsyncMock),
         ):
             mock_service.return_value.list_graphs.return_value = ["test-graph"]
 
@@ -327,7 +327,7 @@ class TestStatelessCreateRun:
 
         with (
             patch("aegra_api.services.run_preparation.get_langgraph_service") as mock_service,
-            patch("aegra_api.api.stateless_runs._delete_thread_by_id", new_callable=AsyncMock),
+            patch("aegra_api.api.stateless_runs.delete_thread_by_id", new_callable=AsyncMock),
         ):
             mock_service.return_value.list_graphs.return_value = ["test-graph"]
 
@@ -383,7 +383,7 @@ class TestStatelessCreateRun:
         # Mock _delete_thread_by_id: assistant lookup raises 404, the cleanup
         # path opens its own DB session via _get_session_maker which is not
         # initialized in this test harness.
-        with patch("aegra_api.api.stateless_runs._delete_thread_by_id", new_callable=AsyncMock):
+        with patch("aegra_api.api.stateless_runs.delete_thread_by_id", new_callable=AsyncMock):
             resp = client.post(
                 "/runs",
                 json={

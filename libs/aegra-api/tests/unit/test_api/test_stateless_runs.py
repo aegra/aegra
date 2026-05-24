@@ -14,8 +14,6 @@ from sse_starlette import EventSourceResponse
 
 from aegra_api.api.stateless_runs import (
     _background_cleanup_tasks,
-    _cleanup_after_background_run,
-    _delete_thread_by_id,
     stateless_create_run,
     stateless_stream_run,
     stateless_wait_for_run,
@@ -23,6 +21,12 @@ from aegra_api.api.stateless_runs import (
 from aegra_api.core.orm import Run as RunORM
 from aegra_api.core.orm import Thread as ThreadORM
 from aegra_api.models import Run, RunCreate, User
+from aegra_api.services.run_cleanup import (
+    cleanup_after_background_run as _cleanup_after_background_run,
+)
+from aegra_api.services.run_cleanup import (
+    delete_thread_by_id as _delete_thread_by_id,
+)
 
 
 class _RaisingIter:
@@ -100,7 +104,7 @@ class TestDeleteThreadById:
         mock_maker.return_value.__aenter__ = AsyncMock(return_value=mock_session)
         mock_maker.return_value.__aexit__ = AsyncMock(return_value=False)
 
-        with patch("aegra_api.api.stateless_runs._get_session_maker", return_value=mock_maker):
+        with patch("aegra_api.services.run_cleanup._get_session_maker", return_value=mock_maker):
             await _delete_thread_by_id(thread_id, user_id)
 
         mock_session.delete.assert_called_once_with(thread_orm)
@@ -136,12 +140,12 @@ class TestDeleteThreadById:
         mock_task.done.return_value = True
 
         with (
-            patch("aegra_api.api.stateless_runs._get_session_maker", return_value=mock_maker),
+            patch("aegra_api.services.run_cleanup._get_session_maker", return_value=mock_maker),
             patch(
-                "aegra_api.api.stateless_runs.streaming_service.cancel_run",
+                "aegra_api.services.run_cleanup.streaming_service.cancel_run",
                 new_callable=AsyncMock,
             ) as mock_cancel,
-            patch("aegra_api.api.stateless_runs.active_runs", {run_id: mock_task}),
+            patch("aegra_api.services.run_cleanup.active_runs", {run_id: mock_task}),
         ):
             await _delete_thread_by_id(thread_id, user_id)
 
@@ -159,7 +163,7 @@ class TestDeleteThreadById:
         mock_maker.return_value.__aenter__ = AsyncMock(return_value=mock_session)
         mock_maker.return_value.__aexit__ = AsyncMock(return_value=False)
 
-        with patch("aegra_api.api.stateless_runs._get_session_maker", return_value=mock_maker):
+        with patch("aegra_api.services.run_cleanup._get_session_maker", return_value=mock_maker):
             await _delete_thread_by_id("nonexistent", "user")
 
         mock_session.delete.assert_not_called()
@@ -195,12 +199,12 @@ class TestDeleteThreadById:
         fut: asyncio.Future[None] = asyncio.get_event_loop().create_future()
 
         with (
-            patch("aegra_api.api.stateless_runs._get_session_maker", return_value=mock_maker),
+            patch("aegra_api.services.run_cleanup._get_session_maker", return_value=mock_maker),
             patch(
-                "aegra_api.api.stateless_runs.streaming_service.cancel_run",
+                "aegra_api.services.run_cleanup.streaming_service.cancel_run",
                 new_callable=AsyncMock,
             ),
-            patch("aegra_api.api.stateless_runs.active_runs", {run_id: fut}),
+            patch("aegra_api.services.run_cleanup.active_runs", {run_id: fut}),
         ):
             # Should not raise — CancelledError is caught
             await _delete_thread_by_id(thread_id, user_id)
@@ -241,13 +245,13 @@ class TestDeleteThreadById:
         mock_maker.return_value.__aexit__ = AsyncMock(return_value=False)
 
         with (
-            patch("aegra_api.api.stateless_runs._get_session_maker", return_value=mock_maker),
+            patch("aegra_api.services.run_cleanup._get_session_maker", return_value=mock_maker),
             patch(
-                "aegra_api.api.stateless_runs.streaming_service.cancel_run",
+                "aegra_api.services.run_cleanup.streaming_service.cancel_run",
                 new_callable=AsyncMock,
             ),
             patch(
-                "aegra_api.api.stateless_runs.active_runs",
+                "aegra_api.services.run_cleanup.active_runs",
                 {run_id: _FailingTask(RedisError("redis hiccup"))},
             ),
         ):
@@ -285,13 +289,13 @@ class TestDeleteThreadById:
         mock_maker.return_value.__aexit__ = AsyncMock(return_value=False)
 
         with (  # noqa: SIM117
-            patch("aegra_api.api.stateless_runs._get_session_maker", return_value=mock_maker),
+            patch("aegra_api.services.run_cleanup._get_session_maker", return_value=mock_maker),
             patch(
-                "aegra_api.api.stateless_runs.streaming_service.cancel_run",
+                "aegra_api.services.run_cleanup.streaming_service.cancel_run",
                 new_callable=AsyncMock,
             ),
             patch(
-                "aegra_api.api.stateless_runs.active_runs",
+                "aegra_api.services.run_cleanup.active_runs",
                 {run_id: _FailingTask(RuntimeError("task exploded"))},
             ),
         ):
@@ -320,9 +324,9 @@ class TestCleanupAfterBackgroundRun:
         await task  # let it finish before test to avoid timing issues
 
         with (
-            patch("aegra_api.api.stateless_runs.active_runs", {run_id: task}),
+            patch("aegra_api.services.run_cleanup.active_runs", {run_id: task}),
             patch(
-                "aegra_api.api.stateless_runs._delete_thread_by_id",
+                "aegra_api.services.run_cleanup.delete_thread_by_id",
                 new_callable=AsyncMock,
             ) as mock_delete,
         ):
@@ -339,9 +343,9 @@ class TestCleanupAfterBackgroundRun:
         user_id = "test-user"
 
         with (
-            patch("aegra_api.api.stateless_runs.active_runs", {}),
+            patch("aegra_api.services.run_cleanup.active_runs", {}),
             patch(
-                "aegra_api.api.stateless_runs._delete_thread_by_id",
+                "aegra_api.services.run_cleanup.delete_thread_by_id",
                 new_callable=AsyncMock,
             ) as mock_delete,
         ):
@@ -379,7 +383,7 @@ class TestStatelessWaitForRun:
                 return_value=mock_response,
             ) as mock_wait,
             patch(
-                "aegra_api.api.stateless_runs._delete_thread_by_id",
+                "aegra_api.api.stateless_runs.delete_thread_by_id",
                 new_callable=AsyncMock,
             ) as mock_delete,
         ):
@@ -415,7 +419,7 @@ class TestStatelessWaitForRun:
                 return_value=mock_response,
             ),
             patch(
-                "aegra_api.api.stateless_runs._delete_thread_by_id",
+                "aegra_api.api.stateless_runs.delete_thread_by_id",
                 new_callable=AsyncMock,
             ) as mock_delete,
         ):
@@ -438,7 +442,7 @@ class TestStatelessWaitForRun:
                 side_effect=RuntimeError("boom"),
             ),
             patch(
-                "aegra_api.api.stateless_runs._delete_thread_by_id",
+                "aegra_api.api.stateless_runs.delete_thread_by_id",
                 new_callable=AsyncMock,
             ) as mock_delete,
             pytest.raises(RuntimeError, match="boom"),
@@ -460,7 +464,7 @@ class TestStatelessWaitForRun:
                 side_effect=RuntimeError("original"),
             ),
             patch(
-                "aegra_api.api.stateless_runs._delete_thread_by_id",
+                "aegra_api.api.stateless_runs.delete_thread_by_id",
                 new_callable=AsyncMock,
                 side_effect=OSError("cleanup failed"),
             ),
@@ -506,7 +510,7 @@ class TestStatelessStreamRun:
                 return_value=mock_response,
             ) as mock_stream,
             patch(
-                "aegra_api.api.stateless_runs._delete_thread_by_id",
+                "aegra_api.api.stateless_runs.delete_thread_by_id",
                 new_callable=AsyncMock,
             ) as mock_delete,
         ):
@@ -544,7 +548,7 @@ class TestStatelessStreamRun:
                 return_value=mock_response,
             ),
             patch(
-                "aegra_api.api.stateless_runs._delete_thread_by_id",
+                "aegra_api.api.stateless_runs.delete_thread_by_id",
                 new_callable=AsyncMock,
             ) as mock_delete,
         ):
@@ -567,7 +571,7 @@ class TestStatelessStreamRun:
                 side_effect=RuntimeError("setup failed"),
             ),
             patch(
-                "aegra_api.api.stateless_runs._delete_thread_by_id",
+                "aegra_api.api.stateless_runs.delete_thread_by_id",
                 new_callable=AsyncMock,
             ) as mock_delete,
             pytest.raises(RuntimeError, match="setup failed"),
@@ -605,7 +609,7 @@ class TestStatelessStreamRun:
                 return_value=mock_response,
             ),
             patch(
-                "aegra_api.api.stateless_runs._delete_thread_by_id",
+                "aegra_api.api.stateless_runs.delete_thread_by_id",
                 new_callable=AsyncMock,
             ) as mock_delete,
         ):
@@ -659,7 +663,7 @@ class TestStatelessStreamRun:
                 return_value=finished_broker,
             ),
             patch(
-                "aegra_api.api.stateless_runs._delete_thread_by_id",
+                "aegra_api.api.stateless_runs.delete_thread_by_id",
                 new_callable=AsyncMock,
             ) as mock_delete,
         ):
@@ -721,7 +725,7 @@ class TestStatelessStreamRun:
                 return_value=active_broker,
             ),
             patch(
-                "aegra_api.api.stateless_runs._delete_thread_by_id",
+                "aegra_api.api.stateless_runs.delete_thread_by_id",
                 new_callable=AsyncMock,
             ) as mock_delete,
         ):
@@ -773,7 +777,7 @@ class TestStatelessStreamRun:
                 "aegra_api.api.stateless_runs.broker_manager.get_broker",
             ) as mock_get_broker,
             patch(
-                "aegra_api.api.stateless_runs._delete_thread_by_id",
+                "aegra_api.api.stateless_runs.delete_thread_by_id",
                 new_callable=AsyncMock,
             ) as mock_delete,
         ):
@@ -813,7 +817,7 @@ class TestStatelessStreamRun:
                 return_value=mock_response,
             ),
             patch(
-                "aegra_api.api.stateless_runs._delete_thread_by_id",
+                "aegra_api.api.stateless_runs.delete_thread_by_id",
                 new_callable=AsyncMock,
                 side_effect=OSError("cleanup failed"),
             ),
@@ -918,7 +922,7 @@ class TestStatelessCreateRun:
                 side_effect=RuntimeError("create failed"),
             ),
             patch(
-                "aegra_api.api.stateless_runs._delete_thread_by_id",
+                "aegra_api.api.stateless_runs.delete_thread_by_id",
                 new_callable=AsyncMock,
             ) as mock_delete,
             pytest.raises(RuntimeError, match="create failed"),

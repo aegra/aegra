@@ -43,6 +43,40 @@ router = APIRouter(tags=["Crons"], dependencies=auth_dependency)
 logger = structlog.getLogger(__name__)
 
 
+async def _authorize_cron_create(
+    user: User,
+    request: CronCreate,
+    *,
+    thread_id: str | None,
+) -> None:
+    """Fire the multi-resource auth chain expected by cron creation.
+
+    Spec contract: a cron create touches three resources, so a handler can deny
+    at any layer (caller may have crons access but not the underlying assistant
+    or thread). Chain mirrors the LangGraph SDK reference.
+
+    * thread-scoped create: ``crons.create`` → ``assistants.read`` → ``threads.read``
+    * stateless create:     ``crons.create`` → ``assistants.read`` → ``threads.search``
+    """
+    cron_value: dict[str, object] = request.model_dump()
+    if thread_id is not None:
+        cron_value["thread_id"] = thread_id
+    await handle_event(build_auth_context(user, "crons", "create"), cron_value)
+
+    await handle_event(
+        build_auth_context(user, "assistants", "read"),
+        {"assistant_id": request.assistant_id},
+    )
+
+    if thread_id is not None:
+        await handle_event(
+            build_auth_context(user, "threads", "read"),
+            {"thread_id": thread_id},
+        )
+    else:
+        await handle_event(build_auth_context(user, "threads", "search"), {})
+
+
 # ---------------------------------------------------------------------------
 # Create (stateless) – POST /runs/crons → returns Run
 # ---------------------------------------------------------------------------
@@ -62,10 +96,7 @@ async def create_cron(
     When the caller passes ``enabled=False`` the first run is suppressed and
     the response is the persisted ``Cron`` instead.
     """
-    ctx = build_auth_context(user, "crons", "create")
-    value = request.model_dump()
-    await handle_event(ctx, value)
-
+    await _authorize_cron_create(user, request, thread_id=None)
     return await _create_cron_atomic(request, user, service, session)
 
 
@@ -88,10 +119,7 @@ async def create_cron_for_thread(
     immediately and returns the ``Run`` object. When ``enabled=False`` is
     passed the first run is suppressed and the persisted cron is returned.
     """
-    ctx = build_auth_context(user, "crons", "create")
-    value = {**request.model_dump(), "thread_id": thread_id}
-    await handle_event(ctx, value)
-
+    await _authorize_cron_create(user, request, thread_id=thread_id)
     return await _create_cron_atomic(request, user, service, session, thread_id=thread_id)
 
 

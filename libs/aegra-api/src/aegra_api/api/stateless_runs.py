@@ -304,9 +304,7 @@ async def stateless_create_run(
         raise
 
     if should_delete:
-        task = asyncio.create_task(
-            cleanup_after_background_run(result.run_id, thread_id, user.identity)
-        )
+        task = asyncio.create_task(cleanup_after_background_run(result.run_id, thread_id, user.identity))
         _background_cleanup_tasks.add(task)
         task.add_done_callback(_background_cleanup_tasks.discard)
 

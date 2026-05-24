@@ -204,7 +204,7 @@ class TestTickTimezone:
                 return_value=("run-1", Mock(), None),
             ),
             patch(
-                "aegra_api.services.cron_scheduler._compute_next_run",
+                "aegra_api.services.cron_service._compute_next_run",
                 return_value=datetime.now(UTC) + timedelta(minutes=5),
             ) as mock_compute,
         ):
@@ -231,7 +231,7 @@ class TestTickTimezone:
                 return_value=("run-1", Mock(), None),
             ),
             patch(
-                "aegra_api.services.cron_scheduler._compute_next_run",
+                "aegra_api.services.cron_service._compute_next_run",
                 return_value=datetime.now(UTC) + timedelta(minutes=5),
             ) as mock_compute,
         ):

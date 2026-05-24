@@ -54,9 +54,7 @@ async def delete_thread_by_id(thread_id: str, user_id: str) -> None:
                 except asyncio.CancelledError:
                     pass
                 except _CLEANUP_ERRORS:
-                    logger.exception(
-                        "Error awaiting cancelled task during thread cleanup", run_id=run_id
-                    )
+                    logger.exception("Error awaiting cancelled task during thread cleanup", run_id=run_id)
 
         thread = await session.scalar(
             select(ThreadORM).where(

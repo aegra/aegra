@@ -27,8 +27,6 @@ from aegra_api.core.orm import _get_session_maker
 from aegra_api.models import RunCreate, User
 from aegra_api.services.cron_service import (
     CronService,
-    _compute_next_run,
-    _is_seconds_cron,
     should_delete_stateless_thread,
 )
 from aegra_api.services.run_cleanup import delete_thread_by_id, schedule_background_cleanup
@@ -109,12 +107,16 @@ class CronScheduler:
         logger.info("Cron scheduler stopped")
 
     async def _loop(self) -> None:
-        """Sleep for the configured interval and trigger cron polling until stopped."""
+        """Tick then sleep so overdue crons are claimed on the very first iteration.
+
+        Sleep-before-tick would delay post-restart recovery by the full poll
+        interval (default 60s) for any cron that was due during downtime.
+        """
         interval = settings.cron.CRON_POLL_INTERVAL_SECONDS
         while self._running:
             try:
-                await asyncio.sleep(interval)
                 await self._tick()
+                await asyncio.sleep(interval)
             except asyncio.CancelledError:
                 break
             except Exception:
@@ -209,40 +211,16 @@ class CronScheduler:
             if should_delete_thread:
                 await CronScheduler._cleanup_failed_stateless_thread(thread_id, cron)
 
-        # Advance to next occurrence (or disable when past end_time). Always
-        # clear ``claimed_until`` so the cron becomes eligible again on its
-        # next scheduled occurrence.
         if run_created:
-            if cron.end_time and now >= cron.end_time:
-                await session.execute(
-                    update(CronORM)
-                    .where(CronORM.cron_id == cron.cron_id)
-                    .values(enabled=False, claimed_until=None, updated_at=now)
-                )
-            else:
-                timezone = (cron.payload or {}).get("timezone")
-                next_run = _compute_next_run(cron.schedule, now=now, timezone=timezone)
-                logger.debug(
-                    "Advancing cron schedule",
-                    cron_id=cron.cron_id,
-                    schedule=repr(cron.schedule),
-                    field_count=len(cron.schedule.split()),
-                    is_seconds_cron=_is_seconds_cron(cron.schedule),
-                    now=now.isoformat(),
-                    next_run=next_run.isoformat(),
-                )
-                await session.execute(
-                    update(CronORM)
-                    .where(CronORM.cron_id == cron.cron_id)
-                    .values(next_run_date=next_run, claimed_until=None, updated_at=now)
-                )
+            # Delegate advance/disable to CronService so the rule lives in one place.
+            await CronService(session).advance_next_run(cron)
         else:
-            # Run setup failed: release the claim so the next tick can retry,
-            # but don't advance ``next_run_date`` — the schedule is unchanged.
+            # Run setup failed: release the claim so the next tick retries,
+            # but leave next_run_date unchanged.
             await session.execute(
                 update(CronORM).where(CronORM.cron_id == cron.cron_id).values(claimed_until=None, updated_at=now)
             )
-        await session.commit()
+            await session.commit()
 
     @staticmethod
     async def _cleanup_failed_stateless_thread(thread_id: str, cron: CronORM) -> None:

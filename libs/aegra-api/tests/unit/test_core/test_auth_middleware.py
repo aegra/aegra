@@ -463,6 +463,40 @@ class TestAuthenticateHandlerInjection:
         kwargs = _authenticate_kwargs_for_handler(conn, authenticate)
         assert set(kwargs.keys()) == {"headers"}
 
+    def test_signature_errors_fallback_to_headers_only(self):
+        """When signature inspection fails, kwargs fall back to headers only."""
+
+        async def authenticate(headers: dict) -> dict:
+            """Headers-only handler stub."""
+            return {"identity": "x"}
+
+        conn = self._mock_connection()
+        with patch("aegra_api.core.auth_middleware.inspect.signature", side_effect=ValueError):
+            kwargs = _authenticate_kwargs_for_handler(conn, authenticate)
+        assert kwargs == {"headers": {"authorization": "Bearer tok"}}
+
+    @pytest.mark.asyncio
+    async def test_call_authenticate_handler_supports_sync_handler(self):
+        """Synchronous handlers should return through the non-awaitable branch."""
+
+        def authenticate(method: str, path: str, headers: dict) -> dict:
+            """Sync handler stub for non-awaitable path."""
+            return {
+                "identity": "sync-user",
+                "method": method,
+                "path": path,
+                "authorization": headers.get("authorization"),
+            }
+
+        conn = self._mock_connection(path="/runs/wait", method="POST")
+        result = await _call_authenticate_handler(authenticate, conn)
+        assert result == {
+            "identity": "sync-user",
+            "method": "POST",
+            "path": "/runs/wait",
+            "authorization": "Bearer tok",
+        }
+
     @pytest.mark.asyncio
     async def test_call_authenticate_handler_invokes_with_path(self):
         captured: dict = {}

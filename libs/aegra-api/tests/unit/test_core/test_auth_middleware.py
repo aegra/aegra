@@ -463,7 +463,8 @@ class TestAuthenticateHandlerInjection:
         kwargs = _authenticate_kwargs_for_handler(conn, authenticate)
         assert set(kwargs.keys()) == {"headers"}
 
-    def test_signature_errors_fallback_to_headers_only(self):
+    @pytest.mark.parametrize("sig_exc", [ValueError, TypeError])
+    def test_signature_errors_fallback_to_headers_only(self, sig_exc):
         """When signature inspection fails, kwargs fall back to headers only."""
 
         async def authenticate(headers: dict) -> dict:
@@ -471,7 +472,7 @@ class TestAuthenticateHandlerInjection:
             return {"identity": "x"}
 
         conn = self._mock_connection()
-        with patch("aegra_api.core.auth_middleware.inspect.signature", side_effect=ValueError):
+        with patch("aegra_api.core.auth_middleware.inspect.signature", side_effect=sig_exc):
             kwargs = _authenticate_kwargs_for_handler(conn, authenticate)
         assert kwargs == {"headers": {"authorization": "Bearer tok"}}
 

@@ -20,6 +20,11 @@ TEMPLATES: list[dict[str, str]] = [
         "name": "ReAct Agent",
         "description": "An agent with tools that reasons and acts step by step.",
     },
+    {
+        "id": "langgraphjs-chatbot",
+        "name": "LangGraph.js Chatbot",
+        "description": "A simple chatbot built with LangGraph.js (TypeScript).",
+    },
 ]
 
 
@@ -245,12 +250,24 @@ volumes:
 """
 
 
-def get_dockerfile() -> str:
+def get_dockerfile(*, runtime: str = "python") -> str:
     """Generate Dockerfile for production builds.
+
+    Parameters
+    ----------
+    runtime:
+        ``"python"`` for standard Python graphs, ``"langgraphjs"`` for
+        JS/TypeScript graphs that need Node.js at runtime.
 
     Returns:
         Dockerfile content string.
     """
+    if runtime == "langgraphjs":
+        return _get_dockerfile_langgraphjs()
+    return _get_dockerfile_python()
+
+
+def _get_dockerfile_python() -> str:
     return """\
 FROM python:3.12-slim-bookworm AS base
 
@@ -299,6 +316,80 @@ COPY aegra.json .
 COPY src/ ./src/
 
 ENV PATH="/app/.venv/bin:$PATH"
+
+EXPOSE 2026
+
+USER app
+
+CMD ["aegra", "serve"]
+"""
+
+
+def _get_dockerfile_langgraphjs() -> str:
+    return """\
+FROM python:3.12-slim-bookworm AS base
+
+ENV PYTHONUNBUFFERED=1 \\
+    PYTHONDONTWRITEBYTECODE=1
+
+WORKDIR /app
+
+# Create non-root user for runtime
+RUN addgroup --system app && adduser --system --ingroup app app
+
+# -----------------------------
+# Node.js install stage
+# -----------------------------
+FROM base AS node-setup
+
+RUN apt-get update && apt-get install -y --no-install-recommends \\
+    curl \\
+    && curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \\
+    && apt-get install -y --no-install-recommends nodejs \\
+    && rm -rf /var/lib/apt/lists/*
+
+# -----------------------------
+# Python builder stage
+# -----------------------------
+FROM node-setup AS builder
+
+COPY --from=ghcr.io/astral-sh/uv:0.10.0 /uv /bin/uv
+
+RUN apt-get update && apt-get install -y --no-install-recommends \\
+    build-essential \\
+    libpq-dev \\
+    && rm -rf /var/lib/apt/lists/*
+
+# Install Python dependencies first (cached layer)
+COPY pyproject.toml ./
+COPY uv.loc[k] ./
+RUN uv sync --no-dev --no-install-project --compile-bytecode
+
+# Copy source and install project
+COPY src/ ./src/
+RUN uv sync --no-dev --compile-bytecode
+
+# Install JS bridge dependencies
+COPY libs/aegra-js-bridge/ ./libs/aegra-js-bridge/
+RUN cd libs/aegra-js-bridge && npm ci --omit=dev
+
+# -----------------------------
+# Runtime stage
+# -----------------------------
+FROM node-setup AS final
+
+RUN apt-get update && apt-get install -y --no-install-recommends \\
+    ca-certificates \\
+    libpq5 \\
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=builder /app/.venv /app/.venv
+COPY --from=builder /app/libs/aegra-js-bridge ./libs/aegra-js-bridge
+COPY aegra.json .
+COPY src/ ./src/
+
+ENV PATH="/app/.venv/bin:$PATH" \\
+    AEGRA_JS_BRIDGE_DIR="/app/libs/aegra-js-bridge"
 
 EXPOSE 2026
 

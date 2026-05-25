@@ -56,6 +56,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libpq5 \
     && rm -rf /var/lib/apt/lists/*
 
+# Node.js runtime — required for LangGraph.js graph execution via the JS bridge.
+# Copied from the official Node.js image to keep the layer small.
+COPY --from=node:20-slim /usr/local/bin/node /usr/local/bin/node
+COPY --from=node:20-slim /usr/local/lib/node_modules /usr/local/lib/node_modules
+RUN ln -s /usr/local/lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm \
+    && ln -s /usr/local/lib/node_modules/npm/bin/npx-cli.js /usr/local/bin/npx
+
 # Copy installed Python packages from the builder stage.
 COPY --from=builder /usr/local/lib/python${PY_VERSION}/site-packages/ /usr/local/lib/python${PY_VERSION}/site-packages/
 COPY --from=builder /usr/local/bin/ /usr/local/bin/
@@ -65,6 +72,10 @@ COPY libs/aegra-api/alembic.ini ./alembic.ini
 COPY libs/aegra-api/alembic/ ./alembic/
 COPY aegra.json ./aegra.json
 COPY examples/ ./examples/
+
+# Copy JS bridge source — npm install runs at first start if node_modules missing
+COPY libs/aegra-js-bridge/ ./libs/aegra-js-bridge/
+ENV AEGRA_JS_BRIDGE_DIR=/app/libs/aegra-js-bridge
 
 EXPOSE 2026
 

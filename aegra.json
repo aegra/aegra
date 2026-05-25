@@ -7,7 +7,11 @@
     "subgraph_hitl_agent": "./examples/subgraph_hitl_agent/graph.py:graph",
     "factory": "./examples/factory/graph.py:graph",
     "stress_test": "./examples/stress_test/graph.py:graph",
-    "stress_tool_agent": "./examples/stress_tool_agent/graph.py:graph"
+    "stress_tool_agent": "./examples/stress_tool_agent/graph.py:graph",
+    "js_chatbot": {
+      "runtime": "langgraphjs",
+      "path": "./examples/langgraphjs_chatbot/graph.ts:graph"
+    }
   },
   "http": {
     "app": "./examples/custom_routes_example.py:app"

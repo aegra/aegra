@@ -11,6 +11,7 @@ package = false
 
 [tool.uv.workspace]
 members = ["libs/*"]
+exclude = ["libs/aegra-js-bridge"]
 
 [dependency-groups]
 dev = [

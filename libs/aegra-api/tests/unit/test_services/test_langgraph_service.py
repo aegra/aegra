@@ -189,6 +189,220 @@ class TestLangGraphServiceConfig:
         assert service.get_dependencies() == []
 
 
+class TestLoadGraphRegistryDictFormat:
+    """Test _load_graph_registry support for dict-format graph entries.
+
+    The graph config accepts both string format ("./path.py:export") and
+    dict format ({"path": "./path.py:export", "description": "..."}).
+    """
+
+    def test_string_format_produces_registry_without_description(self) -> None:
+        """String-format entries should NOT have a 'description' key."""
+        service = LangGraphService()
+        service.config = {"graphs": {"agent": "./graphs/agent.py:graph"}}
+        service._load_graph_registry()
+
+        entry = service._graph_registry["agent"]
+        assert entry["file_path"] == "./graphs/agent.py"
+        assert entry["export_name"] == "graph"
+        assert "description" not in entry
+
+    def test_dict_format_with_path_and_description(self) -> None:
+        """Dict-format entry with path and description stores both."""
+        service = LangGraphService()
+        service.config = {
+            "graphs": {
+                "weather": {
+                    "path": "./graphs/weather.py:graph",
+                    "description": "A weather lookup agent",
+                }
+            }
+        }
+        service._load_graph_registry()
+
+        entry = service._graph_registry["weather"]
+        assert entry["file_path"] == "./graphs/weather.py"
+        assert entry["export_name"] == "graph"
+        assert entry["description"] == "A weather lookup agent"
+
+    def test_dict_format_without_description(self) -> None:
+        """Dict-format entry without description omits it from registry."""
+        service = LangGraphService()
+        service.config = {
+            "graphs": {
+                "chatbot": {
+                    "path": "./graphs/chatbot.py:bot",
+                }
+            }
+        }
+        service._load_graph_registry()
+
+        entry = service._graph_registry["chatbot"]
+        assert entry["file_path"] == "./graphs/chatbot.py"
+        assert entry["export_name"] == "bot"
+        assert "description" not in entry
+
+    def test_dict_format_with_empty_description(self) -> None:
+        """Dict-format entry with empty string description omits it (falsy)."""
+        service = LangGraphService()
+        service.config = {
+            "graphs": {
+                "agent": {
+                    "path": "./graphs/agent.py:graph",
+                    "description": "",
+                }
+            }
+        }
+        service._load_graph_registry()
+
+        entry = service._graph_registry["agent"]
+        assert "description" not in entry
+
+    def test_dict_format_missing_path_raises_value_error(self) -> None:
+        """Dict-format entry without 'path' key defaults to '' which fails the ':' check."""
+        service = LangGraphService()
+        service.config = {
+            "graphs": {
+                "broken": {
+                    "description": "Missing path key",
+                }
+            }
+        }
+
+        with pytest.raises(ValueError, match="Invalid graph path format"):
+            service._load_graph_registry()
+
+    def test_dict_format_path_without_colon_raises_value_error(self) -> None:
+        """Dict-format entry with invalid path format (no ':') raises ValueError."""
+        service = LangGraphService()
+        service.config = {
+            "graphs": {
+                "bad": {
+                    "path": "./graphs/agent.py",
+                    "description": "No export separator",
+                }
+            }
+        }
+
+        with pytest.raises(ValueError, match="Invalid graph path format"):
+            service._load_graph_registry()
+
+    def test_mixed_string_and_dict_formats(self) -> None:
+        """Registry can contain a mix of string and dict format entries."""
+        service = LangGraphService()
+        service.config = {
+            "graphs": {
+                "string_agent": "./graphs/string_agent.py:graph",
+                "dict_agent": {
+                    "path": "./graphs/dict_agent.py:agent",
+                    "description": "Dict-based agent",
+                },
+                "dict_no_desc": {
+                    "path": "./graphs/no_desc.py:run",
+                },
+            }
+        }
+        service._load_graph_registry()
+
+        assert len(service._graph_registry) == 3
+
+        string_entry = service._graph_registry["string_agent"]
+        assert string_entry["file_path"] == "./graphs/string_agent.py"
+        assert string_entry["export_name"] == "graph"
+        assert "description" not in string_entry
+
+        dict_entry = service._graph_registry["dict_agent"]
+        assert dict_entry["file_path"] == "./graphs/dict_agent.py"
+        assert dict_entry["export_name"] == "agent"
+        assert dict_entry["description"] == "Dict-based agent"
+
+        no_desc_entry = service._graph_registry["dict_no_desc"]
+        assert no_desc_entry["file_path"] == "./graphs/no_desc.py"
+        assert no_desc_entry["export_name"] == "run"
+        assert "description" not in no_desc_entry
+
+    def test_dict_format_path_with_multiple_colons(self) -> None:
+        """Path with multiple colons splits on the first one only."""
+        service = LangGraphService()
+        service.config = {
+            "graphs": {
+                "multi_colon": {
+                    "path": "./graphs/agent.py:some:nested:export",
+                    "description": "Unusual export name",
+                }
+            }
+        }
+        service._load_graph_registry()
+
+        entry = service._graph_registry["multi_colon"]
+        assert entry["file_path"] == "./graphs/agent.py"
+        assert entry["export_name"] == "some:nested:export"
+        assert entry["description"] == "Unusual export name"
+
+    def test_no_config_loaded_raises_value_error(self) -> None:
+        """_load_graph_registry raises when config is None."""
+        service = LangGraphService()
+        service.config = None
+
+        with pytest.raises(ValueError, match="Configuration not loaded"):
+            service._load_graph_registry()
+
+    def test_empty_graphs_config(self) -> None:
+        """Empty graphs section produces empty registry."""
+        service = LangGraphService()
+        service.config = {"graphs": {}}
+        service._load_graph_registry()
+
+        assert service._graph_registry == {}
+
+    def test_missing_graphs_key(self) -> None:
+        """Missing 'graphs' key produces empty registry."""
+        service = LangGraphService()
+        service.config = {}
+        service._load_graph_registry()
+
+        assert service._graph_registry == {}
+
+    @pytest.mark.asyncio
+    async def test_dict_format_description_preserved_through_initialize(self) -> None:
+        """Description from dict-format config survives the full initialize flow."""
+        config_data = {
+            "graphs": {
+                "my_agent": {
+                    "path": "./graphs/my_agent.py:graph",
+                    "description": "My cool agent",
+                }
+            }
+        }
+
+        with (
+            patch("pathlib.Path.exists", return_value=True),
+            patch("pathlib.Path.open", mock_open(read_data=json.dumps(config_data))),
+            patch("aegra_api.services.langgraph_service.LangGraphService._ensure_default_assistants"),
+            patch("aegra_api.services.langgraph_service.LangGraphService._load_all_graph_modules"),
+        ):
+            service = LangGraphService()
+            await service.initialize()
+
+        entry = service._graph_registry["my_agent"]
+        assert entry["description"] == "My cool agent"
+        assert entry["file_path"] == "./graphs/my_agent.py"
+        assert entry["export_name"] == "graph"
+
+    def test_colliding_graph_ids_raises_for_dict_format(self) -> None:
+        """Sanitisation collision detection works for dict-format entries too."""
+        service = LangGraphService()
+        service.config = {
+            "graphs": {
+                "a.b": {"path": "./graphs/ab.py:graph", "description": "first"},
+                "a_b": {"path": "./graphs/ab2.py:graph", "description": "second"},
+            }
+        }
+
+        with pytest.raises(ValueError, match="collide after sanitisation"):
+            service._load_graph_registry()
+
+
 class TestLangGraphServiceGraphs:
     """Test graph management"""
 

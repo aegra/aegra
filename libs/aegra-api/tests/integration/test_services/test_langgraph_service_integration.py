@@ -134,6 +134,156 @@ class TestLangGraphServiceRealFiles:
                 await service.initialize()
 
 
+class TestLoadGraphRegistryDictFormatIntegration:
+    """Integration tests for dict-format graph config with real files."""
+
+    @pytest.mark.asyncio
+    async def test_initialize_with_dict_format_graphs(self) -> None:
+        """Full initialize with a mix of string and dict format graph entries."""
+        config_data = {
+            "graphs": {
+                "string_graph": "./graphs/test.py:graph",
+                "dict_graph": {
+                    "path": "./graphs/dict.py:agent",
+                    "description": "A described agent",
+                },
+            }
+        }
+
+        with TemporaryDirectory() as temp_dir:
+            config_path = Path(temp_dir) / "aegra.json"
+            config_path.write_text(json.dumps(config_data))
+
+            with (
+                patch("aegra_api.services.langgraph_service.LangGraphService._ensure_default_assistants"),
+                patch("aegra_api.services.langgraph_service.LangGraphService._load_all_graph_modules"),
+            ):
+                service = LangGraphService(str(config_path))
+                await service.initialize()
+
+                assert service.config == config_data
+
+                string_entry = service._graph_registry["string_graph"]
+                assert string_entry["file_path"] == "./graphs/test.py"
+                assert string_entry["export_name"] == "graph"
+                assert "description" not in string_entry
+
+                dict_entry = service._graph_registry["dict_graph"]
+                assert dict_entry["file_path"] == "./graphs/dict.py"
+                assert dict_entry["export_name"] == "agent"
+                assert dict_entry["description"] == "A described agent"
+
+    @pytest.mark.asyncio
+    async def test_initialize_dict_format_invalid_path_raises(self) -> None:
+        """Dict-format entry with missing colon in path raises during initialize."""
+        config_data = {
+            "graphs": {
+                "broken": {
+                    "path": "./graphs/no_export_separator.py",
+                    "description": "Missing colon",
+                }
+            }
+        }
+
+        with TemporaryDirectory() as temp_dir:
+            config_path = Path(temp_dir) / "aegra.json"
+            config_path.write_text(json.dumps(config_data))
+
+            with (
+                patch("aegra_api.services.langgraph_service.LangGraphService._ensure_default_assistants"),
+                patch("aegra_api.services.langgraph_service.LangGraphService._load_all_graph_modules"),
+            ):
+                service = LangGraphService(str(config_path))
+
+                with pytest.raises(ValueError, match="Invalid graph path format"):
+                    await service.initialize()
+
+    @pytest.mark.asyncio
+    async def test_list_graphs_with_dict_format(self) -> None:
+        """list_graphs returns file_path for both string and dict format entries."""
+        config_data = {
+            "graphs": {
+                "str_agent": "./graphs/str.py:graph",
+                "dict_agent": {
+                    "path": "./graphs/dict.py:agent",
+                    "description": "Described agent",
+                },
+            }
+        }
+
+        with TemporaryDirectory() as temp_dir:
+            config_path = Path(temp_dir) / "aegra.json"
+            config_path.write_text(json.dumps(config_data))
+
+            with (
+                patch("aegra_api.services.langgraph_service.LangGraphService._ensure_default_assistants"),
+                patch("aegra_api.services.langgraph_service.LangGraphService._load_all_graph_modules"),
+            ):
+                service = LangGraphService(str(config_path))
+                await service.initialize()
+
+                graphs = service.list_graphs()
+                assert graphs == {
+                    "str_agent": "./graphs/str.py",
+                    "dict_agent": "./graphs/dict.py",
+                }
+
+    @pytest.mark.asyncio
+    async def test_dict_format_description_accessible_from_registry(self) -> None:
+        """Description is stored in registry and accessible for downstream consumers."""
+        config_data = {
+            "graphs": {
+                "my_graph": {
+                    "path": "./graphs/my.py:graph",
+                    "description": "Does important things",
+                }
+            }
+        }
+
+        with TemporaryDirectory() as temp_dir:
+            config_path = Path(temp_dir) / "aegra.json"
+            config_path.write_text(json.dumps(config_data))
+
+            with (
+                patch("aegra_api.services.langgraph_service.LangGraphService._ensure_default_assistants"),
+                patch("aegra_api.services.langgraph_service.LangGraphService._load_all_graph_modules"),
+            ):
+                service = LangGraphService(str(config_path))
+                await service.initialize()
+
+                entry = service._graph_registry["my_graph"]
+                assert entry.get("description") == "Does important things"
+
+    @pytest.mark.asyncio
+    async def test_get_graph_with_dict_format_entry(self) -> None:
+        """get_graph works correctly when the graph was registered via dict format."""
+        service = LangGraphService()
+        service._graph_registry = {
+            "dict_graph": {
+                "file_path": "./graphs/dict.py",
+                "export_name": "agent",
+                "description": "A test agent",
+            }
+        }
+
+        mock_graph = DummyStateGraph()
+        mock_compiled = Mock()
+        mock_compiled.copy = Mock(return_value=mock_compiled)
+        mock_graph.compile = Mock(return_value=mock_compiled)
+
+        with (
+            patch.object(service, "_load_graph_from_file", return_value=mock_graph),
+            patch("aegra_api.core.database.db_manager") as mock_db_manager,
+        ):
+            mock_db_manager.get_checkpointer = Mock(return_value="checkpointer")
+            mock_db_manager.get_store = Mock(return_value="store")
+
+            async with service.get_graph("dict_graph") as graph:
+                assert graph == mock_compiled
+                mock_graph.compile.assert_called_once()
+                mock_compiled.copy.assert_called_once()
+
+
 class TestLangGraphServiceDatabase:
     """Test LangGraphService database integration"""
 

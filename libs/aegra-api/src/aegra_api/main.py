@@ -12,6 +12,7 @@ from fastapi.responses import JSONResponse
 from fastapi.routing import APIRoute, APIRouter
 
 from aegra_api import __version__
+from aegra_api.adapters.mcp_adapter import mcp_lifespan, mount_mcp, register_mcp_tools
 from aegra_api.api.assistants import router as assistants_router
 from aegra_api.api.runs import router as runs_router
 from aegra_api.api.stateless_runs import router as stateless_runs_router
@@ -99,6 +100,10 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     langgraph_service = get_langgraph_service()
     await langgraph_service.initialize()
 
+    # Register graph tools in MCP adapter (skip when MCP is disabled)
+    if not (load_http_config() or {}).get("disable_mcp", False):
+        await register_mcp_tools(langgraph_service)
+
     # Initialize Redis broker (if enabled)
     if settings.redis.REDIS_BROKER_ENABLED:
         try:
@@ -129,7 +134,8 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     if settings.redis.REDIS_BROKER_ENABLED:
         await lease_reaper.start()
 
-    yield
+    async with mcp_lifespan():
+        yield
 
     # Shutdown order: reaper → executor (drains jobs) → broker → Redis → DB
     if settings.redis.REDIS_BROKER_ENABLED:
@@ -197,7 +203,7 @@ def _apply_auth_to_routes(app: FastAPI, auth_deps: list[Any]) -> None:
         auth_deps: List of dependencies to apply (e.g., [Depends(require_auth)])
     """
 
-    def process_routes(routes: list) -> None:
+    def process_routes(routes: list[Any]) -> None:
         """Recursively process routes and nested routers."""
         for route in routes:
             if isinstance(route, APIRoute):
@@ -360,6 +366,10 @@ def create_app() -> FastAPI:
             application.exception_handler(exc_type)(handler)
 
         application.get("/")(root_handler)
+
+    # Mount MCP adapter unless disabled
+    if not (http_config or {}).get("disable_mcp", False):
+        mount_mcp(application)
 
     setup_prometheus_metrics(application)
 

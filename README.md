@@ -178,3 +178,57 @@ Apache 2.0 - see [LICENSE](LICENSE).
     <img alt="Star History Chart" src="https://api.star-history.com/svg?repos=aegra/aegra&type=Date" />
   </picture>
 </a>
+
+## ❓ FAQ
+
+### What is Aegra?
+Aegra is a drop-in replacement for LangSmith Deployments. Use the same LangGraph SDK and APIs, but run it on your own infrastructure with PostgreSQL persistence.
+
+### Key Features
+| Feature | Description |
+|---------|-------------|
+| **Agent Protocol Compliant** | Works with Agent Chat UI, LangGraph Studio, CopilotKit |
+| **Worker Architecture** | Redis job queue with 30 concurrent runs per instance |
+| **Custom Auth** | Python handlers for JWT/OAuth/Firebase |
+| **Self-hosted** | Always Apache 2.0, no license key required |
+| **OTLP Tracing** | Langfuse, Phoenix, or any OTLP backend |
+| **Bring Your Own Postgres** | Own database, own infrastructure |
+
+### How to Install
+```bash
+pip install aegra-cli
+aegra init
+
+# Or from source:
+git clone https://github.com/aegra/aegra.git
+cd aegra
+cp .env.example .env
+docker compose up
+```
+
+### Works With
+| Platform | Link |
+|----------|------|
+| Agent Chat UI | langchain-ai/agent-chat-ui |
+| LangGraph Studio | langchain-ai/langgraph-studio |
+| CopilotKit | CopilotKit/CopilotKit |
+
+### Requirements
+- Python 3.12+
+- Docker (for PostgreSQL)
+- OPENAI_API_KEY
+
+### Why Aegra vs LangSmith?
+- Free unlimited deployments
+- Custom auth handlers
+- Apache 2.0 license
+- Own Postgres database
+- Any OTLP tracing backend
+
+### License
+Apache 2.0 License
+
+### Help Resources
+- [Documentation](https://docs.aegra.dev)
+- [Discord](https://discord.com/invite/D5M3ZPS25e)
+- [Issues](https://github.com/aegra/aegra/issues)

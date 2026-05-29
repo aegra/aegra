@@ -121,11 +121,13 @@ async def create_cron_for_thread(
     immediately and returns the ``Run`` object. When ``enabled=False`` is
     passed the first run is suppressed and the persisted cron is returned.
     """
-    # Ownership gate at entry: binding a cron onto another tenant's thread
-    # would execute every future firing against their thread. The threads.read
-    # dispatch alone defaults to allow when no handler is registered.
+    # Ownership gate at entry: binding a cron onto a thread the caller doesn't
+    # own would run every future firing against it. Unlike create_run (which
+    # auto-creates a missing thread it then owns), a thread-bound cron names an
+    # existing thread, so a missing row is also a 404 — otherwise _prepare_run
+    # would silently create a thread the user never intended to bind to.
     existing_thread = await session.scalar(select(ThreadORM).where(ThreadORM.thread_id == thread_id))
-    if existing_thread and existing_thread.user_id != user.identity:
+    if existing_thread is None or existing_thread.user_id != user.identity:
         raise HTTPException(404, f"Thread '{thread_id}' not found")
 
     await _authorize_cron_create(user, request, thread_id=thread_id)

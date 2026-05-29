@@ -66,11 +66,14 @@ def client(mock_cron_service: AsyncMock) -> Iterator[TestClient]:
     app.dependency_overrides[get_cron_service] = lambda: mock_cron_service
 
     # Override get_session so create endpoints don't require a real DB. scalar
-    # returns None so the thread-ownership lookup in create_cron_for_thread
-    # treats the thread as absent (no cross-tenant block in the happy path).
+    # returns a thread owned by the test user so create_cron_for_thread's
+    # ownership gate passes in the happy path.
+    owned_thread = Mock()
+    owned_thread.user_id = "test-user"
+
     async def _mock_session() -> AsyncIterator[AsyncMock]:
         sess = AsyncMock()
-        sess.scalar.return_value = None
+        sess.scalar.return_value = owned_thread
         yield sess
 
     app.dependency_overrides[get_session] = _mock_session
@@ -399,6 +402,37 @@ class TestCreateCronForThreadOwnership:
             test_client = make_client(app)
             resp = test_client.post(
                 "/threads/victim-thread/runs/crons",
+                json={"assistant_id": "asst-001", "schedule": "*/5 * * * *"},
+            )
+
+        assert resp.status_code == 404
+        mock_cron_service.create_cron.assert_not_called()
+
+    def test_returns_404_when_thread_missing(self, mock_cron_service: AsyncMock) -> None:
+        # A thread-bound cron names an existing thread; a missing row must 404 at
+        # entry instead of letting _prepare_run silently create a ghost thread.
+        app = create_test_app(include_runs=False, include_threads=False)
+
+        from aegra_api.api import crons as crons_module
+        from aegra_api.core.orm import get_session
+
+        app.include_router(crons_module.router)
+        app.dependency_overrides[get_cron_service] = lambda: mock_cron_service
+
+        async def _mock_session() -> AsyncIterator[AsyncMock]:
+            sess = AsyncMock()
+            sess.scalar.return_value = None
+            yield sess
+
+        app.dependency_overrides[get_session] = _mock_session
+
+        with (
+            patch("aegra_api.api.crons.handle_event", new_callable=AsyncMock),
+            patch("aegra_api.api.crons._trigger_first_run", new_callable=AsyncMock),
+        ):
+            test_client = make_client(app)
+            resp = test_client.post(
+                "/threads/ghost-thread/runs/crons",
                 json={"assistant_id": "asst-001", "schedule": "*/5 * * * *"},
             )
 

@@ -248,11 +248,14 @@ class TestWebhookCredentialMasking:
         assert resp.payload["webhook"] == "https://hooks.example.com/x"
 
     def test_empty_payload_returns_empty_dict(self) -> None:
-        from aegra_api.services.cron_service import _cron_to_response
-
-        cron = _make_cron_orm(payload=None)
         from datetime import UTC, datetime
 
+        from aegra_api.services.cron_service import _cron_to_response
+
+        # _make_cron_orm normalizes payload=None to {}, so set it explicitly to
+        # exercise the real None branch in _cron_to_response.
+        cron = _make_cron_orm()
+        cron.payload = None
         cron.created_at = cron.updated_at = datetime.now(UTC)
         resp = _cron_to_response(cron)
         assert resp.payload == {}

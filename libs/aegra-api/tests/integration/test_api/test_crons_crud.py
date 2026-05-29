@@ -370,9 +370,7 @@ class TestCreateCronExtended:
 class TestCreateCronForThreadOwnership:
     """create_cron_for_thread must 404 when the thread belongs to another tenant."""
 
-    def test_returns_404_when_thread_owned_by_other_user(
-        self, mock_cron_service: AsyncMock
-    ) -> None:
+    def test_returns_404_when_thread_owned_by_other_user(self, mock_cron_service: AsyncMock) -> None:
         # Arrange: a thread row exists but is owned by a different identity than
         # the authenticated test-user. The ownership gate must 404 before any
         # cron is created.

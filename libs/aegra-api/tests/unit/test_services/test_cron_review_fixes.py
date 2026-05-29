@@ -222,6 +222,7 @@ class TestWebhookCredentialMasking:
 
         cron = _make_cron_orm(payload={"webhook": "https://user:secret@hooks.example.com/x"})
         from datetime import UTC, datetime
+
         cron.created_at = cron.updated_at = datetime.now(UTC)
         resp = _cron_to_response(cron)
         assert resp.payload["webhook"] == "https://hooks.example.com/x"
@@ -231,6 +232,7 @@ class TestWebhookCredentialMasking:
 
         cron = _make_cron_orm(payload={"webhook": "https://u:p@host.example:8443/a/b?q=1"})
         from datetime import UTC, datetime
+
         cron.created_at = cron.updated_at = datetime.now(UTC)
         resp = _cron_to_response(cron)
         assert resp.payload["webhook"] == "https://host.example:8443/a/b?q=1"
@@ -240,6 +242,7 @@ class TestWebhookCredentialMasking:
 
         cron = _make_cron_orm(payload={"webhook": "https://hooks.example.com/x"})
         from datetime import UTC, datetime
+
         cron.created_at = cron.updated_at = datetime.now(UTC)
         resp = _cron_to_response(cron)
         assert resp.payload["webhook"] == "https://hooks.example.com/x"
@@ -249,6 +252,7 @@ class TestWebhookCredentialMasking:
 
         cron = _make_cron_orm(payload=None)
         from datetime import UTC, datetime
+
         cron.created_at = cron.updated_at = datetime.now(UTC)
         resp = _cron_to_response(cron)
         assert resp.payload == {}

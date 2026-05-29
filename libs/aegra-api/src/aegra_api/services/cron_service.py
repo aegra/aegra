@@ -346,11 +346,7 @@ class CronService:
         needs_recompute = (
             request.schedule is not None
             or request.timezone is not None
-            or (
-                request.enabled is True
-                and cron.next_run_date is not None
-                and cron.next_run_date <= datetime.now(UTC)
-            )
+            or (request.enabled is True and cron.next_run_date is not None and cron.next_run_date <= datetime.now(UTC))
         )
         if needs_recompute:
             schedule = request.schedule if request.schedule is not None else cron.schedule

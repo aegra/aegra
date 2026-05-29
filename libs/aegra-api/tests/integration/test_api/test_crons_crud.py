@@ -3,11 +3,13 @@
 Uses the same test-client + mocked-service pattern as test_assistants_crud.py.
 """
 
+from collections.abc import AsyncIterator, Iterator
 from typing import Any
 from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
 from fastapi import HTTPException
+from fastapi.testclient import TestClient
 
 from aegra_api.models.crons import CronResponse
 from aegra_api.services.cron_service import get_cron_service
@@ -53,7 +55,7 @@ def mock_cron_service() -> AsyncMock:
 
 
 @pytest.fixture
-def client(mock_cron_service: AsyncMock):
+def client(mock_cron_service: AsyncMock) -> Iterator[TestClient]:
     """TestClient with the crons router mounted and service mocked."""
     app = create_test_app(include_runs=False, include_threads=False)
 
@@ -63,9 +65,13 @@ def client(mock_cron_service: AsyncMock):
     app.include_router(crons_module.router)
     app.dependency_overrides[get_cron_service] = lambda: mock_cron_service
 
-    # Override get_session so create endpoints don't require a real DB
-    async def _mock_session():
-        yield AsyncMock()
+    # Override get_session so create endpoints don't require a real DB. scalar
+    # returns None so the thread-ownership lookup in create_cron_for_thread
+    # treats the thread as absent (no cross-tenant block in the happy path).
+    async def _mock_session() -> AsyncIterator[AsyncMock]:
+        sess = AsyncMock()
+        sess.scalar.return_value = None
+        yield sess
 
     app.dependency_overrides[get_session] = _mock_session
 
@@ -361,10 +367,51 @@ class TestCreateCronExtended:
 # ---------------------------------------------------------------------------
 
 
+class TestCreateCronForThreadOwnership:
+    """create_cron_for_thread must 404 when the thread belongs to another tenant."""
+
+    def test_returns_404_when_thread_owned_by_other_user(
+        self, mock_cron_service: AsyncMock
+    ) -> None:
+        # Arrange: a thread row exists but is owned by a different identity than
+        # the authenticated test-user. The ownership gate must 404 before any
+        # cron is created.
+        app = create_test_app(include_runs=False, include_threads=False)
+
+        from aegra_api.api import crons as crons_module
+        from aegra_api.core.orm import get_session
+
+        app.include_router(crons_module.router)
+        app.dependency_overrides[get_cron_service] = lambda: mock_cron_service
+
+        foreign_thread = Mock()
+        foreign_thread.user_id = "someone-else"
+
+        async def _mock_session() -> AsyncIterator[AsyncMock]:
+            sess = AsyncMock()
+            sess.scalar.return_value = foreign_thread
+            yield sess
+
+        app.dependency_overrides[get_session] = _mock_session
+
+        with (
+            patch("aegra_api.api.crons.handle_event", new_callable=AsyncMock),
+            patch("aegra_api.api.crons._trigger_first_run", new_callable=AsyncMock),
+        ):
+            test_client = make_client(app)
+            resp = test_client.post(
+                "/threads/victim-thread/runs/crons",
+                json={"assistant_id": "asst-001", "schedule": "*/5 * * * *"},
+            )
+
+        assert resp.status_code == 404
+        mock_cron_service.create_cron.assert_not_called()
+
+
 class TestCreateCronForThreadExtended:
     """Extended tests for POST /threads/{thread_id}/runs/crons."""
 
-    def test_with_metadata(self, client, mock_cron_service: AsyncMock) -> None:
+    def test_with_metadata(self, client: TestClient, mock_cron_service: AsyncMock) -> None:
         mock_cron_service.create_cron.return_value = AsyncMock()
 
         resp = client.post(

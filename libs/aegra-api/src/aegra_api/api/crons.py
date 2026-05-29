@@ -13,12 +13,14 @@ Implements the six endpoints consumed by the LangGraph SDK ``CronsClient``:
 from uuid import uuid4
 
 import structlog
-from fastapi import APIRouter, Depends, Response
+from fastapi import APIRouter, Depends, HTTPException, Response
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from aegra_api.core.auth_deps import auth_dependency, get_current_user
 from aegra_api.core.auth_handlers import build_auth_context, handle_event
 from aegra_api.core.orm import Cron as CronORM
+from aegra_api.core.orm import Thread as ThreadORM
 from aegra_api.core.orm import get_session
 from aegra_api.models import Run, User
 from aegra_api.models.crons import (
@@ -119,6 +121,13 @@ async def create_cron_for_thread(
     immediately and returns the ``Run`` object. When ``enabled=False`` is
     passed the first run is suppressed and the persisted cron is returned.
     """
+    # Ownership gate at entry: binding a cron onto another tenant's thread
+    # would execute every future firing against their thread. The threads.read
+    # dispatch alone defaults to allow when no handler is registered.
+    existing_thread = await session.scalar(select(ThreadORM).where(ThreadORM.thread_id == thread_id))
+    if existing_thread and existing_thread.user_id != user.identity:
+        raise HTTPException(404, f"Thread '{thread_id}' not found")
+
     await _authorize_cron_create(user, request, thread_id=thread_id)
     return await _create_cron_atomic(request, user, service, session, thread_id=thread_id)
 

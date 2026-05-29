@@ -6,6 +6,7 @@ to the existing run preparation pipeline.
 
 from datetime import UTC, datetime, timedelta
 from typing import Any, cast
+from urllib.parse import urlparse, urlunparse
 from uuid import uuid4
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -122,18 +123,48 @@ def _compute_next_run(
     return result.astimezone(UTC)
 
 
+def _mask_webhook_credentials(url: str) -> str:
+    """Strip userinfo from a webhook URL before surfacing it back to clients.
+
+    Webhooks like ``https://user:token@host/path`` leak the credential on
+    every read of the cron. We retain the host/path so callers can still
+    audit destination, but the secret never round-trips.
+    """
+    try:
+        parsed = urlparse(url)
+    except ValueError:
+        return url
+    if not parsed.hostname:
+        return url
+    netloc = parsed.hostname
+    if parsed.port is not None:
+        netloc = f"{netloc}:{parsed.port}"
+    return urlunparse(parsed._replace(netloc=netloc))
+
+
+def _redact_payload(payload: dict[str, Any] | None) -> dict[str, Any]:
+    """Return a copy of *payload* with webhook credentials masked."""
+    if not payload:
+        return {}
+    masked = dict(payload)
+    webhook = masked.get("webhook")
+    if isinstance(webhook, str) and webhook:
+        masked["webhook"] = _mask_webhook_credentials(webhook)
+    return masked
+
+
 def _cron_to_response(row: CronORM) -> CronResponse:
     """Convert ORM row to Pydantic response, mapping ``metadata_dict`` → ``metadata``."""
     return CronResponse(
         cron_id=str(row.cron_id),
         assistant_id=str(row.assistant_id),
         thread_id=row.thread_id,
-        on_run_completed=cast("OnRunCompleted | None", row.on_run_completed),
+        on_run_completed=cast(OnRunCompleted | None, row.on_run_completed),
         end_time=row.end_time,
         schedule=row.schedule,
         created_at=row.created_at,
         updated_at=row.updated_at,
-        payload=row.payload or {},
+        payload=_redact_payload(row.payload),
         user_id=row.user_id,
         next_run_date=row.next_run_date,
         metadata=row.metadata_dict or {},
@@ -309,7 +340,19 @@ class CronService:
             existing_payload.update(new_payload)
             values["payload"] = existing_payload
 
-        if request.schedule is not None or request.timezone is not None:
+        # Recompute next_run when schedule/timezone changes OR when re-enabling
+        # a cron whose stored next_run_date is already in the past — otherwise
+        # the scheduler fires immediately on the next tick.
+        needs_recompute = (
+            request.schedule is not None
+            or request.timezone is not None
+            or (
+                request.enabled is True
+                and cron.next_run_date is not None
+                and cron.next_run_date <= datetime.now(UTC)
+            )
+        )
+        if needs_recompute:
             schedule = request.schedule if request.schedule is not None else cron.schedule
             timezone = existing_payload.get("timezone")
             values["next_run_date"] = _compute_next_run(schedule, timezone=timezone)

@@ -140,11 +140,10 @@ class CronSearchRequest(BaseModel):
     assistant_id: str | None = None
     thread_id: str | None = None
     enabled: bool | None = None
-    limit: int = 10
-    offset: int = 0
+    limit: int = Field(10, ge=1, le=1000)
+    offset: int = Field(0, ge=0)
     sort_by: str | None = None
     sort_order: str | None = None
-    select: list[str] | None = None
 
 
 class CronCountRequest(BaseModel):

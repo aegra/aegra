@@ -207,3 +207,144 @@ class TestAdvanceClearsClaim:
         compiled = str(stmt.compile(compile_kwargs={"literal_binds": False}))
         assert "claimed_until" in compiled
         assert "next_run_date" in compiled
+
+
+# ---------------------------------------------------------------------------
+# Webhook credential masking in CronResponse
+# ---------------------------------------------------------------------------
+
+
+class TestWebhookCredentialMasking:
+    """Webhook userinfo (https://user:tok@host/) must never round-trip in payload."""
+
+    def test_strips_userinfo_from_webhook(self) -> None:
+        from aegra_api.services.cron_service import _cron_to_response
+
+        cron = _make_cron_orm(payload={"webhook": "https://user:secret@hooks.example.com/x"})
+        from datetime import UTC, datetime
+        cron.created_at = cron.updated_at = datetime.now(UTC)
+        resp = _cron_to_response(cron)
+        assert resp.payload["webhook"] == "https://hooks.example.com/x"
+
+    def test_preserves_port_and_path(self) -> None:
+        from aegra_api.services.cron_service import _cron_to_response
+
+        cron = _make_cron_orm(payload={"webhook": "https://u:p@host.example:8443/a/b?q=1"})
+        from datetime import UTC, datetime
+        cron.created_at = cron.updated_at = datetime.now(UTC)
+        resp = _cron_to_response(cron)
+        assert resp.payload["webhook"] == "https://host.example:8443/a/b?q=1"
+
+    def test_webhook_without_credentials_unchanged(self) -> None:
+        from aegra_api.services.cron_service import _cron_to_response
+
+        cron = _make_cron_orm(payload={"webhook": "https://hooks.example.com/x"})
+        from datetime import UTC, datetime
+        cron.created_at = cron.updated_at = datetime.now(UTC)
+        resp = _cron_to_response(cron)
+        assert resp.payload["webhook"] == "https://hooks.example.com/x"
+
+    def test_empty_payload_returns_empty_dict(self) -> None:
+        from aegra_api.services.cron_service import _cron_to_response
+
+        cron = _make_cron_orm(payload=None)
+        from datetime import UTC, datetime
+        cron.created_at = cron.updated_at = datetime.now(UTC)
+        resp = _cron_to_response(cron)
+        assert resp.payload == {}
+
+
+# ---------------------------------------------------------------------------
+# Re-enabling an expired cron must recompute next_run_date
+# ---------------------------------------------------------------------------
+
+
+class TestReenableRecomputesNextRun:
+    """PATCH {enabled: true} on a cron with stale next_run_date must not fire on next tick."""
+
+    @pytest.mark.asyncio
+    async def test_recomputes_when_reenabling_expired_cron(
+        self,
+        cron_service: CronService,
+        mock_session: AsyncMock,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from datetime import UTC, datetime, timedelta
+
+        from aegra_api.services import cron_service as _cs
+
+        cron = _make_cron_orm()
+        cron.enabled = False
+        cron.next_run_date = datetime.now(UTC) - timedelta(days=7)
+        cron.created_at = cron.updated_at = datetime.now(UTC)
+        mock_session.scalar.return_value = cron
+        mock_session.execute.return_value = Mock(rowcount=1)
+
+        sentinel = datetime.now(UTC) + timedelta(hours=1)
+        monkeypatch.setattr(_cs, "_compute_next_run", lambda *a, **kw: sentinel)
+
+        await cron_service.update_cron("cron-x", CronUpdate(enabled=True), "tenant-A")
+
+        # Find the UPDATE call and confirm next_run_date is in the values.
+        update_stmt = mock_session.execute.call_args[0][0]
+        compiled_params = update_stmt.compile().params
+        assert "next_run_date" in compiled_params
+        assert compiled_params["next_run_date"] == sentinel
+
+    @pytest.mark.asyncio
+    async def test_no_recompute_when_reenabling_with_future_next_run(
+        self,
+        cron_service: CronService,
+        mock_session: AsyncMock,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from datetime import UTC, datetime, timedelta
+
+        from aegra_api.services import cron_service as _cs
+
+        cron = _make_cron_orm()
+        cron.enabled = False
+        cron.next_run_date = datetime.now(UTC) + timedelta(hours=1)
+        cron.created_at = cron.updated_at = datetime.now(UTC)
+        mock_session.scalar.return_value = cron
+        mock_session.execute.return_value = Mock(rowcount=1)
+
+        called = {"n": 0}
+
+        def _track(*_a: Any, **_kw: Any) -> Any:
+            called["n"] += 1
+            return datetime.now(UTC)
+
+        monkeypatch.setattr(_cs, "_compute_next_run", _track)
+
+        await cron_service.update_cron("cron-x", CronUpdate(enabled=True), "tenant-A")
+        assert called["n"] == 0
+
+    @pytest.mark.asyncio
+    async def test_no_recompute_when_disabling(
+        self,
+        cron_service: CronService,
+        mock_session: AsyncMock,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from datetime import UTC, datetime, timedelta
+
+        from aegra_api.services import cron_service as _cs
+
+        cron = _make_cron_orm()
+        cron.enabled = True
+        cron.next_run_date = datetime.now(UTC) - timedelta(days=1)
+        cron.created_at = cron.updated_at = datetime.now(UTC)
+        mock_session.scalar.return_value = cron
+        mock_session.execute.return_value = Mock(rowcount=1)
+
+        called = {"n": 0}
+
+        def _track(*_a: Any, **_kw: Any) -> Any:
+            called["n"] += 1
+            return datetime.now(UTC)
+
+        monkeypatch.setattr(_cs, "_compute_next_run", _track)
+
+        await cron_service.update_cron("cron-x", CronUpdate(enabled=False), "tenant-A")
+        assert called["n"] == 0

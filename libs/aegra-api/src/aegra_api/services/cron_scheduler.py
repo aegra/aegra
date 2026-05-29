@@ -62,6 +62,8 @@ def _build_run_create(cron: CronORM) -> RunCreate:
         stream_subgraphs=payload.get("stream_subgraphs"),
         stream_mode=payload.get("stream_mode"),
         multitask_strategy=payload.get("multitask_strategy"),
+        # Cron metadata_dict is stored on the cron record for search/filter, not
+        # forwarded onto fired runs. Re-wire here if run-level tagging is needed.
         metadata=None,
     )
 

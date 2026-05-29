@@ -1,7 +1,7 @@
 """add_crons_table
 
 Revision ID: baa02a5d050f
-Revises: a1b2c3d4e5f6
+Revises: f1a2b3c4d5e6
 Create Date: 2026-04-13 20:14:23.864628
 
 """
@@ -13,7 +13,7 @@ from alembic import op
 
 # revision identifiers, used by Alembic.
 revision = "baa02a5d050f"
-down_revision = "a1b2c3d4e5f6"
+down_revision = "f1a2b3c4d5e6"
 branch_labels = None
 depends_on = None
 

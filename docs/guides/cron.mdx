@@ -192,3 +192,9 @@ await client.crons.delete(cron_id="<cron_id>")
 ```
 
 Deletion is permanent. When a cron is bound to a thread and that thread is deleted, the cron is removed atomically as well (`ON DELETE CASCADE`).
+
+## Limitations
+
+- **Scheduled runs skip per-request auth handlers.** Creating a cron runs the full auth chain (`crons.create` → `assistants.read` → `threads.read`/`search`), but each *scheduled firing* executes as a background daemon under the cron owner's identity and does not re-dispatch `@auth.on(...)` handlers. Put per-run authorization logic in the graph itself if it must apply to scheduled runs.
+- **Cron metadata is not copied onto fired runs.** `metadata` set on a cron is stored on the cron record for search and filtering, but is not propagated to the runs the cron creates.
+- **Delivery is at-least-once.** Under a crash between firing and advancing the schedule, a run can fire more than once for a single occurrence. Make scheduled work idempotent.

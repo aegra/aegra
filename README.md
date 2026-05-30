@@ -88,6 +88,7 @@ async for chunk in client.runs.stream(
 |:--|:--|:--|
 | **Deploy agents** | Local dev only (Free), paid cloud (Plus) | Free, unlimited |
 | **Custom auth** | Not available (Free), available (Plus) | Python handlers (JWT/OAuth/Firebase) |
+| **Scheduled cron jobs** | Not available (Free), available (Plus) | Built-in, free |
 | **Self-hosted** | Enterprise only (license key required) | Always (Apache 2.0) |
 | **Own database** | Managed only (Free/Plus), bring your own (Enterprise) | Bring your own Postgres |
 | **Tracing** | LangSmith only | Any OTLP backend (Langfuse, Phoenix, etc.) |
@@ -131,6 +132,7 @@ aegra version           # Show version info
 | [Configuration](https://docs.aegra.dev/reference/configuration) | aegra.json format and all options |
 | [Authentication](https://docs.aegra.dev/guides/authentication) | JWT, OAuth, Firebase, or custom auth handlers |
 | [Worker Architecture](https://docs.aegra.dev/guides/worker-architecture) | Redis job queue, crash recovery, horizontal scaling |
+| [Scheduled cron jobs](https://docs.aegra.dev/guides/cron) | Trigger runs on a schedule with timezone support and multi-instance safe claim |
 | [Streaming](https://docs.aegra.dev/guides/streaming) | 8 SSE stream modes with reconnection |
 | [Store](https://docs.aegra.dev/guides/store) | Key-value and semantic search storage |
 | [Observability](https://docs.aegra.dev/guides/observability) | Fan-out tracing to Langfuse, Phoenix, or any OTLP backend |

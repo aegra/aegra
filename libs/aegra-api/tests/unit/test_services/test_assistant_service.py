@@ -1080,7 +1080,7 @@ class TestAuthDispatch:
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
         "method",
-        ["list_assistant_versions", "get_assistant_schemas", "get_assistant_graph", "get_assistant_subgraphs"],
+        ["get_assistant_schemas", "get_assistant_graph", "get_assistant_subgraphs"],
     )
     async def test_read_endpoints_dispatch_read(self, assistant_service: AssistantService, method: str) -> None:
         assistant_service.session.scalar.return_value = None  # 404 after dispatch
@@ -1094,6 +1094,17 @@ class TestAuthDispatch:
         assert value == {"assistant_id": "asst-1"}
 
     @pytest.mark.asyncio
+    async def test_versions_dispatches_search_not_read(self, assistant_service: AssistantService) -> None:
+        """Per the auth dispatch spec, versions fires `search` not `read`,
+        with the {assistant_id, metadata} value shape."""
+        assistant_service.session.scalar.return_value = None  # 404 after dispatch
+        with patch(_DISPATCH, new=AsyncMock(return_value=None)) as handle, pytest.raises(HTTPException):
+            await assistant_service.list_assistant_versions("asst-1")
+        ctx, value = handle.await_args.args
+        assert (ctx.resource, ctx.action) == ("assistants", "search")
+        assert value == {"assistant_id": "asst-1", "metadata": None}
+
+    @pytest.mark.asyncio
     async def test_rejection_propagates_before_db(self, assistant_service: AssistantService) -> None:
         deny = AsyncMock(side_effect=HTTPException(status_code=403, detail="forbidden"))
         with patch(_DISPATCH, new=deny), pytest.raises(HTTPException) as exc:
@@ -1102,11 +1113,19 @@ class TestAuthDispatch:
         assistant_service.session.scalar.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_search_merges_flat_handler_filter(self, assistant_service: AssistantService) -> None:
+    async def test_search_applies_handler_filter_as_where_clause(self, assistant_service: AssistantService) -> None:
+        """Handler filters are a JSONB WHERE clause, not a metadata mutation.
+        The user's request.metadata is left untouched; the auth filter ANDs in."""
+        from sqlalchemy.dialects import postgresql
+
         request = Mock(name=None, description=None, graph_id=None, metadata={"env": "prod"}, offset=0, limit=20)
         result = Mock()
         result.all.return_value = []
         assistant_service.session.scalars.return_value = result
         with patch(_DISPATCH, new=AsyncMock(return_value={"owner": "user-123"})):
             await assistant_service.search_assistants(request)
-        assert request.metadata == {"env": "prod", "owner": "user-123"}
+
+        assert request.metadata == {"env": "prod"}  # not mutated by the handler filter
+        stmt = assistant_service.session.scalars.call_args.args[0]
+        compiled = stmt.compile(dialect=postgresql.dialect())
+        assert {"owner": "user-123"} in compiled.params.values()

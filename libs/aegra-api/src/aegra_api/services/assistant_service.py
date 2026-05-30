@@ -26,6 +26,7 @@ from sqlalchemy import func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from aegra_api.core.auth_deps import get_current_user
+from aegra_api.core.auth_filters import build_metadata_filter
 from aegra_api.core.orm import Assistant as AssistantORM
 from aegra_api.core.orm import AssistantVersion as AssistantVersionORM
 from aegra_api.core.orm import get_session
@@ -130,22 +131,19 @@ def _escape_like(value: str) -> str:
     return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
 
 
-def _merged_metadata(
+def _injected_metadata(
     base: dict[str, Any] | None,
-    filters: dict[str, Any] | None,
     value: dict[str, Any],
 ) -> dict[str, Any] | None:
-    """Fold auth-handler output into a metadata containment filter.
+    """Read back metadata a create/update handler injected into ``value``.
 
-    A handler may return ``{"metadata": {...}}`` plus flat scope constraints
-    (e.g. ``{"owner": "u1"}``), or mutate ``value["metadata"]`` in place. All
-    three are merged onto ``base`` as metadata constraints, matching the
-    LangGraph SDK auth contract.
+    On create/update, handlers inject by mutating ``value["metadata"]`` in place
+    (e.g. ``value["metadata"]["created_by"] = ctx.user.identity``) and returning
+    True — see examples/jwt_mock_auth_example.py. Any injected keys are folded
+    onto the request's own metadata. The handler's *return* dict is a query
+    filter, not an insert, so it has no effect here: create writes the request
+    metadata into the new row, not the auth filter.
     """
-    if filters:
-        nested = filters["metadata"] if isinstance(filters.get("metadata"), dict) else {}
-        flat = {k: v for k, v in filters.items() if k != "metadata"}
-        return {**(base or {}), **nested, **flat}
     value_meta = value.get("metadata")
     if isinstance(value_meta, dict) and value_meta:
         return {**(base or {}), **value_meta}
@@ -164,8 +162,8 @@ class AssistantService(Authenticated):
     async def create_assistant(self, request: AssistantCreate) -> Assistant:
         """Create a new assistant"""
         value = request.model_dump()
-        filters = await self._dispatch("create", value)
-        request.metadata = _merged_metadata(request.metadata, filters, value)
+        await self._dispatch("create", value)
+        request.metadata = _injected_metadata(request.metadata, value)
 
         available_graphs = self.langgraph_service.list_graphs()
 
@@ -264,13 +262,13 @@ class AssistantService(Authenticated):
         """
         value: dict[str, Any] = {}
         filters = await self._dispatch("search", value)
-        metadata = _merged_metadata(None, filters, value)
 
         stmt = select(AssistantORM).where(
             or_(AssistantORM.user_id == self.user.identity, AssistantORM.user_id == "system")
         )
-        if metadata:
-            stmt = stmt.where(AssistantORM.metadata_dict.op("@>")(metadata))
+        auth_filter = build_metadata_filter(AssistantORM.metadata_dict, filters)
+        if auth_filter is not None:
+            stmt = stmt.where(auth_filter)
         result = await self.session.scalars(stmt)
         return [to_pydantic(a) for a in result.all()]
 
@@ -284,7 +282,6 @@ class AssistantService(Authenticated):
         """Search assistants with filters"""
         value = request.model_dump()
         filters = await self._dispatch("search", value)
-        request.metadata = _merged_metadata(request.metadata, filters, value)
 
         stmt = select(AssistantORM).where(
             or_(AssistantORM.user_id == self.user.identity, AssistantORM.user_id == "system")
@@ -301,6 +298,10 @@ class AssistantService(Authenticated):
 
         if request.metadata:
             stmt = stmt.where(AssistantORM.metadata_dict.op("@>")(request.metadata))
+
+        auth_filter = build_metadata_filter(AssistantORM.metadata_dict, filters)
+        if auth_filter is not None:
+            stmt = stmt.where(auth_filter)
 
         column = sort_column if sort_column is not None else AssistantORM.created_at
         direction = column.asc() if sort_asc else column.desc()
@@ -319,7 +320,6 @@ class AssistantService(Authenticated):
         """Count assistants with filters"""
         value = request.model_dump()
         filters = await self._dispatch("search", value)
-        request.metadata = _merged_metadata(request.metadata, filters, value)
 
         # Include both user's assistants and system assistants (like search_assistants does)
         stmt = select(func.count()).where(
@@ -338,17 +338,24 @@ class AssistantService(Authenticated):
         if request.metadata:
             stmt = stmt.where(AssistantORM.metadata_dict.op("@>")(request.metadata))
 
+        auth_filter = build_metadata_filter(AssistantORM.metadata_dict, filters)
+        if auth_filter is not None:
+            stmt = stmt.where(auth_filter)
+
         total = await self.session.scalar(stmt)
         return total or 0
 
     async def get_assistant(self, assistant_id: str) -> Assistant:
         """Get assistant by ID"""
-        await self._dispatch("read", {"assistant_id": assistant_id})
+        filters = await self._dispatch("read", {"assistant_id": assistant_id})
 
         stmt = select(AssistantORM).where(
             AssistantORM.assistant_id == assistant_id,
             or_(AssistantORM.user_id == self.user.identity, AssistantORM.user_id == "system"),
         )
+        auth_filter = build_metadata_filter(AssistantORM.metadata_dict, filters)
+        if auth_filter is not None:
+            stmt = stmt.where(auth_filter)
         assistant = await self.session.scalar(stmt)
 
         if not assistant:
@@ -359,8 +366,8 @@ class AssistantService(Authenticated):
     async def update_assistant(self, assistant_id: str, request: AssistantUpdate) -> Assistant:
         """Update assistant by ID"""
         value = {**request.model_dump(), "assistant_id": assistant_id}
-        filters = await self._dispatch("update", value)
-        request.metadata = _merged_metadata(request.metadata, filters, value)
+        await self._dispatch("update", value)
+        request.metadata = _injected_metadata(request.metadata, value)
 
         metadata = request.metadata or {}
         config = request.config or {}
@@ -493,12 +500,17 @@ class AssistantService(Authenticated):
 
     async def list_assistant_versions(self, assistant_id: str) -> list[Assistant]:
         """List all versions of an assistant"""
-        await self._dispatch("read", {"assistant_id": assistant_id})
+        # Versions dispatches `search` (not `read`) per the auth dispatch spec,
+        # with the {assistant_id, metadata} value shape.
+        filters = await self._dispatch("search", {"assistant_id": assistant_id, "metadata": None})
 
         stmt = select(AssistantORM).where(
             AssistantORM.assistant_id == assistant_id,
             or_(AssistantORM.user_id == self.user.identity, AssistantORM.user_id == "system"),
         )
+        auth_filter = build_metadata_filter(AssistantORM.metadata_dict, filters)
+        if auth_filter is not None:
+            stmt = stmt.where(auth_filter)
         assistant = await self.session.scalar(stmt)
         if not assistant:
             raise HTTPException(404, f"Assistant '{assistant_id}' not found")

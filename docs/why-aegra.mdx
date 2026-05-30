@@ -32,6 +32,7 @@ These are reasonable trade-offs for prototyping. They become problems at product
 |:--|:--|:--|
 | **Deploy agents** | Local dev only (Free), paid cloud (Plus) | Free, unlimited |
 | **Custom auth** | Not available (Free), available (Plus) | Python handlers (JWT/OAuth/Firebase) |
+| **Scheduled cron jobs** | Not available (Free), available (Plus) | Built-in, free |
 | **Self-hosted** | Enterprise only (license key required) | Always (Apache 2.0) |
 | **Own database** | Managed only (Free/Plus), bring your own (Enterprise) | Bring your own Postgres |
 | **Tracing** | LangSmith only | Any OTLP backend (Langfuse, Phoenix, etc.) |
@@ -54,6 +55,9 @@ See the full breakdown on the [feature support](/feature-support) page.
   </Card>
   <Card title="Human-in-the-loop" icon="hand" href="/guides/human-in-the-loop">
     Approval gates and user intervention points.
+  </Card>
+  <Card title="Scheduled cron jobs" icon="clock" href="/guides/cron">
+    Trigger runs on a schedule with timezone support and multi-instance safe claim.
   </Card>
   <Card title="Authentication" icon="lock" href="/guides/authentication">
     JWT, OAuth, Firebase, or custom auth handlers.

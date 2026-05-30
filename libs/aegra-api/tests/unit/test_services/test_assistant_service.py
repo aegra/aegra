@@ -8,7 +8,7 @@ import uuid
 from collections.abc import AsyncGenerator
 from datetime import UTC, datetime
 from typing import Any
-from unittest.mock import AsyncMock, Mock
+from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
 from fastapi import HTTPException
@@ -38,7 +38,7 @@ def mock_langgraph_service() -> Mock:
 @pytest.fixture
 def assistant_service(mock_session: AsyncMock, mock_langgraph_service: Mock) -> AssistantService:
     """AssistantService instance with mocked dependencies"""
-    return AssistantService(mock_session, mock_langgraph_service)
+    return AssistantService(mock_session, User(identity="user-123"), mock_langgraph_service)
 
 
 @pytest.fixture
@@ -287,7 +287,7 @@ class TestAssistantServiceCreate:
 
         assistant_service.session.refresh = AsyncMock(side_effect=mock_refresh)
 
-        result = await assistant_service.create_assistant(sample_assistant_create, "user-123")
+        result = await assistant_service.create_assistant(sample_assistant_create)
 
         assert isinstance(result, Assistant)
         assistant_service.langgraph_service.list_graphs.assert_called_once()
@@ -303,7 +303,7 @@ class TestAssistantServiceCreate:
         assistant_service.langgraph_service.list_graphs.return_value = {"other-graph": {}}
 
         with pytest.raises(HTTPException) as exc_info:
-            await assistant_service.create_assistant(sample_assistant_create, "user-123")
+            await assistant_service.create_assistant(sample_assistant_create)
 
         assert exc_info.value.status_code == 400
         assert "Graph 'test-graph' not found" in str(exc_info.value.detail)
@@ -319,7 +319,7 @@ class TestAssistantServiceCreate:
         assistant_service.langgraph_service.get_graph_for_validation.side_effect = Exception("Graph load failed")
 
         with pytest.raises(HTTPException) as exc_info:
-            await assistant_service.create_assistant(sample_assistant_create, "user-123")
+            await assistant_service.create_assistant(sample_assistant_create)
 
         assert exc_info.value.status_code == 400
         assert "Failed to load graph" in str(exc_info.value.detail)
@@ -337,7 +337,7 @@ class TestAssistantServiceCreate:
         assistant_service.langgraph_service.get_graph_for_validation.return_value = Mock()
 
         with pytest.raises(HTTPException) as exc_info:
-            await assistant_service.create_assistant(request, "user-123")
+            await assistant_service.create_assistant(request)
 
         assert exc_info.value.status_code == 400
         assert "Cannot specify both configurable and context" in str(exc_info.value.detail)
@@ -373,7 +373,7 @@ class TestAssistantServiceCreate:
 
         assistant_service.session.refresh = AsyncMock(side_effect=mock_refresh)
 
-        result = await assistant_service.create_assistant(request, "user-123")
+        result = await assistant_service.create_assistant(request)
 
         # Verify context was set from config
         assert result.context == {"key": "value"}
@@ -409,7 +409,7 @@ class TestAssistantServiceCreate:
 
         assistant_service.session.refresh = AsyncMock(side_effect=mock_refresh)
 
-        result = await assistant_service.create_assistant(request, "user-123")
+        result = await assistant_service.create_assistant(request)
 
         # Verify config was set from context
         assert result.config == {"configurable": {"key": "value"}}
@@ -450,7 +450,7 @@ class TestAssistantServiceCreate:
         assistant_service.langgraph_service.get_graph_for_validation.return_value = Mock()
         assistant_service.session.scalar.return_value = existing_assistant
 
-        result = await assistant_service.create_assistant(request, "user-123")
+        result = await assistant_service.create_assistant(request)
 
         assert result.assistant_id == "existing-id"
         assert result.name == "Existing Assistant"
@@ -476,7 +476,7 @@ class TestAssistantServiceCreate:
         assistant_service.session.scalar.return_value = existing_assistant
 
         with pytest.raises(HTTPException) as exc_info:
-            await assistant_service.create_assistant(request, "user-123")
+            await assistant_service.create_assistant(request)
 
         assert exc_info.value.status_code == 409
         assert "already exists" in str(exc_info.value.detail)
@@ -514,7 +514,7 @@ class TestAssistantServiceGet:
 
         assistant_service.session.scalar.return_value = mock_assistant
 
-        result = await assistant_service.get_assistant("test-id", "user-123")
+        result = await assistant_service.get_assistant("test-id")
 
         assert isinstance(result, Assistant)
         assert result.assistant_id == "test-id"
@@ -526,7 +526,7 @@ class TestAssistantServiceGet:
         assistant_service.session.scalar.return_value = None
 
         with pytest.raises(HTTPException) as exc_info:
-            await assistant_service.get_assistant("nonexistent", "user-123")
+            await assistant_service.get_assistant("nonexistent")
 
         assert exc_info.value.status_code == 404
         assert "not found" in str(exc_info.value.detail)
@@ -560,7 +560,7 @@ class TestAssistantServiceGet:
 
         assistant_service.session.scalar.return_value = mock_assistant
 
-        result = await assistant_service.get_assistant("system-assistant", "user-123")
+        result = await assistant_service.get_assistant("system-assistant")
 
         assert result.assistant_id == "system-assistant"
         assert result.name == "System Assistant"
@@ -624,7 +624,7 @@ class TestAssistantServiceUpdate:
         assistant_service.session.execute = AsyncMock()
         assistant_service.session.commit = AsyncMock()
 
-        result = await assistant_service.update_assistant("test-id", sample_assistant_update, "user-123")
+        result = await assistant_service.update_assistant("test-id", sample_assistant_update)
 
         assert isinstance(result, Assistant)
         assert assistant_service.session.add.call_count == 1
@@ -650,7 +650,7 @@ class TestAssistantServiceUpdate:
         assistant_service.session.scalar.return_value = None
 
         with pytest.raises(HTTPException) as exc_info:
-            await assistant_service.update_assistant("nonexistent", sample_assistant_update, "user-123")
+            await assistant_service.update_assistant("nonexistent", sample_assistant_update)
 
         assert exc_info.value.status_code == 404
         assert "not found" in str(exc_info.value.detail)
@@ -664,7 +664,7 @@ class TestAssistantServiceUpdate:
         )
 
         with pytest.raises(HTTPException) as exc_info:
-            await assistant_service.update_assistant("test-id", request, "user-123")
+            await assistant_service.update_assistant("test-id", request)
 
         assert exc_info.value.status_code == 400
         assert "Cannot specify both configurable and context" in str(exc_info.value.detail)
@@ -684,7 +684,7 @@ class TestAssistantServiceDelete:
         assistant_service.session.delete = AsyncMock()
         assistant_service.session.commit = AsyncMock()
 
-        result = await assistant_service.delete_assistant("test-id", "user-123")
+        result = await assistant_service.delete_assistant("test-id")
 
         assert result == {"status": "deleted"}
         assistant_service.session.delete.assert_called_once_with(mock_assistant)
@@ -696,7 +696,7 @@ class TestAssistantServiceDelete:
         assistant_service.session.scalar.return_value = None
 
         with pytest.raises(HTTPException) as exc_info:
-            await assistant_service.delete_assistant("nonexistent", "user-123")
+            await assistant_service.delete_assistant("nonexistent")
 
         assert exc_info.value.status_code == 404
         assert "not found" in str(exc_info.value.detail)
@@ -739,7 +739,7 @@ class TestAssistantServiceVersionManagement:
         assistant_service.session.execute = AsyncMock()
         assistant_service.session.commit = AsyncMock()
 
-        result = await assistant_service.set_assistant_latest("test-id", 2, "user-123")
+        result = await assistant_service.set_assistant_latest("test-id", 2)
 
         assert isinstance(result, Assistant)
         assistant_service.session.execute.assert_called_once()
@@ -758,7 +758,7 @@ class TestAssistantServiceVersionManagement:
         assistant_service.session.scalar.return_value = None
 
         with pytest.raises(HTTPException) as exc_info:
-            await assistant_service.set_assistant_latest("nonexistent", 2, "user-123")
+            await assistant_service.set_assistant_latest("nonexistent", 2)
 
         assert exc_info.value.status_code == 404
         assert "not found" in str(exc_info.value.detail)
@@ -773,7 +773,7 @@ class TestAssistantServiceVersionManagement:
         assistant_service.session.scalar.side_effect = [mock_assistant, None]
 
         with pytest.raises(HTTPException) as exc_info:
-            await assistant_service.set_assistant_latest("test-id", 999, "user-123")
+            await assistant_service.set_assistant_latest("test-id", 999)
 
         assert exc_info.value.status_code == 404
         assert "Version '999' for Assistant 'test-id' not found" in str(exc_info.value.detail)
@@ -800,7 +800,7 @@ class TestAssistantServiceSearch:
 
         assistant_service.session.scalars.return_value = mock_result
 
-        result = await assistant_service.search_assistants(mock_request, "user-123")
+        result = await assistant_service.search_assistants(mock_request)
 
         assert isinstance(result, list)
         assistant_service.session.scalars.assert_called_once()
@@ -815,7 +815,7 @@ class TestAssistantServiceSearch:
 
         assistant_service.session.scalar.return_value = 5
 
-        result = await assistant_service.count_assistants(mock_request, "user-123")
+        result = await assistant_service.count_assistants(mock_request)
 
         assert result == 5
         assistant_service.session.scalar.assert_called_once()
@@ -826,7 +826,7 @@ class TestAssistantServiceSearch:
         mock_request = Mock()
         assistant_service.session.scalar.return_value = None
 
-        result = await assistant_service.count_assistants(mock_request, "user-123")
+        result = await assistant_service.count_assistants(mock_request)
 
         assert result == 0
 
@@ -860,7 +860,7 @@ class TestAssistantServiceSchemas:
         assistant_service.session.scalar.return_value = mock_assistant
         assistant_service.langgraph_service.get_graph_for_validation.return_value = mock_graph
 
-        result = await assistant_service.get_assistant_schemas("test-id", User(identity="user-123"))
+        result = await assistant_service.get_assistant_schemas("test-id")
 
         assert "graph_id" in result
         assert "input_schema" in result
@@ -873,7 +873,7 @@ class TestAssistantServiceSchemas:
         assistant_service.session.scalar.return_value = None
 
         with pytest.raises(HTTPException) as exc_info:
-            await assistant_service.get_assistant_schemas("nonexistent", User(identity="user-123"))
+            await assistant_service.get_assistant_schemas("nonexistent")
 
         assert exc_info.value.status_code == 404
         assert "not found" in str(exc_info.value.detail)
@@ -895,7 +895,7 @@ class TestAssistantServiceSchemas:
         assistant_service.langgraph_service.get_graph_for_validation.side_effect = Exception("Graph load failed")
 
         with pytest.raises(HTTPException) as exc_info:
-            await assistant_service.get_assistant_schemas("test-id", User(identity="user-123"))
+            await assistant_service.get_assistant_schemas("test-id")
 
         assert exc_info.value.status_code == 400
         assert "Failed to extract schemas" in str(exc_info.value.detail)
@@ -927,7 +927,7 @@ class TestAssistantServiceGraph:
         assistant_service.session.scalar.return_value = mock_assistant
         assistant_service.langgraph_service.get_graph_for_validation.return_value = mock_graph
 
-        result = await assistant_service.get_assistant_graph("test-id", False, User(identity="user-123"))
+        result = await assistant_service.get_assistant_graph("test-id", False)
 
         assert "nodes" in result
         # Verify id was removed from node data
@@ -954,7 +954,7 @@ class TestAssistantServiceGraph:
         assistant_service.langgraph_service.get_graph_for_validation.return_value = mock_graph
 
         with pytest.raises(HTTPException) as exc_info:
-            await assistant_service.get_assistant_graph("test-id", -1, User(identity="user-123"))
+            await assistant_service.get_assistant_graph("test-id", -1)
 
         assert exc_info.value.status_code == 422
         assert "Invalid xray value" in str(exc_info.value.detail)
@@ -980,7 +980,7 @@ class TestAssistantServiceGraph:
         assistant_service.langgraph_service.get_graph_for_validation.return_value = mock_graph
 
         with pytest.raises(HTTPException) as exc_info:
-            await assistant_service.get_assistant_graph("test-id", False, User(identity="user-123"))
+            await assistant_service.get_assistant_graph("test-id", False)
 
         assert exc_info.value.status_code == 422
         assert "does not support visualization" in str(exc_info.value.detail)
@@ -1021,9 +1021,7 @@ class TestAssistantServiceSubgraphs:
         assistant_service.session.scalar.return_value = mock_assistant
         assistant_service.langgraph_service.get_graph_for_validation.return_value = mock_graph
 
-        result = await assistant_service.get_assistant_subgraphs(
-            "test-id", "namespace1", True, User(identity="user-123")
-        )
+        result = await assistant_service.get_assistant_subgraphs("test-id", "namespace1", True)
 
         assert "subgraph1" in result
         assert "input_schema" in result["subgraph1"]
@@ -1049,7 +1047,66 @@ class TestAssistantServiceSubgraphs:
         assistant_service.langgraph_service.get_graph_for_validation.return_value = mock_graph
 
         with pytest.raises(HTTPException) as exc_info:
-            await assistant_service.get_assistant_subgraphs("test-id", "namespace1", True, User(identity="user-123"))
+            await assistant_service.get_assistant_subgraphs("test-id", "namespace1", True)
 
         assert exc_info.value.status_code == 422
         assert "does not support subgraphs" in str(exc_info.value.detail)
+
+
+_DISPATCH = "aegra_api.services._authenticated.handle_event"
+
+
+def _owned_assistant() -> Mock:
+    """A scalar() result that passes ownership + has a loadable graph_id."""
+    a = Mock()
+    a.graph_id = "test-graph"
+    return a
+
+
+class TestAuthDispatch:
+    """Auth dispatch now lives in the service. These pin the resource/action
+    fired per method, that a handler rejection 403s before any DB work, and that
+    handler-returned filters merge into the metadata predicate (#333 regression)."""
+
+    @pytest.mark.asyncio
+    async def test_set_latest_dispatches_update(self, assistant_service: AssistantService) -> None:
+        assistant_service.session.scalar.return_value = None  # 404 after dispatch
+        with patch(_DISPATCH, new=AsyncMock(return_value=None)) as handle, pytest.raises(HTTPException):
+            await assistant_service.set_assistant_latest("asst-1", 3)
+        ctx, value = handle.await_args.args
+        assert (ctx.resource, ctx.action) == ("assistants", "update")
+        assert value == {"assistant_id": "asst-1", "version": 3}
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "method",
+        ["list_assistant_versions", "get_assistant_schemas", "get_assistant_graph", "get_assistant_subgraphs"],
+    )
+    async def test_read_endpoints_dispatch_read(self, assistant_service: AssistantService, method: str) -> None:
+        assistant_service.session.scalar.return_value = None  # 404 after dispatch
+        args = ("asst-1", False) if method == "get_assistant_graph" else ("asst-1",)
+        if method == "get_assistant_subgraphs":
+            args = ("asst-1", None, False)
+        with patch(_DISPATCH, new=AsyncMock(return_value=None)) as handle, pytest.raises(HTTPException):
+            await getattr(assistant_service, method)(*args)
+        ctx, value = handle.await_args.args
+        assert (ctx.resource, ctx.action) == ("assistants", "read")
+        assert value == {"assistant_id": "asst-1"}
+
+    @pytest.mark.asyncio
+    async def test_rejection_propagates_before_db(self, assistant_service: AssistantService) -> None:
+        deny = AsyncMock(side_effect=HTTPException(status_code=403, detail="forbidden"))
+        with patch(_DISPATCH, new=deny), pytest.raises(HTTPException) as exc:
+            await assistant_service.delete_assistant("asst-1")
+        assert exc.value.status_code == 403
+        assistant_service.session.scalar.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_search_merges_flat_handler_filter(self, assistant_service: AssistantService) -> None:
+        request = Mock(name=None, description=None, graph_id=None, metadata={"env": "prod"}, offset=0, limit=20)
+        result = Mock()
+        result.all.return_value = []
+        assistant_service.session.scalars.return_value = result
+        with patch(_DISPATCH, new=AsyncMock(return_value={"owner": "user-123"})):
+            await assistant_service.search_assistants(request)
+        assert request.metadata == {"env": "prod", "owner": "user-123"}

@@ -25,11 +25,13 @@ from pydantic import TypeAdapter
 from sqlalchemy import func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from aegra_api.core.auth_deps import get_current_user
 from aegra_api.core.orm import Assistant as AssistantORM
 from aegra_api.core.orm import AssistantVersion as AssistantVersionORM
 from aegra_api.core.orm import get_session
 from aegra_api.models import Assistant, AssistantCreate, AssistantUpdate
 from aegra_api.models.auth import User
+from aegra_api.services._authenticated import Authenticated
 from aegra_api.services.langgraph_service import LangGraphService, get_langgraph_service
 
 
@@ -128,16 +130,43 @@ def _escape_like(value: str) -> str:
     return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
 
 
-class AssistantService:
+def _merged_metadata(
+    base: dict[str, Any] | None,
+    filters: dict[str, Any] | None,
+    value: dict[str, Any],
+) -> dict[str, Any] | None:
+    """Fold auth-handler output into a metadata containment filter.
+
+    A handler may return ``{"metadata": {...}}`` plus flat scope constraints
+    (e.g. ``{"owner": "u1"}``), or mutate ``value["metadata"]`` in place. All
+    three are merged onto ``base`` as metadata constraints, matching the
+    LangGraph SDK auth contract.
+    """
+    if filters:
+        nested = filters["metadata"] if isinstance(filters.get("metadata"), dict) else {}
+        flat = {k: v for k, v in filters.items() if k != "metadata"}
+        return {**(base or {}), **nested, **flat}
+    value_meta = value.get("metadata")
+    if isinstance(value_meta, dict) and value_meta:
+        return {**(base or {}), **value_meta}
+    return base
+
+
+class AssistantService(Authenticated):
     """Service for managing assistants"""
 
-    def __init__(self, session: AsyncSession, langgraph_service: LangGraphService):
-        self.session = session
+    resource = "assistants"
+
+    def __init__(self, session: AsyncSession, user: User, langgraph_service: LangGraphService):
+        super().__init__(session, user)
         self.langgraph_service = langgraph_service
 
-    async def create_assistant(self, request: AssistantCreate, user_identity: str) -> Assistant:
+    async def create_assistant(self, request: AssistantCreate) -> Assistant:
         """Create a new assistant"""
-        # Get LangGraph service to validate graph
+        value = request.model_dump()
+        filters = await self._dispatch("create", value)
+        request.metadata = _merged_metadata(request.metadata, filters, value)
+
         available_graphs = self.langgraph_service.list_graphs()
 
         # Use graph_id as the main identifier
@@ -178,7 +207,7 @@ class AssistantService:
 
         # Check if an assistant already exists for this user, graph and config pair
         existing_stmt = select(AssistantORM).where(
-            AssistantORM.user_id == user_identity,
+            AssistantORM.user_id == self.user.identity,
             or_(
                 (AssistantORM.graph_id == graph_id) & (AssistantORM.config == config),
                 AssistantORM.assistant_id == assistant_id,
@@ -200,7 +229,7 @@ class AssistantService:
             config=config,
             context=context,
             graph_id=graph_id,
-            user_id=user_identity,
+            user_id=self.user.identity,
             metadata_dict=request.metadata,
             version=1,
         )
@@ -226,19 +255,20 @@ class AssistantService:
 
         return to_pydantic(assistant_orm)
 
-    async def list_assistants(
-        self,
-        user_identity: str,
-        *,
-        metadata: dict[str, Any] | None = None,
-    ) -> list[Assistant]:
+    async def list_assistants(self) -> list[Assistant]:
         """List user's assistants and system assistants.
 
-        Optionally filtered by a metadata containment predicate. Unlike
-        ``search_assistants``, this method does not paginate — callers that
-        need pagination should use search.
+        Listing dispatches the ``search`` action. A handler may scope results
+        via a metadata containment filter. Unlike ``search_assistants``, this
+        method does not paginate.
         """
-        stmt = select(AssistantORM).where(or_(AssistantORM.user_id == user_identity, AssistantORM.user_id == "system"))
+        value: dict[str, Any] = {}
+        filters = await self._dispatch("search", value)
+        metadata = _merged_metadata(None, filters, value)
+
+        stmt = select(AssistantORM).where(
+            or_(AssistantORM.user_id == self.user.identity, AssistantORM.user_id == "system")
+        )
         if metadata:
             stmt = stmt.where(AssistantORM.metadata_dict.op("@>")(metadata))
         result = await self.session.scalars(stmt)
@@ -247,13 +277,18 @@ class AssistantService:
     async def search_assistants(
         self,
         request: Any,  # AssistantSearchRequest
-        user_identity: str,
         *,
         sort_column: Any | None = None,
         sort_asc: bool = False,
     ) -> list[Assistant]:
         """Search assistants with filters"""
-        stmt = select(AssistantORM).where(or_(AssistantORM.user_id == user_identity, AssistantORM.user_id == "system"))
+        value = request.model_dump()
+        filters = await self._dispatch("search", value)
+        request.metadata = _merged_metadata(request.metadata, filters, value)
+
+        stmt = select(AssistantORM).where(
+            or_(AssistantORM.user_id == self.user.identity, AssistantORM.user_id == "system")
+        )
 
         if request.name:
             stmt = stmt.where(AssistantORM.name.ilike(f"%{_escape_like(request.name)}%", escape="\\"))
@@ -280,14 +315,16 @@ class AssistantService:
         result = await self.session.scalars(stmt)
         return [to_pydantic(a) for a in result.all()]
 
-    async def count_assistants(
-        self,
-        request: Any,  # AssistantSearchRequest
-        user_identity: str,
-    ) -> int:
+    async def count_assistants(self, request: Any) -> int:
         """Count assistants with filters"""
+        value = request.model_dump()
+        filters = await self._dispatch("search", value)
+        request.metadata = _merged_metadata(request.metadata, filters, value)
+
         # Include both user's assistants and system assistants (like search_assistants does)
-        stmt = select(func.count()).where(or_(AssistantORM.user_id == user_identity, AssistantORM.user_id == "system"))
+        stmt = select(func.count()).where(
+            or_(AssistantORM.user_id == self.user.identity, AssistantORM.user_id == "system")
+        )
 
         if request.name:
             stmt = stmt.where(AssistantORM.name.ilike(f"%{_escape_like(request.name)}%", escape="\\"))
@@ -304,11 +341,13 @@ class AssistantService:
         total = await self.session.scalar(stmt)
         return total or 0
 
-    async def get_assistant(self, assistant_id: str, user_identity: str) -> Assistant:
+    async def get_assistant(self, assistant_id: str) -> Assistant:
         """Get assistant by ID"""
+        await self._dispatch("read", {"assistant_id": assistant_id})
+
         stmt = select(AssistantORM).where(
             AssistantORM.assistant_id == assistant_id,
-            or_(AssistantORM.user_id == user_identity, AssistantORM.user_id == "system"),
+            or_(AssistantORM.user_id == self.user.identity, AssistantORM.user_id == "system"),
         )
         assistant = await self.session.scalar(stmt)
 
@@ -317,8 +356,12 @@ class AssistantService:
 
         return to_pydantic(assistant)
 
-    async def update_assistant(self, assistant_id: str, request: AssistantUpdate, user_identity: str) -> Assistant:
+    async def update_assistant(self, assistant_id: str, request: AssistantUpdate) -> Assistant:
         """Update assistant by ID"""
+        value = {**request.model_dump(), "assistant_id": assistant_id}
+        filters = await self._dispatch("update", value)
+        request.metadata = _merged_metadata(request.metadata, filters, value)
+
         metadata = request.metadata or {}
         config = request.config or {}
         context = request.context or {}
@@ -337,7 +380,7 @@ class AssistantService:
 
         stmt = select(AssistantORM).where(
             AssistantORM.assistant_id == assistant_id,
-            AssistantORM.user_id == user_identity,
+            AssistantORM.user_id == self.user.identity,
         )
         assistant = await self.session.scalar(stmt)
         if not assistant:
@@ -370,7 +413,7 @@ class AssistantService:
             update(AssistantORM)
             .where(
                 AssistantORM.assistant_id == assistant_id,
-                AssistantORM.user_id == user_identity,
+                AssistantORM.user_id == self.user.identity,
             )
             .values(
                 name=new_version_details["name"],
@@ -388,11 +431,13 @@ class AssistantService:
         updated_assistant = await self.session.scalar(stmt)
         return to_pydantic(updated_assistant)
 
-    async def delete_assistant(self, assistant_id: str, user_identity: str) -> dict:
+    async def delete_assistant(self, assistant_id: str) -> dict:
         """Delete assistant by ID"""
+        await self._dispatch("delete", {"assistant_id": assistant_id})
+
         stmt = select(AssistantORM).where(
             AssistantORM.assistant_id == assistant_id,
-            AssistantORM.user_id == user_identity,
+            AssistantORM.user_id == self.user.identity,
         )
         assistant = await self.session.scalar(stmt)
 
@@ -404,11 +449,13 @@ class AssistantService:
 
         return {"status": "deleted"}
 
-    async def set_assistant_latest(self, assistant_id: str, version: int, user_identity: str) -> Assistant:
+    async def set_assistant_latest(self, assistant_id: str, version: int) -> Assistant:
         """Set the given version as the latest version of an assistant"""
+        await self._dispatch("update", {"assistant_id": assistant_id, "version": version})
+
         stmt = select(AssistantORM).where(
             AssistantORM.assistant_id == assistant_id,
-            AssistantORM.user_id == user_identity,
+            AssistantORM.user_id == self.user.identity,
         )
         assistant = await self.session.scalar(stmt)
         if not assistant:
@@ -426,7 +473,7 @@ class AssistantService:
             update(AssistantORM)
             .where(
                 AssistantORM.assistant_id == assistant_id,
-                AssistantORM.user_id == user_identity,
+                AssistantORM.user_id == self.user.identity,
             )
             .values(
                 name=assistant_version.name,
@@ -444,11 +491,13 @@ class AssistantService:
         updated_assistant = await self.session.scalar(stmt)
         return to_pydantic(updated_assistant)
 
-    async def list_assistant_versions(self, assistant_id: str, user_identity: str) -> list[Assistant]:
+    async def list_assistant_versions(self, assistant_id: str) -> list[Assistant]:
         """List all versions of an assistant"""
+        await self._dispatch("read", {"assistant_id": assistant_id})
+
         stmt = select(AssistantORM).where(
             AssistantORM.assistant_id == assistant_id,
-            or_(AssistantORM.user_id == user_identity, AssistantORM.user_id == "system"),
+            or_(AssistantORM.user_id == self.user.identity, AssistantORM.user_id == "system"),
         )
         assistant = await self.session.scalar(stmt)
         if not assistant:
@@ -474,7 +523,7 @@ class AssistantService:
                 config=v.config or {},
                 context=v.context or {},
                 graph_id=v.graph_id,
-                user_id=user_identity,
+                user_id=self.user.identity,
                 version=v.version,
                 created_at=v.created_at,
                 updated_at=v.created_at,
@@ -485,11 +534,13 @@ class AssistantService:
 
         return version_list
 
-    async def get_assistant_schemas(self, assistant_id: str, user: User) -> dict[str, Any]:
+    async def get_assistant_schemas(self, assistant_id: str) -> dict[str, Any]:
         """Get input, output, state, config and context schemas for an assistant"""
+        await self._dispatch("read", {"assistant_id": assistant_id})
+
         stmt = select(AssistantORM).where(
             AssistantORM.assistant_id == assistant_id,
-            or_(AssistantORM.user_id == user.identity, AssistantORM.user_id == "system"),
+            or_(AssistantORM.user_id == self.user.identity, AssistantORM.user_id == "system"),
         )
         assistant = await self.session.scalar(stmt)
 
@@ -501,7 +552,7 @@ class AssistantService:
             # not checkpointer/store for execution
             graph = await self.langgraph_service.get_graph_for_validation(
                 assistant.graph_id,
-                user=user,
+                user=self.user,
             )
             schemas = _extract_graph_schemas(graph)
 
@@ -510,11 +561,13 @@ class AssistantService:
         except Exception as e:
             raise HTTPException(400, f"Failed to extract schemas: {str(e)}") from e
 
-    async def get_assistant_graph(self, assistant_id: str, xray: bool | int, user: User) -> dict[str, Any]:
+    async def get_assistant_graph(self, assistant_id: str, xray: bool | int) -> dict[str, Any]:
         """Get the graph structure for visualization"""
+        await self._dispatch("read", {"assistant_id": assistant_id})
+
         stmt = select(AssistantORM).where(
             AssistantORM.assistant_id == assistant_id,
-            or_(AssistantORM.user_id == user.identity, AssistantORM.user_id == "system"),
+            or_(AssistantORM.user_id == self.user.identity, AssistantORM.user_id == "system"),
         )
         assistant = await self.session.scalar(stmt)
 
@@ -526,7 +579,7 @@ class AssistantService:
             # not checkpointer/store for execution
             graph = await self.langgraph_service.get_graph_for_validation(
                 assistant.graph_id,
-                user=user,
+                user=self.user,
             )
 
             # Validate xray if it's an integer (not a boolean)
@@ -555,12 +608,13 @@ class AssistantService:
         assistant_id: str,
         namespace: str | None,
         recurse: bool,
-        user: User,
     ) -> dict[str, Any]:
         """Get subgraphs of an assistant"""
+        await self._dispatch("read", {"assistant_id": assistant_id})
+
         stmt = select(AssistantORM).where(
             AssistantORM.assistant_id == assistant_id,
-            or_(AssistantORM.user_id == user.identity, AssistantORM.user_id == "system"),
+            or_(AssistantORM.user_id == self.user.identity, AssistantORM.user_id == "system"),
         )
         assistant = await self.session.scalar(stmt)
 
@@ -572,7 +626,7 @@ class AssistantService:
             # not checkpointer/store for execution
             graph = await self.langgraph_service.get_graph_for_validation(
                 assistant.graph_id,
-                user=user,
+                user=self.user,
             )
 
             try:
@@ -592,7 +646,8 @@ class AssistantService:
 
 def get_assistant_service(
     session: AsyncSession = Depends(get_session),
+    user: User = Depends(get_current_user),
     langgraph_service: LangGraphService = Depends(get_langgraph_service),
 ) -> AssistantService:
     """Dependency injection for AssistantService"""
-    return AssistantService(session, langgraph_service)
+    return AssistantService(session, user, langgraph_service)

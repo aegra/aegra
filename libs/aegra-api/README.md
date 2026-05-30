@@ -11,6 +11,7 @@ Aegra is an open-source, self-hosted alternative to LangSmith Deployments. This 
 - **Self-Hosted**: Run on your own PostgreSQL database
 - **Streaming Support**: Real-time streaming of agent responses
 - **Human-in-the-Loop**: Built-in support for human approval workflows
+- **Scheduled Cron Jobs**: Trigger runs on a schedule with timezone support and multi-instance safe claim
 - **Vector Store**: Semantic search capabilities with PostgreSQL
 
 ## Installation
@@ -117,6 +118,11 @@ OTEL_TARGETS=LANGFUSE,PHOENIX
 | `/threads/{thread_id}/runs` | POST | Execute graph (background) |
 | `/threads/{thread_id}/runs/stream` | POST | Execute graph (streaming) |
 | `/threads/{thread_id}/runs/{run_id}/cancel` | POST | Cancel a run |
+| `/runs/crons` | POST | Create a stateless cron job |
+| `/threads/{thread_id}/runs/crons` | POST | Create a thread-bound cron job |
+| `/runs/crons/{cron_id}` | PATCH/DELETE | Update or delete a cron job |
+| `/runs/crons/search` | POST | Search cron jobs |
+| `/runs/crons/count` | POST | Count cron jobs |
 | `/store/items` | PUT | Save to vector store |
 | `/store/items/search` | POST | Semantic search |
 | `/store/namespaces` | POST | List store namespaces |

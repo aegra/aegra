@@ -210,10 +210,12 @@ class TestAssistantServiceDatabase:
         mock_result.all.return_value = []
         assistant_service.session.scalars.return_value = mock_result
 
+        from aegra_api.services import _authenticated
+
         async def handler_filter(ctx, value):
             return {"metadata": {"tenant": "x"}}
 
-        monkeypatch.setattr("aegra_api.services._authenticated.handle_event", handler_filter)
+        monkeypatch.setattr(_authenticated, "handle_event", handler_filter)
 
         result = await assistant_service.list_assistants()
 

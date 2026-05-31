@@ -99,6 +99,15 @@ def _compile_bool_op(
             f"Auth handler filter '{op}' must be a list of at least 2 filter objects. "
             "Check the filter returned by your auth handler.",
         )
+    # An empty branch would compile to and_() == TRUE, making OR collapse to TRUE
+    # and silently bypass the constraint. Reject it.
+    for branch in branches:
+        if not isinstance(branch, dict) or not branch:
+            raise HTTPException(
+                500,
+                f"Auth handler filter '{op}' contains an empty or non-dict branch. "
+                "Check the filter returned by your auth handler.",
+            )
     compiled = [and_(*_compile(column, b, depth=depth + 1)) for b in branches]
     return or_(*compiled) if op == "$or" else and_(*compiled)
 

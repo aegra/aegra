@@ -74,12 +74,22 @@ class TestBuildMetadataFilter:
             {"$and": [{"owner": "u1"}]},
             {"k": {"$bad": 1}},  # unknown operator
             {"k": {"$eq": 1, "$contains": 2}},  # more than one operator key
+            {"$or": [{}, {"owner": "u1"}]},  # empty branch -> would collapse to TRUE
+            {"$and": [{"owner": "u1"}, {}]},
+            {"$or": [{"owner": "u1"}, "notadict"]},  # non-dict branch
         ],
     )
     def test_invalid_filters_raise_500(self, bad: dict) -> None:
         with pytest.raises(HTTPException) as exc:
             build_metadata_filter(COL, bad)
         assert exc.value.status_code == 500
+
+    def test_empty_branch_does_not_collapse_to_true(self) -> None:
+        """An empty $or branch must not bypass the constraint via and_() == TRUE."""
+        with pytest.raises(HTTPException) as exc:
+            build_metadata_filter(COL, {"$or": [{}, {"owner": "u1"}]})
+        assert exc.value.status_code == 500
+        assert "empty" in exc.value.detail.lower()
 
     def test_nesting_depth_cap(self) -> None:
         """$or inside $or inside $or exceeds the depth-2 cap."""

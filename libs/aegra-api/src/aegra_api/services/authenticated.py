@@ -1,11 +1,9 @@
-"""Base class that makes authorization dispatch mandatory at the service layer.
+"""Service base that makes `@auth.on.*` dispatch mandatory at the call site.
 
-Every tenant-scoped service inherits from `Authenticated` and calls `_dispatch`
-at the entry of each public method. This hoists the `@auth.on.*` dispatch out of
-route handlers so no route can forget to authorize (closing the gaps tracked in
-the auth dispatch spec). Dispatch policy itself is unchanged: `handle_event`
-stays default-allow when no handler matches; the SQL-layer `user_id ==
-user.identity` filter remains the tenant boundary (GHSA-m98r-6667-4wq7).
+Putting dispatch on the service (not the route) means an endpoint cannot reach
+the database without authorizing first. `handle_event` is default-allow when no
+handler matches; the SQL-layer `user_id == user.identity` filter is the tenant
+boundary (GHSA-m98r-6667-4wq7).
 """
 
 from __future__ import annotations
@@ -19,12 +17,11 @@ from aegra_api.models.auth import User
 
 
 class Authenticated:
-    """Service base carrying the request identity and a single dispatch entry point.
+    """Carries the request identity and the single `_dispatch` entry point.
 
     Subclasses set the `resource` class attribute (e.g. "threads", "assistants")
     and call `await self._dispatch(action, value)` at the top of each public
-    method. The returned filter dict (or None) is applied to the query the same
-    way the route layer applied it before.
+    method, applying the returned filter dict to their query.
     """
 
     resource: str

@@ -135,14 +135,11 @@ def _injected_metadata(
     base: dict[str, Any] | None,
     value: dict[str, Any],
 ) -> dict[str, Any] | None:
-    """Read back metadata a create/update handler injected into ``value``.
+    """Fold metadata a create/update handler injected into ``value`` onto the request.
 
-    On create/update, handlers inject by mutating ``value["metadata"]`` in place
-    (e.g. ``value["metadata"]["created_by"] = ctx.user.identity``) and returning
-    True — see examples/jwt_mock_auth_example.py. Any injected keys are folded
-    onto the request's own metadata. The handler's *return* dict is a query
-    filter, not an insert, so it has no effect here: create writes the request
-    metadata into the new row, not the auth filter.
+    Handlers inject by mutating ``value["metadata"]`` in place (e.g.
+    ``value["metadata"]["created_by"] = ctx.user.identity``). The handler's
+    *return* is a query filter with no insert meaning, so it is not read here.
     """
     value_meta = value.get("metadata")
     if isinstance(value_meta, dict) and value_meta:
@@ -345,8 +342,13 @@ class AssistantService(Authenticated):
         total = await self.session.scalar(stmt)
         return total or 0
 
-    async def get_assistant(self, assistant_id: str) -> Assistant:
-        """Get assistant by ID"""
+    async def _read_owned_assistant(self, assistant_id: str) -> AssistantORM:
+        """Dispatch ``assistants.read`` and load the row, applying any handler
+        filter to the query. 404s if the row is absent or the filter excludes it.
+
+        Shared by every read-derived endpoint so a handler's metadata filter is
+        enforced uniformly — not only on GET /assistants/{id}.
+        """
         filters = await self._dispatch("read", {"assistant_id": assistant_id})
 
         stmt = select(AssistantORM).where(
@@ -356,17 +358,20 @@ class AssistantService(Authenticated):
         auth_filter = build_metadata_filter(AssistantORM.metadata_dict, filters)
         if auth_filter is not None:
             stmt = stmt.where(auth_filter)
-        assistant = await self.session.scalar(stmt)
 
+        assistant = await self.session.scalar(stmt)
         if not assistant:
             raise HTTPException(404, f"Assistant '{assistant_id}' not found")
+        return assistant
 
-        return to_pydantic(assistant)
+    async def get_assistant(self, assistant_id: str) -> Assistant:
+        """Get assistant by ID"""
+        return to_pydantic(await self._read_owned_assistant(assistant_id))
 
     async def update_assistant(self, assistant_id: str, request: AssistantUpdate) -> Assistant:
         """Update assistant by ID"""
         value = {**request.model_dump(), "assistant_id": assistant_id}
-        await self._dispatch("update", value)
+        filters = await self._dispatch("update", value)
         request.metadata = _injected_metadata(request.metadata, value)
 
         metadata = request.metadata or {}
@@ -389,6 +394,9 @@ class AssistantService(Authenticated):
             AssistantORM.assistant_id == assistant_id,
             AssistantORM.user_id == self.user.identity,
         )
+        auth_filter = build_metadata_filter(AssistantORM.metadata_dict, filters)
+        if auth_filter is not None:
+            stmt = stmt.where(auth_filter)
         assistant = await self.session.scalar(stmt)
         if not assistant:
             raise HTTPException(404, f"Assistant '{assistant_id}' not found")
@@ -440,12 +448,15 @@ class AssistantService(Authenticated):
 
     async def delete_assistant(self, assistant_id: str) -> dict:
         """Delete assistant by ID"""
-        await self._dispatch("delete", {"assistant_id": assistant_id})
+        filters = await self._dispatch("delete", {"assistant_id": assistant_id})
 
         stmt = select(AssistantORM).where(
             AssistantORM.assistant_id == assistant_id,
             AssistantORM.user_id == self.user.identity,
         )
+        auth_filter = build_metadata_filter(AssistantORM.metadata_dict, filters)
+        if auth_filter is not None:
+            stmt = stmt.where(auth_filter)
         assistant = await self.session.scalar(stmt)
 
         if not assistant:
@@ -458,12 +469,15 @@ class AssistantService(Authenticated):
 
     async def set_assistant_latest(self, assistant_id: str, version: int) -> Assistant:
         """Set the given version as the latest version of an assistant"""
-        await self._dispatch("update", {"assistant_id": assistant_id, "version": version})
+        filters = await self._dispatch("update", {"assistant_id": assistant_id, "version": version})
 
         stmt = select(AssistantORM).where(
             AssistantORM.assistant_id == assistant_id,
             AssistantORM.user_id == self.user.identity,
         )
+        auth_filter = build_metadata_filter(AssistantORM.metadata_dict, filters)
+        if auth_filter is not None:
+            stmt = stmt.where(auth_filter)
         assistant = await self.session.scalar(stmt)
         if not assistant:
             raise HTTPException(404, f"Assistant '{assistant_id}' not found")
@@ -548,16 +562,7 @@ class AssistantService(Authenticated):
 
     async def get_assistant_schemas(self, assistant_id: str) -> dict[str, Any]:
         """Get input, output, state, config and context schemas for an assistant"""
-        await self._dispatch("read", {"assistant_id": assistant_id})
-
-        stmt = select(AssistantORM).where(
-            AssistantORM.assistant_id == assistant_id,
-            or_(AssistantORM.user_id == self.user.identity, AssistantORM.user_id == "system"),
-        )
-        assistant = await self.session.scalar(stmt)
-
-        if not assistant:
-            raise HTTPException(404, f"Assistant '{assistant_id}' not found")
+        assistant = await self._read_owned_assistant(assistant_id)
 
         try:
             # Use get_graph_for_validation since we only need schema extraction,
@@ -575,16 +580,7 @@ class AssistantService(Authenticated):
 
     async def get_assistant_graph(self, assistant_id: str, xray: bool | int) -> dict[str, Any]:
         """Get the graph structure for visualization"""
-        await self._dispatch("read", {"assistant_id": assistant_id})
-
-        stmt = select(AssistantORM).where(
-            AssistantORM.assistant_id == assistant_id,
-            or_(AssistantORM.user_id == self.user.identity, AssistantORM.user_id == "system"),
-        )
-        assistant = await self.session.scalar(stmt)
-
-        if not assistant:
-            raise HTTPException(404, f"Assistant '{assistant_id}' not found")
+        assistant = await self._read_owned_assistant(assistant_id)
 
         try:
             # Use get_graph_for_validation since we only need graph structure,
@@ -622,16 +618,7 @@ class AssistantService(Authenticated):
         recurse: bool,
     ) -> dict[str, Any]:
         """Get subgraphs of an assistant"""
-        await self._dispatch("read", {"assistant_id": assistant_id})
-
-        stmt = select(AssistantORM).where(
-            AssistantORM.assistant_id == assistant_id,
-            or_(AssistantORM.user_id == self.user.identity, AssistantORM.user_id == "system"),
-        )
-        assistant = await self.session.scalar(stmt)
-
-        if not assistant:
-            raise HTTPException(404, f"Assistant '{assistant_id}' not found")
+        assistant = await self._read_owned_assistant(assistant_id)
 
         try:
             # Use get_graph_for_validation since we only need schema extraction,

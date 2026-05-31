@@ -3,6 +3,7 @@
 from unittest.mock import AsyncMock, patch
 
 import pytest
+from fastapi import HTTPException
 
 from aegra_api.models.auth import User
 from aegra_api.services.authenticated import Authenticated
@@ -44,8 +45,6 @@ class TestDispatch:
 
     @pytest.mark.asyncio
     async def test_propagates_handler_denial(self, service: _Service) -> None:
-        from fastapi import HTTPException
-
         with (
             patch(
                 "aegra_api.services.authenticated.handle_event",

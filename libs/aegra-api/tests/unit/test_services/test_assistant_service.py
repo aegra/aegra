@@ -1105,6 +1105,35 @@ class TestAuthDispatch:
         assert value == {"assistant_id": "asst-1", "metadata": None}
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("method", "args"),
+        [
+            ("get_assistant", ("asst-1",)),
+            ("get_assistant_schemas", ("asst-1",)),
+            ("get_assistant_graph", ("asst-1", False)),
+            ("get_assistant_subgraphs", ("asst-1", None, False)),
+            ("delete_assistant", ("asst-1",)),
+            ("set_assistant_latest", ("asst-1", 1)),
+            ("update_assistant", ("asst-1", AssistantUpdate(name="x"))),
+        ],
+    )
+    async def test_read_write_endpoints_apply_handler_filter(
+        self, assistant_service: AssistantService, method: str, args: tuple
+    ) -> None:
+        """A handler returning a metadata filter must narrow the lookup query on
+        every read/write-by-id endpoint, not just GET /assistants/{id}. Filter
+        excludes the row -> 404 (regression for the discarded-filter bypass)."""
+        from sqlalchemy.dialects import postgresql
+
+        assistant_service.session.scalar.return_value = None  # filtered out -> 404
+        with patch(_DISPATCH, new=AsyncMock(return_value={"team": "x"})), pytest.raises(HTTPException):
+            await getattr(assistant_service, method)(*args)
+
+        stmt = assistant_service.session.scalar.call_args.args[0]
+        compiled = stmt.compile(dialect=postgresql.dialect())
+        assert {"team": "x"} in compiled.params.values()
+
+    @pytest.mark.asyncio
     async def test_rejection_propagates_before_db(self, assistant_service: AssistantService) -> None:
         deny = AsyncMock(side_effect=HTTPException(status_code=403, detail="forbidden"))
         with patch(_DISPATCH, new=deny), pytest.raises(HTTPException) as exc:

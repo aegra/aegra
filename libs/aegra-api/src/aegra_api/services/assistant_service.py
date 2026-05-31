@@ -32,7 +32,7 @@ from aegra_api.core.orm import AssistantVersion as AssistantVersionORM
 from aegra_api.core.orm import get_session
 from aegra_api.models import Assistant, AssistantCreate, AssistantUpdate
 from aegra_api.models.auth import User
-from aegra_api.services._authenticated import Authenticated
+from aegra_api.services.authenticated import Authenticated
 from aegra_api.services.langgraph_service import LangGraphService, get_langgraph_service
 
 

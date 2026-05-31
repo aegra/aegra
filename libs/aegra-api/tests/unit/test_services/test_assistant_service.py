@@ -1053,7 +1053,7 @@ class TestAssistantServiceSubgraphs:
         assert "does not support subgraphs" in str(exc_info.value.detail)
 
 
-_DISPATCH = "aegra_api.services._authenticated.handle_event"
+_DISPATCH = "aegra_api.services.authenticated.handle_event"
 
 
 def _owned_assistant() -> Mock:

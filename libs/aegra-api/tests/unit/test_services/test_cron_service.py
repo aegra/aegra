@@ -795,7 +795,7 @@ class TestUpdateCronExtended:
         cron_service: CronService,
         mock_session: AsyncMock,
     ) -> None:
-        end = datetime(2026, 6, 1, tzinfo=UTC)
+        end = datetime.now(UTC) + timedelta(days=365)
         updated = _make_cron_orm(end_time=end)
         mock_session.scalar.side_effect = [_make_cron_orm(), updated]
 

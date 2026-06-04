@@ -11,17 +11,11 @@ from aegra_api.constants import MULTIHOST_URL_RE
 
 _logger = logging.getLogger(__name__)
 
-# libpq sslmode → asyncpg ssl query param. asyncpg has no analog for
-# "allow"/"prefer" (try-then-fallback) — both map to off, matching the
-# safer-of-the-two interpretation for an application server.
-_SSLMODE_TO_ASYNCPG: dict[str, str] = {
-    "disable": "false",
-    "allow": "false",
-    "prefer": "false",
-    "require": "true",
-    "verify-ca": "true",
-    "verify-full": "true",
-}
+# Valid libpq sslmode values. asyncpg's `ssl` kwarg, when given a string,
+# parses it via SSLMode.parse() and only accepts these spellings. Boolean
+# strings like "true"/"false" raise ClientConfigurationError. We rename
+# `sslmode=X` → `ssl=X` and pass the value through verbatim.
+_VALID_SSLMODES: frozenset[str] = frozenset({"disable", "allow", "prefer", "require", "verify-ca", "verify-full"})
 
 # libpq params that asyncpg rejects as unknown kwargs. We strip these from
 # the async URL — users who need them must use PG* env vars or a custom
@@ -176,18 +170,19 @@ class DatabaseSettings(EnvBase):
 
         for key, value in parse_qsl(query, keep_blank_values=True):
             if key == "sslmode":
-                mapped = _SSLMODE_TO_ASYNCPG.get(value.lower())
-                if mapped is None:
+                normalized = value.lower()
+                if normalized not in _VALID_SSLMODES:
                     _logger.warning("Unknown sslmode=%r in DATABASE_URL; ignoring", value)
                     continue
-                if value.lower() in ("verify-ca", "verify-full"):
+                if normalized in ("verify-ca", "verify-full"):
                     _logger.warning(
-                        "DATABASE_URL sslmode=%s requires an SSLContext for cert verification; "
-                        "asyncpg will negotiate TLS but skip the verify-* check. "
-                        "Use PGSSLMODE + PGSSLROOTCERT env vars for full verification.",
+                        "DATABASE_URL sslmode=%s — asyncpg will verify the server cert "
+                        "against PGSSLROOTCERT or ~/.postgresql/root.crt and fail to "
+                        "connect if neither is available. Set PGSSLROOTCERT to a CA bundle "
+                        "(or use an SSLContext via connect_args) if startup fails.",
                         value,
                     )
-                rewritten.append(("ssl", mapped))
+                rewritten.append(("ssl", normalized))
             elif key in _LIBPQ_ONLY_PARAMS:
                 dropped.append(key)
             else:

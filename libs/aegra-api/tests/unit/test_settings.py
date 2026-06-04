@@ -1,8 +1,9 @@
 """Tests for AppSettings, DatabaseSettings, and WorkerSettings."""
 
-from urllib.parse import quote_plus
+from urllib.parse import parse_qs, quote_plus, urlsplit
 
 import pytest
+from asyncpg.connect_utils import SSLMode  # type: ignore[import-untyped]
 from pydantic import ValidationError
 from sqlalchemy.engine import make_url
 
@@ -151,10 +152,11 @@ class TestDatabaseURLSupport:
         assert "connect_timeout=10" in db.database_url_sync
         assert db.database_url_sync.startswith("postgresql://")
 
-    def test_async_url_translates_sslmode_require_to_ssl_true(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """asyncpg rejects ``sslmode`` as an unknown kwarg. We translate it
-        to ``ssl=true`` so the async engine starts cleanly when users paste
-        a libpq-style URL (the common shape from RDS/Azure/GCP consoles)."""
+    def test_async_url_translates_sslmode_require_to_ssl_require(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """asyncpg rejects ``sslmode`` as an unknown kwarg, but accepts ``ssl``
+        with libpq sslmode spellings (``ssl=require``). We rename the param
+        and keep the value so the async engine starts cleanly when users
+        paste a libpq-style URL (the common shape from RDS/Azure/GCP consoles)."""
         monkeypatch.setenv(
             "DATABASE_URL",
             "postgresql://user:pass@host:5432/db?sslmode=require",
@@ -163,29 +165,35 @@ class TestDatabaseURLSupport:
         db = DatabaseSettings(_env_file=None)
 
         assert "sslmode" not in db.database_url
-        assert "ssl=true" in db.database_url
+        assert "ssl=require" in db.database_url
         assert db.database_url.startswith("postgresql+asyncpg://")
 
     @pytest.mark.parametrize(
-        ("sslmode", "expected_ssl"),
-        [
-            ("disable", "false"),
-            ("allow", "false"),
-            ("prefer", "false"),
-            ("require", "true"),
-            ("verify-ca", "true"),
-            ("verify-full", "true"),
-        ],
+        "sslmode",
+        ["disable", "allow", "prefer", "require", "verify-ca", "verify-full"],
     )
-    def test_async_url_translates_all_sslmode_values(
-        self, monkeypatch: pytest.MonkeyPatch, sslmode: str, expected_ssl: str
-    ) -> None:
+    def test_async_url_translates_all_sslmode_values(self, monkeypatch: pytest.MonkeyPatch, sslmode: str) -> None:
         monkeypatch.setenv("DATABASE_URL", f"postgresql://u:p@h:5432/db?sslmode={sslmode}")
 
         db = DatabaseSettings(_env_file=None)
 
-        assert f"ssl={expected_ssl}" in db.database_url
+        assert f"ssl={sslmode}" in db.database_url
         assert "sslmode" not in db.database_url
+
+    @pytest.mark.parametrize(
+        "sslmode",
+        ["disable", "allow", "prefer", "require", "verify-ca", "verify-full"],
+    )
+    def test_translated_ssl_value_accepted_by_asyncpg(self, sslmode: str) -> None:
+        """Regression: the value we put after ``ssl=`` must parse via
+        ``asyncpg.connect_utils.SSLMode.parse``. asyncpg >= 0.28 raises
+        ClientConfigurationError for unknown values (e.g. ``"true"``/``"false"``)."""
+        mapped = DatabaseSettings._translate_libpq_params_for_asyncpg(
+            f"postgresql+asyncpg://u:p@h/db?sslmode={sslmode}&connect_timeout=10"
+        )
+        ssl_value = parse_qs(urlsplit(mapped).query)["ssl"][0]
+        # Must not raise — SSLMode.parse() is what asyncpg runs internally.
+        SSLMode.parse(ssl_value)
 
     def test_async_url_strips_other_libpq_only_params(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """``channel_binding`` / ``sslcert`` etc. also crash asyncpg as unknown
@@ -395,7 +403,7 @@ class TestMultiHostDatabaseURL:
         assert url.startswith("postgresql+asyncpg://user:pass@/db?")
         assert "host=h1,h2" in url
         assert "port=5432,5432" in url
-        assert "ssl=true" in url
+        assert "ssl=require" in url
         # libpq-only kwargs that asyncpg would reject are stripped.
         assert "target_session_attrs" not in url
         assert "sslmode" not in url

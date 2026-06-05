@@ -72,8 +72,7 @@ async def health_check(_request: Request) -> HealthResponse:
         # Verify in-memory checkpointer is reachable
         try:
             checkpointer = db_manager.get_checkpointer()
-            with contextlib.suppress(Exception):
-                await checkpointer.aget_tuple({"configurable": {"thread_id": "health-check"}})
+            await checkpointer.aget_tuple({"configurable": {"thread_id": "health-check"}})
             health_status["langgraph_checkpointer"] = "connected (memory)"
         except Exception as e:
             health_status["langgraph_checkpointer"] = f"error: {str(e)}"

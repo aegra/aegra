@@ -21,6 +21,27 @@ if TYPE_CHECKING:
 logger = structlog.get_logger(__name__)
 
 
+class _NoOpStore:
+    """Stub store that raises on any operation when running in memory mode.
+
+    Returned by ``get_store()`` in memory mode so callers always receive an
+    object (avoiding ``AttributeError`` on ``None``), but get a descriptive
+    error if they attempt store operations that require PostgreSQL.
+    """
+
+    async def aget(self, *args: Any, **kwargs: Any) -> None:
+        raise RuntimeError("Store is disabled in memory mode (DATABASE_ENABLED=false)")
+
+    async def aput(self, *args: Any, **kwargs: Any) -> None:
+        raise RuntimeError("Store is disabled in memory mode (DATABASE_ENABLED=false)")
+
+    async def adelete(self, *args: Any, **kwargs: Any) -> None:
+        raise RuntimeError("Store is disabled in memory mode (DATABASE_ENABLED=false)")
+
+    async def alist_namespaces(self, *args: Any, **kwargs: Any) -> list:
+        raise RuntimeError("Store is disabled in memory mode (DATABASE_ENABLED=false)")
+
+
 class DatabaseManager:
     """Manages database connections and LangGraph persistence components.
 
@@ -45,9 +66,11 @@ class DatabaseManager:
         Use when DATABASE_ENABLED=false. State is ephemeral and lost on restart,
         but the application starts without requiring any external database.
         """
+        if self._memory_mode and self._checkpointer is not None:
+            return
         self._memory_mode = True
         self._checkpointer = MemorySaver()
-        self._store = None  # No persistent store in memory mode
+        self._store = _NoOpStore()
         logger.info("✅ In-memory checkpointing initialized (no PostgreSQL)")
 
     async def initialize(self) -> None:
@@ -137,10 +160,15 @@ class DatabaseManager:
             raise RuntimeError("Database not initialized — call initialize() or initialize_memory_mode() first")
         return self._checkpointer
 
-    def get_store(self) -> AsyncPostgresStore | None:
-        """Return the store backend, or None if running in memory mode."""
+    def get_store(self) -> "AsyncPostgresStore | _NoOpStore":
+        """Return the store backend.
+
+        In memory mode, returns a ``_NoOpStore`` stub that raises a descriptive
+        ``RuntimeError`` on any operation, preventing silent ``AttributeError``
+        crashes in downstream callers.
+        """
         if self._memory_mode:
-            return None
+            return self._store  # type: ignore[return-value]  # _NoOpStore
         if self._store is None:
             raise RuntimeError("Database not initialized")
         return self._store

@@ -157,8 +157,7 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     if settings.redis.REDIS_BROKER_ENABLED:
         await redis_manager.close()
 
-    if settings.db.DATABASE_ENABLED:
-        await db_manager.close()
+    await db_manager.close()
 
 
 # Define core exception handlers

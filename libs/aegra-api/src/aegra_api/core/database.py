@@ -38,6 +38,9 @@ class _NoOpStore:
     async def adelete(self, *args: Any, **kwargs: Any) -> None:
         raise RuntimeError("Store is disabled in memory mode (DATABASE_ENABLED=false)")
 
+    async def asearch(self, *args: Any, **kwargs: Any) -> list:
+        raise RuntimeError("Store is disabled in memory mode (DATABASE_ENABLED=false)")
+
     async def alist_namespaces(self, *args: Any, **kwargs: Any) -> list:
         raise RuntimeError("Store is disabled in memory mode (DATABASE_ENABLED=false)")
 

@@ -69,6 +69,11 @@ class DatabaseManager:
         Use when DATABASE_ENABLED=false. State is ephemeral and lost on restart,
         but the application starts without requiring any external database.
         """
+        if self.engine is not None or self.lg_pool is not None:
+            raise RuntimeError(
+                "Cannot switch to memory mode after PostgreSQL initialization. "
+                "Call close() first."
+            )
         if self._memory_mode and self._checkpointer is not None:
             return
         self._memory_mode = True
@@ -78,6 +83,11 @@ class DatabaseManager:
 
     async def initialize(self) -> None:
         """Initialize database connections and LangGraph components"""
+        if self._memory_mode:
+            raise RuntimeError(
+                "Cannot switch to PostgreSQL mode after memory initialization. "
+                "Call close() first."
+            )
         # Idempotency check: if already initialized, do nothing
         if self.engine:
             return
@@ -137,9 +147,11 @@ class DatabaseManager:
         logger.info("✅ Database and LangGraph components initialized")
 
     async def close(self) -> None:
-        """Close database connections (no-op in memory mode)."""
+        """Close database connections and reset state."""
         if self._memory_mode:
             self._checkpointer = None
+            self._store = None
+            self._memory_mode = False
             logger.info("✅ In-memory checkpointer released")
             return
 

@@ -55,6 +55,9 @@ async def health_check(_request: Request) -> HealthResponse:
 
     Verifies connectivity to PostgreSQL, the checkpoint backend, and the
     store backend. Returns 503 if any component is unhealthy.
+
+    When DATABASE_ENABLED=false, database and store are reported as
+    "disabled" (healthy) and only the in-memory checkpointer is probed.
     """
     health_status = {
         "status": "healthy",
@@ -63,39 +66,51 @@ async def health_check(_request: Request) -> HealthResponse:
         "langgraph_store": "unknown",
     }
 
-    # Database connectivity
-    try:
-        if db_manager.engine:
-            async with db_manager.engine.begin() as conn:
-                await conn.execute(text("SELECT 1"))
-            health_status["database"] = "connected"
-        else:
-            health_status["database"] = "not_initialized"
+    if db_manager.is_memory_mode:
+        health_status["database"] = "disabled"
+        health_status["langgraph_store"] = "disabled"
+        # Verify in-memory checkpointer is reachable
+        try:
+            checkpointer = db_manager.get_checkpointer()
+            with contextlib.suppress(Exception):
+                await checkpointer.aget_tuple({"configurable": {"thread_id": "health-check"}})
+            health_status["langgraph_checkpointer"] = "connected (memory)"
+        except Exception as e:
+            health_status["langgraph_checkpointer"] = f"error: {str(e)}"
             health_status["status"] = "unhealthy"
-    except Exception as e:
-        health_status["database"] = f"error: {str(e)}"
-        health_status["status"] = "unhealthy"
+    else:
+        # Database connectivity
+        try:
+            if db_manager.engine:
+                async with db_manager.engine.begin() as conn:
+                    await conn.execute(text("SELECT 1"))
+                health_status["database"] = "connected"
+            else:
+                health_status["database"] = "not_initialized"
+                health_status["status"] = "unhealthy"
+        except Exception as e:
+            health_status["database"] = f"error: {str(e)}"
+            health_status["status"] = "unhealthy"
 
-    # LangGraph checkpointer (lazy-init)
-    try:
-        checkpointer = db_manager.get_checkpointer()
-        # probe - will raise if connection is bad; tuple may not exist which is fine
-        with contextlib.suppress(Exception):
-            await checkpointer.aget_tuple({"configurable": {"thread_id": "health-check"}})
-        health_status["langgraph_checkpointer"] = "connected"
-    except Exception as e:
-        health_status["langgraph_checkpointer"] = f"error: {str(e)}"
-        health_status["status"] = "unhealthy"
+        # LangGraph checkpointer (lazy-init)
+        try:
+            checkpointer = db_manager.get_checkpointer()
+            with contextlib.suppress(Exception):
+                await checkpointer.aget_tuple({"configurable": {"thread_id": "health-check"}})
+            health_status["langgraph_checkpointer"] = "connected"
+        except Exception as e:
+            health_status["langgraph_checkpointer"] = f"error: {str(e)}"
+            health_status["status"] = "unhealthy"
 
-    # LangGraph store (lazy-init)
-    try:
-        store = db_manager.get_store()
-        with contextlib.suppress(Exception):
-            await store.aget(("health",), "check")
-        health_status["langgraph_store"] = "connected"
-    except Exception as e:
-        health_status["langgraph_store"] = f"error: {str(e)}"
-        health_status["status"] = "unhealthy"
+        # LangGraph store (lazy-init)
+        try:
+            store = db_manager.get_store()
+            with contextlib.suppress(Exception):
+                await store.aget(("health",), "check")
+            health_status["langgraph_store"] = "connected"
+        except Exception as e:
+            health_status["langgraph_store"] = f"error: {str(e)}"
+            health_status["status"] = "unhealthy"
 
     if health_status["status"] == "unhealthy":
         raise HTTPException(status_code=503, detail="Service unhealthy")
@@ -109,7 +124,19 @@ async def readiness_check(_request: Request) -> dict[str, str]:
 
     Returns 200 when the server can accept traffic (database and graph
     backends are initialized). Returns 503 otherwise.
+
+    In memory mode, only verifies the in-memory checkpointer is available.
     """
+    if db_manager.is_memory_mode:
+        try:
+            db_manager.get_checkpointer()
+        except RuntimeError as e:
+            raise HTTPException(
+                status_code=503,
+                detail=f"Service not ready - checkpointer unavailable: {str(e)}",
+            ) from e
+        return {"status": "ready"}
+
     # Engine must exist and respond to a trivial query
     if not db_manager.engine:
         raise HTTPException(

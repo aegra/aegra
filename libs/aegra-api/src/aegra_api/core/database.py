@@ -1,6 +1,11 @@
 """Database manager with LangGraph integration"""
 
+from __future__ import annotations
+
+from typing import TYPE_CHECKING, Any
+
 import structlog
+from langgraph.checkpoint.memory import MemorySaver
 from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 from langgraph.store.postgres.aio import AsyncPostgresStore
 from psycopg.rows import dict_row
@@ -10,20 +15,40 @@ from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 from aegra_api.config import load_store_config
 from aegra_api.settings import settings
 
+if TYPE_CHECKING:
+    from langgraph.checkpoint.base import BaseCheckpointSaver
+
 logger = structlog.get_logger(__name__)
 
 
 class DatabaseManager:
-    """Manages database connections and LangGraph persistence components"""
+    """Manages database connections and LangGraph persistence components.
+
+    Supports two modes controlled by ``settings.db.DATABASE_ENABLED``:
+      - **postgres** (default): full PostgreSQL-backed checkpointing and store.
+      - **memory**: lightweight in-process MemorySaver — no external DB required.
+    """
 
     def __init__(self) -> None:
         self.engine: AsyncEngine | None = None
+        self._memory_mode: bool = False
 
         # Shared pool for LangGraph components (Checkpointer + Store)
         self.lg_pool: AsyncConnectionPool | None = None
-        self._checkpointer: AsyncPostgresSaver | None = None
-        self._store: AsyncPostgresStore | None = None
+        self._checkpointer: BaseCheckpointSaver | None = None
+        self._store: AsyncPostgresStore | Any | None = None
         self._database_url = settings.db.database_url
+
+    async def initialize_memory_mode(self) -> None:
+        """Initialize with in-memory checkpointing (no database required).
+
+        Use when DATABASE_ENABLED=false. State is ephemeral and lost on restart,
+        but the application starts without requiring any external database.
+        """
+        self._memory_mode = True
+        self._checkpointer = MemorySaver()
+        self._store = None  # No persistent store in memory mode
+        logger.info("✅ In-memory checkpointing initialized (no PostgreSQL)")
 
     async def initialize(self) -> None:
         """Initialize database connections and LangGraph components"""
@@ -86,7 +111,12 @@ class DatabaseManager:
         logger.info("✅ Database and LangGraph components initialized")
 
     async def close(self) -> None:
-        """Close database connections"""
+        """Close database connections (no-op in memory mode)."""
+        if self._memory_mode:
+            self._checkpointer = None
+            logger.info("✅ In-memory checkpointer released")
+            return
+
         # Close SQLAlchemy engine
         if self.engine:
             await self.engine.dispose()
@@ -101,14 +131,16 @@ class DatabaseManager:
 
         logger.info("✅ Database connections closed")
 
-    def get_checkpointer(self) -> AsyncPostgresSaver:
-        """Return the live AsyncPostgresSaver instance."""
+    def get_checkpointer(self) -> BaseCheckpointSaver:
+        """Return the checkpointer (Postgres or MemorySaver depending on mode)."""
         if self._checkpointer is None:
-            raise RuntimeError("Database not initialized")
+            raise RuntimeError("Database not initialized — call initialize() or initialize_memory_mode() first")
         return self._checkpointer
 
-    def get_store(self) -> AsyncPostgresStore:
-        """Return the live AsyncPostgresStore instance."""
+    def get_store(self) -> AsyncPostgresStore | None:
+        """Return the store backend, or None if running in memory mode."""
+        if self._memory_mode:
+            return None
         if self._store is None:
             raise RuntimeError("Database not initialized")
         return self._store
@@ -118,6 +150,11 @@ class DatabaseManager:
         if not self.engine:
             raise RuntimeError("Database not initialized")
         return self.engine
+
+    @property
+    def is_memory_mode(self) -> bool:
+        """Whether the manager is running in memory-only mode (no PostgreSQL)."""
+        return self._memory_mode
 
 
 # Global database manager instance

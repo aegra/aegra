@@ -11,16 +11,17 @@ from aegra_api.constants import MULTIHOST_URL_RE
 
 _logger = logging.getLogger(__name__)
 
-# libpq sslmode → asyncpg ssl query param. asyncpg has no analog for
-# "allow"/"prefer" (try-then-fallback) — both map to off, matching the
-# safer-of-the-two interpretation for an application server.
+# libpq sslmode → asyncpg ssl query param. asyncpg's ssl param validates
+# via SSLMode.parse(), which accepts libpq spellings only — "true"/"false"
+# raise ClientConfigurationError. asyncpg has no "allow"; map it to "prefer"
+# (the closest try-TLS-then-fallback mode).
 _SSLMODE_TO_ASYNCPG: dict[str, str] = {
-    "disable": "false",
-    "allow": "false",
-    "prefer": "false",
-    "require": "true",
-    "verify-ca": "true",
-    "verify-full": "true",
+    "disable": "disable",
+    "allow": "prefer",
+    "prefer": "prefer",
+    "require": "require",
+    "verify-ca": "verify-ca",
+    "verify-full": "verify-full",
 }
 
 # libpq params that asyncpg rejects as unknown kwargs. We strip these from

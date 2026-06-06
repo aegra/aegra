@@ -151,10 +151,10 @@ class TestDatabaseURLSupport:
         assert "connect_timeout=10" in db.database_url_sync
         assert db.database_url_sync.startswith("postgresql://")
 
-    def test_async_url_translates_sslmode_require_to_ssl_true(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """asyncpg rejects ``sslmode`` as an unknown kwarg. We translate it
-        to ``ssl=true`` so the async engine starts cleanly when users paste
-        a libpq-style URL (the common shape from RDS/Azure/GCP consoles)."""
+    def test_async_url_translates_sslmode_require_to_ssl_require(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """asyncpg rejects ``sslmode`` as an unknown kwarg. We rename it to
+        ``ssl`` so the async engine starts cleanly when users paste a
+        libpq-style URL (the common shape from RDS/Azure/GCP consoles)."""
         monkeypatch.setenv(
             "DATABASE_URL",
             "postgresql://user:pass@host:5432/db?sslmode=require",
@@ -163,18 +163,18 @@ class TestDatabaseURLSupport:
         db = DatabaseSettings(_env_file=None)
 
         assert "sslmode" not in db.database_url
-        assert "ssl=true" in db.database_url
+        assert "ssl=require" in db.database_url
         assert db.database_url.startswith("postgresql+asyncpg://")
 
     @pytest.mark.parametrize(
         ("sslmode", "expected_ssl"),
         [
-            ("disable", "false"),
-            ("allow", "false"),
-            ("prefer", "false"),
-            ("require", "true"),
-            ("verify-ca", "true"),
-            ("verify-full", "true"),
+            ("disable", "disable"),
+            ("allow", "prefer"),
+            ("prefer", "prefer"),
+            ("require", "require"),
+            ("verify-ca", "verify-ca"),
+            ("verify-full", "verify-full"),
         ],
     )
     def test_async_url_translates_all_sslmode_values(
@@ -186,6 +186,21 @@ class TestDatabaseURLSupport:
 
         assert f"ssl={expected_ssl}" in db.database_url
         assert "sslmode" not in db.database_url
+
+    @pytest.mark.parametrize("sslmode", ["disable", "allow", "prefer", "require", "verify-ca", "verify-full"])
+    def test_translated_ssl_value_is_accepted_by_asyncpg(self, monkeypatch: pytest.MonkeyPatch, sslmode: str) -> None:
+        """The emitted ``ssl`` value must parse via asyncpg's SSLMode — the
+        previous ``true``/``false`` spellings raised ClientConfigurationError
+        at engine startup (GH #404)."""
+        from urllib.parse import parse_qs, urlsplit
+
+        from asyncpg.connect_utils import SSLMode
+
+        monkeypatch.setenv("DATABASE_URL", f"postgresql://u:p@h:5432/db?sslmode={sslmode}")
+        db = DatabaseSettings(_env_file=None)
+
+        ssl_value = parse_qs(urlsplit(db.database_url).query)["ssl"][0]
+        SSLMode.parse(ssl_value)  # raises if asyncpg would reject it
 
     def test_async_url_strips_other_libpq_only_params(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """``channel_binding`` / ``sslcert`` etc. also crash asyncpg as unknown
@@ -395,7 +410,7 @@ class TestMultiHostDatabaseURL:
         assert url.startswith("postgresql+asyncpg://user:pass@/db?")
         assert "host=h1,h2" in url
         assert "port=5432,5432" in url
-        assert "ssl=true" in url
+        assert "ssl=require" in url
         # libpq-only kwargs that asyncpg would reject are stripped.
         assert "target_session_attrs" not in url
         assert "sslmode" not in url

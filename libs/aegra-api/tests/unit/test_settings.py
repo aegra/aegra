@@ -194,13 +194,18 @@ class TestDatabaseURLSupport:
         at engine startup (GH #404)."""
         from urllib.parse import parse_qs, urlsplit
 
-        from asyncpg.connect_utils import SSLMode
+        # SSLMode lives in a private asyncpg module; skip loudly (not silently)
+        # if a future asyncpg moves it, rather than masking a real regression.
+        connect_utils = pytest.importorskip("asyncpg.connect_utils")
+        ssl_mode = getattr(connect_utils, "SSLMode", None)
+        if ssl_mode is None:
+            pytest.skip("asyncpg.connect_utils.SSLMode not found in this asyncpg version")
 
         monkeypatch.setenv("DATABASE_URL", f"postgresql://u:p@h:5432/db?sslmode={sslmode}")
         db = DatabaseSettings(_env_file=None)
 
         ssl_value = parse_qs(urlsplit(db.database_url).query)["ssl"][0]
-        SSLMode.parse(ssl_value)  # raises if asyncpg would reject it
+        ssl_mode.parse(ssl_value)  # raises if asyncpg would reject it
 
     def test_async_url_strips_other_libpq_only_params(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """``channel_binding`` / ``sslcert`` etc. also crash asyncpg as unknown

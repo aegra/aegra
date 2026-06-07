@@ -5,20 +5,12 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from aegra_api.core import migrations as migrations_mod
 from aegra_api.core.migrations import find_alembic_ini, get_alembic_config
 
 
 class TestFindAlembicIni:
     """Tests for find_alembic_ini() resolution order."""
-
-    def test_finds_alembic_ini_in_cwd(self, tmp_path, monkeypatch):
-        """Should find alembic.ini when it exists in CWD."""
-        monkeypatch.chdir(tmp_path)
-        ini_file = tmp_path / "alembic.ini"
-        ini_file.write_text("[alembic]\nscript_location = alembic\n")
-
-        result = find_alembic_ini()
-        assert result == ini_file.resolve()
 
     def test_finds_alembic_ini_in_package(self, tmp_path, monkeypatch):
         """Should find alembic.ini bundled with the aegra_api package."""
@@ -32,15 +24,29 @@ class TestFindAlembicIni:
         assert result.name == "alembic.ini"
         assert result.exists()
 
-    def test_cwd_takes_priority_over_package(self, tmp_path, monkeypatch):
-        """CWD alembic.ini should be preferred over package-bundled one."""
+    def test_ignores_foreign_cwd_ini(self, tmp_path, monkeypatch):
+        """A host project's own alembic.ini in CWD must never shadow ours.
+
+        Resolving CWD first matched a foreign alembic.ini and skipped our
+        migrations, crashing a fresh DB with relation "assistant" does not
+        exist (GH #306). Discovery must be CWD-independent.
+        """
+        decoy = tmp_path / "alembic.ini"
+        decoy.write_text("[alembic]\nscript_location = not-ours\n")
         monkeypatch.chdir(tmp_path)
-        cwd_ini = tmp_path / "alembic.ini"
-        cwd_ini.write_text("[alembic]\nscript_location = alembic\n")
 
         result = find_alembic_ini()
-        # Should be the CWD file, not the package file
-        assert result == cwd_ini.resolve()
+
+        assert result.resolve() != decoy.resolve()
+        assert result.parent != tmp_path
+        assert result.exists()
+
+    def test_discovery_is_independent_of_cwd(self, tmp_path, monkeypatch):
+        """The resolved ini is identical regardless of process CWD."""
+        baseline = find_alembic_ini()
+
+        monkeypatch.chdir(tmp_path)
+        assert find_alembic_ini() == baseline
 
     def test_raises_when_not_found(self, tmp_path, monkeypatch):
         """Should raise FileNotFoundError when alembic.ini is nowhere."""
@@ -51,8 +57,6 @@ class TestFindAlembicIni:
         fake_core = tmp_path / "fake" / "pkg" / "core"
         fake_core.mkdir(parents=True)
         (fake_core / "migrations.py").touch()
-
-        import aegra_api.core.migrations as migrations_mod
 
         monkeypatch.setattr(
             migrations_mod,
@@ -69,45 +73,39 @@ class TestGetAlembicConfig:
 
     def test_returns_config_object(self, tmp_path, monkeypatch):
         """Should return a valid Alembic Config object."""
-        monkeypatch.chdir(tmp_path)
-
-        # Create a minimal alembic.ini
         ini_file = tmp_path / "alembic.ini"
         ini_file.write_text("[alembic]\nscript_location = alembic\n")
-
-        # Create the alembic directory
         alembic_dir = tmp_path / "alembic"
         alembic_dir.mkdir()
+        monkeypatch.setattr(migrations_mod, "find_alembic_ini", lambda: ini_file)
 
         cfg = get_alembic_config()
         assert cfg is not None
 
         # script_location should be resolved to absolute path
         script_loc = cfg.get_main_option("script_location")
+        assert script_loc is not None
         assert Path(script_loc).is_absolute()
         assert script_loc == str(alembic_dir.resolve())
 
     def test_resolves_relative_script_location(self, tmp_path, monkeypatch):
         """Should resolve relative script_location to absolute path."""
-        monkeypatch.chdir(tmp_path)
-
         ini_file = tmp_path / "alembic.ini"
         ini_file.write_text("[alembic]\nscript_location = alembic\n")
-
-        alembic_dir = tmp_path / "alembic"
-        alembic_dir.mkdir()
+        (tmp_path / "alembic").mkdir()
+        monkeypatch.setattr(migrations_mod, "find_alembic_ini", lambda: ini_file)
 
         cfg = get_alembic_config()
         script_loc = cfg.get_main_option("script_location")
+        assert script_loc is not None
         assert Path(script_loc).is_absolute()
 
     def test_preserves_absolute_script_location(self, tmp_path, monkeypatch):
         """Should not modify an already-absolute script_location."""
-        monkeypatch.chdir(tmp_path)
-
         abs_path = str(tmp_path / "my_alembic")
         ini_file = tmp_path / "alembic.ini"
         ini_file.write_text(f"[alembic]\nscript_location = {abs_path}\n")
+        monkeypatch.setattr(migrations_mod, "find_alembic_ini", lambda: ini_file)
 
         cfg = get_alembic_config()
         assert cfg.get_main_option("script_location") == abs_path

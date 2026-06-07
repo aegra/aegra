@@ -1,6 +1,6 @@
 """Alembic migration helpers.
 
-Resolves alembic.ini from CWD or the installed package. Two entry points:
+Resolves the bundled alembic.ini from the installed package. Two entry points:
 - ``run_migrations()``: unconditional upgrade, takes advisory lock. Use for
   out-of-band runs (``aegra db upgrade``, init container, Helm Job).
 - ``run_migrations_if_needed()``: lock-free precheck, skips upgrade when
@@ -22,11 +22,17 @@ logger = structlog.get_logger(__name__)
 
 
 def find_alembic_ini() -> Path:
-    """Find alembic.ini file.
+    """Find the bundled alembic.ini, never a foreign one in CWD.
 
     Resolution order:
-    1. alembic.ini in CWD (repo development, Docker)
-    2. Bundled with aegra_api package (pip install)
+    1. Bundled with aegra_api package (pip install)
+    2. Development layout (repo/editable install)
+
+    Resolving CWD first would match a host project's own alembic.ini and
+    silently skip our migrations, so a fresh DB crashes with relation
+    "assistant" does not exist (GH #306). Both branches resolve relative to
+    this module, so CWD is irrelevant — including Docker, where the package
+    branch wins regardless of workdir.
 
     Returns:
         Absolute path to alembic.ini
@@ -34,19 +40,14 @@ def find_alembic_ini() -> Path:
     Raises:
         FileNotFoundError: If alembic.ini cannot be found
     """
-    # 1. CWD (works in repo dev and Docker)
-    cwd_ini = Path("alembic.ini")
-    if cwd_ini.exists():
-        return cwd_ini.resolve()
-
-    # 2. Package bundled (pip install aegra-api)
+    # 1. Package bundled (pip install aegra-api)
     # In installed package: site-packages/aegra_api/alembic.ini
     package_dir = Path(__file__).resolve().parent.parent  # aegra_api/
     package_ini = package_dir / "alembic.ini"
     if package_ini.exists():
         return package_ini
 
-    # 3. Development layout (src layout: libs/aegra-api/src/aegra_api/ → libs/aegra-api/)
+    # 2. Development layout (src layout: libs/aegra-api/src/aegra_api/ → libs/aegra-api/)
     dev_root = package_dir.parent.parent  # Up from src/aegra_api/ to libs/aegra-api/
     dev_ini = dev_root / "alembic.ini"
     if dev_ini.exists():

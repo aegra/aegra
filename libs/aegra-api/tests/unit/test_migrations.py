@@ -53,7 +53,7 @@ class TestFindAlembicIni:
         monkeypatch.chdir(tmp_path)
 
         # Create a fake module location where no alembic.ini exists
-        # at any resolution level (CWD, package dir, or dev layout)
+        # at any resolution level (package dir or dev layout)
         fake_core = tmp_path / "fake" / "pkg" / "core"
         fake_core.mkdir(parents=True)
         (fake_core / "migrations.py").touch()
@@ -116,12 +116,10 @@ class TestRunMigrations:
 
     def test_run_migrations_calls_alembic_upgrade(self, tmp_path, monkeypatch):
         """Should call alembic command.upgrade with 'head'."""
-        monkeypatch.chdir(tmp_path)
-
         ini_file = tmp_path / "alembic.ini"
         ini_file.write_text("[alembic]\nscript_location = alembic\n")
-        alembic_dir = tmp_path / "alembic"
-        alembic_dir.mkdir()
+        (tmp_path / "alembic").mkdir()
+        monkeypatch.setattr(migrations_mod, "find_alembic_ini", lambda: ini_file)
 
         with patch("aegra_api.core.migrations.command") as mock_command:
             from aegra_api.core.migrations import run_migrations
@@ -148,9 +146,10 @@ class TestRunMigrationsIfNeeded:
     """Tests for the lock-free fast-path used at FastAPI startup."""
 
     def _setup_alembic_ini(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.chdir(tmp_path)
-        (tmp_path / "alembic.ini").write_text("[alembic]\nscript_location = alembic\n")
+        ini_file = tmp_path / "alembic.ini"
+        ini_file.write_text("[alembic]\nscript_location = alembic\n")
         (tmp_path / "alembic").mkdir()
+        monkeypatch.setattr(migrations_mod, "find_alembic_ini", lambda: ini_file)
 
     def test_skips_upgrade_when_database_at_head(self, tmp_path, monkeypatch):
         """When current revision matches head, no upgrade is invoked."""

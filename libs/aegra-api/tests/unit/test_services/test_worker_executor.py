@@ -4,6 +4,8 @@ import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from redis import ConnectionError as RedisConnectionError
+from redis import TimeoutError as RedisTimeoutError
 
 from aegra_api.core.active_runs import active_runs
 from aegra_api.models.auth import User
@@ -669,3 +671,72 @@ class TestExecuteWithLease:
             await task  # Completes normally (CancelledError is handled internally)
 
         assert job_task_was_cancelled, "job_task must be cancelled when _execute_with_lease is cancelled"
+
+
+class TestDequeue:
+    """Tests for WorkerExecutor._dequeue BLPOP handling."""
+
+    def _make_executor_with_blpop(self, blpop: AsyncMock) -> WorkerExecutor:
+        executor = WorkerExecutor()
+        executor._poll_postgres = AsyncMock(return_value="from-postgres")  # type: ignore[method-assign]
+        self._client = MagicMock()
+        self._client.blpop = blpop
+        return executor
+
+    @pytest.mark.asyncio
+    async def test_returns_run_id_on_queue_hit(self) -> None:
+        blpop = AsyncMock(return_value=("aegra:worker:queue", "run-123"))
+        executor = self._make_executor_with_blpop(blpop)
+
+        with patch(f"{MODULE}.redis_manager.get_client", return_value=self._client):
+            result = await executor._dequeue()
+
+        assert result == "run-123"
+        executor._poll_postgres.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_returns_none_when_blpop_returns_none(self) -> None:
+        blpop = AsyncMock(return_value=None)
+        executor = self._make_executor_with_blpop(blpop)
+
+        with patch(f"{MODULE}.redis_manager.get_client", return_value=self._client):
+            result = await executor._dequeue()
+
+        assert result is None
+        executor._poll_postgres.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_idle_socket_timeout_returns_none_without_fallback(self) -> None:
+        """A blocking BLPOP that hits the socket timeout raises redis TimeoutError
+        (a RedisError subclass). That is a normal idle expiry, not a connectivity
+        failure: it must return None silently, never poll Postgres (GH #bug)."""
+        blpop = AsyncMock(side_effect=RedisTimeoutError("Timeout reading from redis:6379"))
+        executor = self._make_executor_with_blpop(blpop)
+
+        with (
+            patch(f"{MODULE}.redis_manager.get_client", return_value=self._client),
+            patch(f"{MODULE}.logger.warning") as mock_warning,
+        ):
+            result = await executor._dequeue()
+
+        assert result is None
+        executor._poll_postgres.assert_not_awaited()
+        mock_warning.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_connection_error_falls_back_to_postgres(self) -> None:
+        """A genuine Redis failure (connection lost) must still warn and fall
+        back to the Postgres poll so jobs are not stranded."""
+        blpop = AsyncMock(side_effect=RedisConnectionError("Connection refused"))
+        executor = self._make_executor_with_blpop(blpop)
+
+        with (
+            patch(f"{MODULE}.redis_manager.get_client", return_value=self._client),
+            patch(f"{MODULE}.asyncio.sleep", new_callable=AsyncMock),
+            patch(f"{MODULE}.logger.warning") as mock_warning,
+        ):
+            result = await executor._dequeue()
+
+        assert result == "from-postgres"
+        executor._poll_postgres.assert_awaited_once()
+        mock_warning.assert_called_once()

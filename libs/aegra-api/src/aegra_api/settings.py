@@ -22,7 +22,6 @@ _VALID_SSLMODES: frozenset[str] = frozenset({"disable", "allow", "prefer", "requ
 # SSLContext, neither of which fits the URL-only fast path.
 _LIBPQ_ONLY_PARAMS: frozenset[str] = frozenset(
     {
-        "sslmode",
         "sslcert",
         "sslkey",
         "sslrootcert",

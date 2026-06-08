@@ -293,6 +293,12 @@ async def test_runs_wait_with_interrupts_e2e():
 
         check_and_skip_if_geo_blocked(last_run)
 
+        # The wait response can return before the run row leaves "running"
+        # (the status write races the HTTP response). Join blocks until the
+        # run reaches a terminal state, then re-read to get the settled status.
+        await client.runs.join(thread_id, last_run["run_id"])
+        last_run = (await client.runs.list(thread_id))[0]
+
         # Status can be interrupted or success depending on graph structure
         assert last_run["status"] in ("interrupted", "success"), (
             f"Expected interrupted or success status, got {last_run['status']}"

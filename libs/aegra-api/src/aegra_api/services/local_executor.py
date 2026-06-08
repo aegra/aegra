@@ -10,6 +10,7 @@ import contextlib
 import structlog
 
 from aegra_api.core.active_runs import active_runs
+from aegra_api.core.cancellation_state import cancellations
 from aegra_api.models.run_job import RunJob
 from aegra_api.observability.span_enrichment import make_run_trace_context
 from aegra_api.services.base_executor import BaseExecutor
@@ -34,6 +35,10 @@ class LocalExecutor(BaseExecutor):
         )
         task = asyncio.create_task(execute_run(job), context=trace_ctx)
         active_runs[job.identity.run_id] = task
+        # Drop the cancel tag once the run is done — execute_run leaves it
+        # alive so the executor can read it (here: via done-callback).
+        run_id = job.identity.run_id
+        task.add_done_callback(lambda _: cancellations.clear(run_id))
         logger.info(
             "Submitted run to local executor",
             run_id=job.identity.run_id,

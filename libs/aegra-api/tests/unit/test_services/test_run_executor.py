@@ -74,7 +74,7 @@ class TestExecuteRunSuccess:
 
 class TestExecuteRunCancelledError:
     @pytest.mark.asyncio
-    async def test_cancelled_error_sets_interrupted_and_signals(self) -> None:
+    async def test_user_cancelled_error_sets_interrupted_and_signals(self) -> None:
         mock_update = AsyncMock()
         mock_finalize = AsyncMock()
 
@@ -92,10 +92,17 @@ class TestExecuteRunCancelledError:
             mock_streaming.signal_run_cancelled = AsyncMock()
             mock_streaming.cleanup_run = AsyncMock()
 
+            from aegra_api.core.cancellation_state import cancellations
             from aegra_api.services.run_executor import execute_run
 
+            # Mark as user cancel so execute_run finalizes as interrupted
+            cancellations.mark("run-1", "user")
             with pytest.raises(asyncio.CancelledError):
                 await execute_run(_make_job())
+            # execute_run must NOT clear — the executor reads the reason
+            # after ``await job_task`` raises and owns the cleanup.
+            assert cancellations.reason_of("run-1") == "user"
+            cancellations.clear("run-1")
 
         # update_run_status called once for "running"
         assert mock_update.await_count == 1
@@ -255,15 +262,17 @@ class TestLeaseLossCancellation:
             mock_streaming.signal_run_cancelled = AsyncMock()
             mock_streaming.cleanup_run = AsyncMock()
 
-            from aegra_api.services.run_executor import _lease_loss_cancellations, execute_run
+            from aegra_api.core.cancellation_state import cancellations
+            from aegra_api.services.run_executor import execute_run
 
             # Simulate heartbeat marking this as a lease-loss cancel
-            _lease_loss_cancellations.add("run-1")
-            try:
-                with pytest.raises(asyncio.CancelledError):
-                    await execute_run(_make_job())
-            finally:
-                _lease_loss_cancellations.discard("run-1")
+            cancellations.mark("run-1", "lease_loss")
+            with pytest.raises(asyncio.CancelledError):
+                await execute_run(_make_job())
+            # execute_run preserves the tag — executor cleans it up so
+            # the worker can read the reason post-``await job_task``.
+            assert cancellations.reason_of("run-1") == "lease_loss"
+            cancellations.clear("run-1")
 
         # finalize_run must NOT be called — the new worker owns this run
         mock_finalize.assert_not_awaited()
@@ -276,7 +285,7 @@ class TestLeaseLossCancellation:
 
     @pytest.mark.asyncio
     async def test_user_cancel_still_finalizes(self) -> None:
-        """Normal (user-initiated) cancellation must still finalize and signal."""
+        """User-initiated cancellation must finalize and signal."""
         mock_update = AsyncMock()
         mock_finalize = AsyncMock()
         mock_signal_done = AsyncMock()
@@ -295,15 +304,21 @@ class TestLeaseLossCancellation:
             mock_streaming.signal_run_cancelled = AsyncMock()
             mock_streaming.cleanup_run = AsyncMock()
 
+            from aegra_api.core.cancellation_state import cancellations
             from aegra_api.services.run_executor import execute_run
 
+            # Mark as user cancel so execute_run finalizes as interrupted
+            cancellations.mark("run-1", "user")
             with pytest.raises(asyncio.CancelledError):
                 await execute_run(_make_job())
+            # Tag survives execute_run — the executor reads it post-cancel.
+            assert cancellations.reason_of("run-1") == "user"
+            cancellations.clear("run-1")
 
-        # Normal cancel: finalize and signal MUST happen
+        # User cancel: finalize and signal MUST happen
         mock_finalize.assert_awaited_once()
         assert mock_finalize.await_args.kwargs["status"] == "interrupted"
         mock_streaming.signal_run_cancelled.assert_awaited_once_with("run-1")
-        # Done-key and cleanup MUST happen on normal cancel
+        # Done-key and cleanup MUST happen on user cancel
         mock_signal_done.assert_awaited_once_with("run-1")
         mock_streaming.cleanup_run.assert_awaited_once_with("run-1")

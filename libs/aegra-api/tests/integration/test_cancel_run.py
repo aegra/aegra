@@ -8,12 +8,15 @@ Addresses GitHub Issue #132: Cancel endpoint doesn't cancel asyncio task
 
 import asyncio
 import contextlib
+from unittest.mock import MagicMock, patch
 from uuid import uuid4
 
 import pytest
 
 from aegra_api.core.active_runs import active_runs
+from aegra_api.core.cancellation_state import cancellations
 from aegra_api.services.broker import RunBroker, broker_manager
+from aegra_api.services.redis_broker import RedisBrokerManager
 from aegra_api.services.streaming_service import streaming_service
 
 
@@ -151,3 +154,48 @@ class TestCancelRunStatusNotOverwritten:
 
         active_runs.pop(run_id, None)
         broker_manager._brokers.pop(run_id, None)
+
+
+@pytest.mark.asyncio
+class TestRedisCancelListenerMarksUserCancellation:
+    """Multi-instance: when a cancel arrives via Redis pub/sub, the listener
+    must mark the run as user-cancelled before task.cancel() so execute_run's
+    CancelledError handler classifies it correctly (not as a timeout)."""
+
+    async def test_execute_cancel_marks_before_cancelling(self) -> None:
+        """Order check: cancellations.mark must run before task.cancel().
+
+        Without this ordering, a cancel arriving on instance B via Redis
+        pub/sub would have the run_id unmarked on B when execute_run's
+        CancelledError handler runs, falling to the default (timeout)
+        branch and skipping interrupted-finalize.
+        """
+        run_id = str(uuid4())
+        call_order: list[str] = []
+
+        # Replace the task with a mock so cancel() is observable
+        mock_task = MagicMock()
+        mock_task.done.return_value = False
+        mock_task.cancel = MagicMock(side_effect=lambda: call_order.append("cancel"))
+        active_runs[run_id] = mock_task
+
+        try:
+            mgr = RedisBrokerManager.__new__(RedisBrokerManager)
+            # Use in-memory broker for the end event
+            mgr.get_or_create_broker = broker_manager.get_or_create_broker  # type: ignore[method-assign]
+            mgr.allocate_event_id = broker_manager.allocate_event_id  # type: ignore[method-assign]
+
+            with patch.object(
+                cancellations,
+                "mark",
+                side_effect=lambda rid, reason: call_order.append("mark"),
+            ):
+                await mgr._execute_cancel(run_id)
+
+            assert call_order[:2] == ["mark", "cancel"], (
+                f"cancellations.mark must precede task.cancel(); got order: {call_order}"
+            )
+        finally:
+            active_runs.pop(run_id, None)
+            cancellations.clear(run_id)
+            broker_manager._brokers.pop(run_id, None)

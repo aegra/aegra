@@ -5,6 +5,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from aegra_api.core.active_runs import active_runs
+from aegra_api.core.cancellation_state import cancellations
 from aegra_api.models.auth import User
 from aegra_api.models.run_job import RunExecution, RunIdentity, RunJob
 from aegra_api.services.local_executor import LocalExecutor
@@ -42,6 +44,33 @@ class TestLocalExecutor:
             assert "run-1" in active_runs
             task = active_runs.pop("run-1")
             task.cancel()
+
+    @pytest.mark.asyncio
+    async def test_submit_done_callback_clears_cancel_tag(self) -> None:
+        """LocalExecutor owns the cancel-tag clear (since execute_run no longer
+        does it). Without the done-callback, the registry would leak one entry
+        per user-cancelled run in dev mode."""
+        executor = LocalExecutor()
+
+        async def fake_execute(_job: RunJob) -> None:
+            await asyncio.sleep(0)
+
+        with (
+            patch("aegra_api.services.run_executor.execute_run", side_effect=fake_execute),
+            patch("aegra_api.services.local_executor.make_run_trace_context", return_value=None),
+        ):
+            job = _make_job(run_id="run-cb")
+            cancellations.mark("run-cb", "user")
+            await executor.submit(job)
+            task = active_runs["run-cb"]
+            # fake_execute returns None — capture so done_callback fires
+            # before the assertion below.
+            result = await task
+            assert result is None
+
+        # Done-callback fires synchronously; the tag must be gone now.
+        assert cancellations.reason_of("run-cb") is None
+        active_runs.pop("run-cb", None)
 
     @pytest.mark.asyncio
     async def test_wait_for_completion_returns_on_done(self) -> None:

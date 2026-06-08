@@ -6,11 +6,13 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from aegra_api.core.active_runs import active_runs
+from aegra_api.core.cancellation_state import cancellations
 from aegra_api.models.auth import User
 from aegra_api.models.run_job import RunBehavior, RunExecution, RunIdentity, RunJob
 from aegra_api.services.worker_executor import (
     WorkerExecutor,
     _acquire_and_load,
+    _AcquireResult,
     _heartbeat_loop,
     _is_run_terminal,
     _is_valid_run_id,
@@ -125,14 +127,15 @@ class TestAcquireAndLoad:
         with patch(f"{MODULE}._get_session_maker", return_value=maker):
             result = await _acquire_and_load("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee", "worker-0")
 
-        assert result is not None
-        assert isinstance(result, _LoadedRun)
-        assert result.job.identity.run_id == "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
-        assert result.trace == {"correlation_id": "req-123"}
+        assert isinstance(result, _AcquireResult)
+        assert result.reason == "ok"
+        assert result.loaded is not None
+        assert result.loaded.job.identity.run_id == "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+        assert result.loaded.trace == {"correlation_id": "req-123"}
         session.commit.assert_awaited_once()
 
     @pytest.mark.asyncio
-    async def test_returns_none_when_lease_already_taken(self) -> None:
+    async def test_returns_contention_when_lease_already_taken(self) -> None:
         session = AsyncMock()
         update_result = MagicMock()
         update_result.rowcount = 0
@@ -143,11 +146,12 @@ class TestAcquireAndLoad:
         with patch(f"{MODULE}._get_session_maker", return_value=maker):
             result = await _acquire_and_load("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee", "worker-0")
 
-        assert result is None
+        assert result.loaded is None
+        assert result.reason == "contention"
         session.rollback.assert_awaited_once()
 
     @pytest.mark.asyncio
-    async def test_returns_none_when_execution_params_is_none(self) -> None:
+    async def test_returns_corruption_when_execution_params_is_none(self) -> None:
         run_orm = _make_run_orm()
         run_orm.execution_params = None
 
@@ -162,7 +166,8 @@ class TestAcquireAndLoad:
         with patch(f"{MODULE}._get_session_maker", return_value=maker):
             result = await _acquire_and_load("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee", "worker-0")
 
-        assert result is None
+        assert result.loaded is None
+        assert result.reason == "corruption"
 
 
 # ------------------------------------------------------------------
@@ -194,7 +199,10 @@ class TestHeartbeatLoop:
     @pytest.mark.asyncio
     async def test_extends_lease_on_each_iteration(self) -> None:
         session = AsyncMock()
-        session.execute = AsyncMock()
+        # Successful UPDATE returns rowcount=1
+        update_result = MagicMock()
+        update_result.rowcount = 1
+        session.execute = AsyncMock(return_value=update_result)
         session.commit = AsyncMock()
         maker = _make_session_maker(session)
 
@@ -216,16 +224,18 @@ class TestHeartbeatLoop:
             mock_settings.worker.LEASE_DURATION_SECONDS = 30
 
             with pytest.raises(asyncio.CancelledError):
-                await _heartbeat_loop("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee", "worker-0")
+                await _heartbeat_loop("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee", "worker-0", graph_id="g")
 
         # One iteration completed before cancellation on second sleep
         assert session.execute.await_count == 1
         assert session.commit.await_count == 1
 
     @pytest.mark.asyncio
-    async def test_continues_loop_on_db_error(self) -> None:
+    async def test_swallows_sqlalchemyerror_and_continues_heartbeat_loop(self) -> None:
+        from sqlalchemy.exc import SQLAlchemyError
+
         session = AsyncMock()
-        session.execute = AsyncMock(side_effect=Exception("DB connection lost"))
+        session.execute = AsyncMock(side_effect=SQLAlchemyError("DB connection lost"))
         maker = _make_session_maker(session)
 
         call_count = 0
@@ -242,10 +252,12 @@ class TestHeartbeatLoop:
             patch(f"{MODULE}.asyncio.sleep", side_effect=counting_sleep),
         ):
             mock_settings.worker.HEARTBEAT_INTERVAL_SECONDS = 1
-            mock_settings.worker.LEASE_DURATION_SECONDS = 30
+            # Use a long lease so the failure-budget bail-out doesn't fire and
+            # the loop genuinely keeps going across iterations.
+            mock_settings.worker.LEASE_DURATION_SECONDS = 3600
 
             with pytest.raises(asyncio.CancelledError):
-                await _heartbeat_loop("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee", "worker-0")
+                await _heartbeat_loop("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee", "worker-0", graph_id="g")
 
         # Loop continued despite DB errors (2 iterations before cancel on 3rd sleep)
         assert session.execute.await_count == 2
@@ -590,6 +602,57 @@ class TestExecuteAndRelease:
         assert not semaphore.locked()
 
     @pytest.mark.asyncio
+    async def test_clears_cancel_tag_when_acquire_raises_cancelled(self) -> None:
+        """Outermost safety-net: if CancelledError propagates from
+        ``_acquire_and_load`` (before ``_execute_with_lease``'s try block),
+        the inner except never runs. ``_execute_and_release`` finally must
+        still clear the tag to prevent leaks."""
+        run_id = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+        semaphore = asyncio.Semaphore(1)
+        await semaphore.acquire()
+        executor = WorkerExecutor()
+        cancellations.mark(run_id, "user")
+
+        async def cancelling_acquire(_rid: str, _wn: str) -> None:
+            raise asyncio.CancelledError
+
+        with (
+            patch(f"{MODULE}._acquire_and_load", side_effect=cancelling_acquire),
+            patch(f"{MODULE}.settings") as mock_settings,
+        ):
+            mock_settings.worker.BG_JOB_TIMEOUT_SECS = 60
+            with pytest.raises(asyncio.CancelledError):
+                await executor._execute_and_release(run_id, "worker-0", semaphore)
+
+        assert cancellations.reason_of(run_id) is None
+        assert run_id not in active_runs
+        assert not semaphore.locked()
+
+    @pytest.mark.asyncio
+    async def test_clears_leaked_mark_on_success_path(self) -> None:
+        """Outermost safety-net: a stale mark (e.g. broadcast lost so cancel
+        never propagated) must not leak past the run lifecycle. Run completes
+        normally; ``_execute_and_release`` finally clears anyway."""
+        run_id = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+        semaphore = asyncio.Semaphore(1)
+        await semaphore.acquire()
+        executor = WorkerExecutor()
+        cancellations.mark(run_id, "user")
+
+        async def successful_lease(_rid: str, _wn: str) -> None:
+            return None
+
+        executor._execute_with_lease = AsyncMock(side_effect=successful_lease)  # type: ignore[method-assign]
+
+        with patch(f"{MODULE}.settings") as mock_settings:
+            mock_settings.worker.BG_JOB_TIMEOUT_SECS = 60
+            await executor._execute_and_release(run_id, "worker-0", semaphore)
+
+        assert cancellations.reason_of(run_id) is None
+        assert run_id not in active_runs
+        assert not semaphore.locked()
+
+    @pytest.mark.asyncio
     async def test_handles_timeout_error(self) -> None:
         run_id = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
         semaphore = asyncio.Semaphore(1)
@@ -606,7 +669,9 @@ class TestExecuteAndRelease:
 
         with (
             patch(f"{MODULE}.settings") as mock_settings,
-            patch(f"{MODULE}._get_thread_id_for_run", new_callable=AsyncMock, return_value=thread_id),
+            patch(
+                f"{MODULE}._get_run_context_for_timeout", new_callable=AsyncMock, return_value=(thread_id, "test-graph")
+            ),
             patch(f"{MODULE}.finalize_run", new_callable=AsyncMock) as mock_finalize,
             patch(f"{MODULE}._release_lease") as mock_release,
         ):
@@ -648,12 +713,11 @@ class TestExecuteWithLease:
                 job_task_was_cancelled = True
                 raise
 
-        mock_loaded = MagicMock(spec=_LoadedRun)
-        mock_loaded.job = _make_run_job()
-        mock_loaded.trace = {}
+        mock_loaded = _LoadedRun(job=_make_run_job(), trace={}, enqueued_at=None)
+        mock_acquire_result = _AcquireResult(loaded=mock_loaded, reason="ok")
 
         with (
-            patch(f"{MODULE}._acquire_and_load", new_callable=AsyncMock, return_value=mock_loaded),
+            patch(f"{MODULE}._acquire_and_load", new_callable=AsyncMock, return_value=mock_acquire_result),
             patch(f"{MODULE}._restore_trace_context"),
             patch(f"{MODULE}.execute_run", side_effect=long_running_job),
             patch(f"{MODULE}._heartbeat_loop", new_callable=AsyncMock),

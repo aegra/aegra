@@ -219,7 +219,7 @@ sequenceDiagram
     WB->>PG: UPDATE status=success
 ```
 
-The reaper runs on every instance (default every 15 seconds). This is safe — the atomic lease acquisition prevents duplicate execution.
+The reaper runs on every instance (default every 15 seconds). Concurrent reapers are safe — `execution_params` updates use `SELECT ... FOR UPDATE` to prevent read-modify-write races, and the atomic lease acquisition (`_reset_to_pending`) prevents duplicate execution.
 
 ## Cross-instance cancellation
 
@@ -293,6 +293,120 @@ All worker settings are configured via environment variables. See the [environme
   When Redis is unavailable, workers fall back to polling PostgreSQL for pending runs at `POSTGRES_POLL_INTERVAL_SECONDS` intervals. This keeps the system functional during Redis outages, though with higher latency.
 </Note>
 
+## Prometheus metrics
+
+When `ENABLE_PROMETHEUS_METRICS=true` **and** `REDIS_BROKER_ENABLED=true`, Aegra registers 20 application-level metrics covering the worker executor, lease reaper, and run lifecycle. These are separate from the HTTP-level metrics provided by `prometheus-fastapi-instrumentator`. The metrics are not registered at all in dev mode (`REDIS_BROKER_ENABLED=false`) — `LocalExecutor` does not exercise the worker subsystem they describe.
+
+The `/metrics` endpoint is intentionally **not** behind Aegra's auth middleware (Prometheus scrapers typically don't support app-level auth). Restrict access via network controls (firewall, internal LB, mesh policy).
+
+### Identity invariant
+
+```text
+dispatched = completed + permanently_failed + in_flight + discarded
+```
+
+- `dispatched` — counts queue events. Both the original submit and reaper-driven crashed-run retries increment it; stuck-pending re-enqueue does not (the original submit already counted those runs).
+- `completed` — run reached terminal state via `execute_run` or pending-cancel CAS (status: success/error/interrupted). Reaper-marked permanent failures land in `permanently_failed` and are intentionally **not** counted here.
+- `permanently_failed` — max retries exceeded (reaper only, disjoint from `completed`).
+- `in_flight` — currently executing (gauge).
+- `discarded` — invalid `run_id` dequeued and dropped.
+
+### Worker metrics (15)
+
+| Metric | Type | Labels | Description |
+|:-------|:-----|:-------|:------------|
+| `aegra_runs_dispatched_total` | Counter | `graph_id` | Runs submitted to queue |
+| `aegra_runs_completed_total` | Counter | `graph_id`, `status` | Runs completed via `execute_run` or pending-cancel CAS (success/error/interrupted). Reaper permanent-failures land in `aegra_reaper_permanently_failed_total`, not here. |
+| `aegra_runs_in_flight` | Gauge | `graph_id` | Currently executing runs |
+| `aegra_runs_discarded_total` | Counter | — | Invalid run_ids dequeued and dropped |
+| `aegra_run_execution_seconds` | Histogram | `graph_id` | Run execution duration |
+| `aegra_run_queue_wait_seconds` | Histogram | `graph_id` | Time from submit to lease acquire |
+| `aegra_run_timeouts_total` | Counter | `graph_id` | Runs killed by timeout |
+| `aegra_submit_errors_total` | Counter | `graph_id` | Failed RPUSH to Redis on submit |
+| `aegra_runs_dequeued_total` | Counter | — | Successful BLPOP dequeues |
+| `aegra_dequeue_errors_total` | Counter | — | Redis errors during dequeue |
+| `aegra_redis_up` | Gauge | — | 1 if Redis is reachable (last BLPOP / startup PING succeeded), 0 otherwise |
+| `aegra_heartbeat_extensions_total` | Counter | `graph_id` | Successful lease heartbeats |
+| `aegra_heartbeat_failures_total` | Counter | `graph_id` | Failed lease heartbeats |
+| `aegra_lease_losses_total` | Counter | `graph_id`, `reason` | Lease lost during execution. `reason="rowcount_zero"` when the heartbeat UPDATE found no row owned by this worker (claimed by another worker), `reason="heartbeat_timeout"` when consecutive heartbeat failures exceeded the failure budget. |
+| `aegra_run_retries_total` | Counter | `graph_id`, `retry_number` | Runs retried after crash |
+
+### Reaper metrics (5)
+
+| Metric | Type | Labels | Description |
+|:-------|:-----|:-------|:------------|
+| `aegra_reaper_crashed_recovered_total` | Counter | — | Crashed runs recovered by reaper |
+| `aegra_reaper_stuck_reenqueued_total` | Counter | — | Stuck pending runs re-enqueued |
+| `aegra_reaper_permanently_failed_total` | Counter | — | Runs exceeding max retries |
+| `aegra_reaper_cycle_seconds` | Histogram | — | Reaper cycle duration |
+| `aegra_queue_depth` | Gauge | — | Number of run_ids in Redis job queue |
+
+### Histogram buckets
+
+Bucket boundaries are sized for agent workloads (seconds to minutes, not milliseconds):
+
+- **Execution**: 0.5, 1, 2, 5, 10, 30, 60, 120, 300, 600, 1200, 1800, 3600s — top bucket matches the default `BG_JOB_TIMEOUT_SECS` so timed-out runs land in a meaningful bucket instead of `+Inf`.
+- **Queue wait**: 0.1, 0.5, 1, 2, 5, 10, 30, 60, 120, 300s
+- **Reaper cycle**: 0.01, 0.05, 0.1, 0.25, 0.5, 1, 2, 5s
+
+### Cardinality
+
+The `graph_id` label is bounded by the `graphs` map in your `aegra.json` — typically a handful of values. Series count per metric is therefore `len(graphs) × len(other_labels)`. `runs_completed` carries a second `status` label with three values (`success`, `error`, `interrupted`). `lease_losses` carries `reason` with two values (`rowcount_zero`, `heartbeat_timeout`). `run_retries` carries `retry_number` capped by `BG_JOB_MAX_RETRIES` — series count grows linearly with that setting. No user-supplied or unbounded values are emitted as labels.
+
+### Useful PromQL
+
+```promql
+# Error rate per graph (per second, 5-minute window)
+rate(aegra_runs_completed_total{status="error"}[5m])
+
+# P95 execution duration per graph
+histogram_quantile(
+  0.95,
+  sum by (le, graph_id) (rate(aegra_run_execution_seconds_bucket[5m]))
+)
+
+# Queue saturation (per instance) — alerts when in-flight + queue grow past capacity
+sum by (instance) (aegra_runs_in_flight) + on(instance) group_left aegra_queue_depth
+
+# Heartbeat health — failure ratio
+rate(aegra_heartbeat_failures_total[5m])
+  / (rate(aegra_heartbeat_failures_total[5m]) + rate(aegra_heartbeat_extensions_total[5m]))
+
+# Lease loss breakdown by cause
+sum by (reason) (rate(aegra_lease_losses_total[5m]))
+
+# Identity-invariant assertion (should be ~0 over time)
+sum(rate(aegra_runs_dispatched_total[5m]))
+  - sum(rate(aegra_runs_completed_total[5m]))
+  - sum(rate(aegra_reaper_permanently_failed_total[5m]))
+  - sum(rate(aegra_runs_discarded_total[5m]))
+  - sum(deriv(aegra_runs_in_flight[5m]))
+```
+
+### CancelledError discrimination
+
+Worker runs can be cancelled for three reasons, each handled differently. Reasons are tracked in `core/cancellation_state.py`'s `CancellationRegistry` (last-writer-wins, single-loop only):
+
+1. **User cancel** — API calls `cancellations.mark(run_id, "user")` before `task.cancel()`. The run is finalized as `interrupted` and counted in `completed`.
+2. **Lease-loss** — heartbeat detects another worker claimed the run (or that consecutive heartbeat failures span the lease duration). Finalization is skipped; the reaper re-enqueues. Temporary gap in the identity invariant (self-heals).
+3. **Timeout** (default) — `asyncio.wait_for` fires with no tag. `execute_run` skips finalization; the outer `_handle_timeout` handler finalizes as `error` and increments `run_timeouts`.
+
+Precedence in `execute_run`'s `CancelledError` handler: `lease_loss > user > timeout`. Lease-loss wins because the reaper will rerun the job on another worker, and finalizing here would clobber that future run's outcome.
+
+   <Note>
+   **Behavior change**: prior to the worker-metrics PR, timed-out runs went through `execute_run`'s cancel handler (which finalized them as `interrupted`, sent a `signal_run_cancelled` SSE event, and was then overwritten by the outer error finalize). External final status was already `error` in both versions, but SSE consumers no longer receive a spurious cancel event before the timeout error.
+   </Note>
+
+### Known gaps
+
+- **Dev mode**: the worker/reaper metrics are not registered at all when `REDIS_BROKER_ENABLED=false` — `LocalExecutor` does not exercise the worker subsystem. Only the HTTP-instrumentator metrics are exposed.
+- **`permanently_failed`** sets DB `status=error` but is disjoint from `completed` in metrics — keep this in mind when correlating metrics with DB queries.
+- **Retries inflate `dispatched`**: every reaper-driven retry increments `aegra_runs_dispatched_total`, but a permanently-failed run still contributes only `1` to `permanently_failed`. A run that crashes `N` times before exhausting its budget contributes `N+1` to `dispatched`. The identity-invariant assertion (`dispatched == completed + permanently_failed + in_flight + discarded`) drifts upward by exactly the retry count under non-zero `BG_JOB_MAX_RETRIES` — pair with `aegra_run_retries_total` when reading the gap.
+- **Lease-loss vs concurrent user-cancel race**: precedence (`lease_loss > user`) deliberately blocks user-cancel from overwriting a lease-loss tag — the old worker must skip its finalize so the rerun on another worker isn't clobbered. Side effect: a user-cancel arriving in the microsecond window between heartbeat marking lease-loss and the old worker's `pop_reason` clearing it is silently dropped, and if the broadcast then reaches the new worker before its own `mark` succeeds, the new run reads the stale `lease_loss` tag and skips finalize too — leaving the run hanging. The window is tiny (no awaits between mark and pop) but non-zero. A future hardening would scope tags by `(run_id, claim_seq)` so different lease holders observe different tags.
+- **`redis_up=0`** does not mean the system is down — Postgres fallback polling may be active.
+- **`queue_depth`** keeps its last value when Redis is unreachable instead of resetting to 0 — pair it with `redis_up` to interpret correctly.
+- **Multi-process Prometheus**: Aegra runs a single Uvicorn process per container. Running with `WEB_CONCURRENCY > 1` or under multi-worker Gunicorn is **not** supported by the current metrics setup — gauges would report only one process's value and counters would be per-process. Use horizontal scaling (more containers) instead.
+
 ## File map
 
 | File | Purpose |
@@ -308,7 +422,9 @@ All worker settings are configured via environment variables. See the [environme
 | `services/broker.py` | In-memory broker + factory |
 | `services/redis_broker.py` | Redis pub/sub broker for SSE |
 | `services/streaming_service.py` | SSE orchestration (replay + live) |
+| `observability/metrics.py` | Prometheus metric registry (HTTP + worker + reaper) |
 | `models/run_job.py` | `RunJob` Pydantic model (serialized execution params) |
 | `core/orm.py` | Run table with `execution_params`, `claimed_by`, `lease_expires_at` |
 | `core/active_runs.py` | In-memory task registry (dev mode only) |
+| `core/cancellation_state.py` | In-process `CancellationRegistry` — disambiguates user / lease-loss CancelledError sources |
 | `core/redis_manager.py` | Redis connection pool singleton |

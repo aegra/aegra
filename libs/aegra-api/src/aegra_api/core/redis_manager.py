@@ -4,6 +4,7 @@ from urllib.parse import urlparse
 
 import redis.asyncio as aioredis
 import structlog
+from redis import RedisError
 
 from aegra_api.settings import settings
 
@@ -53,6 +54,24 @@ class RedisManager:
         if self._client is None:
             raise RuntimeError("Redis not initialized. Set REDIS_BROKER_ENABLED=true and ensure Redis is running.")
         return self._client
+
+    async def is_reachable(self) -> bool:
+        """Probe Redis with a PING. Returns ``True`` on success, ``False`` on
+        any failure (uninitialized, connection error, timeout).
+
+        Used at startup to seed observability gauges (``aegra_redis_up``)
+        so dashboards reflect actual reachability instead of an
+        optimistic default.
+        """
+        if self._client is None:
+            return False
+        try:
+            await self._client.ping()  # type: ignore[invalid-await]
+        except (RedisError, OSError, TimeoutError) as exc:
+            logger.warning("Redis PING failed", error=str(exc))
+            return False
+        else:
+            return True
 
 
 # Global Redis manager instance

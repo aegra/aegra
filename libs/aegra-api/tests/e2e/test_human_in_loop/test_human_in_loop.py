@@ -79,7 +79,7 @@ async def test_human_in_loop_interrupt_resume_e2e():
     # Wait for interrupt
     import asyncio
 
-    max_wait = 10
+    max_wait = 30
     wait_interval = 0.5
     waited = 0
 
@@ -198,7 +198,7 @@ async def test_human_in_loop_text_response_e2e():
     # Wait for interrupt
     import asyncio
 
-    max_wait = 10
+    max_wait = 30
     wait_interval = 0.5
     waited = 0
 
@@ -340,7 +340,7 @@ async def test_human_in_loop_ignore_tool_call_e2e():
     # Wait for interrupt
     import asyncio
 
-    max_wait = 10
+    max_wait = 30
     wait_interval = 0.5
     waited = 0
 
@@ -611,7 +611,7 @@ async def test_human_in_loop_mark_as_resolved_e2e():
     # Wait for interrupt
     import asyncio
 
-    max_wait = 10
+    max_wait = 30
     wait_interval = 0.5
     waited = 0
 

@@ -5,6 +5,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from aegra_api.observability.otel import OpenTelemetryProvider
+from aegra_api.observability.span_enrichment import RunIdAwareIdGenerator
 from aegra_api.observability.targets import (
     BaseOtelTarget,
     GenericOtelTarget,
@@ -179,7 +180,9 @@ class TestOpenTelemetryProviderSetup:
                 "deployment.environment": "test",
             }
         )
-        mock_deps["tp"].assert_called_with(resource=mock_deps["resource"].create.return_value)
+        id_generator = mock_deps["tp"].call_args.kwargs["id_generator"]
+        assert isinstance(id_generator, RunIdAwareIdGenerator)
+        assert mock_deps["tp"].call_args.kwargs["resource"] == mock_deps["resource"].create.return_value
 
     def test_setup_attaches_configured_targets(self, mock_deps):
         """Test that exporters from targets are attached to the tracer."""

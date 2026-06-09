@@ -139,6 +139,27 @@ Aegra injects a small number of runtime keys into the same metadata stream so th
 
 If the request `metadata` contains a key already populated by the runtime, the system value wins, the user value is dropped, and a warning is logged from `aegra_api.observability.span_enrichment`. This makes the OTEL view a reliable join key with logs and the runs table; user audit fidelity is preserved by keeping the original payload in `execution_params.run_metadata`.
 
+## Trace identification
+
+Each run's OTEL `trace_id` is derived deterministically from its `run_id` — the UUID integer maps directly to the 128-bit trace identifier. This means you can look up a trace in Langfuse (or any OTLP backend) knowing only the run ID:
+
+```python
+# Submit feedback to Langfuse using just the run_id
+langfuse.score(
+    trace_id=run_id.replace("-", ""),
+    name="thumbs_up",
+    value=1.0,
+)
+```
+
+No extra API call to Aegra is needed to discover the trace.
+
+### Upstream W3C `traceparent`
+
+Each run starts its own trace — Aegra does **not** continue an incoming W3C `traceparent` from an API gateway or proxy. The deterministic `trace_id` always takes precedence.
+
+If you need to correlate Aegra traces with an upstream distributed trace (e.g. from Envoy, Istio, or AWS ALB), use the `original_request_id` key in [run metadata](#system-key-collisions) instead of relying on OTEL `trace_id` stitching.
+
 ## Key environment variables
 
 The main variables you'll need:

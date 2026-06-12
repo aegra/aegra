@@ -36,15 +36,15 @@ database that already contains a row whose ``config::text`` exceeds
 migration as **forward-only** on production databases that have been used
 with large agent configs.
 
-Revision ID: a1b2c3d4e5f6
-Revises: f1a2b3c4d5e6
+Revision ID: b88bb61be638
+Revises: c7d1f2a4b6e8
 Create Date: 2026-06-12 00:00:00.000000
 """
 
 from alembic import op
 
-revision = "a1b2c3d4e5f6"
-down_revision = "f1a2b3c4d5e6"
+revision = "b88bb61be638"
+down_revision = "c7d1f2a4b6e8"
 branch_labels = None
 depends_on = None
 

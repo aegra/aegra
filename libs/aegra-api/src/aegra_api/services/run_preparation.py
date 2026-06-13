@@ -11,7 +11,7 @@ from uuid import uuid4
 import structlog
 from asgi_correlation_id import correlation_id
 from fastapi import HTTPException
-from sqlalchemy import select, update
+from sqlalchemy import or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from aegra_api.core.orm import Assistant as AssistantORM
@@ -200,6 +200,7 @@ async def _prepare_run(
 
     assistant_stmt = select(AssistantORM).where(
         AssistantORM.assistant_id == resolved_assistant_id,
+        or_(AssistantORM.user_id == user.identity, AssistantORM.user_id == "system"),
     )
     assistant = await session.scalar(assistant_stmt)
     if not assistant:

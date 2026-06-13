@@ -224,8 +224,14 @@ class LangGraphAuthBackend(AuthenticationBackend):
         # Default to noop (anonymous) authentication when no auth file is found,
         # regardless of AUTH_TYPE setting. This ensures the server works out-of-the-box.
         if self.auth_instance is None:
-            logger.debug("No auth file configured, defaulting to noop (anonymous) authentication")
-            # Return anonymous user when no auth is configured
+            logger.warning(
+                "No auth file configured — all requests share a single 'anonymous' identity. "
+                "Data is NOT isolated between users in this mode. "
+                "Configure 'auth.path' in aegra.json before serving multiple users. "
+                "See: https://docs.aegra.dev/guides/authentication"
+            )
+            # Return anonymous user when no auth is configured.
+            # WARNING: all callers share this identity; no tenant isolation is enforced.
             user_data: Auth.types.MinimalUserDict = {
                 "identity": "anonymous",
                 "display_name": "Anonymous User",

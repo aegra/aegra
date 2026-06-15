@@ -56,8 +56,7 @@ def upgrade() -> None:
     # the assistant table during the index build is acceptable: the table is
     # small and this migration runs once at deployment time.
     op.execute(
-        "CREATE UNIQUE INDEX idx_assistant_user_graph_config"
-        " ON assistant (user_id, graph_id, md5(config::text))"
+        "CREATE UNIQUE INDEX idx_assistant_user_graph_config ON assistant (user_id, graph_id, md5(config::text))"
     )
 
 

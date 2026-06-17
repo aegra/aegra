@@ -366,7 +366,6 @@ async def stream_run(
     last_event_id: str | None = Header(None, alias="Last-Event-ID"),
     _stream_mode: str | None = Query(None, description="Override the stream mode for this connection."),
     user: User = Depends(get_current_user),
-    session: AsyncSession = Depends(get_session),
 ) -> EventSourceResponse:
     """Stream an existing run's execution via SSE.
 
@@ -444,6 +443,7 @@ async def cancel_run_endpoint(
         description="Cancellation strategy: 'cancel' for hard cancel, 'interrupt' for cooperative interrupt.",
     ),
     user: User = Depends(get_current_user),
+    session: AsyncSession = Depends(get_session),
 ) -> Run:
     """Cancel or interrupt a running execution.
 
@@ -576,3 +576,4 @@ async def delete_run(
 
     # 204 No Content
     return
+

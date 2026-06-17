@@ -109,6 +109,29 @@ class TestLangGraphAuthBackend:
             backend = LangGraphAuthBackend()
             assert backend.auth_instance is None
 
+    def test_no_auth_warning_emitted_once_at_init(self, capsys: pytest.CaptureFixture[str]):
+        """The no-auth warning fires once at startup, not on every request."""
+        with patch.object(LangGraphAuthBackend, "_load_auth_instance", return_value=None):
+            LangGraphAuthBackend()
+
+        out = capsys.readouterr().out
+        assert out.count("single 'anonymous' identity") == 1
+
+    @pytest.mark.asyncio
+    async def test_authenticate_does_not_warn_per_request(self, capsys: pytest.CaptureFixture[str]):
+        """authenticate() must not emit the no-auth warning; that would flood logs."""
+        with patch.object(LangGraphAuthBackend, "_load_auth_instance", return_value=None):
+            backend = LangGraphAuthBackend()
+        capsys.readouterr()  # drop the startup warning emitted in __init__
+
+        mock_conn = Mock(spec=HTTPConnection)
+        mock_conn.headers = {}
+
+        for _ in range(3):
+            await backend.authenticate(mock_conn)
+
+        assert "single 'anonymous' identity" not in capsys.readouterr().out
+
     def test_load_auth_instance_success(self):
         """Test successful auth instance loading"""
         mock_auth_instance = Mock()

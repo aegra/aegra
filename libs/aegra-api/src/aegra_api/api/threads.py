@@ -42,6 +42,17 @@ logger = structlog.getLogger(__name__)
 
 thread_state_service = ThreadStateService()
 
+# Identity keys the server pins from the ownership-verified path param. A
+# client checkpoint dict must not redefine them — the checkpointer keys on
+# thread_id alone, so a body-supplied thread_id would redirect reads/writes
+# to another user's thread despite the route ownership check.
+_SERVER_PINNED_CONFIG_KEYS: frozenset[str] = frozenset({"thread_id", "run_id"})
+
+
+def _client_checkpoint(checkpoint: dict[str, Any]) -> dict[str, Any]:
+    """Drop server-authoritative identity keys from a client checkpoint dict."""
+    return {k: v for k, v in checkpoint.items() if k not in _SERVER_PINNED_CONFIG_KEYS}
+
 
 # --- Sort resolution for /threads/search ---
 
@@ -473,7 +484,7 @@ async def update_thread_state(
         if request.checkpoint_id:
             config["configurable"]["checkpoint_id"] = request.checkpoint_id
         if request.checkpoint:
-            config["configurable"].update(request.checkpoint)
+            config["configurable"].update(_client_checkpoint(request.checkpoint))
         if request.checkpoint_ns:
             config["configurable"]["checkpoint_ns"] = request.checkpoint_ns
 
@@ -716,7 +727,7 @@ async def get_thread_history_post(
 
         config: dict[str, Any] = create_thread_config(thread_id, user)
         if checkpoint:
-            cfg_cp = checkpoint.copy()
+            cfg_cp = _client_checkpoint(checkpoint)
             if checkpoint_ns is not None:
                 cfg_cp.setdefault("checkpoint_ns", checkpoint_ns)
             config["configurable"].update(cfg_cp)
@@ -733,7 +744,7 @@ async def get_thread_history_post(
             if "configurable" in before:
                 before_config = before
             else:
-                before_config = {"configurable": before}
+                before_config = {"configurable": _client_checkpoint(before)}
 
         state_snapshots = []
         kwargs: dict[str, Any] = {

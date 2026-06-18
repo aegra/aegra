@@ -259,7 +259,11 @@ class TestBeforeParameterFormats:
         assert captured[0] == {"configurable": {"checkpoint_id": "cp_xyz789"}}
 
     def test_before_as_raw_checkpoint_dict(self, capturing_client: tuple) -> None:
-        """Raw checkpoint dict (no 'configurable' key) should be wrapped."""
+        """Raw checkpoint dict is wrapped, but a client thread_id is stripped.
+
+        A thread_id inside `before` must not redirect history away from the
+        ownership-verified thread (cross-tenant read).
+        """
         client, captured = capturing_client
         thread_id = _ensure_thread(client)
 
@@ -271,7 +275,7 @@ class TestBeforeParameterFormats:
         assert resp.status_code == 200
 
         assert len(captured) == 1
-        assert captured[0] == {"configurable": {"checkpoint_id": "cp_raw", "thread_id": "t1"}}
+        assert captured[0] == {"configurable": {"checkpoint_id": "cp_raw"}}
 
     def test_before_none(self, capturing_client: tuple) -> None:
         """None before should pass through as None."""

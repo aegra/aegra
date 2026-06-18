@@ -20,7 +20,7 @@ import structlog
 from asgi_correlation_id import correlation_id
 from redis import RedisError
 from redis import TimeoutError as RedisTimeoutError
-from sqlalchemy import select, update
+from sqlalchemy import select, update, or_
 
 from aegra_api.core.active_runs import active_runs
 from aegra_api.core.orm import Run as RunORM
@@ -316,11 +316,20 @@ class WorkerExecutor(BaseExecutor):
     @staticmethod
     async def _poll_postgres() -> str | None:
         """Pick the oldest pending, unclaimed run from Postgres."""
+
+        assistant_id = settings.worker.ASSISTANT_ID
         maker = _get_session_maker()
         async with maker() as session:
             run_id = await session.scalar(
                 select(RunORM.run_id)
-                .where(RunORM.status == "pending", RunORM.claimed_by.is_(None))
+                .where(
+                    RunORM.status == "pending",
+                    RunORM.claimed_by.is_(None),
+                    or_(
+                        assistant_id is None,
+                        RunORM.assistant_id == assistant_id
+                    )
+                )
                 .order_by(RunORM.created_at.asc())
                 .limit(1)
             )

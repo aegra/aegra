@@ -93,6 +93,7 @@ class LeaseReaper:
         Returns (crashed_run_ids, stuck_pending_run_ids) separately so retry
         budget is only charged to crashed runs, not stuck pending ones.
         """
+        assistant_id = settings.worker.ASSISTANT_ID
         now = datetime.now(UTC)
         maker = _get_session_maker()
         async with maker() as session:
@@ -101,6 +102,10 @@ class LeaseReaper:
                     RunORM.status == "running",
                     RunORM.lease_expires_at.isnot(None),
                     RunORM.lease_expires_at < now,
+                    or_(
+                        assistant_id is None,
+                        RunORM.assistant_id == assistant_id
+                    )
                 )
             )
             crashed = [row[0] for row in crashed_result.fetchall()]
@@ -110,6 +115,10 @@ class LeaseReaper:
                     RunORM.status == "pending",
                     RunORM.claimed_by.is_(None),
                     RunORM.created_at < now - timedelta(seconds=settings.worker.STUCK_PENDING_THRESHOLD_SECONDS),
+                    or_(
+                        assistant_id is None,
+                        RunORM.assistant_id == assistant_id
+                    )
                 )
             )
             stuck_pending = [row[0] for row in stuck_result.fetchall()]

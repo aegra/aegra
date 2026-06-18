@@ -351,7 +351,7 @@ class WorkerSettings(EnvBase):
     Each worker loop dequeues run_ids from Redis and spawns up to
     N_JOBS_PER_WORKER concurrent asyncio tasks for graph execution.
     """
-
+    ASSISTANT_ID: str | None = None
     WORKER_COUNT: int = 3
     N_JOBS_PER_WORKER: int = 10
     WORKER_QUEUE_KEY: str = "aegra:jobs"

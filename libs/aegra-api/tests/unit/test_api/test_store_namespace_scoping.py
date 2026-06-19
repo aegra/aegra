@@ -262,3 +262,19 @@ class TestScopeAttrMap:
             lambda: {"scopes": {"orgs": ["org_id", ""], "teams": ["team_id"]}},
         )
         assert _scope_attr_map() == {"teams": ["team_id"]}
+
+    def test_non_dict_scopes_value_returns_empty(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A truthy non-dict scopes value is malformed; return empty instead of raising AttributeError."""
+        monkeypatch.setattr(
+            "aegra_api.api.store.load_store_config",
+            lambda: {"scopes": "orgs"},
+        )
+        assert _scope_attr_map() == {}
+
+    def test_non_dict_scopes_int_returns_empty(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """An int scopes value must not raise; return empty."""
+        monkeypatch.setattr(
+            "aegra_api.api.store.load_store_config",
+            lambda: {"scopes": 42},
+        )
+        assert _scope_attr_map() == {}

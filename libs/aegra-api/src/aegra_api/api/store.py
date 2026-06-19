@@ -263,6 +263,9 @@ def _scope_attr_map() -> Mapping[str, list[str]]:
     configured = store_config.get("scopes") if store_config else None
     if not configured:
         return {}
+    if not isinstance(configured, dict):
+        logger.warning("store.scopes must be a mapping of prefix -> attribute names; ignoring %r", configured)
+        return {}
 
     scopes: dict[str, list[str]] = {}
     for prefix, attrs in configured.items():

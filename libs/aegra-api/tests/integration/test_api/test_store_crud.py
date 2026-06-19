@@ -701,19 +701,14 @@ class TestNamespaceScoping:
 
 
 class TestConfiguredScopeIntegration:
-    """A configured store.scopes entry maps a namespace prefix to a User attribute.
-
-    The base `client` user already carries org_id="org-1", so these reuse it and
-    only configure the "orgs" -> org_id scope. Arbitrary-attribute mapping and the
-    edge cases are covered by the unit tests in test_store_namespace_scoping.py.
-    """
+    """A configured store.scopes entry maps a namespace prefix to User attributes"""
 
     @pytest.fixture(autouse=True)
     def _org_scope(self, monkeypatch) -> None:
-        """Configure the "orgs" -> org_id scope for every test in this class."""
+        """Configure the "orgs" -> [org_id] scope for every test in this class."""
         from aegra_api.api import store as store_module
 
-        monkeypatch.setattr(store_module, "_scope_attr_map", lambda: {"orgs": "org_id"})
+        monkeypatch.setattr(store_module, "_scope_attr_map", lambda: {"orgs": ["org_id"]})
 
     def test_put_org_namespace_scopes_to_org(self, client, mock_store) -> None:
         """A fully-qualified org namespace passes through to the org scope."""
@@ -784,6 +779,44 @@ class TestConfiguredScopeIntegration:
 
         assert resp.status_code == 403
         mock_store.aput.assert_not_called()
+
+    def test_fully_qualified_multi_attribute_namespace_passes_through(self, client, mock_store, monkeypatch) -> None:
+        """A namespace already under [prefix, *attr_values] passes through unchanged."""
+        from aegra_api.api import store as store_module
+        from aegra_api.core.auth_deps import get_current_user, require_auth
+        from aegra_api.models.auth import User
+
+        monkeypatch.setattr(store_module, "_scope_attr_map", lambda: {"teams": ["org_id", "team_id"]})
+        user = User(identity="test-user", org_id="org-1", team_id="team-42")
+        client.app.dependency_overrides[require_auth] = lambda: user
+        client.app.dependency_overrides[get_current_user] = lambda: user
+
+        resp = client.put(
+            "/store/items",
+            json={"namespace": ["teams", "org-1", "team-42", "kb"], "key": "greeting", "value": {"text": "hi"}},
+        )
+
+        assert resp.status_code == 204
+        assert mock_store.aput.call_args.kwargs["namespace"] == ("teams", "org-1", "team-42", "kb")
+
+    def test_multi_attribute_scope_buries_under_all_values(self, client, mock_store, monkeypatch) -> None:
+        """A scope listing several attributes partitions by each value, in order."""
+        from aegra_api.api import store as store_module
+        from aegra_api.core.auth_deps import get_current_user, require_auth
+        from aegra_api.models.auth import User
+
+        monkeypatch.setattr(store_module, "_scope_attr_map", lambda: {"teams": ["org_id", "team_id"]})
+        user = User(identity="test-user", org_id="org-1", team_id="team-42")
+        client.app.dependency_overrides[require_auth] = lambda: user
+        client.app.dependency_overrides[get_current_user] = lambda: user
+
+        resp = client.put(
+            "/store/items",
+            json={"namespace": ["teams", "kb"], "key": "greeting", "value": {"text": "hi"}},
+        )
+
+        assert resp.status_code == 204
+        assert mock_store.aput.call_args.kwargs["namespace"] == ("teams", "org-1", "team-42", "teams", "kb")
 
 
 class TestStoreIntegration:

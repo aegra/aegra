@@ -240,23 +240,20 @@ def _normalize_namespace(value: str | list[str] | None) -> list[str]:
     return []
 
 
-def _scope(prefix: str, scope_id: str, namespace: list[str]) -> list[str]:
-    """Bury a namespace under [prefix, scope_id] unless it is already exactly that."""
-    if not namespace:
-        return [prefix, scope_id]
-
-    if namespace[0] == prefix and len(namespace) >= 2 and namespace[1] == scope_id:
+def _scope(prefix: str, scope_ids: list[str], namespace: list[str]) -> list[str]:
+    """Bury a namespace under [prefix, *scope_ids] unless it already starts with exactly that."""
+    head = [prefix, *scope_ids]
+    if namespace[: len(head)] == head:
         return namespace
-
-    return [prefix, scope_id, *namespace]
+    return [*head, *namespace]
 
 
 _USER_SCOPE_PREFIX = "users"
 
 
 @cache
-def _scope_attr_map() -> Mapping[str, str]:
-    """Map of namespace prefix -> User attribute, from aegra.json store.scopes.
+def _scope_attr_map() -> Mapping[str, list[str]]:
+    """Map of namespace prefix -> list of User attributes, from aegra.json store.scopes.
 
     Empty unless configured — configurable scopes are entirely opt-in. The
     reserved "users" prefix is dropped so it can never be remapped away from
@@ -267,28 +264,37 @@ def _scope_attr_map() -> Mapping[str, str]:
     if not configured:
         return {}
 
-    scopes = {prefix: attr for prefix, attr in configured.items() if prefix != _USER_SCOPE_PREFIX}
-    if _USER_SCOPE_PREFIX in configured:
-        logger.warning("store.scopes key %r is reserved and was ignored", _USER_SCOPE_PREFIX)
+    scopes: dict[str, list[str]] = {}
+    for prefix, attrs in configured.items():
+        if prefix == _USER_SCOPE_PREFIX:
+            logger.warning("store.scopes key %r is reserved and was ignored", _USER_SCOPE_PREFIX)
+            continue
+        if not isinstance(attrs, list) or not attrs or not all(isinstance(a, str) and a for a in attrs):
+            logger.warning("store.scopes[%r] must be a non-empty list of attribute names; ignoring", prefix)
+            continue
+        scopes[prefix] = attrs
     return scopes
 
 
-def apply_namespace_scoping(namespace: list[str], user: User, *, scopes: Mapping[str, str] | None = None) -> list[str]:
+def apply_namespace_scoping(
+    namespace: list[str], user: User, *, scopes: Mapping[str, list[str]] | None = None
+) -> list[str]:
     """Scope store namespaces for data isolation.
 
     User scope is the default. A leading element matching a configured scope
-    prefix opts into that scope, isolating data under [prefix, <user attr>].
-    Items land in the same scope for every user with the same attribute value,
+    prefix opts into that scope, isolating data under [prefix, *<user attrs>].
+    Items land in the same scope for every user sharing those attribute values,
     so mapping a shared attribute (e.g. org_id) shares data across that group.
-    The scope value comes from the authenticated user, never the request.
     """
     scopes = scopes if scopes is not None else _scope_attr_map()
 
     if namespace and (prefix := namespace[0]) in scopes:
-        attr = scopes[prefix]
-        value = getattr(user, attr, None)
-        if value is None or value == "":
-            raise HTTPException(403, f"User has no {attr!r} required for {prefix!r}-scoped store access")
-        return _scope(prefix, str(value), namespace)
+        values: list[str] = []
+        for attr in scopes[prefix]:
+            value = getattr(user, attr, None)
+            if value is None or value == "":
+                raise HTTPException(403, f"User has no {attr!r} required for {prefix!r}-scoped store access")
+            values.append(str(value))
+        return _scope(prefix, values, namespace)
 
-    return _scope(_USER_SCOPE_PREFIX, user.identity, namespace)
+    return _scope(_USER_SCOPE_PREFIX, [user.identity], namespace)

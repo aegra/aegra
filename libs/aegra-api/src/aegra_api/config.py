@@ -64,18 +64,8 @@ class StoreConfig(TypedDict, total=False):
 
     index: StoreIndexConfig | None
     """Vector index configuration for semantic search"""
-    scopes: dict[str, str]
-    """Map of namespace prefix -> User attribute used for configurable store scoping.
-
-    A leading namespace element matching a key opts into that scope, isolating
-    data under [prefix, <user attribute value>]. The "users" prefix is reserved
-    for per-user isolation and cannot be remapped. Empty (no extra scopes) unless
-    configured. Mapping a shared attribute (e.g. org_id) shares data across every
-    user with that value — a common use case, but the scope value can be any
-    User attribute.
-    Example: {"orgs": "org_id", "teams": "team_id"} scopes under ["orgs", <org_id>]
-    and ["teams", <team_id>].
-    """
+    scopes: dict[str, list[str]]
+    """Map of namespace prefix -> list of User attributes used for configurable store scoping."""
 
 
 class AuthConfig(TypedDict, total=False):

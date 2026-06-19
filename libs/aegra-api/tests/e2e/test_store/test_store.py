@@ -45,7 +45,7 @@ async def test_store_endpoints_via_sdk():
 async def test_org_prefix_without_org_membership_is_forbidden():
     """The anonymous user has no org_id, so the "orgs" prefix is rejected with 403.
 
-    Relies on aegra.json configuring store.scopes {"orgs": "org_id"}. The org-scoped
+    Relies on aegra.json configuring store.scopes {"orgs": ["org_id"]}. The org-scoped
     happy path needs auth that sets org_id; it lives in the auth-enabled suite
     (manual_auth_tests/test_store_org_isolation_e2e.py).
     """

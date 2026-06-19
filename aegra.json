@@ -15,7 +15,7 @@
   },
   "store": {
     "scopes": {
-      "orgs": "org_id"
+      "orgs": ["org_id"]
     }
   }
 }

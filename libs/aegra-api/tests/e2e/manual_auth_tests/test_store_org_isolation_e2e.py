@@ -8,7 +8,7 @@ Claim under test:
 ⚠️ MANUAL TESTS - These are skipped by default. Run with: pytest -m manual_auth
 
 Requires a running Aegra server with auth enabled (the jwt_mock_auth_example
-config) and store.scopes {"orgs": "org_id"} configured (see aegra.auth.json).
+config) and store.scopes {"orgs": ["org_id"]} configured (see aegra.auth.json).
 See README.md for setup. The mock auth maps a token's team segment to org_id:
 mock-jwt-<user>-<role>-<org>. A token without a team segment has no org.
 
@@ -27,7 +27,9 @@ from tests.e2e._utils import elog
 
 def get_server_url() -> str:
     """Return the base URL of the running server under test."""
-    return settings.app.SERVER_URL
+    url = settings.app.SERVER_URL
+    assert url is not None, "SERVER_URL is derived from HOST/PORT and is never None"
+    return url
 
 
 def auth_headers(user_id: str, *, role: str = "user", org: str | None = "org1") -> dict[str, str]:

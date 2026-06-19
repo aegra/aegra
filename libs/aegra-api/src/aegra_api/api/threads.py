@@ -741,8 +741,8 @@ async def get_thread_history_post(
         if isinstance(before, str):
             before_config = {"configurable": {"checkpoint_id": before}}
         elif isinstance(before, dict):
-            if "configurable" in before:
-                before_config = before
+            if "configurable" in before and isinstance(before["configurable"], dict):
+                before_config = {**before, "configurable": _client_checkpoint(before["configurable"])}
             else:
                 before_config = {"configurable": _client_checkpoint(before)}
 

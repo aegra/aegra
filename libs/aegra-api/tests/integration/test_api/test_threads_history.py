@@ -258,6 +258,25 @@ class TestBeforeParameterFormats:
         # Must NOT be double-wrapped as {"configurable": {"configurable": {...}}}
         assert captured[0] == {"configurable": {"checkpoint_id": "cp_xyz789"}}
 
+    def test_before_as_runnable_config_strips_thread_id(self, capturing_client: tuple) -> None:
+        """A thread_id inside a full-RunnableConfig `before` must be stripped.
+
+        Otherwise it redirects history to another user's thread despite the
+        route ownership check (cross-tenant read).
+        """
+        client, captured = capturing_client
+        thread_id = _ensure_thread(client)
+
+        before = {"configurable": {"thread_id": "victim", "checkpoint_id": "cp1"}}
+        resp = client.post(
+            f"/threads/{thread_id}/history",
+            json={"before": before},
+        )
+        assert resp.status_code == 200
+
+        assert len(captured) == 1
+        assert captured[0] == {"configurable": {"checkpoint_id": "cp1"}}
+
     def test_before_as_raw_checkpoint_dict(self, capturing_client: tuple) -> None:
         """Raw checkpoint dict is wrapped, but a client thread_id is stripped.
 

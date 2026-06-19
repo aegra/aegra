@@ -1,8 +1,13 @@
 """Store endpoints for Agent Protocol"""
 
+from collections.abc import Mapping
+from functools import cache
+
+import structlog
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import Response
 
+from aegra_api.config import load_store_config
 from aegra_api.core.auth_deps import auth_dependency, get_current_user
 from aegra_api.core.auth_handlers import build_auth_context, handle_event
 from aegra_api.core.database import db_manager
@@ -18,6 +23,8 @@ from aegra_api.models import (
     User,
 )
 from aegra_api.models.errors import BAD_REQUEST, NOT_FOUND
+
+logger = structlog.get_logger(__name__)
 
 router = APIRouter(tags=["Store"], dependencies=auth_dependency)
 
@@ -44,7 +51,7 @@ async def put_store_item(request: StorePutRequest, user: User = Depends(get_curr
             request.value = filters["value"]
 
     # Apply user namespace scoping
-    scoped_namespace = apply_user_namespace_scoping(user.identity, request.namespace)
+    scoped_namespace = apply_namespace_scoping(request.namespace, user)
 
     store = db_manager.get_store()
 
@@ -78,7 +85,7 @@ async def get_store_item(
             key = filters["key"]
 
     # Apply user namespace scoping
-    scoped_namespace = apply_user_namespace_scoping(user.identity, _normalize_namespace(namespace))
+    scoped_namespace = apply_namespace_scoping(_normalize_namespace(namespace), user)
 
     store = db_manager.get_store()
 
@@ -127,7 +134,7 @@ async def delete_store_item(
             k = filters["key"]
 
     # Apply user namespace scoping
-    scoped_namespace = apply_user_namespace_scoping(user.identity, ns)
+    scoped_namespace = apply_namespace_scoping(ns, user)
 
     store = db_manager.get_store()
 
@@ -160,7 +167,7 @@ async def search_store_items(
             request.filter = {**(request.filter or {}), **handler_filters}
 
     # Apply user namespace scoping
-    scoped_prefix = apply_user_namespace_scoping(user.identity, request.namespace_prefix)
+    scoped_prefix = apply_namespace_scoping(request.namespace_prefix, user)
 
     store = db_manager.get_store()
 
@@ -207,7 +214,7 @@ async def list_namespaces(
             request.suffix = filters["suffix"]
 
     # Apply user namespace scoping to prefix
-    scoped_prefix = apply_user_namespace_scoping(user.identity, request.prefix or [])
+    scoped_prefix = apply_namespace_scoping(request.prefix or [], user)
     prefix: tuple[str, ...] = tuple(scoped_prefix)
     suffix: tuple[str, ...] | None = tuple(request.suffix) if request.suffix else None
 
@@ -233,17 +240,55 @@ def _normalize_namespace(value: str | list[str] | None) -> list[str]:
     return []
 
 
-def apply_user_namespace_scoping(user_id: str, namespace: list[str]) -> list[str]:
-    """Apply user-based namespace scoping for data isolation.
-
-    All store operations are scoped to the authenticated user's namespace.
-    Users can only access namespaces under ["users", <their_user_id>].
-    """
+def _scope(prefix: str, scope_id: str, namespace: list[str]) -> list[str]:
+    """Bury a namespace under [prefix, scope_id] unless it is already exactly that."""
     if not namespace:
-        return ["users", user_id]
+        return [prefix, scope_id]
 
-    if namespace[0] == "users" and len(namespace) >= 2 and namespace[1] == user_id:
+    if namespace[0] == prefix and len(namespace) >= 2 and namespace[1] == scope_id:
         return namespace
 
-    # Scope any other namespace under the user's prefix
-    return ["users", user_id] + namespace
+    return [prefix, scope_id, *namespace]
+
+
+_USER_SCOPE_PREFIX = "users"
+
+
+@cache
+def _scope_attr_map() -> Mapping[str, str]:
+    """Map of namespace prefix -> User attribute, from aegra.json store.scopes.
+
+    Empty unless configured — configurable scopes are entirely opt-in. The
+    reserved "users" prefix is dropped so it can never be remapped away from
+    per-user isolation.
+    """
+    store_config = load_store_config()
+    configured = store_config.get("scopes") if store_config else None
+    if not configured:
+        return {}
+
+    scopes = {prefix: attr for prefix, attr in configured.items() if prefix != _USER_SCOPE_PREFIX}
+    if _USER_SCOPE_PREFIX in configured:
+        logger.warning("store.scopes key %r is reserved and was ignored", _USER_SCOPE_PREFIX)
+    return scopes
+
+
+def apply_namespace_scoping(namespace: list[str], user: User, *, scopes: Mapping[str, str] | None = None) -> list[str]:
+    """Scope store namespaces for data isolation.
+
+    User scope is the default. A leading element matching a configured scope
+    prefix opts into that scope, isolating data under [prefix, <user attr>].
+    Items land in the same scope for every user with the same attribute value,
+    so mapping a shared attribute (e.g. org_id) shares data across that group.
+    The scope value comes from the authenticated user, never the request.
+    """
+    scopes = scopes if scopes is not None else _scope_attr_map()
+
+    if namespace and (prefix := namespace[0]) in scopes:
+        attr = scopes[prefix]
+        value = getattr(user, attr, None)
+        if value is None or value == "":
+            raise HTTPException(403, f"User has no {attr!r} required for {prefix!r}-scoped store access")
+        return _scope(prefix, str(value), namespace)
+
+    return _scope(_USER_SCOPE_PREFIX, user.identity, namespace)

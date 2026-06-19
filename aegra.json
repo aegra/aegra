@@ -12,5 +12,10 @@
   },
   "http": {
     "app": "./examples/custom_routes_example.py:app"
+  },
+  "store": {
+    "scopes": {
+      "orgs": "org_id"
+    }
   }
 }

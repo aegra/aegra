@@ -207,7 +207,7 @@ async def stateless_stream_run(
     should_delete = request.on_completion != "keep"
 
     try:
-        response = await create_and_stream_run(thread_id, request, user, session)
+        response = await create_and_stream_run(thread_id, request, user)
     except Exception:
         # create_and_stream_run may have auto-created the thread via
         # update_thread_metadata before raising; clean up to avoid orphans.

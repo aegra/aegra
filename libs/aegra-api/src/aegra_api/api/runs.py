@@ -417,7 +417,6 @@ async def stream_run(
 
     # Stream active or pending runs via broker
 
-
     return make_sse_response(
         sse_to_bytes(streaming_service.stream_run_execution(run_model, last_event_id)),
         headers={
@@ -576,4 +575,3 @@ async def delete_run(
 
     # 204 No Content
     return
-

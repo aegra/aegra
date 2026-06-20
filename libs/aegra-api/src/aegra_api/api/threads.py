@@ -42,15 +42,12 @@ logger = structlog.getLogger(__name__)
 
 thread_state_service = ThreadStateService()
 
-# Identity keys the server pins from the ownership-verified path param. A
-# client checkpoint dict must not redefine them — the checkpointer keys on
-# thread_id alone, so a body-supplied thread_id would redirect reads/writes
-# to another user's thread despite the route ownership check.
+# A body-supplied thread_id overrides the route-verified one (the checkpointer
+# keys on thread_id alone), so the server pins these instead of trusting them.
 _SERVER_PINNED_CONFIG_KEYS: frozenset[str] = frozenset({"thread_id", "run_id"})
 
 
 def _client_checkpoint(checkpoint: dict[str, Any]) -> dict[str, Any]:
-    """Drop server-authoritative identity keys from a client checkpoint dict."""
     return {k: v for k, v in checkpoint.items() if k not in _SERVER_PINNED_CONFIG_KEYS}
 
 

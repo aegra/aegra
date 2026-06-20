@@ -707,20 +707,16 @@ def create_run_config(
 ) -> dict[str, Any]:
     """Create LangGraph configuration for a specific run with full context.
 
-    The function is *additive* for most keys, but `thread_id` and `run_id` are
-    server-authoritative: a client-supplied `configurable.thread_id` would
-    otherwise point graph execution (and the checkpointer, which keys solely on
-    thread_id) at another user's thread, bypassing the route ownership check.
-    We force the server values so the request body cannot redirect execution.
+    Additive for client keys, except thread_id/run_id which are forced: a
+    body-supplied configurable.thread_id would redirect execution to another
+    user's thread (the checkpointer keys on thread_id alone).
     """
     from copy import deepcopy
 
     cfg: dict = deepcopy(additional_config) if additional_config else {}
-
-    # Ensure a configurable section exists
     cfg.setdefault("configurable", {})
 
-    # Force server-authoritative identity keys — never honor a client override.
+    # Server-authoritative — overwrite, never honor a client override.
     cfg["configurable"]["thread_id"] = thread_id
     cfg["configurable"]["run_id"] = run_id
 

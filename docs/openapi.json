@@ -3118,6 +3118,88 @@
           }
         }
       }
+    },
+    "/threads/{thread_id}/stream/events": {
+      "post": {
+        "tags": [
+          "Event Streaming"
+        ],
+        "summary": "Stream Thread Events",
+        "description": "Open a channel-filtered SSE stream of v2 events for the thread's run.\n\nBody ``{channels: [...], since?: int}``. Each SSE frame is a protocol\nevent envelope: ``event:`` is the channel, ``data:`` the JSON envelope,\n``id:`` the session ``seq`` a client echoes back as ``since`` on resume.",
+        "operationId": "stream_thread_events_threads__thread_id__stream_events_post",
+        "parameters": [
+          {
+            "name": "thread_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Thread Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/threads/{thread_id}/commands": {
+      "post": {
+        "tags": [
+          "Event Streaming"
+        ],
+        "summary": "Post Thread Command",
+        "description": "Run a single v2 command on the thread and return its response envelope.",
+        "operationId": "post_thread_command_threads__thread_id__commands_post",
+        "parameters": [
+          {
+            "name": "thread_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Thread Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
     }
   },
   "components": {
@@ -5669,6 +5751,10 @@
     {
       "name": "Store",
       "description": "Persistent key-value and semantic storage available from any thread."
+    },
+    {
+      "name": "Event Streaming",
+      "description": "Agent Protocol v2 thread event streaming and commands."
     },
     {
       "name": "Health",

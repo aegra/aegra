@@ -86,9 +86,9 @@ requires-dist = [
 [package.metadata.requires-dev]
 dev = [
     { name = "bandit", specifier = ">=1.8.0" },
-    { name = "langchain", specifier = ">=1.0.0" },
+    { name = "langchain", specifier = ">=1.3.9" },
     { name = "langchain-mcp-adapters", specifier = ">=0.1.0" },
-    { name = "langchain-openai", specifier = ">=1.0.3" },
+    { name = "langchain-openai", specifier = ">=1.1.14" },
     { name = "pre-commit", specifier = ">=4.0.1" },
     { name = "pytest", specifier = ">=9.0.2" },
     { name = "pytest-asyncio", specifier = ">=1.3.0" },
@@ -129,7 +129,7 @@ requires-dist = [
     { name = "click", specifier = ">=8.1.7" },
     { name = "debugpy", marker = "extra == 'debug'", specifier = ">=1.8" },
     { name = "jinja2", specifier = ">=3.1" },
-    { name = "python-dotenv", specifier = ">=1.1.1" },
+    { name = "python-dotenv", specifier = ">=1.2.2" },
     { name = "rich", specifier = ">=13.0" },
 ]
 provides-extras = ["debug"]

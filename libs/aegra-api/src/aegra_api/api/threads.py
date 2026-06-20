@@ -36,18 +36,12 @@ from aegra_api.models import (
 from aegra_api.models.errors import CONFLICT, NOT_FOUND
 from aegra_api.services.streaming_service import streaming_service
 from aegra_api.services.thread_state_service import ThreadStateService
+from aegra_api.utils.run_utils import strip_pinned_config_keys
 
 router = APIRouter(tags=["Threads"], dependencies=auth_dependency)
 logger = structlog.getLogger(__name__)
 
 thread_state_service = ThreadStateService()
-
-
-def _client_checkpoint(checkpoint: dict[str, Any]) -> dict[str, Any]:
-    """Drop server-pinned identity keys (thread_id/run_id) from a client dict."""
-    from aegra_api.services.langgraph_service import strip_pinned_config_keys
-
-    return strip_pinned_config_keys(checkpoint)
 
 
 # --- Sort resolution for /threads/search ---
@@ -480,7 +474,7 @@ async def update_thread_state(
         if request.checkpoint_id:
             config["configurable"]["checkpoint_id"] = request.checkpoint_id
         if request.checkpoint:
-            config["configurable"].update(_client_checkpoint(request.checkpoint))
+            config["configurable"].update(strip_pinned_config_keys(request.checkpoint))
         if request.checkpoint_ns:
             config["configurable"]["checkpoint_ns"] = request.checkpoint_ns
 
@@ -723,7 +717,7 @@ async def get_thread_history_post(
 
         config: dict[str, Any] = create_thread_config(thread_id, user)
         if checkpoint:
-            cfg_cp = _client_checkpoint(checkpoint)
+            cfg_cp = strip_pinned_config_keys(checkpoint)
             if checkpoint_ns is not None:
                 cfg_cp.setdefault("checkpoint_ns", checkpoint_ns)
             config["configurable"].update(cfg_cp)
@@ -738,9 +732,9 @@ async def get_thread_history_post(
             before_config = {"configurable": {"checkpoint_id": before}}
         elif isinstance(before, dict):
             if "configurable" in before and isinstance(before["configurable"], dict):
-                before_config = {**before, "configurable": _client_checkpoint(before["configurable"])}
+                before_config = {**before, "configurable": strip_pinned_config_keys(before["configurable"])}
             else:
-                before_config = {"configurable": _client_checkpoint(before)}
+                before_config = {"configurable": strip_pinned_config_keys(before)}
 
         state_snapshots = []
         kwargs: dict[str, Any] = {

@@ -6,6 +6,15 @@ from langgraph.types import Command, Send
 
 logger = structlog.getLogger(__name__)
 
+# A body-supplied thread_id overrides the route-verified one (the checkpointer
+# keys on thread_id alone), so the server pins these instead of trusting them.
+SERVER_PINNED_CONFIG_KEYS: frozenset[str] = frozenset({"thread_id", "run_id"})
+
+
+def strip_pinned_config_keys(client_config: dict[str, Any]) -> dict[str, Any]:
+    """Drop server-authoritative identity keys from a client-supplied config dict."""
+    return {k: v for k, v in client_config.items() if k not in SERVER_PINNED_CONFIG_KEYS}
+
 
 def map_command_to_langgraph(cmd: dict[str, Any]) -> Command:
     """Convert an API command dict to a LangGraph Command object."""

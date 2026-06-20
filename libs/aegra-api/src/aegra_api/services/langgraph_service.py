@@ -39,18 +39,10 @@ from aegra_api.services.graph_factory import (
     invoke_factory,
     is_factory,
 )
+from aegra_api.utils.run_utils import strip_pinned_config_keys
 
 State = TypeVar("State")
 logger = structlog.get_logger(__name__)
-
-# A body-supplied thread_id overrides the route-verified one (the checkpointer
-# keys on thread_id alone), so the server pins these instead of trusting them.
-SERVER_PINNED_CONFIG_KEYS: frozenset[str] = frozenset({"thread_id", "run_id"})
-
-
-def strip_pinned_config_keys(client_config: dict[str, Any]) -> dict[str, Any]:
-    """Drop server-authoritative identity keys from a client-supplied config dict."""
-    return {k: v for k, v in client_config.items() if k not in SERVER_PINNED_CONFIG_KEYS}
 
 
 def _module_name_for(graph_id: str) -> str:

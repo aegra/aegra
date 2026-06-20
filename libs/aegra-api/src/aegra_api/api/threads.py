@@ -727,14 +727,13 @@ async def get_thread_history_post(
         # Convert `before` to a RunnableConfig for aget_state_history.
         # The SDK sends `before` as either a checkpoint ID string, a raw
         # checkpoint dict, or a full RunnableConfig with a "configurable" key.
+        # No thread_id scrub here: aget_state_history reads only checkpoint_id
+        # from `before` (the thread comes from the main config, pinned above).
         before_config: dict[str, Any] | None = None
         if isinstance(before, str):
             before_config = {"configurable": {"checkpoint_id": before}}
         elif isinstance(before, dict):
-            if "configurable" in before and isinstance(before["configurable"], dict):
-                before_config = {**before, "configurable": strip_pinned_config_keys(before["configurable"])}
-            else:
-                before_config = {"configurable": strip_pinned_config_keys(before)}
+            before_config = before if "configurable" in before else {"configurable": before}
 
         state_snapshots = []
         kwargs: dict[str, Any] = {

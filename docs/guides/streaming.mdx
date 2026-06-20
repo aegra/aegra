@@ -235,3 +235,65 @@ Events are retained for 1 hour after the run completes.
 <Note>
   In production deployments, SSE events are delivered via Redis pub/sub from workers — the client's SSE connection and the worker executing the run can be on different instances. See the [worker architecture guide](/guides/worker-architecture) for details on how this works.
 </Note>
+
+## Agent Protocol v2 event streaming
+
+The latest LangGraph JS and Python SDKs (including `@langchain/langgraph-sdk` and the Vue/React `useStream()` composables) speak a newer streaming protocol with a dedicated event envelope and a content-block message model. Aegra exposes this protocol behind a feature flag.
+
+<Note>
+  v2 streaming is **off by default** and additive — the legacy `runs/stream` endpoints are unchanged. Enable it with `FF_V2_EVENT_STREAMING=true`. It requires a `langgraph` / `langchain-core` new enough to emit native content-block events; the server returns `503` with an upgrade hint if the runtime is too old.
+</Note>
+
+### Endpoints
+
+| Endpoint | Purpose |
+|---|---|
+| `POST /threads/{thread_id}/commands` | Run a command: `run.start` (start a run), `input.respond` (resume an interrupt). Returns a JSON response envelope. |
+| `POST /threads/{thread_id}/stream/events` | Open a channel-filtered SSE stream of v2 events for a run on the thread. |
+
+### Starting a run
+
+```bash
+curl -X POST http://localhost:8000/threads/$THREAD/commands \
+  -H "Content-Type: application/json" \
+  -d '{
+        "id": 1,
+        "method": "run.start",
+        "params": {"assistant_id": "agent", "input": {"messages": [{"role": "user", "content": "hi"}]}}
+      }'
+# → {"type": "success", "id": 1, "result": {"run_id": "..."}}
+```
+
+### Streaming events
+
+The SSE filter is a POST body listing the channels you want. Pass `since` (the last `seq` you saw) to resume after a dropped connection.
+
+```bash
+curl -N -X POST http://localhost:8000/threads/$THREAD/stream/events \
+  -H "Content-Type: application/json" \
+  -d '{"run_id": "'"$RUN"'", "channels": ["messages", "values", "lifecycle"]}'
+```
+
+Each SSE frame carries a protocol event envelope. `event:` is the channel, `data:` is the JSON envelope, and `id:` is the session `seq` you echo back as `since` on resume:
+
+```
+event: messages
+data: {"type":"event","seq":1,"method":"messages","params":{"event":"message-start","role":"ai","id":"msg_1"}}
+id: 1
+
+event: messages
+data: {"type":"event","seq":2,"method":"messages","params":{"event":"content-block-delta","index":0,"delta":{"type":"text-delta","text":"Hello"}}}
+id: 2
+
+event: lifecycle
+data: {"type":"event","seq":3,"method":"lifecycle","params":{"event":"completed"}}
+id: 3
+```
+
+### Channels
+
+`values`, `updates`, `messages`, `tools`, `lifecycle`, `input`, `checkpoints`, `tasks`, and `custom` (plus `custom:<name>`). Message streams arrive as content-block events (`message-start` → `content-block-delta` → `message-finish`); lifecycle reports `started` / `completed` / `failed` / `interrupted`.
+
+<Note>
+  This first release covers the HTTP SSE + commands path that unblocks the JS/Python SDKs. The WebSocket transport and the `agent.getTree` / `state.fork` commands are not yet implemented. `run.start` and `input.respond` require an explicit `assistant_id` in their params.
+</Note>

@@ -58,5 +58,8 @@ class TestChannels:
     def test_custom_namespaced_channel_supported(self) -> None:
         assert is_supported_channel("custom:my_event")
 
+    def test_empty_custom_channel_rejected(self) -> None:
+        assert not is_supported_channel("custom:")
+
     def test_unknown_channel_rejected(self) -> None:
         assert not is_supported_channel("bogus")

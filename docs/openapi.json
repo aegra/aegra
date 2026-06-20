@@ -3125,7 +3125,7 @@
           "Event Streaming"
         ],
         "summary": "Stream Thread Events",
-        "description": "Open a channel-filtered SSE stream of v2 events for the thread's run.\n\nBody ``{channels: [...], since?: int}``. Each SSE frame is a protocol\nevent envelope: ``event:`` is the channel, ``data:`` the JSON envelope,\n``id:`` the session ``seq`` a client echoes back as ``since`` on resume.",
+        "description": "Open a channel-filtered SSE stream of v2 events for a run on the thread.\n\nEach SSE frame is a protocol event envelope: ``event:`` is the channel,\n``data:`` the JSON envelope, ``id:`` the session ``seq`` a client echoes\nback as ``since`` on resume.",
         "operationId": "stream_thread_events_threads__thread_id__stream_events_post",
         "parameters": [
           {
@@ -3138,6 +3138,16 @@
             }
           }
         ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/EventStreamRequest"
+              }
+            }
+          }
+        },
         "responses": {
           "200": {
             "description": "Successful Response",
@@ -3179,6 +3189,16 @@
             }
           }
         ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ThreadCommand"
+              }
+            }
+          }
+        },
         "responses": {
           "200": {
             "description": "Successful Response",
@@ -4321,6 +4341,43 @@
         "title": "CronUpdate",
         "description": "Request body for updating an existing cron job."
       },
+      "EventStreamRequest": {
+        "properties": {
+          "run_id": {
+            "type": "string",
+            "title": "Run Id",
+            "description": "Run on the thread whose events to stream."
+          },
+          "channels": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Channels",
+            "description": "Channels to subscribe to (e.g. messages, values, lifecycle)."
+          },
+          "since": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Since",
+            "description": "Last seq the client saw; events at or below it are skipped on resume."
+          }
+        },
+        "type": "object",
+        "required": [
+          "run_id",
+          "channels"
+        ],
+        "title": "EventStreamRequest",
+        "description": "Body for ``POST /threads/{thread_id}/stream/events``."
+      },
       "HTTPValidationError": {
         "properties": {
           "detail": {
@@ -5180,6 +5237,33 @@
         ],
         "title": "ThreadCheckpointPostRequest",
         "description": "Request model for fetching thread checkpoint"
+      },
+      "ThreadCommand": {
+        "properties": {
+          "id": {
+            "type": "integer",
+            "title": "Id",
+            "description": "Client-assigned command id, echoed in the response."
+          },
+          "method": {
+            "type": "string",
+            "title": "Method",
+            "description": "Command method, e.g. run.start or input.respond."
+          },
+          "params": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Params",
+            "description": "Method parameters."
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "method"
+        ],
+        "title": "ThreadCommand",
+        "description": "Body for ``POST /threads/{thread_id}/commands`` (JSON-RPC style)."
       },
       "ThreadCreate": {
         "properties": {

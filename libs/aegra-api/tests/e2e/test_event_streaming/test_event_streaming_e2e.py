@@ -117,12 +117,15 @@ async def test_unknown_command_returns_not_supported() -> None:
 
 @pytest.mark.e2e
 @pytest.mark.asyncio
-async def test_stream_unknown_channel_rejected() -> None:
-    """An unsupported channel on the SSE filter is rejected with 400."""
+async def test_stream_foreign_run_id_is_forbidden() -> None:
+    """A run_id that doesn't belong to the thread is rejected with 404."""
     _assistant_id, thread_id = await _setup_thread_and_assistant()
 
     async with httpx.AsyncClient(base_url=_base_url(), timeout=15.0) as http:
         if not await _v2_enabled(http, thread_id):
             pytest.skip("FF_V2_EVENT_STREAMING is disabled on the server under test")
-        resp = await http.post(f"/threads/{thread_id}/stream/events", json={"run_id": "x", "channels": ["bogus"]})
-        assert resp.status_code == 400
+        resp = await http.post(
+            f"/threads/{thread_id}/stream/events",
+            json={"run_id": "does-not-exist", "channels": ["messages"]},
+        )
+        assert resp.status_code == 404

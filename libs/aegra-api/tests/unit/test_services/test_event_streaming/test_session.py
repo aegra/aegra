@@ -101,6 +101,17 @@ class TestSessionStreaming:
         ids = [e["event_id"] for e in events]
         assert len(ids) == len(set(ids))
 
+    async def test_namespaced_custom_subscription_receives_custom_events(self, manager: BrokerManager) -> None:
+        """Subscribing to custom:<name> still receives the base custom events."""
+        await _seed(manager, "run-1", [("custom", {"hello": "world"}), ("end", {"status": "success"})])
+        events = await _collect(ThreadEventSession("run-1", channels={"custom:my_event", "lifecycle"}))
+        assert any(e["method"] == "custom" for e in events)
+
+    async def test_plain_custom_subscription_receives_custom_events(self, manager: BrokerManager) -> None:
+        await _seed(manager, "run-1", [("custom", {"hello": "world"}), ("end", {"status": "success"})])
+        events = await _collect(ThreadEventSession("run-1", channels={"custom", "lifecycle"}))
+        assert any(e["method"] == "custom" for e in events)
+
 
 class TestValidateChannels:
     def test_valid_channels(self) -> None:

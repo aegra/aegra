@@ -437,17 +437,6 @@ class EventStreamingSettings(EnvBase):
     """
 
     FF_V2_EVENT_STREAMING: bool = False
-    # Per-session replay ring buffer. Reconnects whose `since` cursor falls
-    # behind the buffer head get a resume_gap error rather than silent loss.
-    V2_EVENT_STREAMING_BUFFER_SIZE: int = 10_000
-
-    @model_validator(mode="after")
-    def _validate_buffer_size(self) -> "EventStreamingSettings":
-        if self.V2_EVENT_STREAMING_BUFFER_SIZE <= 0:
-            raise ValueError(
-                f"V2_EVENT_STREAMING_BUFFER_SIZE must be greater than 0, got {self.V2_EVENT_STREAMING_BUFFER_SIZE}"
-            )
-        return self
 
 
 class Settings:

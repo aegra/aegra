@@ -90,9 +90,15 @@ class ThreadEventSession:
         return envelopes
 
     def _wants(self, channel: str) -> bool:
-        """True if the client subscribed to this channel (or its base)."""
-        base = channel.split(":", 1)[0] if channel.startswith("custom:") else channel
-        return base in self._channels or channel in self._channels
+        """True if the client subscribed to this channel.
+
+        The translator emits the base ``custom`` channel, so any custom
+        subscription — plain ``custom`` or namespaced ``custom:<name>`` —
+        matches it. Named filtering is a follow-up.
+        """
+        if channel == "custom":
+            return any(c == "custom" or c.startswith("custom:") for c in self._channels)
+        return channel in self._channels
 
     def _lifecycle(self, payload: Any) -> list[tuple[str, dict[str, Any]]]:
         """Build a lifecycle event from a terminal broker payload."""

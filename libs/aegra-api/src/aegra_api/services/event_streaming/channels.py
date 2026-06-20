@@ -26,8 +26,12 @@ _CUSTOM_CHANNEL_PREFIX = "custom:"
 
 
 def is_supported_channel(channel: str) -> bool:
-    """True for a known channel or a ``custom:<name>`` namespaced channel."""
-    return channel in SUPPORTED_CHANNELS or channel.startswith(_CUSTOM_CHANNEL_PREFIX)
+    """True for a known channel or a non-empty ``custom:<name>`` channel."""
+    if channel in SUPPORTED_CHANNELS:
+        return True
+    if channel.startswith(_CUSTOM_CHANNEL_PREFIX):
+        return len(channel) > len(_CUSTOM_CHANNEL_PREFIX)
+    return False
 
 
 # stream_mode set requested from langgraph on every v2 run. Drives which

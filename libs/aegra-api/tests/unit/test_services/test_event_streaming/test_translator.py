@@ -46,6 +46,20 @@ class TestMessageTranslation:
         events = t.translate("messages", (_chunk("", last=True), {}))
         assert [e[1]["event"] for e in events] == ["message-finish"]
 
+    def test_complete_message_emits_start_delta_finish(self) -> None:
+        """A whole (non-chunk) message from a non-streaming model finishes immediately."""
+        from langchain_core.messages import AIMessage
+
+        t = EventTranslator()
+        events = t.translate("messages", (AIMessage(content="done", id="c1"), {}))
+        assert [e[1]["event"] for e in events] == ["message-start", "content-block-delta", "message-finish"]
+
+    def test_message_state_is_cleared_after_finish(self) -> None:
+        """Per-message state does not accumulate across finished messages."""
+        t = EventTranslator()
+        t.translate("messages", (_chunk("a", msg_id="x", last=True), {}))
+        assert "x" not in t._messages
+
     def test_human_message_role(self) -> None:
         t = EventTranslator()
         msg = HumanMessage(content="hey", id="h1")

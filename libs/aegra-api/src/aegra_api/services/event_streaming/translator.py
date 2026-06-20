@@ -17,7 +17,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
-from langchain_core.messages import BaseMessage
+from langchain_core.messages import BaseMessage, BaseMessageChunk
 
 # Index of the single text content block we emit per message. Multi-block
 # messages (mixed text/reasoning/tool-calls) are a follow-up; today we
@@ -128,6 +128,7 @@ class EventTranslator:
 
         if _is_final_chunk(message):
             events.append(("messages", {"event": "message-finish"}))
+            del self._messages[msg_id]
 
         return events
 
@@ -139,8 +140,11 @@ class EventTranslator:
 
 
 def _is_final_chunk(message: Any) -> bool:
-    """True when a message chunk marks the end of its stream."""
-    return getattr(message, "chunk_position", None) == "last"
+    """True when a message is terminal: the last stream chunk, or a complete
+    (non-chunk) message that arrives whole from a non-streaming model."""
+    if getattr(message, "chunk_position", None) == "last":
+        return True
+    return not isinstance(message, BaseMessageChunk)
 
 
 def _wire_metadata(metadata: Any) -> dict[str, Any]:

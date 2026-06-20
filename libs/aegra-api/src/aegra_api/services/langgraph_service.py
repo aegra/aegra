@@ -43,6 +43,15 @@ from aegra_api.services.graph_factory import (
 State = TypeVar("State")
 logger = structlog.get_logger(__name__)
 
+# A body-supplied thread_id overrides the route-verified one (the checkpointer
+# keys on thread_id alone), so the server pins these instead of trusting them.
+SERVER_PINNED_CONFIG_KEYS: frozenset[str] = frozenset({"thread_id", "run_id"})
+
+
+def strip_pinned_config_keys(client_config: dict[str, Any]) -> dict[str, Any]:
+    """Drop server-authoritative identity keys from a client-supplied config dict."""
+    return {k: v for k, v in client_config.items() if k not in SERVER_PINNED_CONFIG_KEYS}
+
 
 def _module_name_for(graph_id: str) -> str:
     """Return a safe ``sys.modules`` key for a dynamically loaded graph.
@@ -740,9 +749,11 @@ def create_run_config(
     observability_metadata = get_tracing_metadata(run_id, thread_id, user_identity)
     cfg["metadata"].update(observability_metadata)
 
-    # Apply checkpoint parameters if provided
+    # Apply checkpoint parameters if provided. Strip pinned identity keys so a
+    # client checkpoint can't redirect execution to another user's thread.
     if checkpoint and isinstance(checkpoint, dict):
-        cfg["configurable"].update({k: v for k, v in checkpoint.items() if v is not None})
+        safe = strip_pinned_config_keys(checkpoint)
+        cfg["configurable"].update({k: v for k, v in safe.items() if v is not None})
 
     # Finally inject user context via existing helper
     return inject_user_context(user, cfg)

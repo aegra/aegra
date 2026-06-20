@@ -42,13 +42,12 @@ logger = structlog.getLogger(__name__)
 
 thread_state_service = ThreadStateService()
 
-# A body-supplied thread_id overrides the route-verified one (the checkpointer
-# keys on thread_id alone), so the server pins these instead of trusting them.
-_SERVER_PINNED_CONFIG_KEYS: frozenset[str] = frozenset({"thread_id", "run_id"})
-
 
 def _client_checkpoint(checkpoint: dict[str, Any]) -> dict[str, Any]:
-    return {k: v for k, v in checkpoint.items() if k not in _SERVER_PINNED_CONFIG_KEYS}
+    """Drop server-pinned identity keys (thread_id/run_id) from a client dict."""
+    from aegra_api.services.langgraph_service import strip_pinned_config_keys
+
+    return strip_pinned_config_keys(checkpoint)
 
 
 # --- Sort resolution for /threads/search ---

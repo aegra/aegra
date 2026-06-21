@@ -81,9 +81,12 @@ class ThreadEventSession:
 
         envelopes: list[dict[str, Any]] = []
         for channel, params in channel_events:
+            # seq counts every translated event, before channel filtering, so
+            # the cursor is absolute position in the run's stream — a reconnect
+            # with a different channel set still resumes at the right point.
+            self._seq += 1
             if not self._wants(channel):
                 continue
-            self._seq += 1
             if self._since is not None and self._seq <= self._since:
                 continue
             envelopes.append(build_event(channel, params, seq=self._seq, event_id=_with_seq(event_id, self._seq)))

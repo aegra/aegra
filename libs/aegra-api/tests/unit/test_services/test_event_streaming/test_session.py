@@ -85,6 +85,34 @@ class TestSessionStreaming:
         events = await _collect(ThreadEventSession("run-1", channels={"values", "lifecycle"}, since=1))
         assert [e["seq"] for e in events] == [2, 3]
 
+    async def test_seq_is_absolute_not_filter_relative(self, manager: BrokerManager) -> None:
+        """seq counts every translated event, so a filtered channel still advances it."""
+        await _seed(
+            manager,
+            "run-1",
+            [("values", {"a": 1}), ("updates", {"n": {"b": 2}}), ("end", {"status": "success"})],
+        )
+        # Subscribe only to lifecycle: values(seq1) + updates(seq2) are dropped,
+        # lifecycle lands at the absolute seq 3.
+        events = await _collect(ThreadEventSession("run-1", channels={"lifecycle"}))
+        assert [(e["method"], e["seq"]) for e in events] == [("lifecycle", 3)]
+
+    async def test_reconnect_with_narrower_channels_keeps_terminal_event(self, manager: BrokerManager) -> None:
+        """A resume on a narrower channel set still delivers later events.
+
+        Absolute seq means the lifecycle event keeps its run-stream position, so
+        a since cursor from the wider first session does not skip it.
+        """
+        await _seed(
+            manager,
+            "run-1",
+            [("messages", (_chunk("hi", last=True), {})), ("end", {"status": "success"})],
+        )
+        # First session saw through seq 3 (start, delta, finish). Reconnect for
+        # lifecycle only with since=3; the terminal event is seq 4, still delivered.
+        events = await _collect(ThreadEventSession("run-1", channels={"lifecycle"}, since=3))
+        assert [(e["method"], e["seq"]) for e in events] == [("lifecycle", 4)]
+
     async def test_lifecycle_interrupted(self, manager: BrokerManager) -> None:
         await _seed(manager, "run-1", [("end", {"status": "interrupted"})])
         events = await _collect(ThreadEventSession("run-1", channels={"lifecycle"}))

@@ -85,3 +85,36 @@ class TestErrors:
     async def test_non_dict_params_is_invalid(self, user: User) -> None:
         resp, _ = await _dispatch({"id": 1, "method": "run.start", "params": "nope"}, user)
         assert resp["error"] == "invalid_argument"
+
+    async def test_prepare_http_404_maps_to_protocol_error(self, monkeypatch: pytest.MonkeyPatch, user: User) -> None:
+        """An HTTPException from run prep returns an on-protocol error, not FastAPI's detail."""
+        from fastapi import HTTPException
+
+        async def boom(*_a: Any, **_k: Any) -> None:
+            raise HTTPException(404, "Assistant 'x' not found")
+
+        monkeypatch.setattr(cmd, "_prepare_run", boom)
+        resp, run_id = await _dispatch(
+            {"id": 5, "method": "run.start", "params": {"assistant_id": "x", "input": {}}}, user
+        )
+        assert resp == {"type": "error", "id": 5, "error": "no_such_run", "message": "Assistant 'x' not found"}
+        assert run_id is None
+
+    async def test_prepare_http_403_maps_to_permission_denied(
+        self, monkeypatch: pytest.MonkeyPatch, user: User
+    ) -> None:
+        from fastapi import HTTPException
+
+        async def boom(*_a: Any, **_k: Any) -> None:
+            raise HTTPException(403, "nope")
+
+        monkeypatch.setattr(cmd, "_prepare_run", boom)
+        resp, _ = await _dispatch({"id": 6, "method": "run.start", "params": {"assistant_id": "x", "input": {}}}, user)
+        assert resp["error"] == "permission_denied"
+
+    async def test_malformed_runcreate_params_map_to_invalid_argument(self, user: User) -> None:
+        """RunCreate validation failure (no input/command/checkpoint) is on-protocol."""
+        resp, run_id = await _dispatch({"id": 7, "method": "run.start", "params": {"assistant_id": "x"}}, user)
+        assert resp["type"] == "error"
+        assert resp["error"] == "invalid_argument"
+        assert run_id is None

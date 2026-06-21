@@ -12,14 +12,25 @@ from __future__ import annotations
 from typing import Any
 
 import structlog
+from fastapi import HTTPException
+from pydantic import ValidationError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from aegra_api.models import User
 from aegra_api.models.runs import RunCreate
-from aegra_api.services.event_streaming.protocol import build_error, build_success
+from aegra_api.services.event_streaming.protocol import ErrorCode, build_error, build_success
 from aegra_api.services.run_preparation import _prepare_run
 
 logger = structlog.getLogger(__name__)
+
+
+def _status_to_error_code(status_code: int) -> ErrorCode:
+    """Map an HTTP status from run preparation to a protocol error code."""
+    if status_code == 404:
+        return "no_such_run"
+    if status_code == 403:
+        return "permission_denied"
+    return "invalid_argument"
 
 
 async def handle_command(
@@ -48,10 +59,18 @@ async def handle_command(
     if not isinstance(params, dict):
         return build_error(command_id, "invalid_argument", "params must be an object."), None
 
-    if method == "run.start":
-        return await _run_start(command_id, params, session=session, thread_id=thread_id, user=user)
-    if method == "input.respond":
-        return await _input_respond(command_id, params, session=session, thread_id=thread_id, user=user)
+    # Run preparation raises HTTPException (unknown assistant/graph, bad resume)
+    # and RunCreate raises ValidationError on malformed params. Map both to a
+    # protocol error envelope so the client never sees FastAPI's {detail: ...}.
+    try:
+        if method == "run.start":
+            return await _run_start(command_id, params, session=session, thread_id=thread_id, user=user)
+        if method == "input.respond":
+            return await _input_respond(command_id, params, session=session, thread_id=thread_id, user=user)
+    except HTTPException as exc:
+        return build_error(command_id, _status_to_error_code(exc.status_code), str(exc.detail)), None
+    except ValidationError as exc:
+        return build_error(command_id, "invalid_argument", str(exc.errors()[0].get("msg", "invalid params"))), None
 
     return build_error(command_id, "not_supported", f"Command {method!r} is not supported."), None
 

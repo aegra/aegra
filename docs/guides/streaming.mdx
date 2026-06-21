@@ -235,3 +235,78 @@ Events are retained for 1 hour after the run completes.
 <Note>
   In production deployments, SSE events are delivered via Redis pub/sub from workers — the client's SSE connection and the worker executing the run can be on different instances. See the [worker architecture guide](/guides/worker-architecture) for details on how this works.
 </Note>
+
+## Agent Protocol v2 event streaming
+
+The latest LangGraph JS and Python SDKs (including `@langchain/langgraph-sdk` and the Vue/React `useStream()` composables) speak a newer streaming protocol with a dedicated event envelope and a content-block message model. Aegra serves this protocol natively.
+
+<Note>
+  v2 streaming is **on by default** — it's a new endpoint set the SDK targets and has no v1 to break; the legacy `runs/stream` endpoints are unchanged. `FF_V2_EVENT_STREAMING` is a kill switch: set it to `false` to unregister the routes (clients then get `404`) and roll back without a redeploy. The endpoints require a `langgraph` / `langchain-core` new enough to emit native v3 events; the server returns `503` with an upgrade hint if the runtime is too old.
+</Note>
+
+### Using the SDK
+
+The stock LangGraph SDK drives both endpoints for you. Streaming is **thread-scoped**: open the stream, start a run, and consume the events:
+
+```python
+from langgraph_sdk import get_client
+
+client = get_client(url="http://localhost:8000")
+
+async with client.threads.stream(assistant_id="agent") as ts:
+    await ts.run.start(input={"messages": [{"role": "user", "content": "hi"}]})
+    async for event in ts.events:
+        print(event["method"], event["params"]["data"])
+```
+
+The same flow backs the Vue/React `useStream()` composables.
+
+### Endpoints
+
+| Endpoint | Purpose |
+|---|---|
+| `POST /threads/{thread_id}/commands` | Run a command: `run.start` (start a run), `input.respond` (resume an interrupt). Returns a JSON response envelope. |
+| `POST /threads/{thread_id}/stream/events` | Open a channel-filtered SSE stream of the thread's run events. |
+
+The stream is scoped to the **thread**, not a run — you open it, then issue `run.start`, and the events of whatever run executes flow through. The client mints the thread id, and `run.start` creates the thread if it doesn't exist yet.
+
+### Starting a run
+
+```bash
+curl -X POST http://localhost:8000/threads/$THREAD/commands \
+  -H "Content-Type: application/json" \
+  -d '{
+        "id": 1,
+        "method": "run.start",
+        "params": {"assistant_id": "agent", "input": {"messages": [{"role": "user", "content": "hi"}]}}
+      }'
+# → {"type": "success", "id": 1, "result": {"run_id": "..."}}
+```
+
+### Streaming events
+
+The SSE filter is a POST body listing the channels you want — no run id. Pass `since` (the last `seq` you saw) to resume after a dropped connection.
+
+```bash
+curl -N -X POST http://localhost:8000/threads/$THREAD/stream/events \
+  -H "Content-Type: application/json" \
+  -d '{"channels": ["messages", "values", "lifecycle"]}'
+```
+
+The client reads each frame's `data:` line — a protocol event envelope. `seq` is the cursor you echo back as `since`; `event_id` dedups across reconnects; `params.data` is the payload and `params.namespace` the subgraph path:
+
+```
+data: {"type":"event","seq":1,"event_id":"...:1","method":"messages","params":{"data":{"event":"message-start","role":"ai","id":"msg_1"},"namespace":[]}}
+
+data: {"type":"event","seq":2,"event_id":"...:2","method":"messages","params":{"data":{"event":"content-block-delta","index":0,"delta":{"type":"text-delta","text":"Hello"}},"namespace":[]}}
+
+data: {"type":"event","seq":3,"event_id":"...:3","method":"lifecycle","params":{"data":{"event":"completed"},"namespace":[]}}
+```
+
+### Channels
+
+`values`, `updates`, `messages`, `tools`, `lifecycle`, `input`, `checkpoints`, `tasks`, and `custom` (plus `custom:<name>`). Message streams arrive as content-block events (`message-start` → `content-block-delta` → `message-finish`); lifecycle reports `started` / `completed` / `failed` / `interrupted`.
+
+<Note>
+  This first release covers the HTTP SSE + commands path the JS/Python SDKs use, verified end-to-end against the stock `langgraph-sdk`. The WebSocket transport and the `agent.getTree` / `state.fork` / `subscription.*` commands are not yet implemented; SSE filtering via the POST body covers the `useStream()` path without them.
+</Note>

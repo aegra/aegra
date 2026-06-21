@@ -3150,12 +3150,19 @@
         },
         "responses": {
           "200": {
-            "description": "Successful Response",
+            "description": "SSE stream of protocol event envelopes",
             "content": {
-              "application/json": {
-                "schema": {}
-              }
+              "text/event-stream": {}
             }
+          },
+          "400": {
+            "description": "Invalid request (unsupported channels, malformed command)"
+          },
+          "404": {
+            "description": "Thread owned by another user"
+          },
+          "503": {
+            "description": "v2 disabled by flag, or runtime too old for native v3 events"
           },
           "422": {
             "description": "Validation Error",
@@ -3207,6 +3214,15 @@
                 "schema": {}
               }
             }
+          },
+          "400": {
+            "description": "Invalid request (unsupported channels, malformed command)"
+          },
+          "404": {
+            "description": "Thread owned by another user"
+          },
+          "503": {
+            "description": "v2 disabled by flag, or runtime too old for native v3 events"
           },
           "422": {
             "description": "Validation Error",

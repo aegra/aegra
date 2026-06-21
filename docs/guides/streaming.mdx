@@ -241,7 +241,7 @@ Events are retained for 1 hour after the run completes.
 The latest LangGraph JS and Python SDKs (including `@langchain/langgraph-sdk` and the Vue/React `useStream()` composables) speak a newer streaming protocol with a dedicated event envelope and a content-block message model. Aegra serves this protocol natively.
 
 <Note>
-  v2 streaming is **on by default** — it's a new endpoint set the SDK targets and has no v1 to break; the legacy `runs/stream` endpoints are unchanged. `FF_V2_EVENT_STREAMING` is a kill switch: set it to `false` to unregister the routes (clients then get `404`) and roll back without a redeploy. The endpoints require a `langgraph` / `langchain-core` new enough to emit native v3 events; the server returns `503` with an upgrade hint if the runtime is too old.
+  v2 streaming is **on by default** — it's a new endpoint set the SDK targets and has no v1 to break; the legacy `runs/stream` endpoints are unchanged. `FF_V2_EVENT_STREAMING` is a kill switch: set it to `false` to disable v2 serving (requests return `503` with an enable hint) and roll back without a redeploy. The endpoints also require a `langgraph` / `langchain-core` new enough to emit native v3 events; the server returns `503` with an upgrade hint if the runtime is too old.
 </Note>
 
 ### Using the SDK

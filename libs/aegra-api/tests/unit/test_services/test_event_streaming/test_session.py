@@ -111,6 +111,31 @@ class TestForwarding:
         events = await _collect(_make_session("t1", channels={"tools"}, run_ids=("run-1",)))
         assert events[0]["params"]["data"] == {"event": "tool-started", "tool_call_id": "c1"}
 
+    async def test_raw_v3_updates_normalized_to_node_values(self, manager: BrokerManager) -> None:
+        """v3 emits updates as raw {node: values}; the wire form is {node, values}."""
+        await _seed(
+            manager,
+            "run-1",
+            [("updates", _protocol_event("updates", {"worker": {"count": 1}})), ("end", {"status": "success"})],
+        )
+        events = await _collect(_make_session("t1", channels={"updates"}, run_ids=("run-1",)))
+        assert events[0]["params"]["data"] == {"node": "worker", "values": {"count": 1}}
+
+    async def test_interrupt_node_in_updates_routes_to_input(self, manager: BrokerManager) -> None:
+        """An __interrupt__ update surfaces on the input channel, not as an updates event."""
+        await _seed(
+            manager,
+            "run-1",
+            [
+                ("updates", _protocol_event("updates", {"__interrupt__": [{"id": "int-9", "value": {"q": "ok?"}}]})),
+                ("end", {"status": "interrupted"}),
+            ],
+        )
+        events = await _collect(_make_session("t1", channels={"input", "updates"}, run_ids=("run-1",)))
+        input_events = [e for e in events if e["method"] == "input.requested"]
+        assert input_events[0]["params"]["data"] == {"interrupt_id": "int-9", "payload": {"q": "ok?"}}
+        assert not [e for e in events if e["method"] == "updates"]
+
 
 class TestSeqAndFilter:
     async def test_seq_monotonic_from_one(self, manager: BrokerManager) -> None:
@@ -130,7 +155,7 @@ class TestSeqAndFilter:
             "run-1",
             [
                 ("values", _protocol_event("values", {"a": 1})),
-                ("updates", _protocol_event("updates", {"node": "n", "values": {"b": 2}})),
+                ("updates", _protocol_event("updates", {"n": {"b": 2}})),
                 ("end", {"status": "success"}),
             ],
         )
@@ -143,7 +168,7 @@ class TestSeqAndFilter:
             "run-1",
             [
                 ("values", _protocol_event("values", {"a": 1})),
-                ("updates", _protocol_event("updates", {"node": "n", "values": {"b": 2}})),
+                ("updates", _protocol_event("updates", {"n": {"b": 2}})),
                 ("end", {"status": "success"}),
             ],
         )

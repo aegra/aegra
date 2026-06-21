@@ -73,7 +73,22 @@ def _require_v2_enabled() -> None:
         raise HTTPException(503, caps.error_message)
 
 
-@router.post("/threads/{thread_id}/stream/events")
+# Error responses both v2 routes can emit, for an accurate OpenAPI contract.
+_V2_ERROR_RESPONSES: dict[int | str, dict[str, str]] = {
+    400: {"description": "Invalid request (unsupported channels, malformed command)"},
+    404: {"description": "Thread owned by another user"},
+    503: {"description": "v2 disabled by flag, or runtime too old for native v3 events"},
+}
+
+
+@router.post(
+    "/threads/{thread_id}/stream/events",
+    response_class=EventSourceResponse,
+    responses={
+        200: {"description": "SSE stream of protocol event envelopes", "content": {"text/event-stream": {}}},
+        **_V2_ERROR_RESPONSES,
+    },
+)
 async def stream_thread_events(
     thread_id: str,
     body: EventStreamRequest,
@@ -106,7 +121,7 @@ async def stream_thread_events(
     return make_sse_response(sse_to_bytes(_frame_events(session_stream)), headers=get_sse_headers())
 
 
-@router.post("/threads/{thread_id}/commands")
+@router.post("/threads/{thread_id}/commands", responses=dict(_V2_ERROR_RESPONSES))
 async def post_thread_command(
     thread_id: str,
     body: ThreadCommand,

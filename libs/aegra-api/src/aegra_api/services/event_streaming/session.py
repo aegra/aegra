@@ -20,25 +20,20 @@ import asyncio
 from collections.abc import AsyncIterator, Awaitable, Callable
 from typing import Any
 
-import structlog
-
 from aegra_api.services.broker import broker_manager
 from aegra_api.services.event_streaming.channels import is_supported_channel
 from aegra_api.services.event_streaming.normalizers import (
     lifecycle_status,
     normalize_input_requested,
     normalize_state_payload,
+    normalize_updates,
     strip_interrupts,
 )
 from aegra_api.services.event_streaming.protocol import build_event
 
-logger = structlog.getLogger(__name__)
-
 __all__ = ["RunLister", "ThreadEventSession", "validate_channels"]
 
-# How long to keep polling for a new run after the thread goes quiet before
-# closing the stream. Covers the SDK gap between opening the stream and the
-# run.start landing.
+# Grace window covering the SDK gap between stream open and run.start landing.
 _IDLE_GRACE_SECONDS = 30.0
 _POLL_INTERVAL_SECONDS = 0.25
 
@@ -135,9 +130,8 @@ class ThreadEventSession:
 
         envelopes: list[dict[str, Any]] = []
         for index, (channel, data, namespace) in enumerate(channel_events):
-            # seq counts every projected event before channel filtering, so the
-            # cursor is absolute position in the thread's stream — a reconnect
-            # with a different channel set still resumes correctly.
+            # seq counts before channel filtering — absolute cursor, so a
+            # reconnect with a different channel set still resumes correctly.
             self._seq += 1
             if not self._wants(channel):
                 continue
@@ -183,12 +177,16 @@ class ThreadEventSession:
         return events
 
     def _updates_events(self, data: Any, namespace: list[str]) -> list[_ChannelEvent]:
-        """Forward updates, splitting any embedded interrupt onto the input channel."""
-        node = data.get("node") if isinstance(data, dict) else None
-        if node == "__interrupt__":
-            values = data.get("values") if isinstance(data, dict) else None
-            return [("input.requested", request, namespace) for request in normalize_input_requested(values)]
-        return [("updates", normalize_state_payload(data) if isinstance(data, dict) else {"value": data}, namespace)]
+        """Forward updates, splitting any embedded interrupt onto the input channel.
+
+        v3 emits updates as raw ``{node: values}``; an interrupt arrives as the
+        ``__interrupt__`` node whose values are the interrupt array.
+        """
+        if isinstance(data, dict) and "__interrupt__" in data:
+            return [("input.requested", req, namespace) for req in normalize_input_requested(data["__interrupt__"])]
+        normalized = normalize_updates(data)
+        normalized["values"] = normalize_state_payload(normalized["values"])
+        return [("updates", normalized, namespace)]
 
     def _lifecycle(self, payload: Any) -> list[_ChannelEvent]:
         """Build a lifecycle event from a terminal broker payload."""

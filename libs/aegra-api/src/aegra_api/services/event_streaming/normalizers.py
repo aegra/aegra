@@ -34,7 +34,7 @@ def lifecycle_status(run_status: str) -> str:
     """Map a persisted run status to a protocol lifecycle status."""
     if run_status == "success":
         return "completed"
-    if run_status == "error":
+    if run_status in ("error", "timeout"):
         return "failed"
     if run_status == "interrupted":
         return "interrupted"

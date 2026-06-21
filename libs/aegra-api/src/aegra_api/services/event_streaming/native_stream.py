@@ -18,25 +18,24 @@ from collections.abc import AsyncIterator
 from functools import lru_cache
 from typing import Any
 
-import structlog
-
-logger = structlog.getLogger(__name__)
-
 
 @lru_cache(maxsize=1)
 def _extra_transformers() -> list[Any]:
-    """Transformers that enable the non-default v3 channels.
+    """Transformers enabling the non-default v3 channels (updates/custom/checkpoints/tasks).
 
-    The v3 mux ships values/messages/lifecycle/subgraph by default; these add
-    updates/custom/checkpoints/tasks so every protocol channel can carry data.
-    Imported lazily so a too-old langgraph fails the capability probe, not here.
+    The default v3 mux ships only values/messages/lifecycle/subgraph.
     """
-    from langgraph.stream.transformers import (
-        CheckpointsTransformer,
-        CustomTransformer,
-        TasksTransformer,
-        UpdatesTransformer,
-    )
+    # Optional-dep guard: a too-old langgraph should fail the capability probe,
+    # but if it's bypassed surface a clean error, not a raw ImportError mid-run.
+    try:
+        from langgraph.stream.transformers import (
+            CheckpointsTransformer,
+            CustomTransformer,
+            TasksTransformer,
+            UpdatesTransformer,
+        )
+    except ImportError as exc:
+        raise RuntimeError("langgraph.stream.transformers unavailable; run the v2 capability probe first.") from exc
 
     return [UpdatesTransformer, CustomTransformer, CheckpointsTransformer, TasksTransformer]
 

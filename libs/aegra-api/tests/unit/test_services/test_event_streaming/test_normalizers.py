@@ -15,6 +15,10 @@ class TestLifecycleStatus:
         assert lifecycle_status("error") == "failed"
         assert lifecycle_status("interrupted") == "interrupted"
 
+    def test_timeout_is_terminal_failed(self) -> None:
+        """timeout is a terminal RunStatus, not an in-progress one."""
+        assert lifecycle_status("timeout") == "failed"
+
     def test_unknown_status_defaults_running(self) -> None:
         """An in-progress/unknown status maps to running, never completed."""
         assert lifecycle_status("pending") == "running"

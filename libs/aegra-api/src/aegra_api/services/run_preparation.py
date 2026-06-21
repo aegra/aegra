@@ -164,6 +164,7 @@ async def _prepare_run(
     user: User,
     *,
     initial_status: str,
+    event_streaming_v2: bool = False,
 ) -> tuple[str, Run, RunJob]:
     """Shared run-creation logic used by create, stream, and wait endpoints.
 
@@ -231,6 +232,7 @@ async def _prepare_run(
             stream_mode=request.stream_mode,
             checkpoint=request.checkpoint,
             command=request.command,
+            event_streaming_v2=event_streaming_v2,
         ),
         behavior=RunBehavior(
             interrupt_before=request.interrupt_before,

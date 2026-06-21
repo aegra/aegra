@@ -41,6 +41,8 @@ class RunExecution(BaseModel):
     stream_mode: str | list[str] | None = None
     checkpoint: dict[str, Any] | None = None
     command: dict[str, Any] | None = None
+    # When true, stream via the native v3 protocol producer for Agent Protocol v2.
+    event_streaming_v2: bool = False
 
 
 class RunBehavior(BaseModel):

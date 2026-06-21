@@ -16,6 +16,7 @@ from aegra_api.core.auth_ctx import with_auth_ctx
 from aegra_api.core.redis_manager import redis_manager
 from aegra_api.models.run_job import RunJob
 from aegra_api.services.broker import broker_manager
+from aegra_api.services.event_streaming.native_stream import stream_native_v3_events
 from aegra_api.services.graph_streaming import stream_graph_events
 from aegra_api.services.langgraph_service import create_run_config, get_langgraph_service
 from aegra_api.services.run_status import finalize_run, update_run_status
@@ -126,7 +127,6 @@ class _GraphResult:
 
 async def _stream_graph(job: RunJob) -> _GraphResult:
     """Load the graph, stream events to the broker, return final output."""
-    run_id = job.identity.run_id
     run_config = _build_run_config(job)
     execution_input = _resolve_input(job)
     stream_modes = _resolve_stream_modes(job.execution.stream_mode)
@@ -144,25 +144,73 @@ async def _stream_graph(job: RunJob) -> _GraphResult:
         ) as graph,
         with_auth_ctx(job.user, job.user.permissions),  # type: ignore[arg-type]
     ):
-        async for event_type, event_data in stream_graph_events(
-            graph=graph,
-            input_data=execution_input,
-            config=run_config,
-            stream_mode=stream_modes,
-            context=job.execution.context,
-            subgraphs=job.behavior.subgraphs,
-            on_checkpoint=lambda _: None,
-            on_task_result=lambda _: None,
-        ):
-            event_id = await broker_manager.allocate_event_id(run_id)
-            await streaming_service.put_to_broker(run_id, event_id, (event_type, event_data))
-
-            if isinstance(event_data, dict) and "__interrupt__" in event_data:
-                result.has_interrupt = True
-            if event_type.startswith("values"):
-                result.data = event_data
+        if job.execution.event_streaming_v2:
+            await _stream_native_v2(job, graph, execution_input, run_config, result)
+        else:
+            await _stream_legacy(job, graph, execution_input, run_config, stream_modes, result)
 
     return result
+
+
+async def _stream_legacy(
+    job: RunJob,
+    graph: Any,
+    execution_input: Any,
+    run_config: dict[str, Any],
+    stream_modes: list[str],
+    result: _GraphResult,
+) -> None:
+    """Stream via the v1 producer (legacy SSE endpoints)."""
+    run_id = job.identity.run_id
+    async for event_type, event_data in stream_graph_events(
+        graph=graph,
+        input_data=execution_input,
+        config=run_config,
+        stream_mode=stream_modes,
+        context=job.execution.context,
+        subgraphs=job.behavior.subgraphs,
+        on_checkpoint=lambda _: None,
+        on_task_result=lambda _: None,
+    ):
+        event_id = await broker_manager.allocate_event_id(run_id)
+        await streaming_service.put_to_broker(run_id, event_id, (event_type, event_data))
+
+        if isinstance(event_data, dict) and "__interrupt__" in event_data:
+            result.has_interrupt = True
+        if event_type.startswith("values"):
+            result.data = event_data
+
+
+async def _stream_native_v2(
+    job: RunJob,
+    graph: Any,
+    execution_input: Any,
+    run_config: dict[str, Any],
+    result: _GraphResult,
+) -> None:
+    """Stream via the native v3 protocol producer (Agent Protocol v2).
+
+    Each native event goes into the broker as ``(method, protocol_event)``.
+    Interrupts ride on a ``values`` event's ``params.interrupts``; the final
+    state is the last ``values`` event's ``params.data``.
+    """
+    run_id = job.identity.run_id
+    async for method, event in stream_native_v3_events(
+        graph=graph,
+        input_data=execution_input,
+        config=run_config,
+        context=job.execution.context,
+    ):
+        event_id = await broker_manager.allocate_event_id(run_id)
+        await streaming_service.put_to_broker(run_id, event_id, (method, event))
+
+        if method == "values":
+            params = event.get("params", {})
+            if params.get("interrupts"):
+                result.has_interrupt = True
+            data = params.get("data")
+            if isinstance(data, dict):
+                result.data = data
 
 
 def _build_run_config(job: RunJob) -> dict[str, Any]:

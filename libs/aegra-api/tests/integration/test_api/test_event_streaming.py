@@ -1,5 +1,7 @@
 """Integration tests for the v2 event streaming routes."""
 
+from __future__ import annotations
+
 import asyncio
 import uuid
 from collections.abc import Iterator
@@ -11,7 +13,6 @@ from fastapi.testclient import TestClient
 
 from aegra_api.api import event_streaming as es_module
 from aegra_api.core.auth_deps import get_current_user, require_auth
-from aegra_api.core.orm import get_session
 from aegra_api.models.auth import User
 from aegra_api.services.broker import broker_manager
 from aegra_api.services.event_streaming import capabilities as caps
@@ -31,6 +32,12 @@ class _Session:
         self._owner = owner
         self._run_ids = run_ids or []
 
+    async def __aenter__(self) -> _Session:
+        return self
+
+    async def __aexit__(self, *_exc: Any) -> None:
+        return None
+
     async def scalar(self, _stmt: Any) -> Any:
         return self._owner
 
@@ -49,7 +56,9 @@ def _make_app(*, owner: str | None = _USER, run_ids: list[str] | None = None) ->
     user = User(identity=_USER)
     app.dependency_overrides[require_auth] = lambda: user
     app.dependency_overrides[get_current_user] = lambda: user
-    app.dependency_overrides[get_session] = lambda: _Session(owner=owner, run_ids=run_ids)
+    # Routes open short-lived sessions via _get_session_maker(); patch it to
+    # return a maker yielding the in-memory test session.
+    es_module._get_session_maker = lambda: lambda: _Session(owner=owner, run_ids=run_ids)  # type: ignore[attr-defined]
     app.include_router(es_module.router)
     return app
 

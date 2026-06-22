@@ -27,6 +27,7 @@ async def test_insert_assistant_with_large_configurable_prompt_succeeds() -> Non
     engine = create_async_engine(settings.db.database_url)
 
     try:
+        assistant_table = None
         try:
             async with engine.begin() as conn:
                 await conn.execute(text("SELECT 1"))

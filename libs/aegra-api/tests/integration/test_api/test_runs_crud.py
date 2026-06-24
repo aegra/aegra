@@ -453,10 +453,12 @@ class TestStreamRun:
             async def scalar(self, _stmt):
                 return None
 
-        override_session_dependency(app, BasicSession)
         client = make_client(app)
 
-        resp = client.get("/threads/test-thread-123/runs/nonexistent/stream")
+        # stream_run manages its session via _get_session_maker (not Depends),
+        # so the DI override doesn't apply — patch the maker instead.
+        with patch("aegra_api.api.runs._get_session_maker", return_value=_make_session_maker(Session())):
+            resp = client.get("/threads/test-thread-123/runs/nonexistent/stream")
 
         assert resp.status_code == 404
 

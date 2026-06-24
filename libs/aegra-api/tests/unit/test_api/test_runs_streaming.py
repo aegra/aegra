@@ -15,6 +15,14 @@ from aegra_api.core.orm import Run as RunORM
 from aegra_api.models import RunCreate, User
 
 
+def _make_session_maker(session: AsyncMock) -> MagicMock:
+    """Build a mock async_sessionmaker that always yields the given session."""
+    ctx = MagicMock()
+    ctx.__aenter__ = AsyncMock(return_value=session)
+    ctx.__aexit__ = AsyncMock(return_value=False)
+    return MagicMock(return_value=ctx)
+
+
 class TestRunsStreamingEndpoints:
     """Test streaming run endpoints."""
 
@@ -69,6 +77,7 @@ class TestRunsStreamingEndpoints:
             patch("aegra_api.api.runs.asyncio.create_task") as mock_create_task,
             patch("aegra_api.api.runs.active_runs", {}),
             patch("aegra_api.api.runs.streaming_service.stream_run_execution") as mock_stream_exec,
+            patch("aegra_api.api.runs._get_session_maker", return_value=_make_session_maker(mock_session)),
         ):
             mock_lg_service.return_value.list_graphs.return_value = ["test-graph"]
 
@@ -81,7 +90,7 @@ class TestRunsStreamingEndpoints:
 
             mock_stream_exec.return_value = mock_generator()
 
-            response = await create_and_stream_run(thread_id, request, mock_user, mock_session)
+            response = await create_and_stream_run(thread_id, request, mock_user)
 
             # Verify Response
             assert response.status_code == 200
@@ -148,12 +157,13 @@ class TestRunsStreamingEndpoints:
             patch("aegra_api.api.runs.active_runs", {}),
             patch("aegra_api.api.runs.streaming_service.stream_run_execution", return_value=_fake_stream()),
             patch("aegra_api.api.runs.broker_manager.request_cancel", new_callable=AsyncMock) as mock_cancel,
+            patch("aegra_api.api.runs._get_session_maker", return_value=_make_session_maker(mock_session)),
         ):
             mock_lg_service.return_value.list_graphs.return_value = ["test-graph"]
             # First scalar = thread ownership check (None = new thread); second = assistant
             mock_session.scalar.side_effect = [None, sample_assistant]
 
-            response = await create_and_stream_run(thread_id, request, mock_user, mock_session)
+            response = await create_and_stream_run(thread_id, request, mock_user)
 
             handler = response.client_close_handler_callable
             if not expect_handler:
@@ -202,12 +212,13 @@ class TestRunsStreamingEndpoints:
                 new_callable=AsyncMock,
                 side_effect=RedisError("broker down"),
             ),
+            patch("aegra_api.api.runs._get_session_maker", return_value=_make_session_maker(mock_session)),
         ):
             mock_lg_service.return_value.list_graphs.return_value = ["test-graph"]
             # First scalar = thread ownership check (None = new thread); second = assistant
             mock_session.scalar.side_effect = [None, sample_assistant]
 
-            response = await create_and_stream_run(thread_id, request, mock_user, mock_session)
+            response = await create_and_stream_run(thread_id, request, mock_user)
             handler = response.client_close_handler_callable
             assert handler is not None
             # Must not raise even though the broker side-effect blows up
@@ -232,7 +243,10 @@ class TestRunsStreamingEndpoints:
 
         mock_session.scalar.return_value = run_orm
 
-        with patch("aegra_api.api.runs.streaming_service.stream_run_execution") as mock_stream_exec:
+        with (
+            patch("aegra_api.api.runs.streaming_service.stream_run_execution") as mock_stream_exec,
+            patch("aegra_api.api.runs._get_session_maker", return_value=_make_session_maker(mock_session)),
+        ):
             # Mock generator
             async def mock_generator() -> AsyncGenerator:
                 yield "data"
@@ -244,7 +258,6 @@ class TestRunsStreamingEndpoints:
                 run_id,
                 last_event_id="evt-1",
                 user=mock_user,
-                session=mock_session,
             )
 
             assert response.status_code == 200
@@ -296,16 +309,18 @@ class TestRunsStreamingEndpoints:
         async def _fake_stream() -> AsyncGenerator:
             yield "data"
 
-        with patch(
-            "aegra_api.api.runs.streaming_service.stream_run_execution",
-            return_value=_fake_stream(),
+        with (
+            patch(
+                "aegra_api.api.runs.streaming_service.stream_run_execution",
+                return_value=_fake_stream(),
+            ),
+            patch("aegra_api.api.runs._get_session_maker", return_value=_make_session_maker(mock_session)),
         ):
             response = await stream_run(
                 thread_id,
                 run_id,
                 last_event_id=last_event_id,
                 user=mock_user,
-                session=mock_session,
             )
 
         assert response.client_close_handler_callable is None
@@ -315,8 +330,11 @@ class TestRunsStreamingEndpoints:
         """Test streaming non-existent run."""
         mock_session.scalar.return_value = None
 
-        with pytest.raises(HTTPException) as exc:
-            await stream_run("t", "r", user=mock_user, session=mock_session)
+        with (
+            patch("aegra_api.api.runs._get_session_maker", return_value=_make_session_maker(mock_session)),
+            pytest.raises(HTTPException) as exc,
+        ):
+            await stream_run("t", "r", user=mock_user)
 
         assert exc.value.status_code == 404
 

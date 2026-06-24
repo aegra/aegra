@@ -480,15 +480,8 @@ class TestStatelessStreamRun:
     def mock_user(self) -> User:
         return User(identity="test-user", scopes=[])
 
-    @pytest.fixture
-    def mock_session(self) -> AsyncMock:
-        session = AsyncMock()
-        session.refresh = AsyncMock()
-        session.add = MagicMock()
-        return session
-
     @pytest.mark.asyncio
-    async def test_delegates_and_wraps_body_for_cleanup(self, mock_user: User, mock_session: AsyncMock) -> None:
+    async def test_delegates_and_wraps_body_for_cleanup(self, mock_user: User) -> None:
         """Delegates to create_and_stream_run and wraps iterator for cleanup."""
         request = RunCreate(assistant_id="agent", input={"msg": "hi"})
 
@@ -514,10 +507,10 @@ class TestStatelessStreamRun:
                 new_callable=AsyncMock,
             ) as mock_delete,
         ):
-            result = await stateless_stream_run(request, mock_user, mock_session)
+            result = await stateless_stream_run(request, mock_user)
 
             assert isinstance(result, EventSourceResponse)
-            mock_stream.assert_called_once_with("eph-thread-4", request, mock_user, mock_session)
+            mock_stream.assert_called_once_with("eph-thread-4", request, mock_user)
             # Outer response must re-expose the inner close handler so real
             # http.disconnect still cancels the run.
             assert result.client_close_handler_callable is inner_close_handler
@@ -531,7 +524,7 @@ class TestStatelessStreamRun:
             mock_delete.assert_called_once_with("eph-thread-4", mock_user.identity)
 
     @pytest.mark.asyncio
-    async def test_passes_through_when_keep(self, mock_user: User, mock_session: AsyncMock) -> None:
+    async def test_passes_through_when_keep(self, mock_user: User) -> None:
         """Returns original response unchanged when on_completion='keep'."""
         request = RunCreate(assistant_id="agent", input={"msg": "hi"}, on_completion="keep")
 
@@ -552,14 +545,14 @@ class TestStatelessStreamRun:
                 new_callable=AsyncMock,
             ) as mock_delete,
         ):
-            result = await stateless_stream_run(request, mock_user, mock_session)
+            result = await stateless_stream_run(request, mock_user)
 
         # Should return original response, not wrapped
         assert result is mock_response
         mock_delete.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_cleans_up_thread_when_delegation_raises(self, mock_user: User, mock_session: AsyncMock) -> None:
+    async def test_cleans_up_thread_when_delegation_raises(self, mock_user: User) -> None:
         """Thread is deleted if create_and_stream_run raises (e.g. assistant not found)."""
         request = RunCreate(assistant_id="agent", input={"msg": "hi"})
 
@@ -576,12 +569,12 @@ class TestStatelessStreamRun:
             ) as mock_delete,
             pytest.raises(RuntimeError, match="setup failed"),
         ):
-            await stateless_stream_run(request, mock_user, mock_session)
+            await stateless_stream_run(request, mock_user)
 
         mock_delete.assert_called_once_with("eph-thread-err", mock_user.identity)
 
     @pytest.mark.asyncio
-    async def test_early_disconnect_keeps_thread(self, mock_user: User, mock_session: AsyncMock) -> None:
+    async def test_early_disconnect_keeps_thread(self, mock_user: User) -> None:
         """Client disconnect before stream completion must NOT delete the thread.
 
         Regression: deleting the thread here would cancel active runs via
@@ -613,7 +606,7 @@ class TestStatelessStreamRun:
                 new_callable=AsyncMock,
             ) as mock_delete,
         ):
-            result = await stateless_stream_run(request, mock_user, mock_session)
+            result = await stateless_stream_run(request, mock_user)
 
             # Drain until CancelledError bubbles up from the iterator
             with contextlib.suppress(asyncio.CancelledError):
@@ -626,7 +619,6 @@ class TestStatelessStreamRun:
     async def test_slow_client_disconnect_with_finished_run_schedules_cleanup(
         self,
         mock_user: User,
-        mock_session: AsyncMock,
     ) -> None:
         """Slow-client / dead-proxy abort after the run finished must clean up.
 
@@ -673,7 +665,7 @@ class TestStatelessStreamRun:
             # defunct event loop).
             tasks_before = set(_background_cleanup_tasks)
 
-            result = await stateless_stream_run(request, mock_user, mock_session)
+            result = await stateless_stream_run(request, mock_user)
 
             with contextlib.suppress(asyncio.CancelledError):
                 async for _chunk in result.body_iterator:
@@ -689,7 +681,6 @@ class TestStatelessStreamRun:
     async def test_slow_client_disconnect_with_active_run_keeps_thread(
         self,
         mock_user: User,
-        mock_session: AsyncMock,
     ) -> None:
         """Slow-client abort while the run is still active must NOT clean up.
 
@@ -731,7 +722,7 @@ class TestStatelessStreamRun:
         ):
             tasks_before = set(_background_cleanup_tasks)
 
-            result = await stateless_stream_run(request, mock_user, mock_session)
+            result = await stateless_stream_run(request, mock_user)
 
             with contextlib.suppress(asyncio.CancelledError):
                 async for _chunk in result.body_iterator:
@@ -748,7 +739,6 @@ class TestStatelessStreamRun:
     async def test_slow_client_disconnect_without_run_id_keeps_thread(
         self,
         mock_user: User,
-        mock_session: AsyncMock,
     ) -> None:
         """Missing Content-Location header → slow-client cleanup branch is skipped.
 
@@ -783,7 +773,7 @@ class TestStatelessStreamRun:
         ):
             tasks_before = set(_background_cleanup_tasks)
 
-            result = await stateless_stream_run(request, mock_user, mock_session)
+            result = await stateless_stream_run(request, mock_user)
 
             with contextlib.suppress(asyncio.CancelledError):
                 async for _chunk in result.body_iterator:
@@ -800,7 +790,7 @@ class TestStatelessStreamRun:
         assert not new_tasks, "Should not schedule cleanup when run_id unavailable"
 
     @pytest.mark.asyncio
-    async def test_stream_cleanup_failure_is_logged_not_raised(self, mock_user: User, mock_session: AsyncMock) -> None:
+    async def test_stream_cleanup_failure_is_logged_not_raised(self, mock_user: User) -> None:
         """If _delete_thread_by_id raises during stream cleanup, it is logged but not propagated."""
         request = RunCreate(assistant_id="agent", input={"msg": "hi"})
 
@@ -822,7 +812,7 @@ class TestStatelessStreamRun:
                 side_effect=OSError("cleanup failed"),
             ),
         ):
-            result = await stateless_stream_run(request, mock_user, mock_session)
+            result = await stateless_stream_run(request, mock_user)
 
             # Consuming the iterator should not raise despite cleanup failure
             chunks: list[bytes] = []

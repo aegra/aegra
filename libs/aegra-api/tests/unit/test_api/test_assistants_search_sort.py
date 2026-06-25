@@ -1,12 +1,14 @@
-"""Unit tests for _resolve_sort and filter merging in /assistants/search."""
+"""Unit tests for _resolve_sort in /assistants/search.
+
+Auth-handler filter merging moved out of the route layer into
+build_metadata_filter (see tests/unit/test_core/test_auth_filters.py) and
+AssistantService (see test_assistant_service.py::TestAuthDispatch).
+"""
 
 import pytest
 from pydantic import ValidationError
 
-from aegra_api.api.assistants import (
-    _merge_handler_filters_into_metadata,
-    _resolve_sort,
-)
+from aegra_api.api.assistants import _resolve_sort
 from aegra_api.core.orm import Assistant as AssistantORM
 from aegra_api.models import AssistantSearchRequest
 
@@ -53,62 +55,3 @@ class TestSortByValidation:
     def test_invalid_sort_order_raises(self) -> None:
         with pytest.raises(ValidationError):
             AssistantSearchRequest(sort_by="name", sort_order="sideways")  # type: ignore[arg-type]
-
-
-class TestMergeHandlerFilters:
-    """Auth-handler filters are merged into request.metadata, not a non-existent
-    request.filters attribute (regression test for #333)."""
-
-    def test_no_filters_no_value_metadata_leaves_metadata_alone(self) -> None:
-        request = AssistantSearchRequest(metadata={"keep": "me"})
-        _merge_handler_filters_into_metadata(request, None, {})
-        assert request.metadata == {"keep": "me"}
-
-    def test_handler_returns_flat_filters_merges_into_metadata(self) -> None:
-        """Handler returning ``{"owner": "u1"}`` becomes a metadata containment filter."""
-        request = AssistantSearchRequest(metadata={"env": "prod"})
-        _merge_handler_filters_into_metadata(request, {"owner": "u1"}, {})
-        assert request.metadata == {"env": "prod", "owner": "u1"}
-
-    def test_handler_returns_metadata_key_unwraps_it(self) -> None:
-        """Handler returning ``{"metadata": {"owner": "u1"}}`` is unwrapped, not nested."""
-        request = AssistantSearchRequest(metadata={"env": "prod"})
-        _merge_handler_filters_into_metadata(request, {"metadata": {"owner": "u1"}}, {})
-        assert request.metadata == {"env": "prod", "owner": "u1"}
-
-    def test_handler_mutated_value_metadata_is_picked_up(self) -> None:
-        """Handler that mutates ``value['metadata']`` instead of returning is honoured."""
-        request = AssistantSearchRequest(metadata={"env": "prod"})
-        value = {"metadata": {"owner": "u1"}}
-        _merge_handler_filters_into_metadata(request, None, value)
-        assert request.metadata == {"env": "prod", "owner": "u1"}
-
-    def test_request_filters_attribute_does_not_exist(self) -> None:
-        """The bug in #333 was code referencing a non-existent ``filters`` field;
-        confirm the model still has no such attribute so we don't regress."""
-        assert "filters" not in AssistantSearchRequest.model_fields
-
-    def test_handler_filters_override_request_metadata(self) -> None:
-        """When keys conflict, handler filters win (auth must not be bypassable)."""
-        request = AssistantSearchRequest(metadata={"owner": "attacker"})
-        _merge_handler_filters_into_metadata(request, {"owner": "real-user"}, {})
-        assert request.metadata == {"owner": "real-user"}
-
-    def test_value_metadata_set_to_non_mapping_does_not_crash(self) -> None:
-        """If a handler mutates ``value['metadata']`` to a non-mapping (e.g. a
-        bare string), the merge must skip rather than ``TypeError`` on ``**``."""
-        request = AssistantSearchRequest(metadata={"env": "prod"})
-        _merge_handler_filters_into_metadata(request, None, {"metadata": "not-a-dict"})
-        assert request.metadata == {"env": "prod"}
-
-    def test_handler_returning_both_nested_metadata_and_flat_keys_merges_both(self) -> None:
-        """A handler returning ``{"metadata": {"tenant": "x"}, "owner": "u1"}`` must
-        apply BOTH constraints. Earlier code returned after the nested branch and
-        silently dropped the flat keys — leaking rows the flat scope would exclude."""
-        request = AssistantSearchRequest(metadata={"env": "prod"})
-        _merge_handler_filters_into_metadata(
-            request,
-            {"metadata": {"tenant": "x"}, "owner": "u1"},
-            {},
-        )
-        assert request.metadata == {"env": "prod", "tenant": "x", "owner": "u1"}

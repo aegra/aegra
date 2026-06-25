@@ -51,14 +51,16 @@ class _Session:
         return _Result()
 
 
-def _make_app(*, owner: str | None = _USER, run_ids: list[str] | None = None) -> FastAPI:
+def _make_app(
+    monkeypatch: pytest.MonkeyPatch, *, owner: str | None = _USER, run_ids: list[str] | None = None
+) -> FastAPI:
     app = FastAPI()
     user = User(identity=_USER)
     app.dependency_overrides[require_auth] = lambda: user
     app.dependency_overrides[get_current_user] = lambda: user
-    # Routes open short-lived sessions via _get_session_maker(); patch it to
-    # return a maker yielding the in-memory test session.
-    es_module._get_session_maker = lambda: lambda: _Session(owner=owner, run_ids=run_ids)  # type: ignore[attr-defined]
+    # Routes open short-lived sessions via _get_session_maker(); patch it (per
+    # test, auto-restored) to return a maker yielding the in-memory test session.
+    monkeypatch.setattr(es_module, "_get_session_maker", lambda: lambda: _Session(owner=owner, run_ids=run_ids))
     app.include_router(es_module.router)
     return app
 
@@ -78,7 +80,7 @@ class TestCommandRoute:
             return "run-1", object(), object()
 
         monkeypatch.setattr(cmd_module, "_prepare_run", fake_prepare)
-        client = TestClient(_make_app())
+        client = TestClient(_make_app(monkeypatch))
 
         resp = client.post(
             "/threads/t1/commands",
@@ -87,14 +89,14 @@ class TestCommandRoute:
         assert resp.status_code == 200
         assert resp.json() == {"type": "success", "id": 1, "result": {"run_id": "run-1"}}
 
-    def test_unknown_command_returns_400_error_envelope(self) -> None:
-        client = TestClient(_make_app())
+    def test_unknown_command_returns_400_error_envelope(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        client = TestClient(_make_app(monkeypatch))
         resp = client.post("/threads/t1/commands", json={"id": 1, "method": "agent.getTree", "params": {}})
         assert resp.status_code == 400
         assert resp.json()["error"] == "not_supported"
 
-    def test_cross_tenant_thread_is_404(self) -> None:
-        client = TestClient(_make_app(owner="other-user"))
+    def test_cross_tenant_thread_is_404(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        client = TestClient(_make_app(monkeypatch, owner="other-user"))
         resp = client.post("/threads/t1/commands", json={"id": 1, "method": "run.start", "params": {}})
         assert resp.status_code == 404
 
@@ -105,7 +107,7 @@ class TestCommandRoute:
             return "run-1", object(), object()
 
         monkeypatch.setattr(cmd_module, "_prepare_run", fake_prepare)
-        client = TestClient(_make_app(owner=None))  # thread does not exist yet
+        client = TestClient(_make_app(monkeypatch, owner=None))  # thread does not exist yet
         resp = client.post(
             "/threads/new-thread/commands",
             json={"id": 1, "method": "run.start", "params": {"assistant_id": "agent", "input": {"messages": []}}},
@@ -114,29 +116,29 @@ class TestCommandRoute:
 
     def test_disabled_flag_returns_503(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(caps.settings.event_streaming, "FF_V2_EVENT_STREAMING", False)
-        client = TestClient(_make_app())
+        client = TestClient(_make_app(monkeypatch))
         resp = client.post("/threads/t1/commands", json={"id": 1, "method": "run.start", "params": {}})
         assert resp.status_code == 503
         assert "FF_V2_EVENT_STREAMING" in resp.json()["detail"]
 
 
 class TestStreamRoute:
-    def test_missing_channels_is_422(self) -> None:
-        client = TestClient(_make_app())
+    def test_missing_channels_is_422(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        client = TestClient(_make_app(monkeypatch))
         resp = client.post("/threads/t1/stream/events", json={})
         assert resp.status_code == 422
 
-    def test_unknown_channel_is_400(self) -> None:
-        client = TestClient(_make_app())
+    def test_unknown_channel_is_400(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        client = TestClient(_make_app(monkeypatch))
         resp = client.post("/threads/t1/stream/events", json={"channels": ["bogus"]})
         assert resp.status_code == 400
 
-    def test_cross_tenant_thread_is_404(self) -> None:
-        client = TestClient(_make_app(owner="other-user"))
+    def test_cross_tenant_thread_is_404(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        client = TestClient(_make_app(monkeypatch, owner="other-user"))
         resp = client.post("/threads/t1/stream/events", json={"channels": ["messages"]})
         assert resp.status_code == 404
 
-    def test_stream_emits_v2_frames(self) -> None:
+    def test_stream_emits_v2_frames(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """A run on the thread streams content-block frames over SSE."""
         run_id = f"run-{uuid.uuid4().hex[:8]}"
 
@@ -154,7 +156,7 @@ class TestStreamRoute:
             await broker.put(f"{run_id}_event_4", ("end", {"status": "success"}))
 
         asyncio.run(seed())
-        client = TestClient(_make_app(run_ids=[run_id]))
+        client = TestClient(_make_app(monkeypatch, run_ids=[run_id]))
 
         with client.stream("POST", "/threads/t1/stream/events", json={"channels": ["messages", "lifecycle"]}) as resp:
             assert resp.status_code == 200

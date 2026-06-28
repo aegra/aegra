@@ -247,7 +247,9 @@ class TestLifecycle:
         assert events[0]["params"]["data"] == {"event": "interrupted"}
 
     async def test_failed_carries_error(self, manager: BrokerManager) -> None:
-        await _seed(manager, "run-1", [("error", {"status": "error", "message": "boom"})])
+        # The real broker error event is {error, message} with NO status; the
+        # failed status must come from the method, not a status key.
+        await _seed(manager, "run-1", [("error", {"error": "RuntimeError", "message": "boom"})])
         events = await _collect(_make_session("t1", channels={"lifecycle"}, run_ids=("run-1",)))
         assert events[0]["params"]["data"] == {"event": "failed", "error": "boom"}
 

@@ -154,7 +154,7 @@ class ThreadEventSession:
     def _channel_events(self, method: str, payload: Any) -> list[_ChannelEvent]:
         """Map one raw broker event to zero or more (channel, data, namespace)."""
         if method in ("end", "error"):
-            return self._lifecycle(payload)
+            return self._lifecycle(method, payload)
 
         # Native producer events: payload is a ProtocolEvent dict.
         params = payload.get("params", {}) if isinstance(payload, dict) else {}
@@ -191,9 +191,16 @@ class ThreadEventSession:
         normalized["values"] = normalize_state_payload(normalized["values"])
         return [("updates", normalized, namespace)]
 
-    def _lifecycle(self, payload: Any) -> list[_ChannelEvent]:
-        """Build a lifecycle event from a terminal broker payload."""
+    def _lifecycle(self, method: str, payload: Any) -> list[_ChannelEvent]:
+        """Build a lifecycle event from a terminal broker payload.
+
+        The ``error`` broker event carries ``{error, message}`` with no status —
+        it is terminal and drains the run before the trailing ``end`` event, so
+        the failed status comes from the method, not a status key.
+        """
         status = payload.get("status") if isinstance(payload, dict) else None
+        if method == "error":
+            status = "error"
         data: dict[str, Any] = {"event": lifecycle_status(status or "")}
         if isinstance(payload, dict) and (message := payload.get("message")):
             data["error"] = message

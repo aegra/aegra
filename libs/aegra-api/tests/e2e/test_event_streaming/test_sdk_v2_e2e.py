@@ -216,6 +216,135 @@ async def test_sdk_hitl_interrupt_surfaces_on_input_channel_and_resumes() -> Non
     )
 
 
+@pytest.mark.e2e
+@pytest.mark.asyncio
+async def test_sdk_graph_error_surfaces_as_lifecycle_failed() -> None:
+    """A graph that raises ends the stream with lifecycle: failed carrying the error."""
+    if not await _v2_enabled():
+        pytest.skip("FF_V2_EVENT_STREAMING is disabled on the server under test")
+
+    assistant_id = await _ensure_graph("stress_test")
+    client = get_client(url=_base_url())
+
+    lifecycle_events: list[dict] = []
+    async with client.threads.stream(assistant_id=assistant_id) as ts:
+        # stress_test raises RuntimeError when {"fail": true} reaches the target step.
+        await ts.run.start(
+            input={"messages": [{"role": "user", "content": json.dumps({"delay": 0.0, "steps": 1, "fail": True})}]}
+        )
+        async for event in ts.events:
+            if event.get("method") == "lifecycle":
+                data = event.get("params", {}).get("data") or {}
+                lifecycle_events.append(data)
+                if data.get("event") in ("completed", "failed"):
+                    break
+
+    elog("error lifecycle", lifecycle_events)
+    failed = [e for e in lifecycle_events if e.get("event") == "failed"]
+    assert failed, f"graph error did not surface as lifecycle: failed; got {lifecycle_events}"
+    assert isinstance(failed[0].get("error"), str) and failed[0]["error"], "failed lifecycle missing error string"
+
+
+def _parse_sse_frames(buffer: str) -> tuple[list[dict], str]:
+    """Parse complete SSE frames from ``buffer``; return (frames, leftover).
+
+    The leftover is any trailing partial frame (no terminating blank line yet),
+    carried into the next read so a frame split across chunks is not dropped.
+    """
+    *complete, leftover = buffer.split("\n\n")
+    frames: list[dict] = []
+    for block in complete:
+        if not block.strip():
+            continue
+        frame: dict = {}
+        for line in block.splitlines():
+            if line.startswith("event:"):
+                frame["event"] = line[len("event:") :].strip()
+            elif line.startswith("data:"):
+                frame["data"] = json.loads(line[len("data:") :].strip())
+            elif line.startswith("id:"):
+                frame["id"] = line[len("id:") :].strip()
+        if "data" in frame:
+            frames.append(frame)
+    return frames, leftover
+
+
+@pytest.mark.e2e
+@pytest.mark.asyncio
+async def test_reconnect_with_since_resumes_without_replaying_seen_events() -> None:
+    """Reconnecting with ``since=<last seq>`` resumes past seen events, no duplicates.
+
+    Drives the raw wire (the SDK hides reconnect): open, read a few frames, note the
+    last seq, close, reopen with that seq as ``since``. The server must only send
+    events with a strictly greater seq, and the run still reaches a terminal lifecycle.
+    """
+    if not await _v2_enabled():
+        pytest.skip("FF_V2_EVENT_STREAMING is disabled on the server under test")
+
+    client = get_client(url=_base_url())
+    assistant_id = await _ensure_graph("stress_test")
+    thread = await client.threads.create()
+    thread_id = thread["thread_id"]
+    body = {"channels": ["values", "messages", "lifecycle"]}
+
+    # Start a multi-step run so there are several events to split across two connects.
+    async with httpx.AsyncClient(base_url=_base_url(), timeout=30.0) as http:
+        await http.post(
+            f"/threads/{thread_id}/commands",
+            json={
+                "id": 1,
+                "method": "run.start",
+                "params": {
+                    "assistant_id": assistant_id,
+                    "input": {"messages": [{"role": "user", "content": json.dumps({"delay": 0.2, "steps": 3})}]},
+                },
+            },
+        )
+
+        # First connect: collect a couple of frames, then bail with the last seq seen.
+        first_seqs: list[int] = []
+        last_seq = 0
+        async with http.stream("POST", f"/threads/{thread_id}/stream/events", json=body) as resp:
+            assert resp.status_code == 200
+            buffer = ""
+            async for chunk in resp.aiter_text():
+                buffer += chunk
+                parsed, buffer = _parse_sse_frames(buffer)
+                for frame in parsed:
+                    seq = frame["data"].get("seq")
+                    if isinstance(seq, int):
+                        first_seqs.append(seq)
+                        last_seq = max(last_seq, seq)
+                if len(first_seqs) >= 2:
+                    break
+
+        assert last_seq > 0, "no seq'd events on first connect"
+
+        # Second connect with since=last_seq: must not replay anything <= last_seq.
+        second_seqs: list[int] = []
+        terminal: list[str] = []
+        async with http.stream("POST", f"/threads/{thread_id}/stream/events", json={**body, "since": last_seq}) as resp:
+            assert resp.status_code == 200
+            buffer = ""
+            async for chunk in resp.aiter_text():
+                buffer += chunk
+                parsed, buffer = _parse_sse_frames(buffer)
+                for frame in parsed:
+                    seq = frame["data"].get("seq")
+                    if isinstance(seq, int):
+                        second_seqs.append(seq)
+                    if frame.get("event") == "lifecycle":
+                        terminal.append(frame["data"].get("params", {}).get("data", {}).get("event"))
+                if any(t in ("completed", "failed") for t in terminal):
+                    break
+
+    elog("reconnect first/second seqs", {"first": first_seqs, "last": last_seq, "second": second_seqs[:10]})
+    assert second_seqs, "no events on reconnect"
+    assert all(s > last_seq for s in second_seqs), (
+        f"reconnect replayed events at/below since={last_seq}: {[s for s in second_seqs if s <= last_seq]}"
+    )
+
+
 async def _resume_via_sdk(ts: object, interrupt_id: str) -> None:
     """Call ``ts.run.respond`` once the SDK's lifecycle watcher has registered the
     interrupt. The watcher runs on a separate SSE, so the main stream can surface

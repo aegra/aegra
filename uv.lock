@@ -72,7 +72,7 @@ requires-dist = [
     { name = "opentelemetry-api", specifier = ">=1.39.1" },
     { name = "opentelemetry-exporter-otlp", specifier = ">=1.39.1" },
     { name = "opentelemetry-sdk", specifier = ">=1.39.1" },
-    { name = "prometheus-fastapi-instrumentator", specifier = ">=7.1.0" },
+    { name = "prometheus-fastapi-instrumentator", specifier = ">=8.0.2" },
     { name = "psycopg", extras = ["binary"], specifier = ">=3.2.9" },
     { name = "pydantic", specifier = ">=2.11.7" },
     { name = "pydantic-settings", specifier = ">=2.14.2" },
@@ -619,7 +619,7 @@ wheels = [
 
 [[package]]
 name = "fastapi"
-version = "0.128.6"
+version = "0.138.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "annotated-doc" },
@@ -628,9 +628,9 @@ dependencies = [
     { name = "typing-extensions" },
     { name = "typing-inspection" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/83/d1/195005b5e45b443e305136df47ee7df4493d782e0c039dd0d97065580324/fastapi-0.128.6.tar.gz", hash = "sha256:0cb3946557e792d731b26a42b04912f16367e3c3135ea8290f620e234f2b604f", size = 374757, upload-time = "2026-02-09T17:27:03.541Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/8a/c9/5e8defe249899c0dc900643695fc07829a67fc88b4ff2cdb03fcbdbf5a4b/fastapi-0.138.1.tar.gz", hash = "sha256:96e3702dce09ee0dce48856135620d3d865ca684a79fe7513fd7b13a12f82862", size = 419646, upload-time = "2026-06-25T15:40:42.115Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/24/58/a2c4f6b240eeb148fb88cdac48f50a194aba760c1ca4988c6031c66a20ee/fastapi-0.128.6-py3-none-any.whl", hash = "sha256:bb1c1ef87d6086a7132d0ab60869d6f1ee67283b20fbf84ec0003bd335099509", size = 103674, upload-time = "2026-02-09T17:27:02.355Z" },
+    { url = "https://files.pythonhosted.org/packages/38/a9/69a6924f645eb4dd8cd625bf255b3625990eb3e14e073438a53c405dcd3e/fastapi-0.138.1-py3-none-any.whl", hash = "sha256:b994cae7ba8b82c976a728b544244de31333fa5f7d261f9a1dffe526444cae23", size = 129182, upload-time = "2026-06-25T15:40:40.771Z" },
 ]
 
 [[package]]
@@ -1644,15 +1644,15 @@ wheels = [
 
 [[package]]
 name = "prometheus-fastapi-instrumentator"
-version = "7.1.0"
+version = "8.0.2"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "prometheus-client" },
     { name = "starlette" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/69/6d/24d53033cf93826aa7857699a4450c1c67e5b9c710e925b1ed2b320c04df/prometheus_fastapi_instrumentator-7.1.0.tar.gz", hash = "sha256:be7cd61eeea4e5912aeccb4261c6631b3f227d8924542d79eaf5af3f439cbe5e", size = 20220, upload-time = "2025-03-19T19:35:05.351Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/1b/e9/2065686d1dfa62296fdc158b6e8fd25b0cb3dca09b0632cabeb5ae81fe4d/prometheus_fastapi_instrumentator-8.0.2.tar.gz", hash = "sha256:3c252e748151768a7aefd66824a04a870144f71de48a67aed211749a9ca2a548", size = 21342, upload-time = "2026-06-23T09:39:31.611Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/27/72/0824c18f3bc75810f55dacc2dd933f6ec829771180245ae3cc976195dec0/prometheus_fastapi_instrumentator-7.1.0-py3-none-any.whl", hash = "sha256:978130f3c0bb7b8ebcc90d35516a6fe13e02d2eb358c8f83887cdef7020c31e9", size = 19296, upload-time = "2025-03-19T19:35:04.323Z" },
+    { url = "https://files.pythonhosted.org/packages/c6/c7/fa2b3f469a2e6001b829e0d6bc8680755349aa1329a87bf48731e9d5d30a/prometheus_fastapi_instrumentator-8.0.2-py3-none-any.whl", hash = "sha256:746002ec1e2c58b93f61444e1d104de959a9463a6a3f1c8909ac3757e16c3866", size = 20549, upload-time = "2026-06-23T09:39:32.616Z" },
 ]
 
 [[package]]
@@ -2356,15 +2356,15 @@ wheels = [
 
 [[package]]
 name = "starlette"
-version = "0.52.1"
+version = "1.3.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "anyio" },
     { name = "typing-extensions", marker = "python_full_version < '3.13'" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/c4/68/79977123bb7be889ad680d79a40f339082c1978b5cfcf62c2d8d196873ac/starlette-0.52.1.tar.gz", hash = "sha256:834edd1b0a23167694292e94f597773bc3f89f362be6effee198165a35d62933", size = 2653702, upload-time = "2026-01-18T13:34:11.062Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/eb/e3/7c1dc7381d9f8ab7d854328ebfa884e62cb3f3d8549ddfd37c7814f42afa/starlette-1.3.1.tar.gz", hash = "sha256:05d0213193f2fbaae60e2ecb593b4add4262ad4e46536b54abe36f11a71724e0", size = 2703240, upload-time = "2026-06-12T09:23:11.602Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/81/0d/13d1d239a25cbfb19e740db83143e95c772a1fe10202dda4b76792b114dd/starlette-0.52.1-py3-none-any.whl", hash = "sha256:0029d43eb3d273bc4f83a08720b4912ea4b071087a3b48db01b7c839f7954d74", size = 74272, upload-time = "2026-01-18T13:34:09.188Z" },
+    { url = "https://files.pythonhosted.org/packages/ec/bb/2799cc2ede3ed41131f8975621e7213dfc7ef4acbbaadfa440f32500c370/starlette-1.3.1-py3-none-any.whl", hash = "sha256:c7372aae11c3c3f26a42df7bd626cec2f47d03483d261d369516a615a53714c6", size = 73632, upload-time = "2026-06-12T09:23:10.017Z" },
 ]
 
 [[package]]

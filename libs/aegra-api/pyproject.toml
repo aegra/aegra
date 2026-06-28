@@ -43,7 +43,9 @@ dependencies = [
     "openinference-instrumentation-langchain>=0.1.58",
 
     # Metrics
-    "prometheus-fastapi-instrumentator>=7.1.0",
+    # >=8.0.2: 7.x reads route.path on FastAPI >=0.137's _IncludedRouter (which has
+    # no .path), 500ing every request when metrics are on. 8.0.2 handles the new tree.
+    "prometheus-fastapi-instrumentator>=8.0.2",
 
     # Utils
     "structlog>=25.4.0",

@@ -224,4 +224,6 @@ async def _resume_via_sdk(ts: object, interrupt_id: str) -> None:
         if any(p.get("interrupt_id") == interrupt_id for p in ts.interrupts):  # type: ignore[attr-defined]
             break
         await asyncio.sleep(0.1)
+    else:
+        raise AssertionError(f"SDK never registered interrupt {interrupt_id}: {ts.interrupts!r}")  # type: ignore[attr-defined]
     await ts.run.respond({"action": "approve"}, interrupt_id=interrupt_id)  # type: ignore[attr-defined]

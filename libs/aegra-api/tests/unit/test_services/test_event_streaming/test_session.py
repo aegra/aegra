@@ -311,7 +311,7 @@ class TestResumeAcrossRuns:
         )
         seeder = asyncio.create_task(reveal_run_b())
         events = [e async for e in session.stream()]
-        await seeder
+        await asyncio.wait_for(seeder, timeout=1.0)
 
         methods = [(e["method"], e["params"]["data"]) for e in events]
         assert ("input.requested", {"interrupt_id": "int-1", "value": {"q": "ok?"}}) in methods

@@ -70,9 +70,15 @@ class ThreadEventSession:
         return self._seq
 
     async def stream(self) -> AsyncIterator[dict[str, Any]]:
-        """Yield v2 envelopes for the thread's runs until they finish + idle."""
+        """Yield v2 envelopes for the thread's runs until they finish + idle.
+
+        The stream stays open across the gap between runs so a HITL resume
+        (``input.respond`` starts a fresh run on the same thread) is delivered
+        on the same SSE connection the SDK holds open. An interrupted run keeps
+        the full grace window; a terminal run still waits one grace window so a
+        same-thread follow-up run is not dropped, but never blocks forever.
+        """
         idle_deadline: float | None = None
-        drained_any = False
         loop = asyncio.get_running_loop()
 
         while True:
@@ -82,13 +88,10 @@ class ThreadEventSession:
                     progressed = True
                     yield envelope
                 self._drained.add(run_id)
-                drained_any = True
 
             if progressed:
                 idle_deadline = None
                 continue
-            if drained_any:
-                return
 
             now = loop.time()
             if idle_deadline is None:

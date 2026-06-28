@@ -54,14 +54,18 @@ def _as_values(value: Any) -> Any:
 
 
 def normalize_input_requested(payload: Any) -> list[dict[str, Any]]:
-    """Project interrupt entries into ``{interrupt_id, payload?}`` requests."""
+    """Project interrupt entries into ``{interrupt_id, value?}`` requests.
+
+    ``value`` (not ``payload``) is the SDK's ``InterruptPayload`` field — it is
+    what ``thread.interrupts[].value`` surfaces to the client.
+    """
     requests: list[dict[str, Any]] = []
     for entry in _interrupt_array(payload):
         if not isinstance(entry, dict) or not isinstance(entry.get("id"), str):
             continue
         request: dict[str, Any] = {"interrupt_id": entry["id"]}
         if "value" in entry:
-            request["payload"] = entry["value"]
+            request["value"] = entry["value"]
         requests.append(request)
     return requests
 

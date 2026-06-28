@@ -14,8 +14,10 @@ from typing import Any
 import structlog
 from fastapi import HTTPException
 from pydantic import ValidationError
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from aegra_api.core.orm import Run as RunORM
 from aegra_api.models import User
 from aegra_api.models.runs import RunCreate
 from aegra_api.services.event_streaming.protocol import ErrorCode, build_error, build_success
@@ -108,12 +110,20 @@ async def _input_respond(
     thread_id: str,
     user: User,
 ) -> tuple[dict[str, Any], str | None]:
-    """Resume an interrupted run by replaying a HITL response as a command."""
-    assistant_id = params.get("assistant_id")
-    if not isinstance(assistant_id, str) or not assistant_id:
-        return build_error(command_id, "invalid_argument", "input.respond requires a string assistant_id."), None
+    """Resume an interrupted run by replaying a HITL response as a command.
+
+    The stock SDK's ``input.respond`` sends only ``{interrupt_id, namespace,
+    response}`` — no assistant. Recover the assistant from the thread's most
+    recent run so a resume works without the client re-supplying it.
+    """
     if "response" not in params:
         return build_error(command_id, "invalid_argument", "input.respond requires a response value."), None
+
+    assistant_id = params.get("assistant_id")
+    if not isinstance(assistant_id, str) or not assistant_id:
+        assistant_id = await _thread_assistant_id(session, thread_id, user)
+    if not assistant_id:
+        return build_error(command_id, "no_such_run", "No run on this thread to resume."), None
 
     request = RunCreate(
         assistant_id=assistant_id,
@@ -122,6 +132,16 @@ async def _input_respond(
     )
     run_id = await _start(session, thread_id, request, user)
     return build_success(command_id, {"run_id": run_id}), run_id
+
+
+async def _thread_assistant_id(session: AsyncSession, thread_id: str, user: User) -> str | None:
+    """The assistant bound to the thread's most recent run, user-scoped."""
+    return await session.scalar(
+        select(RunORM.assistant_id)
+        .where(RunORM.thread_id == thread_id, RunORM.user_id == user.identity)
+        .order_by(RunORM.created_at.desc())
+        .limit(1)
+    )
 
 
 async def _start(session: AsyncSession, thread_id: str, request: RunCreate, user: User) -> str:

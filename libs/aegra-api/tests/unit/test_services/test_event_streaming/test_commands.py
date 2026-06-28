@@ -22,8 +22,8 @@ def prepared_run(monkeypatch: pytest.MonkeyPatch) -> AsyncMock:
     return mock
 
 
-async def _dispatch(payload: dict[str, Any], user: User) -> tuple[dict, str | None]:
-    return await cmd.handle_command(payload, session=AsyncMock(), thread_id="t1", user=user)
+async def _dispatch(payload: dict[str, Any], user: User, *, session: Any = None) -> tuple[dict, str | None]:
+    return await cmd.handle_command(payload, session=session or AsyncMock(), thread_id="t1", user=user)
 
 
 class TestRunStart:
@@ -72,6 +72,33 @@ class TestInputRespond:
     async def test_input_respond_missing_response_is_invalid(self, prepared_run: AsyncMock, user: User) -> None:
         resp, _ = await _dispatch({"id": 2, "method": "input.respond", "params": {"assistant_id": "agent"}}, user)
         assert resp["error"] == "invalid_argument"
+
+    async def test_input_respond_recovers_assistant_from_thread(self, prepared_run: AsyncMock, user: User) -> None:
+        """The stock SDK sends no assistant_id; recover it from the thread's last run."""
+        session = AsyncMock()
+        session.scalar = AsyncMock(return_value="bound-agent")
+        resp, run_id = await _dispatch(
+            {"id": 2, "method": "input.respond", "params": {"interrupt_id": "i1", "response": "yes"}},
+            user,
+            session=session,
+        )
+        assert resp["type"] == "success"
+        request = prepared_run.call_args.args[2]
+        assert request.assistant_id == "bound-agent"
+        assert request.command == {"resume": "yes"}
+
+    async def test_input_respond_no_run_to_resume_is_error(self, prepared_run: AsyncMock, user: User) -> None:
+        """No assistant_id and no prior run on the thread → on-protocol error, no run started."""
+        session = AsyncMock()
+        session.scalar = AsyncMock(return_value=None)
+        resp, run_id = await _dispatch(
+            {"id": 2, "method": "input.respond", "params": {"interrupt_id": "i1", "response": "yes"}},
+            user,
+            session=session,
+        )
+        assert resp["error"] == "no_such_run"
+        assert run_id is None
+        prepared_run.assert_not_called()
 
 
 class TestErrors:

@@ -1,5 +1,6 @@
 """Tests for ThreadEventSession: native-event forwarding, seq, filter, since, HITL, lifecycle."""
 
+import asyncio
 from collections.abc import Iterator
 from typing import Any
 
@@ -133,7 +134,7 @@ class TestForwarding:
         )
         events = await _collect(_make_session("t1", channels={"input", "updates"}, run_ids=("run-1",)))
         input_events = [e for e in events if e["method"] == "input.requested"]
-        assert input_events[0]["params"]["data"] == {"interrupt_id": "int-9", "payload": {"q": "ok?"}}
+        assert input_events[0]["params"]["data"] == {"interrupt_id": "int-9", "value": {"q": "ok?"}}
         assert not [e for e in events if e["method"] == "updates"]
 
 
@@ -217,7 +218,7 @@ class TestInterruptsToInputChannel:
         events = await _collect(_make_session("t1", channels={"input", "values"}, run_ids=("run-1",)))
         input_events = [e for e in events if e["method"] == "input.requested"]
         assert input_events
-        assert input_events[0]["params"]["data"] == {"interrupt_id": "int-1", "payload": interrupt_payload}
+        assert input_events[0]["params"]["data"] == {"interrupt_id": "int-1", "value": interrupt_payload}
 
     async def test_interrupt_stripped_from_values_payload(self, manager: BrokerManager) -> None:
         """__interrupt__ never leaks into the forwarded values data."""
@@ -264,6 +265,65 @@ class TestMisc:
     async def test_empty_thread_closes_after_idle(self, manager: BrokerManager) -> None:
         events = await _collect(_make_session("t1", channels={"lifecycle"}, run_ids=()))
         assert events == []
+
+
+class TestResumeAcrossRuns:
+    """A HITL resume starts a fresh run on the thread; its events must reach the
+    same open stream, not be dropped when the interrupted run drains first."""
+
+    async def test_followup_run_after_interrupt_streams_on_same_session(self, manager: BrokerManager) -> None:
+        await _seed(
+            manager,
+            "run-a",
+            [
+                (
+                    "values",
+                    _protocol_event("values", {"messages": []}, interrupts=[{"id": "int-1", "value": {"q": "ok?"}}]),
+                ),
+                ("end", {"status": "interrupted"}),
+            ],
+        )
+
+        revealed = False
+
+        async def lister() -> list[str]:
+            nonlocal revealed
+            if not revealed:
+                revealed = True
+                return ["run-a"]
+            return ["run-a", "run-b"]
+
+        async def reveal_run_b() -> None:
+            # run-b appears a beat after run-a drains, as the resume round-trip lands.
+            await asyncio.sleep(0.05)
+            await _seed(
+                manager,
+                "run-b",
+                [("values", _protocol_event("values", {"messages": [{"type": "ai", "content": "done"}]}))],
+            )
+            await manager.get_or_create_broker("run-b").put("run-b_end", ("end", {"status": "success"}))
+
+        session = ThreadEventSession(
+            "t1",
+            channels={"input", "values", "lifecycle"},
+            list_run_ids=lister,
+            idle_grace_seconds=5.0,
+        )
+        seeder = asyncio.create_task(reveal_run_b())
+        events = [e async for e in session.stream()]
+        await seeder
+
+        methods = [(e["method"], e["params"]["data"]) for e in events]
+        assert ("input.requested", {"interrupt_id": "int-1", "value": {"q": "ok?"}}) in methods
+        # run-b's completion proves the stream stayed open across the run gap.
+        assert any(e["method"] == "lifecycle" and e["params"]["data"] == {"event": "completed"} for e in events)
+
+    async def test_terminal_run_still_closes_after_grace(self, manager: BrokerManager) -> None:
+        """A completed run with no follow-up closes after one grace window."""
+        await _seed(manager, "run-1", [("values", _protocol_event("values", {"a": 1})), ("end", {"status": "success"})])
+        session = _make_session("t1", channels={"values", "lifecycle"}, run_ids=("run-1",))
+        events = await _collect(session)
+        assert [e["method"] for e in events] == ["values", "lifecycle"]
 
 
 class TestValidateChannels:

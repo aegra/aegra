@@ -8,6 +8,7 @@ Skipped unless the server has ``FF_V2_EVENT_STREAMING=true`` (else 503).
 Uses the ``stress_test`` graph (no LLM) so the run is hermetic.
 """
 
+import asyncio
 import json
 
 import httpx
@@ -151,7 +152,7 @@ async def test_sdk_tool_agent_streams_content_blocks_and_tool_calls() -> None:
         await ts.run.start(input={"messages": [{"role": "user", "content": "Process steps 1 and 2."}]})
         async for event in ts.events:
             events.append(event)
-            data = event.get("params", {}).get("data")
+            data = event.get("params", {}).get("data") or {}
             if isinstance(data, dict) and "tool_call" in json.dumps(data):
                 tool_call_seen = True
             if event.get("method") == "lifecycle" and data.get("event") in ("completed", "failed"):
@@ -180,6 +181,8 @@ async def test_sdk_hitl_interrupt_surfaces_on_input_channel_and_resumes() -> Non
     client = get_client(url=_base_url())
 
     input_requested: list[dict] = []
+    resumed = False
+    lifecycle_after_resume: list[str] = []
     async with client.threads.stream(assistant_id=assistant_id) as ts:
         # A search request makes the agent call a tool, which the graph gates
         # behind a human-approval interrupt.
@@ -187,15 +190,38 @@ async def test_sdk_hitl_interrupt_surfaces_on_input_channel_and_resumes() -> Non
             input={"messages": [{"role": "user", "content": "Search the web for the latest LangGraph release."}]}
         )
         async for event in ts.events:
-            if event.get("method") == "input.requested":
-                input_requested.append(event["params"]["data"])
             method = event.get("method")
-            data = event.get("params", {}).get("data", {})
-            if input_requested:
-                break
-            if method == "lifecycle" and data.get("event") in ("completed", "failed"):
-                break
+            data = event.get("params", {}).get("data") or {}
+            if method == "input.requested" and not resumed:
+                input_requested.append(data)
+                # Resume on the SAME open stream — the SDK does not reopen it.
+                # Proves the session keeps the stream alive across the run gap
+                # and that resume works without re-supplying an assistant.
+                await _resume_via_sdk(ts, data["interrupt_id"])
+                resumed = True
+                continue
+            if resumed and method == "lifecycle":
+                lifecycle_after_resume.append(data.get("event"))
+                if data.get("event") in ("completed", "failed"):
+                    break
 
     elog("hitl input.requested", input_requested)
+    elog("hitl lifecycle after resume", lifecycle_after_resume)
     assert input_requested, "interrupt did not surface on the input channel"
     assert isinstance(input_requested[0].get("interrupt_id"), str)
+    # value (not payload) is the SDK's InterruptPayload field.
+    assert "value" in input_requested[0], "interrupt value missing from input.requested"
+    assert "completed" in lifecycle_after_resume, (
+        f"resume did not run to completion on the same stream; got {lifecycle_after_resume}"
+    )
+
+
+async def _resume_via_sdk(ts: object, interrupt_id: str) -> None:
+    """Call ``ts.run.respond`` once the SDK's lifecycle watcher has registered the
+    interrupt. The watcher runs on a separate SSE, so the main stream can surface
+    ``input.requested`` a beat before ``ts.interrupts`` is populated."""
+    for _ in range(50):
+        if any(p.get("interrupt_id") == interrupt_id for p in ts.interrupts):  # type: ignore[attr-defined]
+            break
+        await asyncio.sleep(0.1)
+    await ts.run.respond({"action": "approve"}, interrupt_id=interrupt_id)  # type: ignore[attr-defined]

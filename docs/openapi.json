@@ -3118,6 +3118,124 @@
           }
         }
       }
+    },
+    "/threads/{thread_id}/stream/events": {
+      "post": {
+        "tags": [
+          "Event Streaming"
+        ],
+        "summary": "Stream Thread Events",
+        "description": "Open a channel-filtered SSE stream of the thread's run events.\n\nThread-scoped: events for any run on the thread flow through, so a\nclient can open the stream then issue ``run.start``. Each SSE frame's\n``data:`` is a protocol event envelope; ``id:`` is the ``seq`` a client\nechoes back as ``since`` on resume.",
+        "operationId": "stream_thread_events_threads__thread_id__stream_events_post",
+        "parameters": [
+          {
+            "name": "thread_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Thread Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/EventStreamRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "SSE stream of protocol event envelopes",
+            "content": {
+              "text/event-stream": {}
+            }
+          },
+          "400": {
+            "description": "Invalid request (unsupported channels, malformed command)"
+          },
+          "404": {
+            "description": "Thread owned by another user"
+          },
+          "503": {
+            "description": "v2 disabled by flag, or runtime too old for native v3 events"
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/threads/{thread_id}/commands": {
+      "post": {
+        "tags": [
+          "Event Streaming"
+        ],
+        "summary": "Post Thread Command",
+        "description": "Run a single v2 command on the thread and return its response envelope.",
+        "operationId": "post_thread_command_threads__thread_id__commands_post",
+        "parameters": [
+          {
+            "name": "thread_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Thread Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ThreadCommand"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request (unsupported channels, malformed command)"
+          },
+          "404": {
+            "description": "Thread owned by another user"
+          },
+          "503": {
+            "description": "v2 disabled by flag, or runtime too old for native v3 events"
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
     }
   },
   "components": {
@@ -4239,6 +4357,68 @@
         "title": "CronUpdate",
         "description": "Request body for updating an existing cron job."
       },
+      "EventStreamRequest": {
+        "properties": {
+          "channels": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Channels",
+            "description": "Channels to subscribe to (e.g. messages, values, lifecycle)."
+          },
+          "namespaces": {
+            "anyOf": [
+              {
+                "items": {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Namespaces",
+            "description": "Subgraph namespace prefixes to include."
+          },
+          "depth": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Depth",
+            "description": "Max subgraph nesting depth to include."
+          },
+          "since": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Since",
+            "description": "Last seq the client saw; events at or below it are skipped on resume."
+          }
+        },
+        "type": "object",
+        "required": [
+          "channels"
+        ],
+        "title": "EventStreamRequest",
+        "description": "Body for ``POST /threads/{thread_id}/stream/events``.\n\nThread-scoped, matching the LangGraph SDK: no run id \u2014 the stream\ncarries events for whatever run(s) execute on the thread."
+      },
       "HTTPValidationError": {
         "properties": {
           "detail": {
@@ -5099,6 +5279,33 @@
         "title": "ThreadCheckpointPostRequest",
         "description": "Request model for fetching thread checkpoint"
       },
+      "ThreadCommand": {
+        "properties": {
+          "id": {
+            "type": "integer",
+            "title": "Id",
+            "description": "Client-assigned command id, echoed in the response."
+          },
+          "method": {
+            "type": "string",
+            "title": "Method",
+            "description": "Command method, e.g. run.start or input.respond."
+          },
+          "params": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Params",
+            "description": "Method parameters."
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "method"
+        ],
+        "title": "ThreadCommand",
+        "description": "Body for ``POST /threads/{thread_id}/commands`` (JSON-RPC style)."
+      },
       "ThreadCreate": {
         "properties": {
           "metadata": {
@@ -5669,6 +5876,10 @@
     {
       "name": "Store",
       "description": "Persistent key-value and semantic storage available from any thread."
+    },
+    {
+      "name": "Event Streaming",
+      "description": "Agent Protocol v2 thread event streaming and commands."
     },
     {
       "name": "Health",

@@ -29,8 +29,13 @@ logger = structlog.getLogger(__name__)
 
 
 async def _validate_resume_command(session: AsyncSession, thread_id: str, command: dict[str, Any] | None) -> None:
-    """Validate resume command requirements."""
-    if command and command.get("resume") is not None:
+    """Validate resume command requirements.
+
+    Guard on the presence of the ``resume`` key, not a non-None value: ``None``
+    is a valid resume payload, and a ``{"resume": None}`` command must still be
+    rejected against a thread that is not interrupted.
+    """
+    if command and "resume" in command:
         # Check if thread exists and is in interrupted state
         thread_stmt = select(ThreadORM).where(ThreadORM.thread_id == thread_id)
         thread = await session.scalar(thread_stmt)
@@ -164,6 +169,7 @@ async def _prepare_run(
     user: User,
     *,
     initial_status: str,
+    event_streaming_v2: bool = False,
 ) -> tuple[str, Run, RunJob]:
     """Shared run-creation logic used by create, stream, and wait endpoints.
 
@@ -231,6 +237,7 @@ async def _prepare_run(
             stream_mode=request.stream_mode,
             checkpoint=request.checkpoint,
             command=request.command,
+            event_streaming_v2=event_streaming_v2,
         ),
         behavior=RunBehavior(
             interrupt_before=request.interrupt_before,

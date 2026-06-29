@@ -86,8 +86,21 @@ class RedisRunBroker(BaseRunBroker):
         self._cache_key = cache_key
         self._counter_key = counter_key
         self._finished = False
+        # Serializes writes for this run so concurrent put() calls (e.g. a
+        # cancel/error signal racing a stream write) keep cache-then-publish
+        # ordering — without it, a backoff sleep on one put could let a later
+        # event's publish overtake an earlier one.
+        self._write_lock = asyncio.Lock()
 
     async def put(self, event_id: str, payload: Any, *, resumable: bool = True) -> None:
+        """Append an event to the replay buffer and publish it to live subscribers.
+
+        Writes are retried with bounded backoff (see ``_write_with_retry``), so
+        delivery is **at-least-once**: in the rare case a write times out *after*
+        Redis already applied it, a retry may re-deliver the event. ``event_id``
+        is stable (allocated once upstream), so consumers de-duplicate on
+        ``Last-Event-ID`` during replay.
+        """
         if self._finished:
             logger.warning(f"Attempted to put event {event_id} into finished broker for run {self.run_id}")
             return
@@ -101,23 +114,28 @@ class RedisRunBroker(BaseRunBroker):
 
         is_end = isinstance(payload, tuple) and len(payload) >= 1 and payload[0] == "end"
 
-        try:
+        async with self._write_lock:
             # Cache and publish are retried independently so a publish failure
             # never re-runs the cache pipeline (which would double-write the
             # replay buffer and double-increment the sequence counter).
-            if resumable:
-                await self._write_with_retry(self._cache_event, message)
+            operation = "cache"
+            try:
+                if resumable:
+                    await self._write_with_retry(self._cache_event, message)
 
-            await self._write_with_retry(self._publish_event, message)
+                operation = "publish"
+                await self._write_with_retry(self._publish_event, message)
 
-            if is_end:
-                self._finished = True
-        except RedisError as e:
-            logger.error(f"Redis publish failed for run {self.run_id} after {_PUT_MAX_ATTEMPTS} attempts: {e}")
-            # Even if Redis fails, mark finished for end events so aiter() can exit
-            # rather than looping forever waiting for an end event that won't arrive.
-            if is_end:
-                self._finished = True
+                if is_end:
+                    self._finished = True
+            except RedisError as e:
+                logger.error(
+                    f"Redis {operation} write failed for run {self.run_id} after {_PUT_MAX_ATTEMPTS} attempts: {e}"
+                )
+                # Even if Redis fails, mark finished for end events so aiter() can exit
+                # rather than looping forever waiting for an end event that won't arrive.
+                if is_end:
+                    self._finished = True
 
     async def _cache_event(self, message: str) -> None:
         """Append the event to the replay buffer and bump the sequence counter."""

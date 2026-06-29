@@ -1,5 +1,6 @@
 """Unit tests for RedisRunBroker and RedisBrokerManager"""
 
+import asyncio
 import json
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -238,6 +239,44 @@ class TestRedisRunBroker:
             await broker.put("evt-end", ("end", {"status": "success"}))
 
         assert broker.is_finished()
+
+    @pytest.mark.asyncio
+    async def test_put_serializes_concurrent_calls(self) -> None:
+        """The per-broker write lock keeps concurrent put() calls from
+        interleaving: a second put cannot start writing while the first is
+        mid-flight, preserving cache-then-publish event ordering."""
+        broker = self._make_broker()
+        order: list[str] = []
+        gate = asyncio.Event()
+
+        async def slow_first_cache(message: str) -> None:
+            order.append("A-cache-start")
+            await gate.wait()  # hold the write lock until released
+            order.append("A-cache-end")
+
+        async def publish_noop(message: str) -> None:
+            order.append("publish")
+
+        async def second_cache(message: str) -> None:
+            order.append("B-cache")
+
+        broker._cache_event = slow_first_cache  # type: ignore[method-assign]
+        broker._publish_event = publish_noop  # type: ignore[method-assign]
+        task_a = asyncio.create_task(broker.put("evt-A", ("values", {})))
+        await asyncio.sleep(0)  # let A acquire the lock and enter its cache write
+        assert order == ["A-cache-start"]
+
+        # B is queued while A holds the lock — it must not write yet.
+        broker._cache_event = second_cache  # type: ignore[method-assign]
+        task_b = asyncio.create_task(broker.put("evt-B", ("values", {})))
+        await asyncio.sleep(0)
+        assert "B-cache" not in order
+
+        gate.set()  # release A
+        await asyncio.gather(task_a, task_b)
+
+        # A fully completes (cache then publish) before B begins.
+        assert order == ["A-cache-start", "A-cache-end", "publish", "B-cache", "publish"]
 
     @pytest.mark.asyncio
     async def test_aiter_yields_events(self) -> None:

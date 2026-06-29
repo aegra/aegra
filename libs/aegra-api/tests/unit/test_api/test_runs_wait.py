@@ -124,6 +124,9 @@ class TestWaitForRunExceptionPaths:
         session_1 = AsyncMock()
         session_1.add = MagicMock()
         session_1.scalar.side_effect = [None, _make_assistant()]
+        session_1.scalars.return_value = MagicMock(
+            all=MagicMock(return_value=[])
+        )  # no in-flight run → multitask gate runs now
 
         # Post-wait session (for _fetch_run_output)
         session_2 = AsyncMock()
@@ -169,6 +172,9 @@ class TestWaitForRunExceptionPaths:
         session_1 = AsyncMock()
         session_1.add = MagicMock()
         session_1.scalar.side_effect = [None, _make_assistant()]
+        session_1.scalars.return_value = MagicMock(
+            all=MagicMock(return_value=[])
+        )  # no in-flight run → multitask gate runs now
 
         session_2 = AsyncMock()
         session_2.scalar.return_value = _make_run_orm(run_id, thread_id, output={"result": "success"})
@@ -210,6 +216,9 @@ class TestWaitForRunExceptionPaths:
         session_1 = AsyncMock()
         session_1.add = MagicMock()
         session_1.scalar.side_effect = [None, _make_assistant()]
+        session_1.scalars.return_value = MagicMock(
+            all=MagicMock(return_value=[])
+        )  # no in-flight run → multitask gate runs now
 
         session_2 = AsyncMock()
         session_2.scalar.return_value = _make_run_orm(
@@ -258,6 +267,9 @@ class TestWaitForRunExceptionPaths:
         session_1 = AsyncMock()
         session_1.add = MagicMock()
         session_1.scalar.side_effect = [None, _make_assistant()]
+        session_1.scalars.return_value = MagicMock(
+            all=MagicMock(return_value=[])
+        )  # no in-flight run → multitask gate runs now
 
         session_2 = AsyncMock()
         session_2.scalar.return_value = _make_run_orm(
@@ -337,6 +349,9 @@ class TestWaitForRunExceptionPaths:
         session_1 = AsyncMock()
         session_1.add = MagicMock()
         session_1.scalar.side_effect = [None, _make_assistant()]
+        session_1.scalars.return_value = MagicMock(
+            all=MagicMock(return_value=[])
+        )  # no in-flight run → multitask gate runs now
 
         session_2 = AsyncMock()
         session_2.scalar.return_value = _make_run_orm(run_id, thread_id, output={"ok": True})

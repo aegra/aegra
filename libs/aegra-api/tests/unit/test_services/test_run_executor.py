@@ -43,7 +43,7 @@ class TestExecuteRunSuccess:
 
         with (
             patch("aegra_api.services.run_executor.get_langgraph_service", return_value=mock_service),
-            patch("aegra_api.services.run_executor.update_run_status", mock_update),
+            patch("aegra_api.services.run_executor.try_mark_run_running", mock_update),
             patch("aegra_api.services.run_executor.finalize_run", mock_finalize),
             patch("aegra_api.services.run_executor.streaming_service") as mock_streaming,
             patch("aegra_api.services.run_executor.stream_graph_events", return_value=_empty_async_gen()),
@@ -61,9 +61,9 @@ class TestExecuteRunSuccess:
 
             await execute_run(_make_job())
 
-        # update_run_status called once for "running"
+        # try_mark_run_running CAS called once
         assert mock_update.await_count == 1
-        assert mock_update.await_args_list[0].args == ("run-1", "running")
+        assert mock_update.await_args_list[0].args == ("run-1",)
 
         # finalize_run called once for success
         mock_finalize.assert_awaited_once()
@@ -79,7 +79,7 @@ class TestExecuteRunCancelledError:
         mock_finalize = AsyncMock()
 
         with (
-            patch("aegra_api.services.run_executor.update_run_status", mock_update),
+            patch("aegra_api.services.run_executor.try_mark_run_running", mock_update),
             patch("aegra_api.services.run_executor.finalize_run", mock_finalize),
             patch("aegra_api.services.run_executor.streaming_service") as mock_streaming,
             patch("aegra_api.services.run_executor._signal_run_done", new_callable=AsyncMock),
@@ -97,9 +97,9 @@ class TestExecuteRunCancelledError:
             with pytest.raises(asyncio.CancelledError):
                 await execute_run(_make_job())
 
-        # update_run_status called once for "running"
+        # try_mark_run_running CAS called once
         assert mock_update.await_count == 1
-        assert mock_update.await_args_list[0].args == ("run-1", "running")
+        assert mock_update.await_args_list[0].args == ("run-1",)
         # finalize_run called for "interrupted"
         mock_finalize.assert_awaited_once()
         assert mock_finalize.await_args.kwargs["status"] == "interrupted"
@@ -113,7 +113,7 @@ class TestExecuteRunException:
         mock_finalize = AsyncMock()
 
         with (
-            patch("aegra_api.services.run_executor.update_run_status", mock_update),
+            patch("aegra_api.services.run_executor.try_mark_run_running", mock_update),
             patch("aegra_api.services.run_executor.finalize_run", mock_finalize),
             patch("aegra_api.services.run_executor.streaming_service") as mock_streaming,
             patch("aegra_api.services.run_executor._signal_run_done", new_callable=AsyncMock),
@@ -130,9 +130,9 @@ class TestExecuteRunException:
 
             await execute_run(_make_job())
 
-        # update_run_status called once for "running"
+        # try_mark_run_running CAS called once
         assert mock_update.await_count == 1
-        assert mock_update.await_args_list[0].args == ("run-1", "running")
+        assert mock_update.await_args_list[0].args == ("run-1",)
         # finalize_run called for "error"
         mock_finalize.assert_awaited_once()
         assert mock_finalize.await_args.kwargs["status"] == "error"
@@ -286,7 +286,7 @@ class TestLeaseLossCancellation:
         mock_signal_done = AsyncMock()
 
         with (
-            patch("aegra_api.services.run_executor.update_run_status", mock_update),
+            patch("aegra_api.services.run_executor.try_mark_run_running", mock_update),
             patch("aegra_api.services.run_executor.finalize_run", mock_finalize),
             patch("aegra_api.services.run_executor.streaming_service") as mock_streaming,
             patch("aegra_api.services.run_executor._signal_run_done", mock_signal_done),
@@ -326,7 +326,7 @@ class TestLeaseLossCancellation:
         mock_signal_done = AsyncMock()
 
         with (
-            patch("aegra_api.services.run_executor.update_run_status", mock_update),
+            patch("aegra_api.services.run_executor.try_mark_run_running", mock_update),
             patch("aegra_api.services.run_executor.finalize_run", mock_finalize),
             patch("aegra_api.services.run_executor.streaming_service") as mock_streaming,
             patch("aegra_api.services.run_executor._signal_run_done", mock_signal_done),
@@ -351,3 +351,30 @@ class TestLeaseLossCancellation:
         # Done-key and cleanup MUST happen on normal cancel
         mock_signal_done.assert_awaited_once_with("run-1")
         mock_streaming.cleanup_run.assert_awaited_once_with("run-1")
+
+
+class TestPreemptedBeforeStart:
+    @pytest.mark.asyncio
+    async def test_gate_preempted_run_skips_execution_and_finalize(self) -> None:
+        """A run whose start CAS fails (multitask gate terminalized it between dispatch
+        and start) must not execute the graph or finalize — the gate owns its status."""
+        mock_finalize = AsyncMock()
+
+        with (
+            patch("aegra_api.services.run_executor.try_mark_run_running", AsyncMock(return_value=False)),
+            patch("aegra_api.services.run_executor._stream_graph", new_callable=AsyncMock) as mock_stream,
+            patch("aegra_api.services.run_executor.finalize_run", mock_finalize),
+            patch("aegra_api.services.run_executor.streaming_service") as mock_streaming,
+            patch("aegra_api.services.run_executor._signal_run_done", new_callable=AsyncMock) as mock_done,
+        ):
+            mock_streaming.cleanup_run = AsyncMock()
+            mock_streaming.signal_run_cancelled = AsyncMock()
+
+            from aegra_api.services.run_executor import execute_run
+
+            await execute_run(_make_job())
+
+        mock_stream.assert_not_awaited()  # graph never runs
+        mock_finalize.assert_not_awaited()  # gate owns the terminal status
+        mock_streaming.signal_run_cancelled.assert_awaited_once()  # SSE clients released
+        mock_done.assert_awaited_once()  # join/wait waiters released

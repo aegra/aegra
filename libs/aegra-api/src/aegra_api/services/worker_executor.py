@@ -100,6 +100,7 @@ class WorkerExecutor(BaseExecutor):
 
     async def start(self) -> None:
         self._running = True
+        self._accepting = True
         count = settings.worker.WORKER_COUNT
         if count == 0:
             logger.warning(
@@ -121,6 +122,7 @@ class WorkerExecutor(BaseExecutor):
 
     async def stop(self) -> None:
         self._running = False
+        self._accepting = False
         drain_timeout = settings.worker.WORKER_DRAIN_TIMEOUT
 
         # Wait for in-flight job tasks to finish
@@ -229,6 +231,12 @@ class WorkerExecutor(BaseExecutor):
                     status="error",
                     thread_status="error",
                     error="Job exceeded maximum execution time",
+                    # Authoritative late corrector: the cancel handler already finalized the run
+                    # to 'interrupted', so override that terminal status to 'error'. Scoped to
+                    # our own lease so a gate-pre-empted 'interrupted' (lease cleared) is never
+                    # stomped — its thread belongs to a newer run by now.
+                    allow_terminal_override=True,
+                    claimed_by=worker_name,
                 )
             else:
                 # Fallback: update run status only (thread_id lookup failed)

@@ -833,7 +833,7 @@ async def delete_thread(
     active_runs_stmt = select(RunORM).where(
         RunORM.thread_id == thread_id,
         RunORM.user_id == user.identity,
-        RunORM.status.in_(["pending", "running"]),
+        RunORM.status.in_(["queued", "pending", "running"]),
     )
     active_runs_list = (await session.scalars(active_runs_stmt)).all()
 

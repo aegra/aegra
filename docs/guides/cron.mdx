@@ -96,6 +96,17 @@ run = await client.crons.create_for_thread(
 print(f"Cron ID: {run['cron_id']}")
 ```
 
+<Note>
+For a thread-bound cron, keep the payload's `multitask_strategy` at the default
+**`enqueue`**. The non-default strategies interact badly with periodic same-thread
+firing: `rollback`/`interrupt` cancel the still-running prior fire on every overlapping
+tick (a fire that outlasts the poll interval never completes), and `reject` 409s on every
+tick until the active fire finishes. Also note: if the bound thread is paused on a
+human-in-the-loop `interrupt()`, every cron fire is refused with `409` (regardless of
+strategy, including `enqueue`) until the thread is resumed. See
+[double-texting](/guides/double-texting) for the full semantics.
+</Note>
+
 ## Cron expression format
 
 Aegra uses [croniter](https://github.com/kiorky/croniter) for schedule parsing.

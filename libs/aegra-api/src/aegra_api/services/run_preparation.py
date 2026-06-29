@@ -29,8 +29,13 @@ logger = structlog.getLogger(__name__)
 
 
 async def _validate_resume_command(session: AsyncSession, thread_id: str, command: dict[str, Any] | None) -> None:
-    """Validate resume command requirements."""
-    if command and command.get("resume") is not None:
+    """Validate resume command requirements.
+
+    Guard on the presence of the ``resume`` key, not a non-None value: ``None``
+    is a valid resume payload, and a ``{"resume": None}`` command must still be
+    rejected against a thread that is not interrupted.
+    """
+    if command and "resume" in command:
         # Check if thread exists and is in interrupted state
         thread_stmt = select(ThreadORM).where(ThreadORM.thread_id == thread_id)
         thread = await session.scalar(thread_stmt)

@@ -204,13 +204,14 @@ async def _stream_native_v2(
         event_id = await broker_manager.allocate_event_id(run_id)
         await streaming_service.put_to_broker(run_id, event_id, (method, event))
 
-        if method == "values":
-            params = event.get("params", {})
-            if params.get("interrupts"):
-                result.has_interrupt = True
-            data = params.get("data")
-            if isinstance(data, dict):
-                result.data = data
+        params = event.get("params", {})
+        data = params.get("data")
+        # Interrupts ride on values.params.interrupts, or as an __interrupt__ key
+        # in a values/updates payload (the path session.py routes to input.requested).
+        if params.get("interrupts") or (isinstance(data, dict) and "__interrupt__" in data):
+            result.has_interrupt = True
+        if method == "values" and isinstance(data, dict):
+            result.data = data
 
 
 def _build_run_config(job: RunJob) -> dict[str, Any]:

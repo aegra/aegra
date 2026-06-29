@@ -77,23 +77,30 @@ def _log_connection_help(error: Exception) -> None:
 @asynccontextmanager
 async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     """FastAPI lifespan context manager for startup/shutdown"""
-    # Multi-pod K8s: set RUN_MIGRATIONS_ON_STARTUP=false + run `aegra db upgrade`
-    # out-of-band. See docs/guides/deployment.mdx.
-    if settings.app.RUN_MIGRATIONS_ON_STARTUP:
+    if settings.db.DATABASE_ENABLED:
+        # Multi-pod K8s: set RUN_MIGRATIONS_ON_STARTUP=false + run `aegra db upgrade`
+        # out-of-band. See docs/guides/deployment.mdx.
+        if settings.app.RUN_MIGRATIONS_ON_STARTUP:
+            try:
+                await run_migrations_async()
+            except (ConnectionRefusedError, OSError) as e:
+                _log_connection_help(e)
+                raise
+        else:
+            logger.info("skipping startup migrations (RUN_MIGRATIONS_ON_STARTUP=false)")
+
+        # Startup: Initialize database and LangGraph components
         try:
-            await run_migrations_async()
+            await db_manager.initialize()
         except (ConnectionRefusedError, OSError) as e:
             _log_connection_help(e)
             raise
     else:
-        logger.info("skipping startup migrations (RUN_MIGRATIONS_ON_STARTUP=false)")
-
-    # Startup: Initialize database and LangGraph components
-    try:
-        await db_manager.initialize()
-    except (ConnectionRefusedError, OSError) as e:
-        _log_connection_help(e)
-        raise
+        logger.info(
+            "Running without PostgreSQL (DATABASE_ENABLED=false). "
+            "Using in-memory checkpointing — state is lost on restart."
+        )
+        await db_manager.initialize_memory_mode()
 
     # Observability
     setup_observability()

@@ -13,7 +13,7 @@ import contextlib
 import json
 import random
 import time
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from typing import Any
 
 import structlog
@@ -41,6 +41,12 @@ _REPLAY_MAX_EVENTS = 10_000
 _BACKOFF_BASE = 0.5
 _BACKOFF_MAX = 30.0
 _BACKOFF_FACTOR = 2.0
+
+# Bounded retry for the write path (put). The read path (aiter) retries
+# RedisError indefinitely; the write path must be bounded so a producer can't
+# block forever, but it should still retry a transient blip rather than drop the
+# event — a dropped event is a permanently lost SSE token.
+_PUT_MAX_ATTEMPTS = 3
 
 
 def _serialize_payload(payload: Any) -> str:
@@ -96,27 +102,62 @@ class RedisRunBroker(BaseRunBroker):
         is_end = isinstance(payload, tuple) and len(payload) >= 1 and payload[0] == "end"
 
         try:
-            client = redis_manager.get_client()
-
+            # Cache and publish are retried independently so a publish failure
+            # never re-runs the cache pipeline (which would double-write the
+            # replay buffer and double-increment the sequence counter).
             if resumable:
-                pipe = client.pipeline()
-                pipe.rpush(self._cache_key, message)
-                pipe.ltrim(self._cache_key, -_REPLAY_MAX_EVENTS, -1)
-                pipe.expire(self._cache_key, _REPLAY_TTL_SECONDS)
-                pipe.incr(self._counter_key)
-                pipe.expire(self._counter_key, _REPLAY_TTL_SECONDS)
-                await pipe.execute()  # type: ignore[invalid-await]
+                await self._write_with_retry(self._cache_event, message)
 
-            await client.publish(self._channel, message)
+            await self._write_with_retry(self._publish_event, message)
 
             if is_end:
                 self._finished = True
         except RedisError as e:
-            logger.error(f"Redis publish failed for run {self.run_id}: {e}")
+            logger.error(f"Redis publish failed for run {self.run_id} after {_PUT_MAX_ATTEMPTS} attempts: {e}")
             # Even if Redis fails, mark finished for end events so aiter() can exit
             # rather than looping forever waiting for an end event that won't arrive.
             if is_end:
                 self._finished = True
+
+    async def _cache_event(self, message: str) -> None:
+        """Append the event to the replay buffer and bump the sequence counter."""
+        client = redis_manager.get_client()
+        pipe = client.pipeline()
+        pipe.rpush(self._cache_key, message)
+        pipe.ltrim(self._cache_key, -_REPLAY_MAX_EVENTS, -1)
+        pipe.expire(self._cache_key, _REPLAY_TTL_SECONDS)
+        pipe.incr(self._counter_key)
+        pipe.expire(self._counter_key, _REPLAY_TTL_SECONDS)
+        await pipe.execute()  # type: ignore[invalid-await]
+
+    async def _publish_event(self, message: str) -> None:
+        """Broadcast the event to live subscribers."""
+        client = redis_manager.get_client()
+        await client.publish(self._channel, message)
+
+    async def _write_with_retry(self, op: Callable[[str], Awaitable[None]], message: str) -> None:
+        """Run a Redis write with bounded exponential backoff.
+
+        Mirrors the retry/backoff the read path (aiter) already applies, so a
+        transient client-side blip (e.g. socket timeout) is retried instead of
+        dropping the event. Bounded by ``_PUT_MAX_ATTEMPTS`` so a producer never
+        blocks indefinitely; the final ``RedisError`` propagates to ``put()``.
+        """
+        attempt = 0
+        while True:
+            try:
+                await op(message)
+                return
+            except RedisError as e:
+                attempt += 1
+                if attempt >= _PUT_MAX_ATTEMPTS:
+                    raise
+                delay = _backoff_delay(attempt)
+                logger.warning(
+                    f"Redis write failed for run {self.run_id}, retrying in {delay:.1f}s: {e}",
+                    attempt=attempt,
+                )
+                await asyncio.sleep(delay)
 
     async def aiter(self) -> AsyncIterator[tuple[str, Any]]:
         attempt = 0

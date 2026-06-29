@@ -7,6 +7,7 @@ import pytest
 from redis.exceptions import ConnectionError as RedisConnectionError
 
 from aegra_api.services.redis_broker import (
+    _PUT_MAX_ATTEMPTS,
     RedisBrokerManager,
     RedisRunBroker,
     _deserialize_payload,
@@ -158,11 +159,85 @@ class TestRedisRunBroker:
         mock_client.publish = AsyncMock()
         mock_client.pipeline.return_value = mock_pipe
 
-        with patch("aegra_api.services.redis_broker.redis_manager") as mock_rm:
+        with (
+            patch("aegra_api.services.redis_broker.redis_manager") as mock_rm,
+            patch("aegra_api.services.redis_broker.asyncio.sleep", new_callable=AsyncMock),
+        ):
             mock_rm.get_client.return_value = mock_client
 
-            # Should not raise
+            # Should not raise even after retries are exhausted
             await broker.put("evt-1", ("values", {"data": "test"}))
+
+        # Retried up to the bounded limit before giving up
+        assert mock_pipe.execute.await_count == _PUT_MAX_ATTEMPTS
+
+    @pytest.mark.asyncio
+    async def test_put_retries_cache_write_then_succeeds(self) -> None:
+        """A transient RedisError on the cache pipeline is retried, not dropped.
+
+        Mirrors the read path (aiter), which already retries on RedisError.
+        """
+        broker = self._make_broker()
+        mock_pipe = MagicMock()
+        mock_pipe.execute = AsyncMock(side_effect=[RedisConnectionError("blip"), None])
+        mock_client = MagicMock()
+        mock_client.publish = AsyncMock()
+        mock_client.pipeline.return_value = mock_pipe
+
+        with (
+            patch("aegra_api.services.redis_broker.redis_manager") as mock_rm,
+            patch("aegra_api.services.redis_broker.asyncio.sleep", new_callable=AsyncMock) as mock_sleep,
+        ):
+            mock_rm.get_client.return_value = mock_client
+
+            await broker.put("evt-1", ("values", {"msg": "hi"}))
+
+        assert mock_pipe.execute.await_count == 2  # one retry
+        mock_client.publish.assert_awaited_once()  # publish runs after cache succeeds
+        mock_sleep.assert_awaited()  # backed off between attempts
+
+    @pytest.mark.asyncio
+    async def test_put_retries_publish_without_rerunning_cache(self) -> None:
+        """A publish failure retries publish only — the cache pipeline is not
+        re-run, so the replay buffer is never double-written (no duplicate RPUSH)."""
+        broker = self._make_broker()
+        mock_pipe = MagicMock()
+        mock_pipe.execute = AsyncMock()
+        mock_client = MagicMock()
+        mock_client.publish = AsyncMock(side_effect=[RedisConnectionError("blip"), None])
+        mock_client.pipeline.return_value = mock_pipe
+
+        with (
+            patch("aegra_api.services.redis_broker.redis_manager") as mock_rm,
+            patch("aegra_api.services.redis_broker.asyncio.sleep", new_callable=AsyncMock),
+        ):
+            mock_rm.get_client.return_value = mock_client
+
+            await broker.put("evt-1", ("values", {"msg": "hi"}))
+
+        assert mock_client.publish.await_count == 2  # publish retried
+        mock_pipe.execute.assert_awaited_once()  # cache written exactly once
+
+    @pytest.mark.asyncio
+    async def test_put_end_event_marks_finished_even_when_dropped(self) -> None:
+        """If an 'end' event can't be delivered after retries, the broker is still
+        marked finished so aiter() can exit instead of looping forever."""
+        broker = self._make_broker()
+        mock_pipe = MagicMock()
+        mock_pipe.execute = AsyncMock(side_effect=RedisConnectionError("down"))
+        mock_client = MagicMock()
+        mock_client.publish = AsyncMock(side_effect=RedisConnectionError("down"))
+        mock_client.pipeline.return_value = mock_pipe
+
+        with (
+            patch("aegra_api.services.redis_broker.redis_manager") as mock_rm,
+            patch("aegra_api.services.redis_broker.asyncio.sleep", new_callable=AsyncMock),
+        ):
+            mock_rm.get_client.return_value = mock_client
+
+            await broker.put("evt-end", ("end", {"status": "success"}))
+
+        assert broker.is_finished()
 
     @pytest.mark.asyncio
     async def test_aiter_yields_events(self) -> None:

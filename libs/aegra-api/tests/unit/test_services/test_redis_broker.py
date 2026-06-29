@@ -279,6 +279,65 @@ class TestRedisRunBroker:
         assert order == ["A-cache-start", "A-cache-end", "publish", "B-cache", "publish"]
 
     @pytest.mark.asyncio
+    async def test_replay_dedups_adjacent_duplicate_event(self) -> None:
+        """An at-least-once retry can RPUSH the same event twice; replay() drops
+        the adjacent duplicate so a resuming client doesn't receive it twice."""
+        broker = self._make_broker()
+        mock_client = AsyncMock()
+        mock_client.lrange.return_value = [
+            json.dumps({"event_id": "evt-1", "payload": ["values", {"a": 1}]}),
+            json.dumps({"event_id": "evt-2", "payload": ["values", {"a": 2}]}),
+            json.dumps({"event_id": "evt-2", "payload": ["values", {"a": 2}]}),  # duplicate
+            json.dumps({"event_id": "evt-3", "payload": ["end", {}]}),
+        ]
+
+        with patch("aegra_api.services.redis_broker.redis_manager") as mock_rm:
+            mock_rm.get_client.return_value = mock_client
+
+            events = await broker.replay(None)
+
+        assert [event_id for event_id, _ in events] == ["evt-1", "evt-2", "evt-3"]
+
+    @pytest.mark.asyncio
+    async def test_aiter_dedups_adjacent_duplicate_live_event(self) -> None:
+        """A republished (retried) live event with the same event_id is yielded once."""
+        broker = self._make_broker()
+
+        messages = [
+            {"type": "message", "data": json.dumps({"event_id": "evt-1", "payload": ["values", {"msg": "hi"}]})},
+            {"type": "message", "data": json.dumps({"event_id": "evt-1", "payload": ["values", {"msg": "hi"}]})},  # dup
+            {"type": "message", "data": json.dumps({"event_id": "evt-2", "payload": ["end", {"status": "success"}]})},
+        ]
+        call_count = 0
+
+        async def mock_get_message(ignore_subscribe_messages: bool = True, timeout: float = 0.5) -> dict | None:
+            nonlocal call_count
+            if call_count < len(messages):
+                msg = messages[call_count]
+                call_count += 1
+                return msg
+            return None
+
+        mock_pubsub = AsyncMock()
+        mock_pubsub.get_message = mock_get_message
+        mock_pubsub.subscribe = AsyncMock()
+        mock_pubsub.unsubscribe = AsyncMock()
+        mock_pubsub.aclose = AsyncMock()
+
+        mock_client = MagicMock()
+        mock_client.pubsub.return_value = mock_pubsub
+        mock_client.lrange = AsyncMock(return_value=[])
+
+        with patch("aegra_api.services.redis_broker.redis_manager") as mock_rm:
+            mock_rm.get_client.return_value = mock_client
+
+            events: list[tuple[str, object]] = []
+            async for event_id, payload in broker.aiter():
+                events.append((event_id, payload))
+
+        assert [event_id for event_id, _ in events] == ["evt-1", "evt-2"]
+
+    @pytest.mark.asyncio
     async def test_aiter_yields_events(self) -> None:
         broker = self._make_broker()
 

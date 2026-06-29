@@ -205,6 +205,7 @@ class RedisRunBroker(BaseRunBroker):
         # the end event was published before we subscribed on this instance).
         end_already_in_buffer = await self._check_end_in_buffer()
 
+        last_yielded_event_id: str | None = None
         try:
             while True:
                 message = await pubsub.get_message(
@@ -221,6 +222,15 @@ class RedisRunBroker(BaseRunBroker):
 
                 data = json.loads(message["data"])
                 event_id: str = data["event_id"]
+
+                # Drop an at-least-once republish (put() retries a transient
+                # publish failure). event_ids are unique per event and the write
+                # lock keeps a retry adjacent, so skipping a repeat of the last
+                # id de-duplicates without dropping a distinct event.
+                if event_id == last_yielded_event_id:
+                    continue
+                last_yielded_event_id = event_id
+
                 payload = _deserialize_payload(data["payload"])
 
                 yield event_id, payload
@@ -265,9 +275,20 @@ class RedisRunBroker(BaseRunBroker):
         all_events: list[tuple[str, Any]] = []
         events_after: list[tuple[str, Any]] = []
         found_last = last_event_id is None
+        prev_event_id: str | None = None
         for raw in raw_messages:
             data = json.loads(raw)
             event_id: str = data["event_id"]
+
+            # Skip an adjacent duplicate: put() retries are at-least-once, so a
+            # write that timed out *after* Redis applied it can RPUSH the same
+            # event twice. The per-run write lock keeps the copies adjacent, and
+            # event_ids are unique per event, so dropping a run of equal ids is
+            # safe and removes the duplicate from replay.
+            if event_id == prev_event_id:
+                continue
+            prev_event_id = event_id
+
             payload = _deserialize_payload(data["payload"])
             all_events.append((event_id, payload))
 

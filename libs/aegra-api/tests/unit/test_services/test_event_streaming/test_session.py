@@ -49,13 +49,21 @@ def _msg_event(event_kind: str, **extra: Any) -> tuple[str, dict[str, Any]]:
 
 
 def _make_session(
-    thread_id: str, *, channels: set[str], run_ids: tuple[str, ...], since: int | None = None
+    thread_id: str,
+    *,
+    channels: set[str],
+    run_ids: tuple[str, ...],
+    since: int | None = None,
+    namespaces: list[list[str]] | None = None,
+    depth: int | None = None,
 ) -> ThreadEventSession:
     return ThreadEventSession(
         thread_id,
         channels=channels,
         list_run_ids=_lister(*run_ids),
         since=since,
+        namespaces=namespaces,
+        depth=depth,
         idle_grace_seconds=0.0,
     )
 
@@ -326,6 +334,56 @@ class TestResumeAcrossRuns:
         session = _make_session("t1", channels={"values", "lifecycle"}, run_ids=("run-1",))
         events = await _collect(session)
         assert [e["method"] for e in events] == ["values", "lifecycle"]
+
+
+class TestNamespaceFilter:
+    """namespaces (prefix include-list) and depth (nesting cap) filter subgraph events."""
+
+    async def test_namespaces_include_only_matching_prefix(self, manager: BrokerManager) -> None:
+        await _seed(
+            manager,
+            "run-1",
+            [
+                ("values", _protocol_event("values", {"a": 1}, namespace=["sub_a"])),
+                ("values", _protocol_event("values", {"b": 2}, namespace=["sub_b"])),
+                ("end", {"status": "success"}),
+            ],
+        )
+        events = await _collect(_make_session("t1", channels={"values"}, run_ids=("run-1",), namespaces=[["sub_a"]]))
+        assert [e["params"]["data"] for e in events] == [{"a": 1}]
+
+    async def test_depth_caps_nesting(self, manager: BrokerManager) -> None:
+        await _seed(
+            manager,
+            "run-1",
+            [
+                ("values", _protocol_event("values", {"top": 1}, namespace=["sub_a"])),
+                ("values", _protocol_event("values", {"deep": 2}, namespace=["sub_a", "sub_b"])),
+                ("end", {"status": "success"}),
+            ],
+        )
+        events = await _collect(_make_session("t1", channels={"values"}, run_ids=("run-1",), depth=1))
+        assert [e["params"]["data"] for e in events] == [{"top": 1}]
+
+    async def test_thread_level_events_always_pass_the_filter(self, manager: BrokerManager) -> None:
+        """Lifecycle (empty namespace) is not subgraph-scoped; a namespace filter must not drop it."""
+        await _seed(manager, "run-1", [("end", {"status": "success"})])
+        events = await _collect(_make_session("t1", channels={"lifecycle"}, run_ids=("run-1",), namespaces=[["sub_a"]]))
+        assert events[0]["params"]["data"] == {"event": "completed"}
+
+    async def test_seq_stays_absolute_under_namespace_filter(self, manager: BrokerManager) -> None:
+        """Filtered-out events still advance seq, so reconnect cursors stay stable."""
+        await _seed(
+            manager,
+            "run-1",
+            [
+                ("values", _protocol_event("values", {"a": 1}, namespace=["sub_b"])),  # filtered
+                ("values", _protocol_event("values", {"b": 2}, namespace=["sub_a"])),  # kept, seq=2
+                ("end", {"status": "success"}),
+            ],
+        )
+        events = await _collect(_make_session("t1", channels={"values"}, run_ids=("run-1",), namespaces=[["sub_a"]]))
+        assert [(e["params"]["data"], e["seq"]) for e in events] == [({"b": 2}, 2)]
 
 
 class TestValidateChannels:

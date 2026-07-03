@@ -54,12 +54,16 @@ class ThreadEventSession:
         channels: set[str],
         list_run_ids: RunLister,
         since: int | None = None,
+        namespaces: list[list[str]] | None = None,
+        depth: int | None = None,
         idle_grace_seconds: float = _IDLE_GRACE_SECONDS,
     ) -> None:
         self._thread_id = thread_id
         self._channels = channels
         self._list_run_ids = list_run_ids
         self._since = since
+        self._namespaces = [tuple(prefix) for prefix in namespaces] if namespaces else None
+        self._depth = depth
         self._idle_grace = idle_grace_seconds
         self._seq = 0
         self._drained: set[str] = set()
@@ -137,6 +141,8 @@ class ThreadEventSession:
             # reconnect with a different channel set still resumes correctly.
             self._seq += 1
             if not self._wants(channel):
+                continue
+            if not self._wants_namespace(namespace):
                 continue
             if self._since is not None and self._seq <= self._since:
                 continue
@@ -218,6 +224,23 @@ class ThreadEventSession:
         if channel == "custom":
             return any(c == "custom" or c.startswith("custom:") for c in self._channels)
         return channel in self._channels
+
+    def _wants_namespace(self, namespace: list[str]) -> bool:
+        """True if the event's namespace passes the subgraph and depth filters.
+
+        Thread-level events (empty namespace) always pass — lifecycle and other
+        terminal signals are not subgraph-scoped. ``namespaces`` is a prefix
+        include-list; ``depth`` caps subgraph nesting.
+        """
+        if not namespace:
+            return True
+        if self._depth is not None and len(namespace) > self._depth:
+            return False
+        if self._namespaces is not None:
+            ns = tuple(namespace)
+            if not any(ns[: len(prefix)] == prefix for prefix in self._namespaces):
+                return False
+        return True
 
 
 def _is_terminal(raw_event: Any) -> bool:

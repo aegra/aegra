@@ -125,6 +125,8 @@ async def stream_thread_events(
         channels=channels,
         list_run_ids=_thread_run_lister(thread_id, user),
         since=body.since,
+        namespaces=body.namespaces,
+        depth=body.depth,
     )
     return make_sse_response(sse_to_bytes(_frame_events(session_stream)), headers=get_sse_headers())
 

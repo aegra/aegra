@@ -91,12 +91,15 @@ async def _run_start(
         return build_error(command_id, "invalid_argument", "run.start requires a string assistant_id."), None
 
     # No stream_mode: v2 runs stream via the native v3 path, which selects
-    # channels through transformers, not stream_mode.
+    # channels through transformers, not stream_mode. interrupt_before/after are
+    # forwarded so v2 clients can set node-level HITL breakpoints like v1.
     request = RunCreate(
         assistant_id=assistant_id,
         input=params.get("input"),
         config=params.get("config") or {},
         metadata=params.get("metadata"),
+        interrupt_before=params.get("interrupt_before"),
+        interrupt_after=params.get("interrupt_after"),
     )
     run_id = await _start(session, thread_id, request, user)
     return build_success(command_id, {"run_id": run_id}), run_id

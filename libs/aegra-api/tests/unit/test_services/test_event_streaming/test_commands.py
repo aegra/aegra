@@ -51,6 +51,25 @@ class TestRunStart:
         # v2 runs are flagged for the native v3 stream path.
         assert prepared_run.call_args.kwargs["event_streaming_v2"] is True
 
+    async def test_run_start_forwards_interrupt_breakpoints(self, prepared_run: AsyncMock, user: User) -> None:
+        """interrupt_before/after must reach RunCreate so v2 clients can set HITL breakpoints."""
+        await _dispatch(
+            {
+                "id": 1,
+                "method": "run.start",
+                "params": {
+                    "assistant_id": "agent",
+                    "input": {"x": 1},
+                    "interrupt_before": ["node_a"],
+                    "interrupt_after": "node_b",
+                },
+            },
+            user,
+        )
+        request = prepared_run.call_args.args[2]
+        assert request.interrupt_before == ["node_a"]
+        assert request.interrupt_after == "node_b"
+
     async def test_run_start_missing_assistant_id_is_invalid(self, prepared_run: AsyncMock, user: User) -> None:
         resp, run_id = await _dispatch({"id": 1, "method": "run.start", "params": {"input": {}}}, user)
         assert resp["type"] == "error"

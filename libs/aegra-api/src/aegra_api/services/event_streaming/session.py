@@ -316,7 +316,7 @@ class ThreadEventSession:
             status = "error"
 
         events: list[_ChannelEvent] = []
-        for namespace in sorted(self._open_namespaces.values(), key=lambda ns: len(ns), reverse=True):
+        for namespace in sorted(self._open_namespaces.values(), key=_namespace_depth, reverse=True):
             events.append(("lifecycle", {"event": "completed"}, namespace))
         self._open_namespaces = {}
 
@@ -364,6 +364,10 @@ class ThreadEventSession:
         if self._namespaces is None:
             return True
         return any(_prefix_matches(namespace, prefix) for prefix in self._namespaces)
+
+
+def _namespace_depth(namespace: list[str]) -> int:
+    return len(namespace)
 
 
 def _custom_events(method: str, data: Any, namespace: list[str]) -> list[_ChannelEvent]:

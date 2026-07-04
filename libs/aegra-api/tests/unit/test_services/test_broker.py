@@ -16,7 +16,7 @@ class TestRunBroker:
         broker = RunBroker("run-123")
 
         assert broker.run_id == "run-123"
-        assert broker.queue is not None
+        assert broker._subscribers == set()
         assert not broker.finished.is_set()
 
     @pytest.mark.asyncio
@@ -26,10 +26,9 @@ class TestRunBroker:
 
         await broker.put("evt-1", {"data": "test"})
 
-        # Event should be in queue
-        event_id, payload = await asyncio.wait_for(broker.queue.get(), timeout=1.0)
-        assert event_id == "evt-1"
-        assert payload == {"data": "test"}
+        # Event is buffered for replay and delivered to a subscriber's aiter.
+        replayed = await broker.replay(None)
+        assert replayed == [("evt-1", {"data": "test"})]
 
     @pytest.mark.asyncio
     async def test_put_end_event_marks_finished(self):
@@ -51,8 +50,8 @@ class TestRunBroker:
         # Should not raise, just log warning
         await broker.put("evt-1", {"data": "test"})
 
-        # Queue should be empty
-        assert broker.queue.empty()
+        # Event is dropped (broker finished) — nothing buffered.
+        assert await broker.replay(None) == []
 
     @pytest.mark.asyncio
     async def test_mark_finished(self):
@@ -99,6 +98,35 @@ class TestRunBroker:
 
         # Should get both events including end
         assert len(events) == 2
+
+    @pytest.mark.asyncio
+    async def test_two_concurrent_aiters_each_receive_every_live_event(self):
+        """Regression: the v2 SDK opens two SSE on one run (main + lifecycle watcher).
+
+        Both must receive every event. A single shared queue would split events
+        between the two consumers, so the watcher would miss the interrupt.
+        """
+        broker = RunBroker("run-123")
+
+        async def drain() -> list[tuple[str, object]]:
+            out: list[tuple[str, object]] = []
+            async for event_id, payload in broker.aiter():
+                out.append((event_id, payload))
+                if event_id == "evt-end":
+                    break
+            return out
+
+        a = asyncio.create_task(drain())
+        b = asyncio.create_task(drain())
+        await asyncio.sleep(0.05)  # let both register their subscriber queues
+
+        await broker.put("evt-1", {"data": "first"})
+        await broker.put("evt-2", {"data": "second"})
+        await broker.put("evt-end", ("end", {}))
+
+        got_a, got_b = await asyncio.gather(a, b)
+        assert got_a == got_b
+        assert [eid for eid, _ in got_a] == ["evt-1", "evt-2", "evt-end"]
 
 
 class TestBrokerManager:

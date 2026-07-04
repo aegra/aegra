@@ -20,17 +20,19 @@ logger = structlog.getLogger(__name__)
 
 
 class RunBroker(BaseRunBroker):
-    """In-memory broker backed by asyncio.Queue + replay buffer.
+    """In-memory broker with per-subscriber fan-out + replay buffer.
 
-    The queue delivers events to live subscribers.
-    The replay buffer keeps a copy of resumable events for replay on reconnect.
+    Each ``aiter()`` caller gets its own queue fed by ``put`` — so multiple
+    concurrent SSE consumers on one run (e.g. the v2 SDK's main event stream and
+    its separate lifecycle-watcher) each receive every event, matching the Redis
+    pub/sub backend. The replay buffer keeps resumable events for reconnect.
     """
 
     def __init__(self, run_id: str) -> None:
         self.run_id = run_id
-        self.queue: asyncio.Queue[tuple[str, Any]] = asyncio.Queue()
         self.finished = asyncio.Event()
         self._replay_buffer: list[tuple[str, Any]] = []
+        self._subscribers: set[asyncio.Queue[tuple[str, Any]]] = set()
         self._created_at = asyncio.get_running_loop().time()
 
     async def put(self, event_id: str, payload: Any, *, resumable: bool = True) -> None:
@@ -41,24 +43,37 @@ class RunBroker(BaseRunBroker):
         if resumable:
             self._replay_buffer.append((event_id, payload))
 
-        await self.queue.put((event_id, payload))
+        for queue in list(self._subscribers):
+            queue.put_nowait((event_id, payload))
 
         # Check if this is an end event
         if isinstance(payload, tuple) and len(payload) >= 1 and payload[0] == "end":
             self.mark_finished()
 
     async def aiter(self) -> AsyncIterator[tuple[str, Any]]:
-        while True:
-            try:
-                event_id, payload = await asyncio.wait_for(self.queue.get(), timeout=0.1)
+        queue: asyncio.Queue[tuple[str, Any]] = asyncio.Queue()
+        # Register, then replay the buffer into this iterator: any event put
+        # between a caller's separate replay() and this registration is still in
+        # the buffer, so nothing is dropped. Callers dedup the overlap by event_id.
+        self._subscribers.add(queue)
+        backlog = list(self._replay_buffer)
+        try:
+            for event_id, payload in backlog:
                 yield event_id, payload
-
+                if isinstance(payload, tuple) and len(payload) >= 1 and payload[0] == "end":
+                    return
+            while True:
+                try:
+                    event_id, payload = await asyncio.wait_for(queue.get(), timeout=0.1)
+                except TimeoutError:
+                    if self.finished.is_set() and queue.empty():
+                        break
+                    continue
+                yield event_id, payload
                 if isinstance(payload, tuple) and len(payload) >= 1 and payload[0] == "end":
                     break
-            except TimeoutError:
-                if self.finished.is_set() and self.queue.empty():
-                    break
-                continue
+        finally:
+            self._subscribers.discard(queue)
 
     async def replay(self, last_event_id: str | None) -> list[tuple[str, Any]]:
         if not self._replay_buffer:
@@ -83,7 +98,7 @@ class RunBroker(BaseRunBroker):
         return self.finished.is_set()
 
     def is_empty(self) -> bool:
-        return self.queue.empty()
+        return all(queue.empty() for queue in self._subscribers)
 
     def get_age(self) -> float:
         return asyncio.get_running_loop().time() - self._created_at

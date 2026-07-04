@@ -685,7 +685,16 @@ class TestWaitForRun:
         override_session_dependency(app, Session)
         client = make_client(app)
 
-        with patch("aegra_api.api.runs._get_session_maker", return_value=_make_session_maker(Session())):
+        # Resume validation polls fresh sessions via run_preparation._get_session_maker
+        # when the first read is not interrupted; keep those returning idle too, and
+        # collapse the settle backoff so the reject path does not wait.
+        maker = _make_session_maker(Session())
+        with (
+            patch("aegra_api.api.runs._get_session_maker", return_value=maker),
+            patch("aegra_api.services.run_preparation._get_session_maker", return_value=maker),
+            patch("aegra_api.services.run_preparation._RESUME_SETTLE_ATTEMPTS", 1),
+            patch("aegra_api.services.run_preparation._RESUME_SETTLE_INTERVAL_SECONDS", 0),
+        ):
             resp = client.post(
                 "/threads/test-thread-123/runs/wait",
                 json={

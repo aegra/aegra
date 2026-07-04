@@ -345,7 +345,7 @@ async def test_reconnect_with_since_resumes_without_replaying_seen_events() -> N
     )
 
 
-async def _resume_via_sdk(ts: object, interrupt_id: str) -> None:
+async def _resume_via_sdk(ts: object, interrupt_id: str, response: object = {"action": "approve"}) -> None:  # noqa: B006
     """Call ``ts.run.respond`` once the SDK's lifecycle watcher has registered the
     interrupt. The watcher runs on a separate SSE, so the main stream can surface
     ``input.requested`` a beat before ``ts.interrupts`` is populated."""
@@ -355,4 +355,91 @@ async def _resume_via_sdk(ts: object, interrupt_id: str) -> None:
         await asyncio.sleep(0.1)
     else:
         raise AssertionError(f"SDK never registered interrupt {interrupt_id}: {ts.interrupts!r}")  # type: ignore[attr-defined]
-    await ts.run.respond({"action": "approve"}, interrupt_id=interrupt_id)  # type: ignore[attr-defined]
+    await ts.run.respond(response, interrupt_id=interrupt_id)  # type: ignore[attr-defined]
+
+
+@pytest.mark.e2e
+@pytest.mark.asyncio
+async def test_hitl_ignore_resume_runs_to_completion() -> None:
+    """An 'ignore' resume (cancels the tool call, routes to END) completes on the
+    same open stream. Covers a non-approve resume payload shape and confirms the
+    resume-settle fix (the interrupt-status race) holds under a real resume."""
+    if not await _v2_enabled():
+        pytest.skip("FF_V2_EVENT_STREAMING is disabled on the server under test")
+
+    assistant_id = await _ensure_graph("agent_hitl")
+    client = get_client(url=_base_url())
+    resumed = False
+    lifecycle_after_resume: list[str] = []
+    async with client.threads.stream(assistant_id=assistant_id) as ts:
+        await ts.run.start(
+            input={"messages": [{"role": "user", "content": "Search the web for the latest LangGraph release."}]}
+        )
+        async for event in ts.events:
+            method = event.get("method")
+            data = event.get("params", {}).get("data") or {}
+            if method == "input.requested" and not resumed:
+                await _resume_via_sdk(ts, data["interrupt_id"], [{"type": "ignore"}])
+                resumed = True
+                continue
+            if resumed and method == "lifecycle":
+                lifecycle_after_resume.append(data.get("event"))
+                if data.get("event") in ("completed", "failed"):
+                    break
+
+    elog("hitl ignore lifecycle", lifecycle_after_resume)
+    assert "completed" in lifecycle_after_resume, f"ignore resume did not complete; got {lifecycle_after_resume}"
+
+
+@pytest.mark.e2e
+@pytest.mark.asyncio
+async def test_cancel_run_closes_v2_stream_with_terminal_lifecycle() -> None:
+    """Cancelling a v2 run ends its open stream with a terminal lifecycle event.
+
+    A client must not hang after a cancel: the session has to see the terminal
+    broker event and emit a lifecycle so ts.events stops.
+    """
+    if not await _v2_enabled():
+        pytest.skip("FF_V2_EVENT_STREAMING is disabled on the server under test")
+
+    assistant_id = await _ensure_graph("stress_test")
+    client = get_client(url=_base_url())
+    thread = await client.threads.create()
+    thread_id = thread["thread_id"]
+
+    # Long-running run so there is a window to cancel mid-flight.
+    async with httpx.AsyncClient(base_url=_base_url(), timeout=30.0) as http:
+        resp = await http.post(
+            f"/threads/{thread_id}/commands",
+            json={
+                "id": 1,
+                "method": "run.start",
+                "params": {
+                    "assistant_id": assistant_id,
+                    "input": {"messages": [{"role": "user", "content": json.dumps({"delay": 1.0, "steps": 10})}]},
+                },
+            },
+        )
+        run_id = resp.json()["result"]["run_id"]
+
+    lifecycle_events: list[str] = []
+    cancelled = False
+    async with client.threads.stream(assistant_id=assistant_id, thread_id=thread_id) as ts:
+        async for event in ts.events:
+            method = event.get("method")
+            data = event.get("params", {}).get("data") or {}
+            if not cancelled and method in ("values", "messages"):
+                # Seen live output — cancel now, mid-stream.
+                await client.runs.cancel(thread_id, run_id)
+                cancelled = True
+            if method == "lifecycle":
+                lifecycle_events.append(data.get("event"))
+                if data.get("event") in ("completed", "failed", "interrupted"):
+                    break
+
+    elog("cancel lifecycle", lifecycle_events)
+    assert cancelled, "never saw live output to cancel against"
+    assert lifecycle_events, "stream did not emit a terminal lifecycle after cancel — client would hang"
+    assert lifecycle_events[-1] in ("interrupted", "failed"), (
+        f"cancelled run should end interrupted/failed, got {lifecycle_events}"
+    )

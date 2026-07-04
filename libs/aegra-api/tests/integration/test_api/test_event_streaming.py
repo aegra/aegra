@@ -22,10 +22,12 @@ _USER = "test-user"
 
 
 class _Session:
-    """Test session: scalar() returns the thread's owner id, scalars() lists runs.
+    """Test session: scalar() returns the thread's owner id, execute() lists runs.
 
     ``owner`` is the existing thread's user_id, or None when the thread does
-    not exist yet (the run.start-creates-it path the SDK relies on).
+    not exist yet (the run.start-creates-it path the SDK relies on). The run
+    lister selects (run_id, status) rows; status stays "running" so tests
+    exercise the live-tail path.
     """
 
     def __init__(self, *, owner: str | None, run_ids: list[str] | None = None) -> None:
@@ -41,12 +43,12 @@ class _Session:
     async def scalar(self, _stmt: Any) -> Any:
         return self._owner
 
-    async def scalars(self, _stmt: Any) -> Any:
-        run_ids = self._run_ids
+    async def execute(self, _stmt: Any) -> Any:
+        rows = [(run_id, "running", "test_graph") for run_id in self._run_ids]
 
         class _Result:
-            def all(self) -> list[str]:
-                return run_ids
+            def all(self) -> list[tuple[str, str, str]]:
+                return rows
 
         return _Result()
 
@@ -87,13 +89,19 @@ class TestCommandRoute:
             json={"id": 1, "method": "run.start", "params": {"assistant_id": "agent", "input": {"messages": []}}},
         )
         assert resp.status_code == 200
-        assert resp.json() == {"type": "success", "id": 1, "result": {"run_id": "run-1"}}
+        assert resp.json() == {
+            "type": "success",
+            "id": 1,
+            "result": {"run_id": "run-1"},
+            "meta": {"applied_through_seq": 0},
+        }
 
-    def test_unknown_command_returns_400_error_envelope(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_unknown_command_returns_error_envelope_on_200(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Protocol errors ride HTTP 200 so envelope-parsing clients see the code."""
         client = TestClient(_make_app(monkeypatch))
         resp = client.post("/threads/t1/commands", json={"id": 1, "method": "agent.getTree", "params": {}})
-        assert resp.status_code == 400
-        assert resp.json()["error"] == "not_supported"
+        assert resp.status_code == 200
+        assert resp.json()["error"] == "unknown_command"
 
     def test_cross_tenant_thread_is_404(self, monkeypatch: pytest.MonkeyPatch) -> None:
         client = TestClient(_make_app(monkeypatch, owner="other-user"))

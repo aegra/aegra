@@ -21,6 +21,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sse_starlette import EventSourceResponse
 
 from aegra_api.core.auth_deps import auth_dependency, get_current_user
+from aegra_api.core.orm import Assistant as AssistantORM
 from aegra_api.core.orm import Run as RunORM
 from aegra_api.core.orm import Thread as ThreadORM
 from aegra_api.core.orm import _get_session_maker
@@ -49,22 +50,25 @@ async def _verify_thread_owned_or_new(session: AsyncSession, thread_id: str, use
 
 
 def _thread_run_lister(thread_id: str, user: User) -> RunLister:
-    """Async callable returning the thread's run ids (oldest first), user-scoped.
+    """Async callable returning the thread's (run_id, status, graph_name) rows (oldest first), user-scoped.
 
     Called repeatedly while a stream is live so a run started after the stream
-    opened is picked up. Each tick uses a short-lived session so a connection
-    is not held for the whole SSE lifetime (see #423).
+    opened is picked up. Status lets the session drain historical runs whose
+    broker events expired instead of tailing them forever; graph_name feeds the
+    run's root lifecycle events. Each tick uses a short-lived session so a
+    connection is not held for the whole SSE lifetime (see #423).
     """
 
-    async def list_run_ids() -> list[str]:
+    async def list_run_ids() -> list[tuple[str, str | None, str | None]]:
         maker = _get_session_maker()
         async with maker() as session:
-            rows = await session.scalars(
-                select(RunORM.run_id)
+            rows = await session.execute(
+                select(RunORM.run_id, RunORM.status, AssistantORM.graph_id)
+                .outerjoin(AssistantORM, RunORM.assistant_id == AssistantORM.assistant_id)
                 .where(RunORM.thread_id == thread_id, RunORM.user_id == user.identity)
                 .order_by(RunORM.created_at.asc())
             )
-            return list(rows.all())
+            return [(run_id, status, graph_id) for run_id, status, graph_id in rows.all()]
 
     return list_run_ids
 
@@ -131,7 +135,14 @@ async def stream_thread_events(
     return make_sse_response(sse_to_bytes(_frame_events(session_stream)), headers=get_sse_headers())
 
 
-@router.post("/threads/{thread_id}/commands", responses=dict(_V2_ERROR_RESPONSES))
+@router.post(
+    "/threads/{thread_id}/commands",
+    responses={
+        200: {"description": "Protocol response envelope (success or error)"},
+        404: {"description": "Thread owned by another user"},
+        503: {"description": "v2 disabled by flag, or runtime too old for native v3 events"},
+    },
+)
 async def post_thread_command(
     thread_id: str,
     body: ThreadCommand,
@@ -151,8 +162,9 @@ async def post_thread_command(
         await _verify_thread_owned_or_new(session, thread_id, user)
         response, _run_id = await handle_command(body.model_dump(), session=session, thread_id=thread_id, user=user)
 
-    status_code = 200 if response.get("type") == "success" else 400
-    return JSONResponse(response, status_code=status_code)
+    # Protocol error envelopes ride HTTP 200 — a client treating non-2xx as a
+    # transport failure would throw before parsing the envelope's error code.
+    return JSONResponse(response, status_code=200)
 
 
 async def _frame_events(session_stream: ThreadEventSession) -> AsyncGenerator[str, None]:

@@ -37,8 +37,12 @@ __all__ = ["RunLister", "ThreadEventSession", "validate_channels"]
 _IDLE_GRACE_SECONDS = 30.0
 _POLL_INTERVAL_SECONDS = 0.25
 
-# Async callable returning the thread's run ids, oldest first.
-RunLister = Callable[[], Awaitable[list[str]]]
+# Async callable returning the thread's (run_id, status, graph_name) rows,
+# oldest first. Status backstops runs whose broker events expired (see
+# _drain_run); graph_name feeds the run's root lifecycle events.
+RunLister = Callable[[], Awaitable[list[tuple[str, str | None, str | None]]]]
+
+_TERMINAL_RUN_STATUSES = frozenset({"success", "error", "timeout", "interrupted"})
 
 # A projected channel event: (wire method, params.data, namespace).
 _ChannelEvent = tuple[str, dict[str, Any], list[str]]
@@ -67,6 +71,14 @@ class ThreadEventSession:
         self._idle_grace = idle_grace_seconds
         self._seq = 0
         self._drained: set[str] = set()
+        # One input.requested per interrupt per session — the same interrupt can
+        # surface via updates (__interrupt__ node) AND the next values snapshot.
+        self._sent_interrupts: set[str] = set()
+        # Per-run lifecycle bookkeeping, reset by _drain_run: the run's root
+        # graph name and the subgraph namespaces still open (started, no
+        # completed/failed yet) so the terminal can cascade-close them.
+        self._current_graph: str | None = None
+        self._open_namespaces: dict[str, list[str]] = {}
 
     @property
     def applied_through_seq(self) -> int:
@@ -87,8 +99,8 @@ class ThreadEventSession:
 
         while True:
             progressed = False
-            for run_id in await self._fresh_run_ids():
-                async for envelope in self._drain_run(run_id):
+            for run_id, run_status, graph_name in await self._fresh_runs():
+                async for envelope in self._drain_run(run_id, run_status, graph_name):
                     progressed = True
                     yield envelope
                 self._drained.add(run_id)
@@ -104,20 +116,49 @@ class ThreadEventSession:
                 return
             await asyncio.sleep(_POLL_INTERVAL_SECONDS)
 
-    async def _fresh_run_ids(self) -> list[str]:
-        return [run_id for run_id in await self._list_run_ids() if run_id not in self._drained]
+    async def _fresh_runs(self) -> list[tuple[str, str | None, str | None]]:
+        return [row for row in await self._list_run_ids() if row[0] not in self._drained]
 
-    async def _drain_run(self, run_id: str) -> AsyncIterator[dict[str, Any]]:
-        """Replay then tail one run's broker, re-enveloping each native event."""
+    async def _drain_run(
+        self, run_id: str, run_status: str | None, graph_name: str | None
+    ) -> AsyncIterator[dict[str, Any]]:
+        """Replay then tail one run's broker, re-enveloping each native event.
+
+        Each run's lifecycle tree is self-contained on the stream: a root
+        ``running`` seed opens it, per-subgraph events flow through, and the
+        terminal closes any still-open subgraph namespaces before the root
+        status (a cancel mid-subgraph otherwise leaves them started forever).
+
+        The persisted run status backstops runs whose broker events expired
+        (replay TTL / cleanup): without it, ``aiter`` on a recreated empty
+        broker waits forever for an end event nobody will publish — wedging
+        the whole thread stream on its first historical run. A terminal run
+        with no surviving events drains silently; one whose events survived
+        but whose end frame was lost gets a synthesized terminal.
+        """
         broker = broker_manager.get_or_create_broker(run_id)
         seen: set[str] = set()
+        self._current_graph = graph_name
+        self._open_namespaces = {}
 
-        for event_id, raw_event in await broker.replay(None):
+        replayed = await broker.replay(None)
+        if run_status in _TERMINAL_RUN_STATUSES and not replayed:
+            return
+
+        for envelope in self._emit([("lifecycle", self._root_lifecycle("running"), [])], f"{run_id}:running"):
+            yield envelope
+
+        for event_id, raw_event in replayed:
             seen.add(event_id)
             for envelope in self._project(event_id, raw_event):
                 yield envelope
             if _is_terminal(raw_event):
                 return
+
+        if run_status in _TERMINAL_RUN_STATUSES:
+            for envelope in self._project(f"{run_id}:status-end", ("end", {"status": run_status})):
+                yield envelope
+            return
 
         async for event_id, raw_event in broker.aiter():
             if event_id in seen:
@@ -132,15 +173,16 @@ class ThreadEventSession:
         method, payload = _unwrap(raw_event)
         if method is None:
             return []
+        return self._emit(self._channel_events(method, payload), event_id)
 
-        channel_events = self._channel_events(method, payload)
-
+    def _emit(self, channel_events: list[_ChannelEvent], event_id: str) -> list[dict[str, Any]]:
+        """Filter + seq a batch of channel events into wire envelopes."""
         envelopes: list[dict[str, Any]] = []
         for index, (channel, data, namespace) in enumerate(channel_events):
             # seq counts before channel filtering — absolute cursor, so a
             # reconnect with a different channel set still resumes correctly.
             self._seq += 1
-            if not self._wants(channel):
+            if not self._wants(channel, data):
                 continue
             if not self._wants_namespace(namespace):
                 continue
@@ -173,16 +215,16 @@ class ThreadEventSession:
             return self._updates_events(data, namespace)
         if method == "lifecycle":
             return self._native_lifecycle_events(data, namespace)
+        if method == "custom" or method.startswith("custom:"):
+            return _custom_events(method, data, namespace)
         return [(method, data if isinstance(data, dict) else {"value": data}, namespace)]
 
     def _values_events(self, data: Any, interrupts: Any, namespace: list[str]) -> list[_ChannelEvent]:
         """Split interrupts onto the input channel; forward cleaned, normalized values."""
-        events: list[_ChannelEvent] = []
         requests, cleaned = strip_interrupts(data)
         if isinstance(interrupts, (list, tuple)) and interrupts:
             requests = _dedupe_requests(requests + normalize_input_requested(_coerce_interrupts(interrupts)))
-        for request in requests:
-            events.append(("input.requested", request, namespace))
+        events = self._input_request_events(requests, namespace)
         if _has_state(cleaned):
             events.append(("values", normalize_state_payload(cleaned), namespace))
         return events
@@ -191,13 +233,38 @@ class ThreadEventSession:
         """Forward updates, splitting any embedded interrupt onto the input channel.
 
         v3 emits updates as raw ``{node: values}``; an interrupt arrives as the
-        ``__interrupt__`` node whose values are the interrupt array.
+        ``__interrupt__`` node whose values are the interrupt array. A sibling
+        node's update in the same chunk (parallel branches) must still forward,
+        and an interrupt nested inside a node's values must still surface.
         """
+        events: list[_ChannelEvent] = []
         if isinstance(data, dict) and "__interrupt__" in data:
-            return [("input.requested", req, namespace) for req in normalize_input_requested(data["__interrupt__"])]
+            events.extend(self._input_request_events(normalize_input_requested(data["__interrupt__"]), namespace))
+            data = {key: value for key, value in data.items() if key != "__interrupt__"}
+            if not data:
+                return events
+        if isinstance(data, dict):
+            for node_values in data.values():
+                if isinstance(node_values, dict) and "__interrupt__" in node_values:
+                    events.extend(
+                        self._input_request_events(normalize_input_requested(node_values["__interrupt__"]), namespace)
+                    )
         normalized = normalize_updates(data)
         normalized["values"] = normalize_state_payload(normalized["values"])
-        return [("updates", normalized, namespace)]
+        events.append(("updates", normalized, namespace))
+        return events
+
+    def _input_request_events(self, requests: list[dict[str, Any]], namespace: list[str]) -> list[_ChannelEvent]:
+        """input.requested events for *requests*, at most once per interrupt id."""
+        events: list[_ChannelEvent] = []
+        for request in requests:
+            interrupt_id = request.get("interrupt_id")
+            if isinstance(interrupt_id, str):
+                if interrupt_id in self._sent_interrupts:
+                    continue
+                self._sent_interrupts.add(interrupt_id)
+            events.append(("input.requested", request, namespace))
+        return events
 
     def _native_lifecycle_events(self, data: Any, namespace: list[str]) -> list[_ChannelEvent]:
         """Forward a per-subgraph lifecycle event from the native producer.
@@ -219,14 +286,26 @@ class ThreadEventSession:
         if not namespace:
             return []
 
-        forwarded: dict[str, Any] = {"event": data["event"]}
-        for key in ("graph_name", "trigger_call_id", "error", "cause"):
-            if key in data:
-                forwarded[key] = data[key]
+        event = data["event"]
+        key = "\0".join(namespace)
+        if event == "started":
+            self._open_namespaces[key] = list(namespace)
+        elif event in ("completed", "failed"):
+            self._open_namespaces.pop(key, None)
+
+        forwarded: dict[str, Any] = {"event": event}
+        for field in ("graph_name", "trigger_call_id", "error", "cause"):
+            if field in data:
+                forwarded[field] = data[field]
         return [("lifecycle", forwarded, namespace)]
 
     def _lifecycle(self, method: str, payload: Any) -> list[_ChannelEvent]:
-        """Build a lifecycle event from a terminal broker payload.
+        """Build the run's terminal lifecycle from a terminal broker payload.
+
+        Cascade-closes any still-open subgraph namespaces (deepest first) before
+        the root status — a cancel or crash mid-subgraph never sends the
+        producer's ``completed``, and clients must not see subgraphs stuck in
+        ``started`` after the run ended.
 
         The ``error`` broker event carries ``{error, message}`` with no status —
         it is terminal and drains the run before the trailing ``end`` event, so
@@ -235,22 +314,40 @@ class ThreadEventSession:
         status = payload.get("status") if isinstance(payload, dict) else None
         if method == "error":
             status = "error"
-        data: dict[str, Any] = {"event": lifecycle_status(status or "")}
+
+        events: list[_ChannelEvent] = []
+        for namespace in sorted(self._open_namespaces.values(), key=lambda ns: len(ns), reverse=True):
+            events.append(("lifecycle", {"event": "completed"}, namespace))
+        self._open_namespaces = {}
+
+        data = self._root_lifecycle(lifecycle_status(status or ""))
         if isinstance(payload, dict) and (message := payload.get("message")):
             data["error"] = message
-        return [("lifecycle", data, [])]
+        events.append(("lifecycle", data, []))
+        return events
 
-    def _wants(self, channel: str) -> bool:
+    def _root_lifecycle(self, status: str) -> dict[str, Any]:
+        """Root-namespace lifecycle data, carrying the run's graph name when known."""
+        data: dict[str, Any] = {"event": status}
+        if self._current_graph:
+            data["graph_name"] = self._current_graph
+        return data
+
+    def _wants(self, channel: str, data: dict[str, Any] | None = None) -> bool:
         """True if the client subscribed to this channel.
 
-        The ``input.requested`` wire method maps to the ``input`` channel. A
-        custom subscription — plain ``custom`` or namespaced ``custom:<name>``
-        — matches the base ``custom`` channel. Named filtering is a follow-up.
+        The ``input.requested`` wire method maps to the ``input`` channel.
+        Custom events: a plain ``custom`` subscription receives everything; a
+        ``custom:<name>`` subscription receives only events whose ``data.name``
+        matches.
         """
         if channel == "input.requested":
             return "input" in self._channels
         if channel == "custom":
-            return any(c == "custom" or c.startswith("custom:") for c in self._channels)
+            if "custom" in self._channels:
+                return True
+            name = data.get("name") if isinstance(data, dict) else None
+            return isinstance(name, str) and f"custom:{name}" in self._channels
         return channel in self._channels
 
     def _wants_namespace(self, namespace: list[str]) -> bool:
@@ -267,6 +364,18 @@ class ThreadEventSession:
         if self._namespaces is None:
             return True
         return any(_prefix_matches(namespace, prefix) for prefix in self._namespaces)
+
+
+def _custom_events(method: str, data: Any, namespace: list[str]) -> list[_ChannelEvent]:
+    """Wrap a custom payload in the wire CustomEvent shape: ``{name?, payload}``.
+
+    Named user stream channels arrive as ``custom:<name>`` source methods; the
+    wire method is always ``custom`` with the name inside the data.
+    """
+    wrapped: dict[str, Any] = {"payload": data}
+    if method.startswith("custom:"):
+        wrapped = {"name": method[len("custom:") :], "payload": data}
+    return [("custom", wrapped, namespace)]
 
 
 def _prefix_matches(namespace: list[str], prefix: tuple[str, ...]) -> bool:

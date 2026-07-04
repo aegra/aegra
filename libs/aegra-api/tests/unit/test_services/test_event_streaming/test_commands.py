@@ -32,7 +32,12 @@ class TestRunStart:
             {"id": 1, "method": "run.start", "params": {"assistant_id": "agent", "input": {"messages": []}}},
             user,
         )
-        assert resp == {"type": "success", "id": 1, "result": {"run_id": "run-xyz"}}
+        assert resp == {
+            "type": "success",
+            "id": 1,
+            "result": {"run_id": "run-xyz"},
+            "meta": {"applied_through_seq": 0},
+        }
         assert run_id == "run-xyz"
 
     async def test_run_start_builds_runcreate(self, prepared_run: AsyncMock, user: User) -> None:
@@ -77,6 +82,45 @@ class TestRunStart:
         assert run_id is None
         prepared_run.assert_not_called()
 
+    async def test_run_start_forwards_multitask_strategy(self, prepared_run: AsyncMock, user: User) -> None:
+        await _dispatch(
+            {
+                "id": 1,
+                "method": "run.start",
+                "params": {"assistant_id": "agent", "input": {"x": 1}, "multitaskStrategy": "reject"},
+            },
+            user,
+        )
+        assert prepared_run.call_args.args[2].multitask_strategy == "reject"
+
+    async def test_run_start_unknown_multitask_strategy_is_invalid(self, prepared_run: AsyncMock, user: User) -> None:
+        resp, _ = await _dispatch(
+            {
+                "id": 1,
+                "method": "run.start",
+                "params": {"assistant_id": "agent", "input": {"x": 1}, "multitaskStrategy": "yolo"},
+            },
+            user,
+        )
+        assert resp["error"] == "invalid_argument"
+        prepared_run.assert_not_called()
+
+    async def test_run_start_on_interrupted_thread_resumes_with_input(
+        self, prepared_run: AsyncMock, user: User
+    ) -> None:
+        """Input sent to an interrupted thread answers the interrupt instead of
+        starting a fresh turn that would discard pending tasks."""
+        session = AsyncMock()
+        session.scalar = AsyncMock(return_value="interrupted")
+        await _dispatch(
+            {"id": 1, "method": "run.start", "params": {"assistant_id": "agent", "input": {"answer": 42}}},
+            user,
+            session=session,
+        )
+        request = prepared_run.call_args.args[2]
+        assert request.command == {"resume": {"answer": 42}}
+        assert request.input is None
+
 
 class TestInputRespond:
     async def test_input_respond_resumes_with_command(self, prepared_run: AsyncMock, user: User) -> None:
@@ -92,26 +136,40 @@ class TestInputRespond:
         resp, _ = await _dispatch({"id": 2, "method": "input.respond", "params": {"assistant_id": "agent"}}, user)
         assert resp["error"] == "invalid_argument"
 
+    async def test_input_respond_forwards_metadata(self, prepared_run: AsyncMock, user: User) -> None:
+        await _dispatch(
+            {
+                "id": 2,
+                "method": "input.respond",
+                "params": {"assistant_id": "agent", "response": "yes", "metadata": {"source": "review-ui"}},
+            },
+            user,
+        )
+        request = prepared_run.call_args.args[2]
+        assert request.metadata == {"source": "review-ui"}
+
     async def test_input_respond_recovers_assistant_from_thread(self, prepared_run: AsyncMock, user: User) -> None:
         """The stock SDK sends no assistant_id; recover it from the thread's last run."""
+        interrupt_id = "a" * 32
         session = AsyncMock()
         session.scalar = AsyncMock(return_value="bound-agent")
         resp, run_id = await _dispatch(
-            {"id": 2, "method": "input.respond", "params": {"interrupt_id": "i1", "response": "yes"}},
+            {"id": 2, "method": "input.respond", "params": {"interrupt_id": interrupt_id, "response": "yes"}},
             user,
             session=session,
         )
         assert resp["type"] == "success"
         request = prepared_run.call_args.args[2]
         assert request.assistant_id == "bound-agent"
-        assert request.command == {"resume": "yes"}
+        # Targeted resume: id-keyed map so multiple pending interrupts route correctly.
+        assert request.command == {"resume": {interrupt_id: "yes"}}
 
     async def test_input_respond_no_run_to_resume_is_error(self, prepared_run: AsyncMock, user: User) -> None:
         """No assistant_id and no prior run on the thread → on-protocol error, no run started."""
         session = AsyncMock()
         session.scalar = AsyncMock(return_value=None)
         resp, run_id = await _dispatch(
-            {"id": 2, "method": "input.respond", "params": {"interrupt_id": "i1", "response": "yes"}},
+            {"id": 2, "method": "input.respond", "params": {"interrupt_id": "b" * 32, "response": "yes"}},
             user,
             session=session,
         )
@@ -119,11 +177,79 @@ class TestInputRespond:
         assert run_id is None
         prepared_run.assert_not_called()
 
+    async def test_input_respond_without_interrupt_id_resumes_untargeted(
+        self, prepared_run: AsyncMock, user: User
+    ) -> None:
+        resp, _ = await _dispatch(
+            {"id": 2, "method": "input.respond", "params": {"assistant_id": "agent", "response": "yes"}}, user
+        )
+        assert resp["type"] == "success"
+        assert prepared_run.call_args.args[2].command == {"resume": "yes"}
+
+    async def test_input_respond_malformed_interrupt_id_is_no_such_interrupt(
+        self, prepared_run: AsyncMock, user: User
+    ) -> None:
+        """A non-interrupt-shaped id can never target a resume; erroring beats silently
+        resuming whatever happens to be pending."""
+        resp, run_id = await _dispatch(
+            {"id": 2, "method": "input.respond", "params": {"interrupt_id": "garbage", "response": "yes"}}, user
+        )
+        assert resp["error"] == "no_such_interrupt"
+        assert run_id is None
+        prepared_run.assert_not_called()
+
+    async def test_input_respond_batch_responses_merge_into_one_resume(
+        self, prepared_run: AsyncMock, user: User
+    ) -> None:
+        """Parallel interrupts resume in a single command via the responses array."""
+        id_a, id_b = "a" * 32, "b" * 32
+        resp, _ = await _dispatch(
+            {
+                "id": 2,
+                "method": "input.respond",
+                "params": {
+                    "assistant_id": "agent",
+                    "responses": [
+                        {"interrupt_id": id_a, "response": {"action": "approve"}},
+                        {"interrupt_id": id_b, "response": [{"type": "ignore"}]},
+                    ],
+                },
+            },
+            user,
+        )
+        assert resp["type"] == "success"
+        assert prepared_run.call_args.args[2].command == {
+            "resume": {id_a: {"action": "approve"}, id_b: [{"type": "ignore"}]}
+        }
+
+    async def test_input_respond_empty_batch_is_invalid(self, prepared_run: AsyncMock, user: User) -> None:
+        resp, _ = await _dispatch(
+            {"id": 2, "method": "input.respond", "params": {"assistant_id": "agent", "responses": []}}, user
+        )
+        assert resp["error"] == "invalid_argument"
+        prepared_run.assert_not_called()
+
 
 class TestErrors:
-    async def test_unknown_method_is_not_supported(self, user: User) -> None:
+    async def test_unknown_method_is_unknown_command(self, user: User) -> None:
         resp, run_id = await _dispatch({"id": 3, "method": "agent.getTree", "params": {}}, user)
-        assert resp["error"] == "not_supported"
+        assert resp["error"] == "unknown_command"
+        assert run_id is None
+
+    async def test_unexpected_exception_wraps_as_unknown_error(
+        self, monkeypatch: pytest.MonkeyPatch, user: User
+    ) -> None:
+        """A non-HTTP, non-validation crash must stay an on-protocol envelope, not a 500."""
+
+        async def boom(*_a: Any, **_k: Any) -> None:
+            raise RuntimeError("db exploded")
+
+        monkeypatch.setattr(cmd, "_prepare_run", boom)
+        resp, run_id = await _dispatch(
+            {"id": 9, "method": "run.start", "params": {"assistant_id": "x", "input": {}}}, user
+        )
+        assert resp["type"] == "error"
+        assert resp["error"] == "unknown_error"
         assert run_id is None
 
     async def test_non_integer_id_is_invalid(self, user: User) -> None:

@@ -8,6 +8,7 @@ place and stay exact (``event_id``, ``seq``, ``applied_through_seq``).
 
 from __future__ import annotations
 
+import time
 from typing import Any, Literal
 
 # Server event channels (the envelope ``method``).
@@ -45,11 +46,12 @@ def build_event(
 ) -> dict[str, Any]:
     """Build a server-push event envelope.
 
-    ``params`` wraps the per-channel payload as ``{data, namespace}`` — the
-    shape the LangGraph SDK reads (``params.data`` is the payload,
-    ``params.namespace`` the subgraph path, ``[]`` at the root).
+    ``params`` wraps the per-channel payload as ``{data, namespace,
+    timestamp}`` — the shape the LangGraph SDK reads (``params.data`` is the
+    payload, ``params.namespace`` the subgraph path, ``[]`` at the root,
+    ``params.timestamp`` ms-epoch server time).
     """
-    params: dict[str, Any] = {"data": data, "namespace": namespace or []}
+    params: dict[str, Any] = {"data": data, "namespace": namespace or [], "timestamp": time.time_ns() // 1_000_000}
     event: dict[str, Any] = {"type": "event", "seq": seq, "method": method, "params": params}
     if event_id is not None:
         event["event_id"] = event_id

@@ -345,6 +345,48 @@ async def test_reconnect_with_since_resumes_without_replaying_seen_events() -> N
     )
 
 
+@pytest.mark.e2e
+@pytest.mark.asyncio
+async def test_sdk_subgraph_emits_nested_lifecycle_events() -> None:
+    """A subgraph run emits per-subgraph lifecycle (started + completed) on the
+    child namespace, plus the root terminal lifecycle. Nested agents get the full
+    lifecycle tree, not just one root frame."""
+    if not await _v2_enabled():
+        pytest.skip("FF_V2_EVENT_STREAMING is disabled on the server under test")
+
+    assistant_id = await _ensure_graph("subgraph_agent")
+    client = get_client(url=_base_url())
+
+    nested_started: list[tuple[str, str]] = []
+    nested_completed: list[str] = []
+    root_terminal: list[str] = []
+    async with client.threads.stream(assistant_id=assistant_id) as ts:
+        await ts.run.start(input={"messages": [{"role": "user", "content": "say hello briefly"}]})
+        async for event in ts.events:
+            if event.get("method") != "lifecycle":
+                continue
+            params = event.get("params", {}) or {}
+            data = params.get("data") or {}
+            namespace = params.get("namespace") or []
+            kind = data.get("event")
+            if namespace:
+                if kind == "started":
+                    nested_started.append((tuple(namespace), data.get("graph_name")))
+                elif kind in ("completed", "failed"):
+                    nested_completed.append(tuple(namespace))
+            elif kind in ("completed", "failed"):
+                root_terminal.append(kind)
+                break
+
+    elog("subgraph nested started", nested_started)
+    elog("subgraph nested completed", nested_completed)
+    elog("subgraph root terminal", root_terminal)
+    assert nested_started, "no subgraph lifecycle: started on a child namespace"
+    assert all(gname for _, gname in nested_started), "subgraph started missing graph_name"
+    assert nested_completed, "no subgraph lifecycle: completed on a child namespace"
+    assert root_terminal == ["completed"], f"run did not reach root completed; got {root_terminal}"
+
+
 async def _resume_via_sdk(ts: object, interrupt_id: str, response: object = {"action": "approve"}) -> None:  # noqa: B006
     """Call ``ts.run.respond`` once the SDK's lifecycle watcher has registered the
     interrupt. The watcher runs on a separate SSE, so the main stream can surface

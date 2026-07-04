@@ -171,6 +171,8 @@ class ThreadEventSession:
             return self._values_events(data, params.get("interrupts"), namespace)
         if method == "updates":
             return self._updates_events(data, namespace)
+        if method == "lifecycle":
+            return self._native_lifecycle_events(data, namespace)
         return [(method, data if isinstance(data, dict) else {"value": data}, namespace)]
 
     def _values_events(self, data: Any, interrupts: Any, namespace: list[str]) -> list[_ChannelEvent]:
@@ -196,6 +198,32 @@ class ThreadEventSession:
         normalized = normalize_updates(data)
         normalized["values"] = normalize_state_payload(normalized["values"])
         return [("updates", normalized, namespace)]
+
+    def _native_lifecycle_events(self, data: Any, namespace: list[str]) -> list[_ChannelEvent]:
+        """Forward a per-subgraph lifecycle event from the native producer.
+
+        The producer's ``LifecycleTransformer`` emits one flat lifecycle stream
+        at the root scope (``params.namespace == []``) while the announced
+        subgraph identity lives in ``data.namespace``. Promote that deeper
+        namespace onto the wire so ``started``/``completed``/``failed`` land on
+        the subgraph, not the root. Root-scoped lifecycle is owned by the
+        terminal ``_lifecycle`` (it resolves interrupt/failure), so drop it here.
+        """
+        if not isinstance(data, dict) or not isinstance(data.get("event"), str):
+            return [("lifecycle", data if isinstance(data, dict) else {"value": data}, namespace)]
+
+        data_ns = data.get("namespace")
+        if isinstance(data_ns, list) and all(isinstance(seg, str) for seg in data_ns) and len(data_ns) > len(namespace):
+            namespace = list(data_ns)
+
+        if not namespace:
+            return []
+
+        forwarded: dict[str, Any] = {"event": data["event"]}
+        for key in ("graph_name", "trigger_call_id", "error", "cause"):
+            if key in data:
+                forwarded[key] = data[key]
+        return [("lifecycle", forwarded, namespace)]
 
     def _lifecycle(self, method: str, payload: Any) -> list[_ChannelEvent]:
         """Build a lifecycle event from a terminal broker payload.
@@ -236,11 +264,29 @@ class ThreadEventSession:
             return True
         if self._depth is not None and len(namespace) > self._depth:
             return False
-        if self._namespaces is not None:
-            ns = tuple(namespace)
-            if not any(ns[: len(prefix)] == prefix for prefix in self._namespaces):
-                return False
-        return True
+        if self._namespaces is None:
+            return True
+        return any(_prefix_matches(namespace, prefix) for prefix in self._namespaces)
+
+
+def _prefix_matches(namespace: list[str], prefix: tuple[str, ...]) -> bool:
+    """True if *namespace* starts with *prefix*, ignoring dynamic ``:task_id`` suffixes.
+
+    Subgraph namespace segments carry a runtime task id (``node:<uuid>``); a
+    client's include-list uses the clean node name (``node``). Compare literally
+    first, then against the suffix-stripped segment when the prefix has no ``:``.
+    """
+    if len(prefix) > len(namespace):
+        return False
+    for i, segment in enumerate(prefix):
+        candidate = namespace[i]
+        if candidate == segment:
+            continue
+        if ":" in segment:
+            return False
+        if candidate.split(":", 1)[0] != segment:
+            return False
+    return True
 
 
 def _is_terminal(raw_event: Any) -> bool:

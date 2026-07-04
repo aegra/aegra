@@ -371,6 +371,20 @@ class TestNamespaceFilter:
         events = await _collect(_make_session("t1", channels={"lifecycle"}, run_ids=("run-1",), namespaces=[["sub_a"]]))
         assert events[0]["params"]["data"] == {"event": "completed"}
 
+    async def test_namespace_filter_matches_dynamic_task_id_suffix(self, manager: BrokerManager) -> None:
+        """Real subgraph namespaces are node:<task_id>; a clean-name prefix must match."""
+        await _seed(
+            manager,
+            "run-1",
+            [
+                ("values", _protocol_event("values", {"a": 1}, namespace=["sub_a:9f3c-1"])),
+                ("values", _protocol_event("values", {"b": 2}, namespace=["sub_b:7e1a-2"])),
+                ("end", {"status": "success"}),
+            ],
+        )
+        events = await _collect(_make_session("t1", channels={"values"}, run_ids=("run-1",), namespaces=[["sub_a"]]))
+        assert [e["params"]["data"] for e in events] == [{"a": 1}]
+
     async def test_seq_stays_absolute_under_namespace_filter(self, manager: BrokerManager) -> None:
         """Filtered-out events still advance seq, so reconnect cursors stay stable."""
         await _seed(
@@ -384,6 +398,96 @@ class TestNamespaceFilter:
         )
         events = await _collect(_make_session("t1", channels={"values"}, run_ids=("run-1",), namespaces=[["sub_a"]]))
         assert [(e["params"]["data"], e["seq"]) for e in events] == [({"b": 2}, 2)]
+
+
+class TestSubgraphLifecycle:
+    """Native producer emits per-subgraph lifecycle at root scope with the child
+    namespace in data.namespace; the session promotes it onto the wire so nested
+    agents get started/completed/failed frames on their own namespace."""
+
+    async def test_subgraph_started_completed_promoted_to_child_namespace(self, manager: BrokerManager) -> None:
+        ns = ["subgraph_agent:abc-123"]
+        await _seed(
+            manager,
+            "run-1",
+            [
+                (
+                    "lifecycle",
+                    _protocol_event(
+                        "lifecycle",
+                        {
+                            "event": "started",
+                            "namespace": ns,
+                            "graph_name": "subgraph_agent",
+                            "trigger_call_id": "abc-123",
+                        },
+                    ),
+                ),
+                ("lifecycle", _protocol_event("lifecycle", {"event": "completed", "namespace": ns})),
+                ("end", {"status": "success"}),
+            ],
+        )
+        events = await _collect(_make_session("t1", channels={"lifecycle"}, run_ids=("run-1",)))
+        lc = [(e["params"]["data"].get("event"), e["params"]["namespace"]) for e in events]
+        assert lc == [("started", ns), ("completed", ns), ("completed", [])]
+        started = next(e for e in events if e["params"]["data"].get("event") == "started")
+        assert started["params"]["data"]["graph_name"] == "subgraph_agent"
+
+    async def test_subgraph_failed_carries_error_on_child_namespace(self, manager: BrokerManager) -> None:
+        ns = ["child_node:xyz"]
+        await _seed(
+            manager,
+            "run-1",
+            [
+                (
+                    "lifecycle",
+                    _protocol_event(
+                        "lifecycle",
+                        {"event": "started", "namespace": ns, "graph_name": "child_graph", "trigger_call_id": "xyz"},
+                    ),
+                ),
+                ("lifecycle", _protocol_event("lifecycle", {"event": "failed", "namespace": ns, "error": "boom"})),
+                ("error", {"error": "RuntimeError", "message": "boom"}),
+            ],
+        )
+        events = await _collect(_make_session("t1", channels={"lifecycle"}, run_ids=("run-1",)))
+        failed = next(e for e in events if e["params"]["data"].get("event") == "failed")
+        assert failed["params"]["namespace"] == ns
+        assert failed["params"]["data"]["error"] == "boom"
+
+    async def test_root_scoped_native_lifecycle_dropped(self, manager: BrokerManager) -> None:
+        """A native lifecycle whose data.namespace is empty is root-scoped; the
+        terminal _lifecycle owns root, so the native one must not double-emit."""
+        await _seed(
+            manager,
+            "run-1",
+            [
+                ("lifecycle", _protocol_event("lifecycle", {"event": "running", "namespace": []})),
+                ("end", {"status": "success"}),
+            ],
+        )
+        events = await _collect(_make_session("t1", channels={"lifecycle"}, run_ids=("run-1",)))
+        assert [e["params"]["data"] for e in events] == [{"event": "completed"}]
+
+    async def test_subgraph_lifecycle_respects_namespace_filter(self, manager: BrokerManager) -> None:
+        await _seed(
+            manager,
+            "run-1",
+            [
+                (
+                    "lifecycle",
+                    _protocol_event("lifecycle", {"event": "started", "namespace": ["sub_a:1"], "graph_name": "a"}),
+                ),
+                (
+                    "lifecycle",
+                    _protocol_event("lifecycle", {"event": "started", "namespace": ["sub_b:1"], "graph_name": "b"}),
+                ),
+                ("end", {"status": "success"}),
+            ],
+        )
+        events = await _collect(_make_session("t1", channels={"lifecycle"}, run_ids=("run-1",), namespaces=[["sub_a"]]))
+        started = [e["params"]["namespace"] for e in events if e["params"]["data"].get("event") == "started"]
+        assert started == [["sub_a:1"]]
 
 
 class TestValidateChannels:

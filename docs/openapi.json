@@ -3125,7 +3125,7 @@
           "Event Streaming"
         ],
         "summary": "Stream Thread Events",
-        "description": "Open a channel-filtered SSE stream of the thread's run events.\n\nThread-scoped: events for any run on the thread flow through, so a\nclient can open the stream then issue ``run.start``. Each SSE frame's\n``data:`` is a protocol event envelope; ``id:`` is the ``seq`` a client\nechoes back as ``since`` on resume.",
+        "description": "Open a channel-filtered SSE stream of the thread's run events.\n\nThread-scoped: events for any run on the thread flow through, so a\nclient can open the stream then issue ``run.start``. Each SSE frame's\n``data:`` is a protocol event envelope; ``id:`` is the ``seq`` a client\nechoes back as ``since`` on resume.\n\nDB work runs in short-lived sessions (the upfront ownership check here, and\neach run-lister poll) so no connection is held for the SSE lifetime (#423).",
         "operationId": "stream_thread_events_threads__thread_id__stream_events_post",
         "parameters": [
           {
@@ -3183,7 +3183,7 @@
           "Event Streaming"
         ],
         "summary": "Post Thread Command",
-        "description": "Run a single v2 command on the thread and return its response envelope.",
+        "description": "Run a single v2 command on the thread and return its response envelope.\n\nUses a short-lived session (the run created by ``run.start`` executes on\nthe worker; the response returns before streaming begins).",
         "operationId": "post_thread_command_threads__thread_id__commands_post",
         "parameters": [
           {
@@ -3208,15 +3208,12 @@
         },
         "responses": {
           "200": {
-            "description": "Successful Response",
+            "description": "Protocol response envelope (success or error)",
             "content": {
               "application/json": {
                 "schema": {}
               }
             }
-          },
-          "400": {
-            "description": "Invalid request (unsupported channels, malformed command)"
           },
           "404": {
             "description": "Thread owned by another user"

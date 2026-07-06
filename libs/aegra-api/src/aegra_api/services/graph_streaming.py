@@ -57,6 +57,23 @@ def _to_message_chunk(msg: BaseMessage) -> BaseMessage:
 
 # Type alias for stream output
 AnyStream = AsyncIterator[tuple[str, Any]]
+_INTERRUPT_KEYS = ("interrupt_before", "interrupt_after")
+
+
+def _normalize_interrupt_value(value: Any) -> Any:
+    if value == ["*"]:
+        return "*"
+    return value
+
+
+def _extract_interrupt_kwargs(config: RunnableConfig) -> tuple[RunnableConfig, dict[str, Any]]:
+    run_config = dict(config)
+    interrupt_kwargs = {}
+    for key in _INTERRUPT_KEYS:
+        value = run_config.pop(key, None)
+        if value is not None:
+            interrupt_kwargs[key] = _normalize_interrupt_value(value)
+    return cast("RunnableConfig", run_config), interrupt_kwargs
 
 
 def _normalize_checkpoint_task(task: dict[str, Any]) -> dict[str, Any]:
@@ -129,6 +146,7 @@ async def stream_graph_events(
         Tuples of (mode, payload) where mode is the stream mode and payload is the event data
     """
     run_id = str(config.get("configurable", {}).get("run_id", uuid.uuid4()))
+    config, interrupt_kwargs = _extract_interrupt_kwargs(config)
 
     # Prepare stream modes
     stream_modes_set: set[str] = set(stream_mode) - {"events"}
@@ -186,6 +204,7 @@ async def stream_graph_events(
                 version="v2",
                 stream_mode=list(stream_modes_set),
                 subgraphs=subgraphs,
+                **interrupt_kwargs,
             )
         ) as stream:
             async for event in stream:
@@ -272,6 +291,7 @@ async def stream_graph_events(
                 stream_mode=list(stream_modes_set),
                 output_keys=output_keys,
                 subgraphs=subgraphs,
+                **interrupt_kwargs,
             )
         ) as stream:
             async for event in stream:

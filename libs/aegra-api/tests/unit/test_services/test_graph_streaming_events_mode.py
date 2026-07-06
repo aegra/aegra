@@ -4,11 +4,35 @@ Tests for issue #99: stream_mode="events" does not work
 https://github.com/aegra/aegra/issues/99
 """
 
+from collections.abc import AsyncIterator
+from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
 
 from aegra_api.services.graph_streaming import stream_graph_events
+
+
+class _RecordingGraph:
+    output_channels = None
+
+    def __init__(self) -> None:
+        self.astream_kwargs: dict[str, Any] | None = None
+        self.astream_events_kwargs: dict[str, Any] | None = None
+
+    async def astream(self, _input_data: Any, _config: dict[str, Any], **kwargs: Any) -> AsyncIterator[tuple[str, Any]]:
+        self.astream_kwargs = kwargs
+        yield "values", {"done": True}
+
+    async def astream_events(
+        self, _input_data: Any, _config: dict[str, Any], **kwargs: Any
+    ) -> AsyncIterator[dict[str, Any]]:
+        self.astream_events_kwargs = kwargs
+        yield {
+            "event": "on_chain_stream",
+            "run_id": "run-123",
+            "data": {"chunk": ("values", {"done": True})},
+        }
 
 
 class TestEventsMode:
@@ -136,3 +160,69 @@ class TestEventsMode:
             f"Event types in raw events: {[p.get('event') for _, p in events_yielded]}. "
             f"on_chain_stream events are processed but not yielded as raw events when stream_mode='events'."
         )
+
+    @pytest.mark.asyncio
+    async def test_forwards_interrupts_to_astream(self) -> None:
+        graph = _RecordingGraph()
+        config = {
+            "configurable": {"run_id": "run-123"},
+            "metadata": {"run_attempt": 1},
+            "interrupt_before": ["agent"],
+            "interrupt_after": ["tools"],
+        }
+
+        async for _mode, _payload in stream_graph_events(
+            graph,
+            {"messages": []},
+            config,
+            stream_mode=["values"],
+        ):
+            pass
+
+        assert graph.astream_kwargs is not None
+        assert graph.astream_kwargs["interrupt_before"] == ["agent"]
+        assert graph.astream_kwargs["interrupt_after"] == ["tools"]
+
+    @pytest.mark.asyncio
+    async def test_forwards_interrupts_to_astream_events(self) -> None:
+        graph = _RecordingGraph()
+        config = {
+            "configurable": {"run_id": "run-123"},
+            "metadata": {"run_attempt": 1},
+            "interrupt_before": ["agent"],
+            "interrupt_after": ["tools"],
+        }
+
+        async for _mode, _payload in stream_graph_events(
+            graph,
+            {"messages": []},
+            config,
+            stream_mode=["events"],
+        ):
+            pass
+
+        assert graph.astream_events_kwargs is not None
+        assert graph.astream_events_kwargs["interrupt_before"] == ["agent"]
+        assert graph.astream_events_kwargs["interrupt_after"] == ["tools"]
+
+    @pytest.mark.asyncio
+    async def test_preserves_all_nodes_interrupt_sentinel(self) -> None:
+        graph = _RecordingGraph()
+        config = {
+            "configurable": {"run_id": "run-123"},
+            "metadata": {"run_attempt": 1},
+            "interrupt_before": ["*"],
+            "interrupt_after": ["*"],
+        }
+
+        async for _mode, _payload in stream_graph_events(
+            graph,
+            {"messages": []},
+            config,
+            stream_mode=["values"],
+        ):
+            pass
+
+        assert graph.astream_kwargs is not None
+        assert graph.astream_kwargs["interrupt_before"] == "*"
+        assert graph.astream_kwargs["interrupt_after"] == "*"

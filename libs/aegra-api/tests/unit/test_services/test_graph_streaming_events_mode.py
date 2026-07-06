@@ -14,7 +14,7 @@ from aegra_api.services.graph_streaming import stream_graph_events
 
 
 class _RecordingGraph:
-    output_channels = None
+    output_channels: list[str] | None = None
 
     def __init__(self) -> None:
         self.astream_kwargs: dict[str, Any] | None = None
@@ -226,3 +226,25 @@ class TestEventsMode:
         assert graph.astream_kwargs is not None
         assert graph.astream_kwargs["interrupt_before"] == "*"
         assert graph.astream_kwargs["interrupt_after"] == "*"
+
+    @pytest.mark.asyncio
+    async def test_preserves_all_nodes_interrupt_sentinel_astream_events(self) -> None:
+        graph = _RecordingGraph()
+        config = {
+            "configurable": {"run_id": "run-123"},
+            "metadata": {"run_attempt": 1},
+            "interrupt_before": ["*"],
+            "interrupt_after": ["*"],
+        }
+
+        async for _mode, _payload in stream_graph_events(
+            graph,
+            {"messages": []},
+            config,
+            stream_mode=["events"],
+        ):
+            pass
+
+        assert graph.astream_events_kwargs is not None
+        assert graph.astream_events_kwargs["interrupt_before"] == "*"
+        assert graph.astream_events_kwargs["interrupt_after"] == "*"

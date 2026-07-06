@@ -25,6 +25,7 @@ import contextvars
 import logging
 from typing import Any
 
+import structlog
 from opentelemetry.context import Context
 from opentelemetry.sdk.trace import ReadableSpan, Span, SpanProcessor
 
@@ -174,15 +175,19 @@ def make_run_trace_context(
     *,
     extra_metadata: dict[str, Any] | None = None,
 ) -> contextvars.Context:
-    """Return an isolated context copy with OTEL trace attributes pre-set for a run.
+    """Return an isolated context copy with trace context pre-set for a run.
 
-    Creates a copy of the current context and populates it with per-request
-    span attributes.  Pass the returned context to ``asyncio.create_task(...,
-    context=ctx)`` so the background task starts with the correct trace data.
+    Creates a copy of the current context and populates it with both the
+    per-request OTEL span attributes and the structlog context vars
+    (``run_id``, ``thread_id``, ``graph_id``, ``user_id``).  Pass the
+    returned context to ``asyncio.create_task(..., context=ctx)`` so the
+    background task starts with the correct trace data and every log line
+    it emits carries the run identifiers automatically — mirroring the
+    worker path's ``_restore_trace_context``.
 
     User-supplied ``extra_metadata`` is merged with the system runtime keys
-    (``run_id``, ``thread_id``, ``graph_id``).  System keys win on collision —
-    see :func:`merge_run_metadata`.
+    (``run_id``, ``thread_id``, ``graph_id``) for the OTEL attributes.
+    System keys win on collision — see :func:`merge_run_metadata`.
     """
     system_metadata: dict[str, str | int | float | bool] = {
         "run_id": run_id,
@@ -197,5 +202,12 @@ def make_run_trace_context(
         session_id=thread_id,
         trace_name=graph_id,
         metadata=metadata,
+    )
+    ctx.run(
+        structlog.contextvars.bind_contextvars,
+        run_id=run_id,
+        thread_id=thread_id,
+        graph_id=graph_id,
+        user_id=user_identity,
     )
     return ctx

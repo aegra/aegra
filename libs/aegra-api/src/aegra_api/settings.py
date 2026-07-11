@@ -134,8 +134,13 @@ class DatabaseSettings(EnvBase):
     Supports two configuration modes:
     1. DATABASE_URL (standard for containerized deployments) — parsed into individual fields
     2. Individual POSTGRES_* vars — used when DATABASE_URL is not set
+
+    Set DATABASE_ENABLED=false to run without PostgreSQL entirely.
+    The server will use in-memory checkpointing (MemorySaver) and skip
+    all database initialization, migrations, and health probes.
     """
 
+    DATABASE_ENABLED: bool = True
     DATABASE_URL: str | None = None
 
     POSTGRES_USER: str = "postgres"

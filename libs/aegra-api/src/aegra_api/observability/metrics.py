@@ -18,7 +18,9 @@ REAPER_RECOVERED_RUNS = prometheus_client.Counter(
     "aegra_reaper_recovered_runs_total",
     "Runs recovered by the lease reaper, by outcome: crashed_retried "
     "(expired lease, re-enqueued), crashed_exhausted (max retries exceeded, "
-    "marked failed), stuck_pending (never claimed, re-enqueued).",
+    "marked failed), stuck_pending (never claimed, re-enqueued). Counts only "
+    "confirmed Redis pushes and DB updates; recovery that falls back to the "
+    "workers' Postgres poll during a Redis outage is not counted.",
     labelnames=["outcome"],
 )
 

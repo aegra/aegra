@@ -5,7 +5,13 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from redis import RedisError
 
+from aegra_api.observability.metrics import REAPER_RECOVERED_RUNS
 from aegra_api.services.lease_reaper import LeaseReaper
+
+
+def _recovered_count(outcome: str) -> float:
+    """Read the current value of the reaper counter for one outcome label."""
+    return REAPER_RECOVERED_RUNS.labels(outcome=outcome)._value.get()
 
 
 def _make_session_maker(session: AsyncMock) -> MagicMock:
@@ -181,6 +187,73 @@ class TestReap:
 
         mock_reset.assert_not_awaited()
         mock_reenqueue.assert_not_awaited()
+
+
+class TestReapMetrics:
+    @pytest.mark.asyncio
+    async def test_increments_counters_per_outcome_on_crashed_recovery(self) -> None:
+        """Retried and exhausted crashed runs each increment their own outcome series."""
+        reaper = LeaseReaper()
+        retried_before = _recovered_count("crashed_retried")
+        exhausted_before = _recovered_count("crashed_exhausted")
+
+        with (
+            patch.object(
+                LeaseReaper, "_find_recoverable", new_callable=AsyncMock, return_value=(["run-1", "run-2"], [])
+            ),
+            patch.object(LeaseReaper, "_reset_to_pending", new_callable=AsyncMock, return_value=["run-1", "run-2"]),
+            patch.object(
+                LeaseReaper, "_check_retry_limits", new_callable=AsyncMock, return_value=(["run-1"], ["run-2"])
+            ),
+            patch.object(LeaseReaper, "_reenqueue", new_callable=AsyncMock),
+            patch.object(LeaseReaper, "_mark_permanently_failed", new_callable=AsyncMock),
+        ):
+            await reaper._reap()
+
+        assert _recovered_count("crashed_retried") == retried_before + 1
+        assert _recovered_count("crashed_exhausted") == exhausted_before + 1
+
+    @pytest.mark.asyncio
+    async def test_increments_stuck_pending_by_batch_size(self) -> None:
+        reaper = LeaseReaper()
+        before = _recovered_count("stuck_pending")
+
+        with (
+            patch.object(
+                LeaseReaper, "_find_recoverable", new_callable=AsyncMock, return_value=([], ["run-3", "run-4"])
+            ),
+            patch.object(LeaseReaper, "_reenqueue", new_callable=AsyncMock),
+        ):
+            await reaper._reap()
+
+        assert _recovered_count("stuck_pending") == before + 2
+
+    @pytest.mark.asyncio
+    async def test_no_increment_when_nothing_to_recover(self) -> None:
+        reaper = LeaseReaper()
+        before = {o: _recovered_count(o) for o in ("crashed_retried", "crashed_exhausted", "stuck_pending")}
+
+        with patch.object(LeaseReaper, "_find_recoverable", new_callable=AsyncMock, return_value=([], [])):
+            await reaper._reap()
+
+        for outcome, value in before.items():
+            assert _recovered_count(outcome) == value
+
+    @pytest.mark.asyncio
+    async def test_no_increment_when_all_crashed_claimed_elsewhere(self) -> None:
+        """Runs found crashed but re-claimed before reset must not count as recovered."""
+        reaper = LeaseReaper()
+        before = _recovered_count("crashed_retried")
+
+        with (
+            patch.object(LeaseReaper, "_find_recoverable", new_callable=AsyncMock, return_value=(["run-1"], [])),
+            patch.object(LeaseReaper, "_reset_to_pending", new_callable=AsyncMock, return_value=[]),
+            patch.object(LeaseReaper, "_check_retry_limits", new_callable=AsyncMock) as mock_retry,
+        ):
+            await reaper._reap()
+
+        mock_retry.assert_not_awaited()
+        assert _recovered_count("crashed_retried") == before
 
 
 class TestStartStop:

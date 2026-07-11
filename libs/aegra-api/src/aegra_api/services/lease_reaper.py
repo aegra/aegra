@@ -17,6 +17,7 @@ from sqlalchemy import select, update
 from aegra_api.core.orm import Run as RunORM
 from aegra_api.core.orm import _get_session_maker
 from aegra_api.core.redis_manager import redis_manager
+from aegra_api.observability.metrics import REAPER_RECOVERED_RUNS
 from aegra_api.settings import settings
 
 logger = structlog.getLogger(__name__)
@@ -72,13 +73,16 @@ class LeaseReaper:
                 retryable, exhausted = await self._check_retry_limits(actually_reset)
                 if exhausted:
                     await self._mark_permanently_failed(exhausted)
+                    REAPER_RECOVERED_RUNS.labels(outcome="crashed_exhausted").inc(len(exhausted))
                 if retryable:
                     await self._reenqueue(retryable)
+                    REAPER_RECOVERED_RUNS.labels(outcome="crashed_retried").inc(len(retryable))
 
         # Stuck pending: just re-enqueue (never executed, no retry budget)
         if stuck_pending:
             logger.warning("Re-enqueueing stuck pending runs", count=len(stuck_pending), run_ids=stuck_pending)
             await self._reenqueue(stuck_pending)
+            REAPER_RECOVERED_RUNS.labels(outcome="stuck_pending").inc(len(stuck_pending))
 
         logger.info(
             "Lease recovery complete",

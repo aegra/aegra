@@ -215,7 +215,7 @@ class TestGetStoreItem:
         """Test empty namespace query param is treated as no namespace"""
         from unittest.mock import patch
 
-        from aegra_api.api.store import apply_user_namespace_scoping
+        from aegra_api.api.store import apply_namespace_scoping
 
         mock_item = DummyStoreItem(
             key="test-key",
@@ -225,13 +225,15 @@ class TestGetStoreItem:
         mock_store.aget.return_value = mock_item
 
         with patch(
-            "aegra_api.api.store.apply_user_namespace_scoping",
-            wraps=apply_user_namespace_scoping,
+            "aegra_api.api.store.apply_namespace_scoping",
+            wraps=apply_namespace_scoping,
         ) as spy:
             resp = client.get("/store/items?namespace=&key=test-key")
 
         assert resp.status_code == 200
-        spy.assert_called_once_with("test-user", [])
+        spy.assert_called_once()
+        assert spy.call_args.args[0] == []
+        assert spy.call_args.args[1].identity == "test-user"
         call_args = mock_store.aget.call_args
         assert call_args[0][0] == ("users", "test-user")
 
@@ -270,16 +272,18 @@ class TestDeleteStoreItem:
         """Test empty namespace query param is treated as no namespace"""
         from unittest.mock import patch
 
-        from aegra_api.api.store import apply_user_namespace_scoping
+        from aegra_api.api.store import apply_namespace_scoping
 
         with patch(
-            "aegra_api.api.store.apply_user_namespace_scoping",
-            wraps=apply_user_namespace_scoping,
+            "aegra_api.api.store.apply_namespace_scoping",
+            wraps=apply_namespace_scoping,
         ) as spy:
             resp = client.delete("/store/items?key=test-key&namespace=")
 
         assert resp.status_code == 204
-        spy.assert_called_once_with("test-user", [])
+        spy.assert_called_once()
+        assert spy.call_args.args[0] == []
+        assert spy.call_args.args[1].identity == "test-user"
         call_args = mock_store.adelete.call_args
         assert call_args[0][0] == ("users", "test-user")
 
@@ -694,6 +698,125 @@ class TestNamespaceScoping:
         call_args = mock_store.asearch.call_args
         namespace_prefix = call_args[0][0]
         assert namespace_prefix == ("users", "test-user", "users", "other-user", "docs")
+
+
+class TestConfiguredScopeIntegration:
+    """A configured store.scopes entry maps a namespace prefix to User attributes"""
+
+    @pytest.fixture(autouse=True)
+    def _org_scope(self, monkeypatch) -> None:
+        """Configure the "orgs" -> [org_id] scope for every test in this class."""
+        from aegra_api.api import store as store_module
+
+        monkeypatch.setattr(store_module, "_scope_attr_map", lambda: {"orgs": ["org_id"]})
+
+    def test_put_org_namespace_scopes_to_org(self, client, mock_store) -> None:
+        """A fully-qualified org namespace passes through to the org scope."""
+        resp = client.put(
+            "/store/items",
+            json={
+                "namespace": ["orgs", "org-1", "shared-prompts"],
+                "key": "greeting",
+                "value": {"text": "hi"},
+            },
+        )
+
+        assert resp.status_code == 204
+        assert mock_store.aput.call_args.kwargs["namespace"] == ("orgs", "org-1", "shared-prompts")
+
+    def test_get_org_namespace_scopes_to_org(self, client, mock_store) -> None:
+        """A GET under the org prefix reads from the caller's org scope."""
+        mock_store.aget.return_value = DummyStoreItem("greeting", {"text": "hi"}, ("orgs", "org-1"))
+
+        resp = client.get("/store/items?key=greeting&namespace=orgs&namespace=org-1")
+
+        assert resp.status_code == 200
+        assert mock_store.aget.call_args[0][0] == ("orgs", "org-1")
+
+    def test_search_org_namespace_scopes_to_org(self, client, mock_store) -> None:
+        """A search under the org prefix is scoped to the caller's org."""
+        mock_store.asearch.return_value = []
+
+        resp = client.post(
+            "/store/items/search",
+            json={"namespace_prefix": ["orgs", "org-1", "docs"]},
+        )
+
+        assert resp.status_code == 200
+        assert mock_store.asearch.call_args[0][0] == ("orgs", "org-1", "docs")
+
+    def test_other_org_namespace_is_buried(self, client, mock_store) -> None:
+        """A foreign org id never passes through — it is buried under the caller's org."""
+        resp = client.put(
+            "/store/items",
+            json={
+                "namespace": ["orgs", "victim-org", "secrets"],
+                "key": "stolen",
+                "value": {"data": "nope"},
+            },
+        )
+
+        assert resp.status_code == 204
+        assert mock_store.aput.call_args.kwargs["namespace"] == ("orgs", "org-1", "orgs", "victim-org", "secrets")
+
+    def test_org_prefix_without_org_membership_is_forbidden(self, client, mock_store) -> None:
+        """A user with no org_id using the "orgs" prefix gets 403."""
+        from aegra_api.core.auth_deps import get_current_user, require_auth
+        from aegra_api.models.auth import User
+
+        no_org_user = User(identity="test-user")
+        client.app.dependency_overrides[require_auth] = lambda: no_org_user
+        client.app.dependency_overrides[get_current_user] = lambda: no_org_user
+
+        resp = client.put(
+            "/store/items",
+            json={
+                "namespace": ["orgs", "shared-prompts"],
+                "key": "greeting",
+                "value": {"text": "hi"},
+            },
+        )
+
+        assert resp.status_code == 403
+        mock_store.aput.assert_not_called()
+
+    def test_fully_qualified_multi_attribute_namespace_passes_through(self, client, mock_store, monkeypatch) -> None:
+        """A namespace already under [prefix, *attr_values] passes through unchanged."""
+        from aegra_api.api import store as store_module
+        from aegra_api.core.auth_deps import get_current_user, require_auth
+        from aegra_api.models.auth import User
+
+        monkeypatch.setattr(store_module, "_scope_attr_map", lambda: {"teams": ["org_id", "team_id"]})
+        user = User(identity="test-user", org_id="org-1", team_id="team-42")
+        client.app.dependency_overrides[require_auth] = lambda: user
+        client.app.dependency_overrides[get_current_user] = lambda: user
+
+        resp = client.put(
+            "/store/items",
+            json={"namespace": ["teams", "org-1", "team-42", "kb"], "key": "greeting", "value": {"text": "hi"}},
+        )
+
+        assert resp.status_code == 204
+        assert mock_store.aput.call_args.kwargs["namespace"] == ("teams", "org-1", "team-42", "kb")
+
+    def test_multi_attribute_scope_buries_under_all_values(self, client, mock_store, monkeypatch) -> None:
+        """A scope listing several attributes partitions by each value, in order."""
+        from aegra_api.api import store as store_module
+        from aegra_api.core.auth_deps import get_current_user, require_auth
+        from aegra_api.models.auth import User
+
+        monkeypatch.setattr(store_module, "_scope_attr_map", lambda: {"teams": ["org_id", "team_id"]})
+        user = User(identity="test-user", org_id="org-1", team_id="team-42")
+        client.app.dependency_overrides[require_auth] = lambda: user
+        client.app.dependency_overrides[get_current_user] = lambda: user
+
+        resp = client.put(
+            "/store/items",
+            json={"namespace": ["teams", "kb"], "key": "greeting", "value": {"text": "hi"}},
+        )
+
+        assert resp.status_code == 204
+        assert mock_store.aput.call_args.kwargs["namespace"] == ("teams", "org-1", "team-42", "teams", "kb")
 
 
 class TestStoreIntegration:

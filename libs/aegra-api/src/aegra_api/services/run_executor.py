@@ -239,6 +239,7 @@ def _build_run_config(job: RunJob) -> dict[str, Any]:
         job.identity.run_id,
         job.identity.thread_id,
         job.user,
+        assistant_id=job.identity.assistant_id,
         additional_config=job.execution.config,
         checkpoint=job.execution.checkpoint,
     )

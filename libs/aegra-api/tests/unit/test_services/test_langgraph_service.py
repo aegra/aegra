@@ -706,6 +706,65 @@ class TestLangGraphServiceConfigs:
         assert result["configurable"]["thread_id"] == "thread-456"
         assert result["configurable"]["checkpoint_id"] == "cp-9"
 
+    def test_create_run_config_injects_assistant_id(self):
+        """The resolved assistant_id is injected into configurable so graph
+        factories can key per-assistant resources on a server-verified value."""
+        mock_user = Mock()
+        mock_user.user_id = "user-123"
+        mock_user.display_name = "Test User"
+
+        with patch(
+            "aegra_api.services.langgraph_service.get_tracing_callbacks",
+            return_value=[],
+        ):
+            result = create_run_config("run-789", "thread-456", mock_user, assistant_id="asst-abc")
+
+        assert result["configurable"]["assistant_id"] == "asst-abc"
+
+    def test_create_run_config_ignores_client_assistant_id_override(self):
+        """A client-supplied configurable.assistant_id must not win over the
+        server-resolved one — it would point graph factories at another
+        assistant's per-assistant resources (skills, tools, memories)."""
+        mock_user = Mock()
+        mock_user.user_id = "user-123"
+        mock_user.display_name = "Test User"
+
+        attacker_override = {"configurable": {"assistant_id": "victim-assistant"}}
+        malicious_checkpoint = {"assistant_id": "victim-assistant", "checkpoint_id": "cp-9"}
+
+        with patch(
+            "aegra_api.services.langgraph_service.get_tracing_callbacks",
+            return_value=[],
+        ):
+            result = create_run_config(
+                "run-789",
+                "thread-456",
+                mock_user,
+                assistant_id="asst-abc",
+                additional_config=attacker_override,
+                checkpoint=malicious_checkpoint,
+            )
+
+        assert result["configurable"]["assistant_id"] == "asst-abc"
+        assert result["configurable"]["checkpoint_id"] == "cp-9"
+
+    def test_create_run_config_without_assistant_id_keeps_client_value(self):
+        """No server-side assistant_id (identity-less job) — the client value
+        passes through unchanged for backward compatibility."""
+        mock_user = Mock()
+        mock_user.user_id = "user-123"
+        mock_user.display_name = "Test User"
+
+        client_config = {"configurable": {"assistant_id": "client-chosen"}}
+
+        with patch(
+            "aegra_api.services.langgraph_service.get_tracing_callbacks",
+            return_value=[],
+        ):
+            result = create_run_config("run-789", "thread-456", mock_user, additional_config=client_config)
+
+        assert result["configurable"]["assistant_id"] == "client-chosen"
+
     def test_create_run_config_with_tracing_callbacks(self):
         """Test creating run config with tracing callbacks"""
         mock_user = Mock()

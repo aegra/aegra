@@ -703,14 +703,17 @@ def create_run_config(
     thread_id: str,
     user: User | BaseUser | None,
     *,
+    assistant_id: str | None = None,
     additional_config: dict[str, Any] | None = None,
     checkpoint: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Create LangGraph configuration for a specific run with full context.
 
-    Additive for client keys, except thread_id/run_id which are forced: a
-    body-supplied configurable.thread_id would redirect execution to another
-    user's thread (the checkpointer keys on thread_id alone).
+    Additive for client keys, except thread_id/run_id/assistant_id which are
+    forced: a body-supplied configurable.thread_id would redirect execution to
+    another user's thread (the checkpointer keys on thread_id alone), and a
+    body-supplied configurable.assistant_id would point graph factories at
+    another assistant's per-assistant resources.
     """
     from copy import deepcopy
 
@@ -720,6 +723,8 @@ def create_run_config(
     # Server-authoritative — overwrite, never honor a client override.
     cfg["configurable"]["thread_id"] = thread_id
     cfg["configurable"]["run_id"] = run_id
+    if assistant_id:
+        cfg["configurable"]["assistant_id"] = assistant_id
 
     # Ensure the root run ID is set to match so that astream_events recognizes it
     cfg.setdefault("run_id", run_id)

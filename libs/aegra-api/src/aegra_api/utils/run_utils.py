@@ -7,8 +7,10 @@ from langgraph.types import Command, Send
 logger = structlog.getLogger(__name__)
 
 # A body-supplied thread_id overrides the route-verified one (the checkpointer
-# keys on thread_id alone), so the server pins these instead of trusting them.
-SERVER_PINNED_CONFIG_KEYS: frozenset[str] = frozenset({"thread_id", "run_id"})
+# keys on thread_id alone), and a body-supplied assistant_id would let a run
+# point graph factories at another assistant's per-assistant resources, so the
+# server pins these instead of trusting them.
+SERVER_PINNED_CONFIG_KEYS: frozenset[str] = frozenset({"thread_id", "run_id", "assistant_id"})
 
 
 def strip_pinned_config_keys(client_config: dict[str, Any]) -> dict[str, Any]:

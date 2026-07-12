@@ -3,7 +3,7 @@
 from datetime import datetime
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class AssistantCreate(BaseModel):
@@ -109,21 +109,13 @@ class AgentSchemas(BaseModel):
 
 
 class AssistantShareCreate(BaseModel):
-    """Create-share request: share_type determines which target field is required."""
+    """Create-share request."""
 
-    share_type: Literal["user", "tenant", "public"] = Field(..., description="Share scope: user/tenant/public")
-    target_user_id: str | None = Field(None, description="Target user when share_type=user")
-    target_tenant_id: str | None = Field(None, description="Target tenant when share_type=tenant")
-
-    @model_validator(mode="after")
-    def _check_target(self) -> "AssistantShareCreate":
-        if self.share_type == "user" and not self.target_user_id:
-            raise ValueError("share_type=user requires target_user_id")
-        if self.share_type == "tenant" and not self.target_tenant_id:
-            raise ValueError("share_type=tenant requires target_tenant_id")
-        if self.share_type == "public" and (self.target_user_id or self.target_tenant_id):
-            raise ValueError("share_type=public must not carry a target")
-        return self
+    grantee: str = Field(
+        ...,
+        pattern=r"^(public|user:.+|tenant:.+)$",
+        description='Grant target: "user:<id>", "tenant:<id>", or "public"',
+    )
 
 
 class AssistantShareResponse(BaseModel):
@@ -131,9 +123,6 @@ class AssistantShareResponse(BaseModel):
 
     model_config = ConfigDict(from_attributes=True)
 
-    share_id: str
     assistant_id: str
-    share_type: str
-    target_user_id: str | None = None
-    target_tenant_id: str | None = None
+    grantee: str
     created_at: datetime

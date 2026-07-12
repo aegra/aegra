@@ -22,7 +22,7 @@ from uuid import uuid4
 from fastapi import Depends, HTTPException
 from langchain_core.runnables.utils import create_model
 from pydantic import TypeAdapter
-from sqlalchemy import and_, func, or_, select, update
+from sqlalchemy import func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from aegra_api.core.auth_deps import get_current_user
@@ -667,72 +667,46 @@ class AssistantService(Authenticated):
         except Exception as e:
             raise HTTPException(400, f"Failed to get subgraphs: {str(e)}") from e
 
-    async def create_share(
-        self, assistant_id: str, request: AssistantShareCreate
-    ) -> AssistantShareResponse:
-        """Share an assistant with user/tenant/public. Owner only (checked via owner_filter)."""
-        await self._dispatch("update", {"assistant_id": assistant_id})
-        owned = await self.session.scalar(
+    async def _owned(self, assistant_id: str) -> None:
+        """404 unless the caller owns the assistant (write-side gate for share management)."""
+        row = await self.session.scalar(
             select(AssistantORM).where(
                 AssistantORM.assistant_id == assistant_id,
                 owner_filter(AssistantORM, self.user),
             )
         )
-        if not owned:
+        if not row:
             raise HTTPException(404, f"Assistant '{assistant_id}' not found")
 
-        dup = and_(
-            AssistantShareORM.assistant_id == assistant_id,
-            AssistantShareORM.share_type == request.share_type,
-            AssistantShareORM.target_user_id.is_not_distinct_from(request.target_user_id),
-            AssistantShareORM.target_tenant_id.is_not_distinct_from(request.target_tenant_id),
-        )
-        existing = await self.session.scalar(select(AssistantShareORM).where(dup))
-        if existing:
-            return AssistantShareResponse.model_validate(existing)
+    async def create_share(self, assistant_id: str, request: AssistantShareCreate) -> AssistantShareResponse:
+        """Grant read/execute on an assistant to a user, a tenant, or the public. Owner only."""
+        await self._dispatch("update", {"assistant_id": assistant_id})
+        await self._owned(assistant_id)
 
-        share = AssistantShareORM(
-            assistant_id=assistant_id,
-            owner_user_id=self.user.user_id,
-            owner_tenant_id=self.user.tenant_id,
-            share_type=request.share_type,
-            target_user_id=request.target_user_id,
-            target_tenant_id=request.target_tenant_id,
-        )
-        self.session.add(share)
-        await self.session.commit()
-        await self.session.refresh(share)
+        share = await self.session.get(AssistantShareORM, (assistant_id, request.grantee))
+        if share is None:
+            share = AssistantShareORM(assistant_id=assistant_id, grantee=request.grantee)
+            self.session.add(share)
+            await self.session.commit()
+            await self.session.refresh(share)
         return AssistantShareResponse.model_validate(share)
 
     async def list_shares(self, assistant_id: str) -> list[AssistantShareResponse]:
-        """List all shares of the owner's own assistant. Owner only."""
+        """List all grants of the owner's own assistant. Owner only."""
         await self._dispatch("read", {"assistant_id": assistant_id})
-        owned = await self.session.scalar(
-            select(AssistantORM).where(
-                AssistantORM.assistant_id == assistant_id,
-                owner_filter(AssistantORM, self.user),
-            )
-        )
-        if not owned:
-            raise HTTPException(404, f"Assistant '{assistant_id}' not found")
+        await self._owned(assistant_id)
         rows = await self.session.scalars(
             select(AssistantShareORM).where(AssistantShareORM.assistant_id == assistant_id)
         )
         return [AssistantShareResponse.model_validate(r) for r in rows.all()]
 
-    async def delete_share(self, assistant_id: str, share_id: str) -> dict:
-        """Delete a share. Owner only."""
+    async def delete_share(self, assistant_id: str, grantee: str) -> dict:
+        """Revoke a grant. Owner only."""
         await self._dispatch("update", {"assistant_id": assistant_id})
-        share = await self.session.scalar(
-            select(AssistantShareORM).where(
-                AssistantShareORM.share_id == share_id,
-                AssistantShareORM.assistant_id == assistant_id,
-                AssistantShareORM.owner_user_id == self.user.user_id,
-                AssistantShareORM.owner_tenant_id.is_not_distinct_from(self.user.tenant_id),
-            )
-        )
+        await self._owned(assistant_id)
+        share = await self.session.get(AssistantShareORM, (assistant_id, grantee))
         if not share:
-            raise HTTPException(404, f"Share '{share_id}' not found")
+            raise HTTPException(404, f"Share '{grantee}' not found")
         await self.session.delete(share)
         await self.session.commit()
         return {"status": "deleted"}

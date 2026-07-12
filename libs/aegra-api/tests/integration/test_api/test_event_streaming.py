@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import uuid
 from collections.abc import Iterator
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -22,7 +23,7 @@ _USER = "test-user"
 
 
 class _Session:
-    """Test session: scalar() returns the thread's owner id, execute() lists runs.
+    """Test session: scalar() returns the thread row (or None); execute() lists runs.
 
     ``owner`` is the existing thread's user_id, or None when the thread does
     not exist yet (the run.start-creates-it path the SDK relies on). The run
@@ -41,7 +42,9 @@ class _Session:
         return None
 
     async def scalar(self, _stmt: Any) -> Any:
-        return self._owner
+        if self._owner is None:
+            return None
+        return SimpleNamespace(user_id=self._owner, tenant_id=None)
 
     async def execute(self, _stmt: Any) -> Any:
         rows = [(run_id, "running", "test_graph") for run_id in self._run_ids]

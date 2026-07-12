@@ -241,26 +241,14 @@ class Cron(Base):
 class AssistantShare(Base):
     __tablename__ = "assistant_share"
 
-    # gen_random_uuid() is in Postgres 13+ core; no extension needed.
-    share_id: Mapped[str] = mapped_column(Text, primary_key=True, server_default=text("gen_random_uuid()::text"))
     assistant_id: Mapped[str] = mapped_column(
-        Text, ForeignKey("assistant.assistant_id", ondelete="CASCADE"), nullable=False
+        Text, ForeignKey("assistant.assistant_id", ondelete="CASCADE"), primary_key=True
     )
-    # Sharer ownership: only the owner may manage (add/remove) shares of their assistant
-    owner_user_id: Mapped[str] = mapped_column(Text, nullable=False)
-    owner_tenant_id: Mapped[str | None] = mapped_column(Text, nullable=True)
-    # Share scope: user=a specific user / tenant=a specific tenant / public=fully public
-    share_type: Mapped[str] = mapped_column(Text, nullable=False)
-    target_user_id: Mapped[str | None] = mapped_column(Text, nullable=True)
-    target_tenant_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Grant target: "user:<id>" | "tenant:<id>" | "public"
+    grantee: Mapped[str] = mapped_column(Text, primary_key=True)
     created_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), server_default=text("now()"))
 
-    __table_args__ = (
-        Index("idx_assistant_share_assistant", "assistant_id"),
-        Index("idx_assistant_share_target_user", "target_user_id"),
-        Index("idx_assistant_share_target_tenant", "target_tenant_id"),
-        Index("idx_assistant_share_owner", "owner_user_id"),
-    )
+    __table_args__ = (Index("idx_assistant_share_grantee", "grantee"),)
 
 
 # ---------------------------------------------------------------------------

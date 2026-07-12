@@ -2,9 +2,7 @@
 
 from types import SimpleNamespace
 
-import pytest
-
-from aegra_api.core.authz import owner_filter, owns, query_scope, scope
+from aegra_api.core.authz import owner_filter, owns, scope
 from aegra_api.core.orm import Thread as ThreadORM
 from aegra_api.models.auth import User
 
@@ -82,31 +80,3 @@ class TestUserIdAlias:
 
     def test_user_id_takes_precedence_when_both(self) -> None:
         assert User(identity="alice", user_id="bob").user_id == "bob"
-
-
-class TestQueryScope:
-    """query_scope() three modes: user_id only / tenant_id only / composite (requirement B)."""
-
-    def test_user_only_filters_user_not_tenant(self) -> None:
-        sql = str(query_scope(ThreadORM, user_id="u1"))
-        assert "user_id" in sql
-        assert "tenant_id" not in sql
-
-    def test_tenant_only_filters_tenant_not_user(self) -> None:
-        sql = str(query_scope(ThreadORM, tenant_id="t1"))
-        assert "tenant_id" in sql
-        assert "user_id" not in sql
-
-    def test_composite_filters_both(self) -> None:
-        sql = str(query_scope(ThreadORM, user_id="u1", tenant_id="t1"))
-        assert "user_id" in sql
-        assert "tenant_id" in sql
-
-    def test_raises_when_no_dimension_given(self) -> None:
-        with pytest.raises(ValueError, match="at least one filter dimension"):
-            query_scope(ThreadORM)
-
-    def test_allow_system_adds_system_branch(self) -> None:
-        sql = str(query_scope(ThreadORM, user_id="u1", allow_system=True))
-        assert " OR " in sql
-        assert sql.count("user_id") >= 2

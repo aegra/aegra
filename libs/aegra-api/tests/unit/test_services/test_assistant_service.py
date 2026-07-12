@@ -1170,7 +1170,7 @@ class TestAssistantSharing:
         assistant_service._dispatch = AsyncMock(return_value=None)
         mock_session.scalar = AsyncMock(return_value=None)  # owner_filter miss -> not owner
         with pytest.raises(HTTPException) as exc:
-            await assistant_service.create_share("a1", AssistantShareCreate(share_type="public"))
+            await assistant_service.create_share("a1", AssistantShareCreate(grantee="public"))
         assert exc.value.status_code == 404
         mock_session.add.assert_not_called()
 
@@ -1179,9 +1179,10 @@ class TestAssistantSharing:
         self, assistant_service: AssistantService, mock_session: AsyncMock
     ) -> None:
         assistant_service._dispatch = AsyncMock(return_value=None)
-        mock_session.scalar = AsyncMock(return_value=None)
+        mock_session.scalar = AsyncMock(return_value=Mock())  # owned
+        mock_session.get = AsyncMock(return_value=None)  # grant absent
         with pytest.raises(HTTPException) as exc:
-            await assistant_service.delete_share("a1", "s1")
+            await assistant_service.delete_share("a1", "user:bob")
         assert exc.value.status_code == 404
 
     @pytest.mark.asyncio
@@ -1195,28 +1196,28 @@ class TestAssistantSharing:
         assert exc.value.status_code == 404
 
     @pytest.mark.asyncio
-    async def test_create_share_inserts_when_owned_and_no_dup(
+    async def test_create_share_inserts_when_owned_and_new(
         self, assistant_service: AssistantService, mock_session: AsyncMock
     ) -> None:
         assistant_service._dispatch = AsyncMock(return_value=None)
-        mock_session.scalar = AsyncMock(side_effect=[Mock(), None])  # owned, no duplicate
+        mock_session.scalar = AsyncMock(return_value=Mock())  # owned
+        mock_session.get = AsyncMock(return_value=None)  # no existing grant
         with patch("aegra_api.services.assistant_service.AssistantShareResponse") as resp:
             resp.model_validate.return_value = "SHARE_RESPONSE"
-            result = await assistant_service.create_share(
-                "a1", AssistantShareCreate(share_type="user", target_user_id="bob")
-            )
+            result = await assistant_service.create_share("a1", AssistantShareCreate(grantee="user:bob"))
         assert result == "SHARE_RESPONSE"
         mock_session.add.assert_called_once()
         mock_session.commit.assert_awaited()
 
     @pytest.mark.asyncio
-    async def test_create_share_idempotent_when_dup_exists(
+    async def test_create_share_idempotent_when_grant_exists(
         self, assistant_service: AssistantService, mock_session: AsyncMock
     ) -> None:
         assistant_service._dispatch = AsyncMock(return_value=None)
-        mock_session.scalar = AsyncMock(side_effect=[Mock(), Mock()])  # owned, duplicate exists
+        mock_session.scalar = AsyncMock(return_value=Mock())  # owned
+        mock_session.get = AsyncMock(return_value=Mock())  # grant already present
         with patch("aegra_api.services.assistant_service.AssistantShareResponse") as resp:
             resp.model_validate.return_value = "EXISTING"
-            result = await assistant_service.create_share("a1", AssistantShareCreate(share_type="public"))
+            result = await assistant_service.create_share("a1", AssistantShareCreate(grantee="public"))
         assert result == "EXISTING"
         mock_session.add.assert_not_called()

@@ -1,7 +1,6 @@
-"""Secret redaction for API responses.
+"""Secret redaction for API responses (cron webhook headers).
 
-Applies only to the copy returned to clients (e.g. an assistant's config/context
-may hold a custom OpenAI api_key). Stored values are untouched — graph execution reads the raw DB value.
+Masks response copies only; stored values are untouched.
 """
 
 from typing import Any

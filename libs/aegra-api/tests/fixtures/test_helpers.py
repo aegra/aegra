@@ -90,6 +90,7 @@ class DummyRun:
         self.assistant_id = assistant_id
         self.status = status
         self.user_id = user_id
+        self.tenant_id: str | None = None
         self.metadata = metadata or {}
         self.input = input_data or {"message": "test"}
         self.output = output_data
@@ -111,6 +112,7 @@ class DummyThread:
         self.status = status
         self.metadata = metadata or {"owner": user_id}
         self.user_id = user_id
+        self.tenant_id: str | None = None
         self.created_at = datetime.now(UTC)
         self.updated_at = datetime.now(UTC)
 

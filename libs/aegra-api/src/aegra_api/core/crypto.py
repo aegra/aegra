@@ -1,9 +1,6 @@
-"""Envelope encryption for at-rest secrets (e.g. per-assistant API keys).
+"""Fernet encryption for at-rest secrets, keyed by the AEGRA_SECRET_KEY env var.
 
-Fernet (AES-128-CBC + HMAC) keyed by the ``AEGRA_SECRET_KEY`` env var — a
-urlsafe base64 32-byte key from ``Fernet.generate_key()``. When the key is
-unset, encryption is disabled and encrypt()/decrypt() raise, so a secret is
-never written or read in the clear by accident.
+Unset key disables encryption: encrypt()/decrypt() raise instead of passing plaintext.
 """
 
 from __future__ import annotations
@@ -22,11 +19,6 @@ def _fernet() -> Fernet | None:
     if not key:
         return None
     return Fernet(key.encode())
-
-
-def is_encryption_enabled() -> bool:
-    """Whether AEGRA_SECRET_KEY is configured."""
-    return _fernet() is not None
 
 
 def encrypt(plaintext: str) -> str:

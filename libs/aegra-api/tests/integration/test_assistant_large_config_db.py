@@ -3,9 +3,9 @@
 import hashlib
 from uuid import uuid4
 
+import psycopg
 import pytest
-from sqlalchemy import delete, text
-from sqlalchemy.exc import OperationalError
+from sqlalchemy import delete
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from aegra_api.core.orm import Assistant as AssistantORM
@@ -24,28 +24,22 @@ def _large_system_prompt() -> str:
 @pytest.mark.asyncio
 async def test_insert_assistant_with_large_configurable_prompt_succeeds() -> None:
     """A large prompt in config.configurable must not overflow the unique index."""
-    engine = create_async_engine(settings.db.database_url)
-
+    # Probe synchronously: an async probe against an unreachable DB surfaces an
+    # uncatchable ConnectionResetError from the Windows proactor loop.
     try:
-        assistant_table = None
-        try:
-            async with engine.begin() as conn:
-                await conn.execute(text("SELECT 1"))
-                assistant_table = await conn.scalar(text("SELECT to_regclass('public.assistant')"))
-        except (OperationalError, OSError) as exc:
-            pytest.skip(f"PostgreSQL test database is unavailable: {exc}")
+        with psycopg.connect(settings.db.database_url_sync, connect_timeout=2) as probe:
+            assistant_table = probe.execute("SELECT to_regclass('public.assistant')").fetchone()[0]
+    except (psycopg.Error, OSError) as exc:
+        pytest.skip(f"PostgreSQL test database is unavailable: {exc}")
 
-        if assistant_table is None:
-            pytest.skip("assistant table is unavailable; run Alembic migrations before this DB regression test")
+    if assistant_table is None:
+        pytest.skip("assistant table is unavailable; run Alembic migrations before this DB regression test")
 
-        prompt = _large_system_prompt()
-        config = {
-            "configurable": {
-                "system_prompt": prompt,
-                "request_id": str(uuid4()),
-            }
-        }
+    prompt = _large_system_prompt()
+    config = {"configurable": {"system_prompt": prompt, "request_id": str(uuid4())}}
 
+    engine = create_async_engine(settings.db.database_url)
+    try:
         Session = async_sessionmaker(engine, expire_on_commit=False)
         async with Session() as session:
             await session.execute(delete(AssistantORM).where(AssistantORM.assistant_id == _ASSISTANT_ID))

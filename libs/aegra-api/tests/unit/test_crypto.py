@@ -23,13 +23,9 @@ class TestCrypto:
         assert token != "sk-secret"
         assert crypto.decrypt(token) == "sk-secret"
 
-    def test_enabled_reflects_env(self, enc_key: str) -> None:
-        assert crypto.is_encryption_enabled() is True
-
     def test_disabled_without_key(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.delenv("AEGRA_SECRET_KEY", raising=False)
         crypto._fernet.cache_clear()
-        assert crypto.is_encryption_enabled() is False
         with pytest.raises(RuntimeError):
             crypto.encrypt("x")
         crypto._fernet.cache_clear()

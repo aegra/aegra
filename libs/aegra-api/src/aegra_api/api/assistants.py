@@ -59,14 +59,16 @@ async def create_assistant(
 
 @router.get("/assistants", response_model=AssistantList, response_model_by_alias=False)
 async def list_assistants(
+    user_id: str | None = Query(None, description="Filter by user_id (within the caller's authorization scope)"),
+    tenant_id: str | None = Query(None, description="Filter by tenant_id (within the caller's authorization scope)"),
     service: AssistantService = Depends(get_assistant_service),
 ):
-    """List all assistants owned by the authenticated user.
+    """List assistants visible to the caller, optionally narrowed by user_id / tenant_id.
 
-    Returns every assistant without filtering. Use the search endpoint for
-    filtered queries.
+    Filters narrow within the caller's authorization scope — they never widen
+    visibility. Use the search endpoint for name/metadata filters and paging.
     """
-    assistants = await service.list_assistants()
+    assistants = await service.list_assistants(user_id=user_id, tenant_id=tenant_id)
     return AssistantList(assistants=assistants, total=len(assistants))
 
 
@@ -266,11 +268,11 @@ async def list_assistant_shares(
     return await service.list_shares(assistant_id)
 
 
-@router.delete("/assistants/{assistant_id}/shares/{share_id}", responses={**NOT_FOUND})
+@router.delete("/assistants/{assistant_id}/shares/{grantee}", responses={**NOT_FOUND})
 async def delete_assistant_share(
     assistant_id: str,
-    share_id: str,
+    grantee: str,
     service: AssistantService = Depends(get_assistant_service),
 ):
-    """Delete a share record. Owner only."""
-    return await service.delete_share(assistant_id, share_id)
+    """Revoke a grant (grantee is "user:<id>", "tenant:<id>", or "public"). Owner only."""
+    return await service.delete_share(assistant_id, grantee)

@@ -107,6 +107,7 @@ async for chunk in client.runs.stream(
 - **[Streaming](https://docs.aegra.dev/guides/streaming)** - Real-time SSE streaming with cross-instance pub/sub and automatic reconnection with event replay. Supports both the legacy run-scoped stream and **Agent Protocol v2** thread-scoped streaming (content-block events, per-subgraph lifecycle, HITL resume) for the latest LangGraph SDKs and `useStream()`
 - **[Persistent state](https://docs.aegra.dev/guides/threads-and-state)** - PostgreSQL checkpoints via LangGraph
 - **[Configurable auth](https://docs.aegra.dev/guides/authentication)** - JWT, OAuth, Firebase, or none
+- **[Multi-tenant isolation](https://docs.aegra.dev/guides/authentication)** - Optional `tenant_id` scoping layered on `user_id`, enforced at the SQL layer
 - **[Unified Observability](https://docs.aegra.dev/guides/observability)** - Fan-out tracing support via OpenTelemetry
 - **[Semantic store](https://docs.aegra.dev/guides/semantic-store)** - Vector embeddings with pgvector
 - **[Custom routes](https://docs.aegra.dev/guides/custom-routes)** - Add your own FastAPI endpoints

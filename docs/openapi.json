@@ -3,7 +3,7 @@
   "info": {
     "title": "Aegra",
     "description": "Production-ready Agent Protocol server",
-    "version": "0.9.24"
+    "version": "0.10.0"
   },
   "paths": {
     "/info": {
@@ -1704,6 +1704,42 @@
               "title": "Status"
             },
             "description": "Filter by run status (e.g. pending, running, success, error, interrupted)"
+          },
+          {
+            "name": "user_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Filter by user_id (within the caller's authorization scope)",
+              "title": "User Id"
+            },
+            "description": "Filter by user_id (within the caller's authorization scope)"
+          },
+          {
+            "name": "tenant_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Filter by tenant_id (within the caller's authorization scope)",
+              "title": "Tenant Id"
+            },
+            "description": "Filter by tenant_id (within the caller's authorization scope)"
           }
         ],
         "responses": {
@@ -3554,6 +3590,30 @@
             "title": "Graph Id",
             "description": "Filter by graph ID"
           },
+          "user_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "User Id",
+            "description": "Filter by user_id (within the caller's authorization scope)"
+          },
+          "tenant_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Tenant Id",
+            "description": "Filter by tenant_id (within the caller's authorization scope)"
+          },
           "limit": {
             "anyOf": [
               {
@@ -3749,6 +3809,28 @@
               }
             ],
             "title": "Thread Id"
+          },
+          "user_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "User Id"
+          },
+          "tenant_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Tenant Id"
           }
         },
         "type": "object",
@@ -3862,6 +3944,46 @@
               }
             ],
             "title": "Webhook"
+          },
+          "webhook_headers": {
+            "anyOf": [
+              {
+                "additionalProperties": {
+                  "type": "string"
+                },
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Webhook Headers"
+          },
+          "webhook_body": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Webhook Body"
+          },
+          "webhook_query": {
+            "anyOf": [
+              {
+                "additionalProperties": {
+                  "type": "string"
+                },
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Webhook Query"
           },
           "on_run_completed": {
             "anyOf": [
@@ -4098,6 +4220,28 @@
             ],
             "title": "Thread Id"
           },
+          "user_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "User Id"
+          },
+          "tenant_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Tenant Id"
+          },
           "enabled": {
             "anyOf": [
               {
@@ -4234,6 +4378,46 @@
               }
             ],
             "title": "Webhook"
+          },
+          "webhook_headers": {
+            "anyOf": [
+              {
+                "additionalProperties": {
+                  "type": "string"
+                },
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Webhook Headers"
+          },
+          "webhook_body": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Webhook Body"
+          },
+          "webhook_query": {
+            "anyOf": [
+              {
+                "additionalProperties": {
+                  "type": "string"
+                },
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Webhook Query"
           },
           "interrupt_before": {
             "anyOf": [
@@ -5486,6 +5670,30 @@
             ],
             "title": "Metadata",
             "description": "Metadata filters"
+          },
+          "user_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "User Id",
+            "description": "Filter by user_id (within the caller's authorization scope)"
+          },
+          "tenant_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Tenant Id",
+            "description": "Filter by tenant_id (within the caller's authorization scope)"
           },
           "status": {
             "anyOf": [

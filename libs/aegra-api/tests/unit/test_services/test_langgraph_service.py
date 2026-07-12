@@ -1015,3 +1015,19 @@ class TestSetupDependencies:
             assert idx1 < idx2  # dep1 has higher priority (lower index)
         finally:
             sys.path = original_path
+
+
+class TestInjectUserContextAuthority:
+    """Identity keys are server-authoritative: client-preset values must be overwritten."""
+
+    def test_client_preset_identity_is_overwritten(self) -> None:
+        mock_user = Mock()
+        mock_user.user_id = "real-user"
+        mock_user.tenant_id = "real-tenant"
+        mock_user.display_name = "Real"
+        base = {"configurable": {"user_id": "forged", "tenant_id": "other-tenant"}}
+
+        result = inject_user_context(mock_user, base)
+
+        assert result["configurable"]["user_id"] == "real-user"
+        assert result["configurable"]["tenant_id"] == "real-tenant"

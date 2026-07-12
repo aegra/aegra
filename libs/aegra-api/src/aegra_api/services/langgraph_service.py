@@ -677,9 +677,8 @@ def inject_user_context(user: Any | None, base_config: dict[str, Any] | None = N
 
     # All user-related data injection (only if user exists)
     if user:
-        # Basic user identity for multi-tenant scoping
-        config["configurable"].setdefault("user_id", user.user_id)
-        config["configurable"].setdefault("tenant_id", getattr(user, "tenant_id", None))
+        config["configurable"]["user_id"] = user.user_id
+        config["configurable"]["tenant_id"] = getattr(user, "tenant_id", None)
         config["configurable"].setdefault("user_display_name", getattr(user, "display_name", None) or user.user_id)
 
         config["configurable"]["langgraph_auth_user"] = user

@@ -1,9 +1,25 @@
 """Thread-related Pydantic models for Agent Protocol"""
 
-from datetime import datetime
+from base64 import b64encode
+from collections import deque
+from datetime import datetime, timedelta, timezone
+from decimal import Decimal
+from ipaddress import (
+    IPv4Address,
+    IPv4Interface,
+    IPv4Network,
+    IPv6Address,
+    IPv6Interface,
+    IPv6Network,
+)
+from pathlib import Path
+from re import Pattern
 from typing import Any, Literal
+from uuid import UUID
+from zoneinfo import ZoneInfo
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+import orjson
+from pydantic import BaseModel, ConfigDict, Field, field_serializer, field_validator
 
 from aegra_api.utils.status_compat import validate_thread_status
 
@@ -118,8 +134,62 @@ class ThreadCheckpointPostRequest(BaseModel):
     subgraphs: bool | None = Field(False, description="Include subgraph states")
 
 
+_REFERENCE_OPTIONS = orjson.OPT_SERIALIZE_NUMPY | orjson.OPT_NON_STR_KEYS
+
+
+def _json_default(obj: Any) -> Any:
+    """Fallback encoder mirroring langgraph_api/serde.py default().
+
+    orjson handles dataclasses, NamedTuples, datetime, UUID, and enum
+    natively before this function is called. This covers the remaining
+    types the reference supports.
+    """
+    if hasattr(obj, "model_dump") and callable(obj.model_dump):
+        return obj.model_dump()
+    if hasattr(obj, "dict") and callable(obj.dict):
+        return obj.dict()
+    if hasattr(obj, "_asdict") and callable(obj._asdict):
+        return obj._asdict()
+    if isinstance(obj, BaseException):
+        return {"error": type(obj).__name__, "message": str(obj)}
+    if isinstance(obj, (set, frozenset, deque)):
+        return list(obj)
+    if isinstance(obj, (timezone, ZoneInfo)):
+        return obj.tzname(None)
+    if isinstance(obj, timedelta):
+        return obj.total_seconds()
+    if isinstance(obj, Decimal):
+        return int(obj) if obj.as_tuple().exponent >= 0 else float(obj)
+    if isinstance(obj, UUID):
+        return str(obj)
+    if isinstance(obj, (IPv4Address, IPv4Interface, IPv4Network, IPv6Address, IPv6Interface, IPv6Network, Path)):
+        return str(obj)
+    if isinstance(obj, Pattern):
+        return obj.pattern
+    if isinstance(obj, (bytes, bytearray)):
+        return b64encode(obj).decode("ascii")
+    return None
+
+
+def _to_jsonable(value: Any) -> Any:
+    """Convert arbitrary thread state to a JSON-compatible Python value.
+
+    Uses orjson with the reference default handler and option flags so the
+    wire output matches langgraph-api's serde for bytes, models, dataclasses,
+    NamedTuples, sets, and all other supported types. Returns a parsed Python
+    object (dict/list/str/etc.), not a JSON string.
+    """
+    return orjson.loads(orjson.dumps(value, default=_json_default, option=_REFERENCE_OPTIONS))
+
+
 class ThreadState(BaseModel):
-    """Thread state model for history endpoint"""
+    """Thread state model for history endpoint
+
+    Binary values (``bytes``/``bytearray``) and other non-JSON-native types
+    nested in arbitrary fields are encoded through orjson's default handler,
+    matching ``langgraph-api``'s wire convention. Python-mode access retains
+    raw values.
+    """
 
     values: dict[str, Any] = Field(description="Channel values (messages, etc.)")
     next: list[str] = Field(default_factory=list, description="Next nodes to execute")
@@ -131,6 +201,11 @@ class ThreadState(BaseModel):
     parent_checkpoint: ThreadCheckpoint | None = Field(None, description="Parent checkpoint")
     checkpoint_id: str | None = Field(None, description="Checkpoint ID (for backward compatibility)")
     parent_checkpoint_id: str | None = Field(None, description="Parent checkpoint ID (for backward compatibility)")
+
+    @field_serializer("values", "tasks", "interrupts", "metadata", when_used="json")
+    @classmethod
+    def _serialize_arbitrary_fields(cls, value: Any) -> Any:
+        return _to_jsonable(value)
 
 
 class ThreadStateUpdate(BaseModel):

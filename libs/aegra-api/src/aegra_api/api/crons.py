@@ -19,6 +19,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from aegra_api.core.auth_deps import auth_dependency, get_current_user
 from aegra_api.core.auth_handlers import build_auth_context, handle_event
+from aegra_api.core.authz import owns
 from aegra_api.core.orm import Cron as CronORM
 from aegra_api.core.orm import Thread as ThreadORM
 from aegra_api.core.orm import get_session
@@ -127,7 +128,7 @@ async def create_cron_for_thread(
     # existing thread, so a missing row is also a 404 — otherwise _prepare_run
     # would silently create a thread the user never intended to bind to.
     existing_thread = await session.scalar(select(ThreadORM).where(ThreadORM.thread_id == thread_id))
-    if existing_thread is None or existing_thread.user_id != user.identity:
+    if existing_thread is None or not owns(existing_thread, user):
         raise HTTPException(404, f"Thread '{thread_id}' not found")
 
     await _authorize_cron_create(user, request, thread_id=thread_id)
@@ -155,7 +156,7 @@ async def update_cron(
     value = {"cron_id": cron_id, **request.model_dump(exclude_none=True)}
     await handle_event(ctx, value)
 
-    return await service.update_cron(cron_id, request, user.identity)
+    return await service.update_cron(cron_id, request, user.identity, user.tenant_id)
 
 
 # ---------------------------------------------------------------------------
@@ -174,7 +175,7 @@ async def delete_cron(
     value = {"cron_id": cron_id}
     await handle_event(ctx, value)
 
-    await service.delete_cron(cron_id, user.identity)
+    await service.delete_cron(cron_id, user.identity, user.tenant_id)
     return Response(status_code=204)
 
 
@@ -194,7 +195,7 @@ async def search_crons(
     value = request.model_dump(exclude_none=True)
     await handle_event(ctx, value)
 
-    return await service.search_crons(request, user.identity)
+    return await service.search_crons(request, user.identity, user.tenant_id)
 
 
 # ---------------------------------------------------------------------------
@@ -213,7 +214,7 @@ async def count_crons(
     value = request.model_dump(exclude_none=True)
     await handle_event(ctx, value)
 
-    return await service.count_crons(request, user.identity)
+    return await service.count_crons(request, user.identity, user.tenant_id)
 
 
 # ---------------------------------------------------------------------------
@@ -236,7 +237,7 @@ async def _create_cron_atomic(
     When ``request.enabled`` is False the first run is suppressed entirely
     and the persisted ``Cron`` is returned instead of a ``Run``.
     """
-    cron = await service.create_cron(request, user.identity, thread_id=thread_id)
+    cron = await service.create_cron(request, user.identity, user.tenant_id, thread_id=thread_id)
 
     if request.enabled is False:
         return _cron_to_response(cron)
@@ -245,7 +246,7 @@ async def _create_cron_atomic(
         return await _trigger_first_run(session, cron, user, thread_id=thread_id)
     except Exception:
         try:
-            await service.delete_cron(cron.cron_id, user.identity)
+            await service.delete_cron(cron.cron_id, user.identity, user.tenant_id)
         except Exception:
             logger.exception(
                 "Failed to roll back cron after first-run setup error",

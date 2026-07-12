@@ -32,7 +32,12 @@ async def call_model(state: State, runtime: Runtime[Context]) -> dict[str, list[
         dict: A dictionary containing the model's response message.
     """
     # Initialize the model with tool binding. Change the model or add more tools here.
-    model = load_chat_model(runtime.context.model).bind_tools(TOOLS)
+    # model / base_url / api_key 可由 assistant 的 context 自定义,回退到 OPENAI_* 环境变量。
+    model = load_chat_model(
+        runtime.context.model,
+        base_url=runtime.context.base_url,
+        api_key=runtime.context.api_key,
+    ).bind_tools(TOOLS)
 
     # Format the system prompt. Customize this to change the agent's behavior.
     system_message = runtime.context.system_prompt.format(system_time=datetime.now(tz=UTC).isoformat())

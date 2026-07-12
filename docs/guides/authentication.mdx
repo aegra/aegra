@@ -60,7 +60,9 @@ The `@auth.authenticate` decorator registers your authentication function. It re
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `identity` | `string` | Unique user identifier |
+| `user_id` | `string` | 用户唯一标识(旧名 `identity`,仍兼容) |
+
+> 返回 `user_id` 或 `identity` 均可:`user_id` 是对外一等名称,`identity` 保留以兼容 LangGraph SDK 的 `BaseUser` 协议。`user.user_id` 与 `user.identity` 等价。
 
 ### Optional fields
 
@@ -69,8 +71,28 @@ The `@auth.authenticate` decorator registers your authentication function. It re
 | `display_name` | `string` | Same as `identity` | Display name |
 | `permissions` | `list[str]` | `[]` | Permission strings |
 | `is_authenticated` | `bool` | `True` | Authentication status |
+| `tenant_id` | `string \| None` | `None` | 多租户隔离标识(见下) |
 
 Any additional fields you return (like `role`, `team_id`, etc.) are preserved and accessible via `ctx.user` in authorization handlers and via the `User` model in custom routes.
+
+### 多租户隔离(tenant_id)
+
+返回 `tenant_id` 即可为所有资源(assistants、threads、runs、crons、store)启用租户级隔离,叠加在 `user_id` 之上:
+
+- **返回 `tenant_id` 时**:资源访问要求 `user_id` 与 `tenant_id` 同时匹配。`tenant` 是硬隔离边界——即使 `identity` 相同,不同 `tenant` 的数据也互相隔离。
+- **不返回(为 `None`)时**:退回纯 `user_id` 隔离,行为与之前完全一致。
+
+`tenant_id` 只能由 `@auth.authenticate` 返回(服务端权威),客户端无法通过请求伪造或篡改;资源在创建时记录其 `tenant_id` 且不可更改。
+
+```python
+@auth.authenticate
+async def authenticate(headers: dict) -> dict:
+    claims = verify_jwt(headers.get("Authorization", ""))
+    return {
+        "identity": claims["sub"],
+        "tenant_id": claims.get("org_id"),  # 无则退回纯 user_id 隔离
+    }
+```
 
 ### Denying access
 

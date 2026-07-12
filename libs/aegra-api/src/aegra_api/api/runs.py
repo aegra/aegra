@@ -17,6 +17,7 @@ from sse_starlette import EventSourceResponse
 from aegra_api.core.active_runs import active_runs
 from aegra_api.core.auth_deps import auth_dependency, get_current_user
 from aegra_api.core.auth_handlers import build_auth_context, handle_event
+from aegra_api.core.authz import owner_filter, owns
 from aegra_api.core.orm import Run as RunORM
 from aegra_api.core.orm import Thread as ThreadORM
 from aegra_api.core.orm import _get_session_maker, get_session
@@ -56,7 +57,7 @@ async def create_run(
     human-in-the-loop resumption) but not both.
     """
     existing_thread = await session.scalar(select(ThreadORM).where(ThreadORM.thread_id == thread_id))
-    if existing_thread and existing_thread.user_id != user.identity:
+    if existing_thread and not owns(existing_thread, user):
         raise HTTPException(404, f"Thread '{thread_id}' not found")
 
     # Authorization check (create_run action on threads resource)
@@ -107,7 +108,7 @@ async def create_and_stream_run(
     maker = _get_session_maker()
     async with maker() as session:
         existing_thread = await session.scalar(select(ThreadORM).where(ThreadORM.thread_id == thread_id))
-        if existing_thread and existing_thread.user_id != user.identity:
+        if existing_thread and not owns(existing_thread, user):
             raise HTTPException(404, f"Thread '{thread_id}' not found")
 
         run_id, run, _job = await _prepare_run(session, thread_id, request, user, initial_status="pending")
@@ -160,7 +161,7 @@ async def get_run(
     stmt = select(RunORM).where(
         RunORM.run_id == str(run_id),
         RunORM.thread_id == thread_id,
-        RunORM.user_id == user.identity,
+        owner_filter(RunORM, user),
     )
     logger.info(f"[get_run] querying DB run_id={run_id} thread_id={thread_id} user={user.identity}")
     run_orm = await session.scalar(stmt)
@@ -185,6 +186,8 @@ async def list_runs(
     status: str | None = Query(
         None, description="Filter by run status (e.g. pending, running, success, error, interrupted)"
     ),
+    user_id: str | None = Query(None, description="Filter by user_id (within the caller's authorization scope)"),
+    tenant_id: str | None = Query(None, description="Filter by tenant_id (within the caller's authorization scope)"),
     user: User = Depends(get_current_user),
     session: AsyncSession = Depends(get_session),
 ) -> list[Run]:
@@ -197,8 +200,10 @@ async def list_runs(
         select(RunORM)
         .where(
             RunORM.thread_id == thread_id,
-            RunORM.user_id == user.identity,
+            owner_filter(RunORM, user),
             *([RunORM.status == status] if status else []),
+            *([RunORM.user_id == user_id] if user_id else []),
+            *([RunORM.tenant_id == tenant_id] if tenant_id else []),
         )
         .limit(limit)
         .offset(offset)
@@ -230,7 +235,7 @@ async def update_run(
         select(RunORM).where(
             RunORM.run_id == str(run_id),
             RunORM.thread_id == thread_id,
-            RunORM.user_id == user.identity,
+            owner_filter(RunORM, user),
         )
     )
     if not run_orm:
@@ -290,7 +295,7 @@ async def join_run(
             select(RunORM).where(
                 RunORM.run_id == str(run_id),
                 RunORM.thread_id == thread_id,
-                RunORM.user_id == user.identity,
+                owner_filter(RunORM, user),
             )
         )
         if not run_orm:
@@ -338,7 +343,7 @@ async def wait_for_run(
     # Session block: all pre-execution DB work (validate, create run, submit)
     async with maker() as session:
         existing_thread = await session.scalar(select(ThreadORM).where(ThreadORM.thread_id == thread_id))
-        if existing_thread and existing_thread.user_id != user.identity:
+        if existing_thread and not owns(existing_thread, user):
             raise HTTPException(404, f"Thread '{thread_id}' not found")
 
         run_id, _run, _job = await _prepare_run(session, thread_id, request, user, initial_status="pending")
@@ -384,7 +389,7 @@ async def stream_run(
             select(RunORM).where(
                 RunORM.run_id == str(run_id),
                 RunORM.thread_id == thread_id,
-                RunORM.user_id == user.identity,
+                owner_filter(RunORM, user),
             )
         )
         if not run_orm:
@@ -456,7 +461,7 @@ async def cancel_run_endpoint(
         select(RunORM).where(
             RunORM.run_id == run_id,
             RunORM.thread_id == thread_id,
-            RunORM.user_id == user.identity,
+            owner_filter(RunORM, user),
         )
     )
     if not run_orm:
@@ -500,7 +505,7 @@ async def cancel_run_endpoint(
         select(RunORM).where(
             RunORM.run_id == run_id,
             RunORM.thread_id == thread_id,
-            RunORM.user_id == user.identity,
+            owner_filter(RunORM, user),
         )
     )
     if not run_orm:
@@ -535,7 +540,7 @@ async def delete_run(
         select(RunORM).where(
             RunORM.run_id == str(run_id),
             RunORM.thread_id == thread_id,
-            RunORM.user_id == user.identity,
+            owner_filter(RunORM, user),
         )
     )
     if not run_orm:
@@ -563,7 +568,7 @@ async def delete_run(
         delete(RunORM).where(
             RunORM.run_id == str(run_id),
             RunORM.thread_id == thread_id,
-            RunORM.user_id == user.identity,
+            owner_filter(RunORM, user),
         )
     )
     await session.commit()

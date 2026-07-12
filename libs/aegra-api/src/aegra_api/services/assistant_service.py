@@ -27,6 +27,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from aegra_api.core.auth_deps import get_current_user
 from aegra_api.core.auth_filters import build_metadata_filter
+from aegra_api.core.authz import owner_filter
 from aegra_api.core.orm import Assistant as AssistantORM
 from aegra_api.core.orm import AssistantVersion as AssistantVersionORM
 from aegra_api.core.orm import get_session
@@ -34,6 +35,7 @@ from aegra_api.models import Assistant, AssistantCreate, AssistantUpdate
 from aegra_api.models.auth import User
 from aegra_api.services.authenticated import Authenticated
 from aegra_api.services.langgraph_service import LangGraphService, get_langgraph_service
+from aegra_api.utils.redaction import redact_secrets
 
 
 def to_pydantic(row: AssistantORM) -> Assistant:
@@ -53,7 +55,12 @@ def to_pydantic(row: AssistantORM) -> Assistant:
         row.user_id = str(row.user_id)
 
     # Use Pydantic's built-in ORM conversion with from_attributes=True
-    return Assistant.model_validate(row, from_attributes=True)
+    assistant = Assistant.model_validate(row, from_attributes=True)
+    # 脱敏回传:config/context 可能含 api_key 等密钥(如自定义 OpenAI 端点)。
+    # 只脱敏响应副本,不改 DB——graph 执行经 run_preparation 直读原始值。
+    assistant.config = redact_secrets(assistant.config)
+    assistant.context = redact_secrets(assistant.context)
+    return assistant
 
 
 def _state_jsonschema(graph) -> dict | None:
@@ -202,7 +209,7 @@ class AssistantService(Authenticated):
 
         # Check if an assistant already exists for this user, graph and config pair
         existing_stmt = select(AssistantORM).where(
-            AssistantORM.user_id == self.user.identity,
+            owner_filter(AssistantORM, self.user),
             or_(
                 (AssistantORM.graph_id == graph_id) & (AssistantORM.config == config),
                 AssistantORM.assistant_id == assistant_id,
@@ -225,6 +232,7 @@ class AssistantService(Authenticated):
             context=context,
             graph_id=graph_id,
             user_id=self.user.identity,
+            tenant_id=self.user.tenant_id,
             metadata_dict=request.metadata,
             version=1,
         )
@@ -261,7 +269,7 @@ class AssistantService(Authenticated):
         filters = await self._dispatch("search", value)
 
         stmt = select(AssistantORM).where(
-            or_(AssistantORM.user_id == self.user.identity, AssistantORM.user_id == "system")
+            owner_filter(AssistantORM, self.user, allow_system=True)
         )
         auth_filter = build_metadata_filter(AssistantORM.metadata_dict, filters)
         if auth_filter is not None:
@@ -281,7 +289,7 @@ class AssistantService(Authenticated):
         filters = await self._dispatch("search", value)
 
         stmt = select(AssistantORM).where(
-            or_(AssistantORM.user_id == self.user.identity, AssistantORM.user_id == "system")
+            owner_filter(AssistantORM, self.user, allow_system=True)
         )
 
         if request.name:
@@ -292,6 +300,12 @@ class AssistantService(Authenticated):
 
         if request.graph_id:
             stmt = stmt.where(AssistantORM.graph_id == request.graph_id)
+
+        if request.user_id:
+            stmt = stmt.where(AssistantORM.user_id == request.user_id)
+
+        if request.tenant_id:
+            stmt = stmt.where(AssistantORM.tenant_id == request.tenant_id)
 
         if request.metadata:
             stmt = stmt.where(AssistantORM.metadata_dict.op("@>")(request.metadata))
@@ -320,7 +334,7 @@ class AssistantService(Authenticated):
 
         # Include both user's assistants and system assistants (like search_assistants does)
         stmt = select(func.count()).where(
-            or_(AssistantORM.user_id == self.user.identity, AssistantORM.user_id == "system")
+            owner_filter(AssistantORM, self.user, allow_system=True)
         )
 
         if request.name:
@@ -331,6 +345,12 @@ class AssistantService(Authenticated):
 
         if request.graph_id:
             stmt = stmt.where(AssistantORM.graph_id == request.graph_id)
+
+        if request.user_id:
+            stmt = stmt.where(AssistantORM.user_id == request.user_id)
+
+        if request.tenant_id:
+            stmt = stmt.where(AssistantORM.tenant_id == request.tenant_id)
 
         if request.metadata:
             stmt = stmt.where(AssistantORM.metadata_dict.op("@>")(request.metadata))
@@ -353,7 +373,7 @@ class AssistantService(Authenticated):
 
         stmt = select(AssistantORM).where(
             AssistantORM.assistant_id == assistant_id,
-            or_(AssistantORM.user_id == self.user.identity, AssistantORM.user_id == "system"),
+            owner_filter(AssistantORM, self.user, allow_system=True),
         )
         auth_filter = build_metadata_filter(AssistantORM.metadata_dict, filters)
         if auth_filter is not None:
@@ -392,7 +412,7 @@ class AssistantService(Authenticated):
 
         stmt = select(AssistantORM).where(
             AssistantORM.assistant_id == assistant_id,
-            AssistantORM.user_id == self.user.identity,
+            owner_filter(AssistantORM, self.user),
         )
         auth_filter = build_metadata_filter(AssistantORM.metadata_dict, filters)
         if auth_filter is not None:
@@ -428,7 +448,7 @@ class AssistantService(Authenticated):
             update(AssistantORM)
             .where(
                 AssistantORM.assistant_id == assistant_id,
-                AssistantORM.user_id == self.user.identity,
+                owner_filter(AssistantORM, self.user),
             )
             .values(
                 name=new_version_details["name"],
@@ -452,7 +472,7 @@ class AssistantService(Authenticated):
 
         stmt = select(AssistantORM).where(
             AssistantORM.assistant_id == assistant_id,
-            AssistantORM.user_id == self.user.identity,
+            owner_filter(AssistantORM, self.user),
         )
         auth_filter = build_metadata_filter(AssistantORM.metadata_dict, filters)
         if auth_filter is not None:
@@ -473,7 +493,7 @@ class AssistantService(Authenticated):
 
         stmt = select(AssistantORM).where(
             AssistantORM.assistant_id == assistant_id,
-            AssistantORM.user_id == self.user.identity,
+            owner_filter(AssistantORM, self.user),
         )
         auth_filter = build_metadata_filter(AssistantORM.metadata_dict, filters)
         if auth_filter is not None:
@@ -494,7 +514,7 @@ class AssistantService(Authenticated):
             update(AssistantORM)
             .where(
                 AssistantORM.assistant_id == assistant_id,
-                AssistantORM.user_id == self.user.identity,
+                owner_filter(AssistantORM, self.user),
             )
             .values(
                 name=assistant_version.name,
@@ -520,7 +540,7 @@ class AssistantService(Authenticated):
 
         stmt = select(AssistantORM).where(
             AssistantORM.assistant_id == assistant_id,
-            or_(AssistantORM.user_id == self.user.identity, AssistantORM.user_id == "system"),
+            owner_filter(AssistantORM, self.user, allow_system=True),
         )
         auth_filter = build_metadata_filter(AssistantORM.metadata_dict, filters)
         if auth_filter is not None:

@@ -21,6 +21,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sse_starlette import EventSourceResponse
 
 from aegra_api.core.auth_deps import auth_dependency, get_current_user
+from aegra_api.core.authz import owner_filter, owns
 from aegra_api.core.orm import Assistant as AssistantORM
 from aegra_api.core.orm import Run as RunORM
 from aegra_api.core.orm import Thread as ThreadORM
@@ -44,8 +45,8 @@ async def _verify_thread_owned_or_new(session: AsyncSession, thread_id: str, use
     create it (run preparation does, owned by the caller). So a missing
     thread is fine here; an existing thread owned by another user is 404.
     """
-    existing_owner = await session.scalar(select(ThreadORM.user_id).where(ThreadORM.thread_id == thread_id))
-    if existing_owner is not None and existing_owner != user.identity:
+    existing = await session.scalar(select(ThreadORM).where(ThreadORM.thread_id == thread_id))
+    if existing is not None and not owns(existing, user):
         raise HTTPException(404, f"Thread '{thread_id}' not found")
 
 
@@ -65,7 +66,7 @@ def _thread_run_lister(thread_id: str, user: User) -> RunLister:
             rows = await session.execute(
                 select(RunORM.run_id, RunORM.status, AssistantORM.graph_id)
                 .outerjoin(AssistantORM, RunORM.assistant_id == AssistantORM.assistant_id)
-                .where(RunORM.thread_id == thread_id, RunORM.user_id == user.identity)
+                .where(RunORM.thread_id == thread_id, owner_filter(RunORM, user))
                 .order_by(RunORM.created_at.asc())
             )
             return [(run_id, status, graph_id) for run_id, status, graph_id in rows.all()]

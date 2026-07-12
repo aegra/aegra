@@ -190,6 +190,7 @@ class CronScheduler:
             identity=cron.user_id,
             display_name="cron-scheduler",
             is_authenticated=True,
+            tenant_id=cron.tenant_id,
         )
 
         try:

@@ -54,6 +54,9 @@ class CronCreate(BaseModel):
     interrupt_before: Literal["*"] | list[str] | None = None
     interrupt_after: Literal["*"] | list[str] | None = None
     webhook: str | None = Field(None, max_length=_WEBHOOK_MAX_LEN)
+    webhook_headers: dict[str, str] | None = None
+    webhook_body: dict[str, Any] | None = None
+    webhook_query: dict[str, str] | None = None
     on_run_completed: OnRunCompleted | None = None
     multitask_strategy: str | None = Field(None, max_length=_STR_FIELD_MAX_LEN)
     end_time: datetime | None = None
@@ -109,6 +112,9 @@ class CronUpdate(BaseModel):
     config: dict[str, Any] | None = None
     context: dict[str, Any] | None = None
     webhook: str | None = Field(None, max_length=_WEBHOOK_MAX_LEN)
+    webhook_headers: dict[str, str] | None = None
+    webhook_body: dict[str, Any] | None = None
+    webhook_query: dict[str, str] | None = None
     interrupt_before: Literal["*"] | list[str] | None = None
     interrupt_after: Literal["*"] | list[str] | None = None
     on_run_completed: OnRunCompleted | None = None
@@ -139,6 +145,8 @@ class CronSearchRequest(BaseModel):
 
     assistant_id: str | None = None
     thread_id: str | None = None
+    user_id: str | None = None
+    tenant_id: str | None = None
     enabled: bool | None = None
     limit: int = Field(10, ge=1, le=1000)
     offset: int = Field(0, ge=0)
@@ -151,3 +159,5 @@ class CronCountRequest(BaseModel):
 
     assistant_id: str | None = None
     thread_id: str | None = None
+    user_id: str | None = None
+    tenant_id: str | None = None

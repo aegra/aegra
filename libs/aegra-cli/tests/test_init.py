@@ -332,7 +332,7 @@ class TestInitCLIFlags:
         result = cli_runner.invoke(cli, ["init", str(project_dir), "-t", "1", "-n", "My Agent"])
         assert result.exit_code == 0
 
-        config = json.loads((project_dir / "aegra.json").read_text())
+        config = json.loads((project_dir / "aegra.json").read_text(encoding="utf-8"))
         assert config["name"] == "My Agent"
         assert "my_agent" in config["graphs"]
 
@@ -349,7 +349,7 @@ class TestInitCLIFlags:
         assert (project_dir / f"src/{slug}/graph.py").exists()
 
         # tools.py should contain tool definitions
-        tools_content = (project_dir / f"src/{slug}/tools.py").read_text()
+        tools_content = (project_dir / f"src/{slug}/tools.py").read_text(encoding="utf-8")
         assert "TOOLS" in tools_content
         assert "@tool" in tools_content
 
@@ -359,7 +359,7 @@ class TestInitCLIFlags:
         result = cli_runner.invoke(cli, ["init", str(project_dir), "-t", "1"])
         assert result.exit_code == 0
 
-        config = json.loads((project_dir / "aegra.json").read_text())
+        config = json.loads((project_dir / "aegra.json").read_text(encoding="utf-8"))
         assert config["name"] == "my-cool-agent"
 
     def test_invalid_template_number(
@@ -386,7 +386,7 @@ class TestInitFileContents:
         result = cli_runner.invoke(cli, ["init", str(project_dir), "-t", "1"])
         assert result.exit_code == 0
 
-        config = json.loads((project_dir / "aegra.json").read_text())
+        config = json.loads((project_dir / "aegra.json").read_text(encoding="utf-8"))
         assert "dependencies" in config
         assert "./src" in config["dependencies"]
 
@@ -397,7 +397,7 @@ class TestInitFileContents:
         result = cli_runner.invoke(cli, ["init", str(project_dir), "-t", "1"])
         assert result.exit_code == 0
 
-        config = json.loads((project_dir / "aegra.json").read_text())
+        config = json.loads((project_dir / "aegra.json").read_text(encoding="utf-8"))
         slug = slugify("test-graph")
         assert config["graphs"][slug] == f"./src/{slug}/graph.py:graph"
 
@@ -408,7 +408,7 @@ class TestInitFileContents:
         result = cli_runner.invoke(cli, ["init", str(project_dir), "-t", "1"])
         assert result.exit_code == 0
 
-        content = (project_dir / "pyproject.toml").read_text()
+        content = (project_dir / "pyproject.toml").read_text(encoding="utf-8")
         assert "aegra-cli" in content
         assert "langgraph" in content
         assert "langchain-openai" in content
@@ -423,7 +423,7 @@ class TestInitFileContents:
         assert result.exit_code == 0
 
         slug = slugify("test-graph-imports")
-        content = (project_dir / f"src/{slug}/graph.py").read_text()
+        content = (project_dir / f"src/{slug}/graph.py").read_text(encoding="utf-8")
         assert "from langgraph.graph import" in content
         assert "StateGraph" in content
 
@@ -435,7 +435,7 @@ class TestInitFileContents:
         assert result.exit_code == 0
 
         slug = slugify("test-state-ctx")
-        content = (project_dir / f"src/{slug}/graph.py").read_text()
+        content = (project_dir / f"src/{slug}/graph.py").read_text(encoding="utf-8")
         assert f"from {slug}.context import Context" in content
         assert f"from {slug}.state import InputState, State" in content
         assert f"from {slug}.utils import load_chat_model" in content
@@ -448,7 +448,7 @@ class TestInitFileContents:
         assert result.exit_code == 0
 
         slug = slugify("test-graph-var")
-        content = (project_dir / f"src/{slug}/graph.py").read_text()
+        content = (project_dir / f"src/{slug}/graph.py").read_text(encoding="utf-8")
         assert "graph =" in content or "graph:" in content
 
     def test_env_example_has_required_vars(
@@ -458,7 +458,7 @@ class TestInitFileContents:
         result = cli_runner.invoke(cli, ["init", str(project_dir), "-t", "1"])
         assert result.exit_code == 0
 
-        content = (project_dir / ".env.example").read_text()
+        content = (project_dir / ".env.example").read_text(encoding="utf-8")
         for var in ["POSTGRES_USER", "POSTGRES_PASSWORD", "AUTH_TYPE", "OPENAI_API_KEY"]:
             assert var in content
 
@@ -469,7 +469,7 @@ class TestInitFileContents:
         result = cli_runner.invoke(cli, ["init", str(project_dir), "-t", "1", "-n", "My App"])
         assert result.exit_code == 0
 
-        content = (project_dir / ".env.example").read_text()
+        content = (project_dir / ".env.example").read_text(encoding="utf-8")
         assert "my_app" in content
 
     def test_gitignore_has_standard_entries(
@@ -479,7 +479,7 @@ class TestInitFileContents:
         result = cli_runner.invoke(cli, ["init", str(project_dir), "-t", "1"])
         assert result.exit_code == 0
 
-        content = (project_dir / ".gitignore").read_text()
+        content = (project_dir / ".gitignore").read_text(encoding="utf-8")
         assert "__pycache__" in content
         assert ".env" in content
         assert ".venv" in content
@@ -491,7 +491,7 @@ class TestInitFileContents:
         result = cli_runner.invoke(cli, ["init", str(project_dir), "-t", "1", "-n", "Cool Agent"])
         assert result.exit_code == 0
 
-        content = (project_dir / "README.md").read_text()
+        content = (project_dir / "README.md").read_text(encoding="utf-8")
         assert "Cool Agent" in content
 
     def test_docker_compose_has_both_services(
@@ -501,7 +501,7 @@ class TestInitFileContents:
         result = cli_runner.invoke(cli, ["init", str(project_dir), "-t", "1"])
         assert result.exit_code == 0
 
-        content = (project_dir / "docker-compose.yml").read_text()
+        content = (project_dir / "docker-compose.yml").read_text(encoding="utf-8")
         assert "postgres:" in content
         assert "build:" in content
         slug = slugify("test-compose")
@@ -514,7 +514,7 @@ class TestInitFileContents:
         result = cli_runner.invoke(cli, ["init", str(project_dir), "-t", "1"])
         assert result.exit_code == 0
 
-        content = (project_dir / "docker-compose.yml").read_text()
+        content = (project_dir / "docker-compose.yml").read_text(encoding="utf-8")
         assert "curl -sf http://localhost:${PORT:-2026}/health || exit 1" in content
 
     def test_no_prod_compose_generated(
@@ -532,7 +532,7 @@ class TestInitFileContents:
         result = cli_runner.invoke(cli, ["init", str(project_dir), "-t", "1"])
         assert result.exit_code == 0
 
-        content = (project_dir / "Dockerfile").read_text()
+        content = (project_dir / "Dockerfile").read_text(encoding="utf-8")
         assert "COPY pyproject.toml" in content
         assert "COPY src/" in content
         assert "uv sync" in content
@@ -545,7 +545,7 @@ class TestInitFileContents:
         assert result.exit_code == 0
 
         slug = slugify("test-state")
-        content = (project_dir / f"src/{slug}/state.py").read_text()
+        content = (project_dir / f"src/{slug}/state.py").read_text(encoding="utf-8")
         assert "class InputState" in content
         assert "class State(InputState)" in content
         assert "is_last_step" in content
@@ -558,7 +558,7 @@ class TestInitFileContents:
         assert result.exit_code == 0
 
         slug = slugify("test-context")
-        content = (project_dir / f"src/{slug}/context.py").read_text()
+        content = (project_dir / f"src/{slug}/context.py").read_text(encoding="utf-8")
         assert "class Context" in content
         assert "system_prompt" in content
         assert "model" in content
@@ -572,7 +572,7 @@ class TestInitFileContents:
         assert result.exit_code == 0
 
         slug = slugify("test-utils")
-        content = (project_dir / f"src/{slug}/utils.py").read_text()
+        content = (project_dir / f"src/{slug}/utils.py").read_text(encoding="utf-8")
         assert "def load_chat_model" in content
         assert "init_chat_model" in content
 
@@ -584,7 +584,7 @@ class TestInitFileContents:
         assert result.exit_code == 0
 
         slug = slugify("test-prompts")
-        content = (project_dir / f"src/{slug}/prompts.py").read_text()
+        content = (project_dir / f"src/{slug}/prompts.py").read_text(encoding="utf-8")
         assert "SYSTEM_PROMPT" in content
         assert "system_time" in content
 
@@ -607,7 +607,7 @@ class TestInitEdgeCases:
         result = cli_runner.invoke(cli, ["init", str(project_dir), "-t", "1", "--force"])
         assert result.exit_code == 0
 
-        config = json.loads((project_dir / "aegra.json").read_text())
+        config = json.loads((project_dir / "aegra.json").read_text(encoding="utf-8"))
         assert "graphs" in config
         assert "old" not in config
 
@@ -622,7 +622,7 @@ class TestInitEdgeCases:
         assert result.exit_code == 0
         assert "SKIP" in result.output
 
-        config = json.loads((project_dir / "aegra.json").read_text())
+        config = json.loads((project_dir / "aegra.json").read_text(encoding="utf-8"))
         assert config == {"old": True}
 
     def test_creates_nested_directories(
@@ -642,7 +642,7 @@ class TestInitEdgeCases:
 
         result = cli_runner.invoke(cli, ["init", str(project_dir), "-t", "1"])
         assert result.exit_code == 0
-        assert (project_dir / "existing.txt").read_text() == "keep me"
+        assert (project_dir / "existing.txt").read_text(encoding="utf-8") == "keep me"
         assert (project_dir / "aegra.json").exists()
 
     def test_double_init_without_force_skips(
@@ -691,7 +691,7 @@ class TestInitEdgeCases:
         assert result.exit_code == 0
 
         slug = slugify("react-import")
-        content = (project_dir / f"src/{slug}/graph.py").read_text()
+        content = (project_dir / f"src/{slug}/graph.py").read_text(encoding="utf-8")
         assert f"from {slug}.tools import TOOLS" in content
 
     def test_init_current_dir_with_template_flag(
@@ -711,7 +711,7 @@ class TestInitEdgeCases:
         assert result.exit_code == 0
 
         slug = slugify("Super Bot")
-        content = (project_dir / f"src/{slug}/graph.py").read_text()
+        content = (project_dir / f"src/{slug}/graph.py").read_text(encoding="utf-8")
         assert "Super Bot" in content
 
     def test_react_shared_files_created(
@@ -739,7 +739,7 @@ class TestInitEdgeCases:
         assert result.exit_code == 0
 
         slug = slugify("react-route")
-        content = (project_dir / f"src/{slug}/graph.py").read_text()
+        content = (project_dir / f"src/{slug}/graph.py").read_text(encoding="utf-8")
         assert "route_model_output" in content
         assert "is_last_step" in content
 
@@ -752,5 +752,5 @@ class TestInitEdgeCases:
         assert result.exit_code == 0
 
         slug = slugify("ctx-import")
-        content = (project_dir / f"src/{slug}/context.py").read_text()
+        content = (project_dir / f"src/{slug}/context.py").read_text(encoding="utf-8")
         assert f"from {slug} import prompts" in content

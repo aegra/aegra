@@ -45,6 +45,11 @@ class LangGraphUser(BaseUser):
         return self._user_data["identity"]
 
     @property
+    def user_id(self) -> str:
+        """`identity` 的对外一等别名;identity 保留以兼容 LangGraph BaseUser 协议。"""
+        return self.identity
+
+    @property
     def is_authenticated(self) -> bool:
         return self._user_data.get("is_authenticated", True)
 
@@ -262,8 +267,12 @@ class LangGraphAuthBackend(AuthenticationBackend):
             if not user_data or not isinstance(user_data, dict):
                 raise AuthenticationError("Invalid user data returned from auth handler")
 
+            # 接受 user_id 作为 identity 的别名;identity 保留以兼容 LangGraph 协议。
+            if "identity" not in user_data and "user_id" in user_data:
+                user_data["identity"] = user_data["user_id"]
+
             if "identity" not in user_data:
-                raise AuthenticationError("Auth handler must return 'identity' field")
+                raise AuthenticationError("Auth handler must return 'user_id' (or 'identity') field")
 
             # Extract permissions for credentials
             permissions = user_data.get("permissions", [])

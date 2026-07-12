@@ -157,7 +157,12 @@ crons = await client.crons.search(thread_id="<thread_id>")
 
 # Count matching crons
 total = await client.crons.count(assistant_id="agent")
+
+# 按租户 / 用户过滤(在调用者授权边界内生效)
+crons = await client.crons.search(tenant_id="acme", user_id="alice")
 ```
+
+搜索 / 计数支持 `assistant_id`、`thread_id`、`enabled`、`user_id`、`tenant_id` 过滤。`user_id` / `tenant_id` 叠加在调用者的隔离边界之上——只能在你有权访问的范围内收窄,无法越权。threads / runs / assistants 的列表与搜索接口同样新增了 `user_id` / `tenant_id` 过滤。
 
 ## Updating a cron
 

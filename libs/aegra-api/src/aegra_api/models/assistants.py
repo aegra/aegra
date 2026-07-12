@@ -75,6 +75,8 @@ class AssistantSearchRequest(BaseModel):
     name: str | None = Field(None, description="Filter by assistant name")
     description: str | None = Field(None, description="Filter by assistant description")
     graph_id: str | None = Field(None, description="Filter by graph ID")
+    user_id: str | None = Field(None, description="Filter by user_id (within the caller's authorization scope)")
+    tenant_id: str | None = Field(None, description="Filter by tenant_id (within the caller's authorization scope)")
     limit: int | None = Field(20, le=100, ge=1, description="Maximum results")
     offset: int | None = Field(0, ge=0, description="Results offset")
     metadata: dict[str, Any] | None = Field(

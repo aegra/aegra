@@ -12,9 +12,10 @@ from uuid import uuid4
 import structlog
 from asgi_correlation_id import correlation_id
 from fastapi import HTTPException
-from sqlalchemy import or_, select, update
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from aegra_api.core.authz import owner_filter
 from aegra_api.core.orm import Assistant as AssistantORM
 from aegra_api.core.orm import Run as RunORM
 from aegra_api.core.orm import Thread as ThreadORM
@@ -136,6 +137,7 @@ async def update_thread_metadata(
     graph_id: str,
     *,
     user_id: str | None = None,
+    tenant_id: str | None = None,
     input_data: dict[str, Any] | None = None,
 ) -> None:
     """Update thread metadata with assistant and graph information (dialect agnostic).
@@ -167,6 +169,7 @@ async def update_thread_metadata(
             status="idle",
             metadata_json=metadata,
             user_id=user_id,
+            tenant_id=tenant_id,
         )
         session.add(thread_orm)
         return
@@ -230,7 +233,7 @@ async def _prepare_run(
 
     assistant_stmt = select(AssistantORM).where(
         AssistantORM.assistant_id == resolved_assistant_id,
-        or_(AssistantORM.user_id == user.identity, AssistantORM.user_id == "system"),
+        owner_filter(AssistantORM, user, allow_system=True),
     )
     assistant = await session.scalar(assistant_stmt)
     if not assistant:
@@ -246,7 +249,13 @@ async def _prepare_run(
 
     # Mark thread as busy and update metadata
     await update_thread_metadata(
-        session, thread_id, assistant.assistant_id, assistant.graph_id, user_id=user.identity, input_data=request.input
+        session,
+        thread_id,
+        assistant.assistant_id,
+        assistant.graph_id,
+        user_id=user.identity,
+        tenant_id=user.tenant_id,
+        input_data=request.input,
     )
     await set_thread_status(session, thread_id, "busy")
 
@@ -279,6 +288,7 @@ async def _prepare_run(
     exec_params["trace"] = {
         "correlation_id": correlation_id.get(""),
         "user_id": user.identity,
+        "tenant_id": user.tenant_id,
         "thread_id": thread_id,
         "graph_id": assistant.graph_id,
     }
@@ -293,6 +303,7 @@ async def _prepare_run(
         config=config,
         context=context,
         user_id=user.identity,
+        tenant_id=user.tenant_id,
         created_at=now,
         updated_at=now,
         output=None,

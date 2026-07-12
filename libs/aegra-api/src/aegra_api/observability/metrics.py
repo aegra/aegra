@@ -14,6 +14,21 @@ from aegra_api.settings import settings
 
 logger = structlog.getLogger(__name__)
 
+REAPER_RECOVERED_RUNS = prometheus_client.Counter(
+    "aegra_reaper_recovered_runs_total",
+    "Runs recovered by the lease reaper, by outcome: crashed_retried "
+    "(expired lease, re-enqueued), crashed_exhausted (max retries exceeded, "
+    "marked failed), stuck_pending (never claimed, re-enqueued). Counts only "
+    "confirmed Redis pushes and DB updates; recovery that falls back to the "
+    "workers' Postgres poll during a Redis outage is not counted.",
+    labelnames=["outcome"],
+)
+
+# Pre-create label children so every outcome series renders as 0 on /metrics
+# before the first recovery event (absent series break rate() alerts).
+for _outcome in ("crashed_retried", "crashed_exhausted", "stuck_pending"):
+    REAPER_RECOVERED_RUNS.labels(outcome=_outcome)
+
 
 def setup_prometheus_metrics(
     app: FastAPI,

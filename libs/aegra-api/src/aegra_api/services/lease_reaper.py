@@ -17,6 +17,7 @@ from sqlalchemy import select, update
 from aegra_api.core.orm import Run as RunORM
 from aegra_api.core.orm import _get_session_maker
 from aegra_api.core.redis_manager import redis_manager
+from aegra_api.observability.metrics import REAPER_RECOVERED_RUNS
 from aegra_api.settings import settings
 
 logger = structlog.getLogger(__name__)
@@ -71,14 +72,17 @@ class LeaseReaper:
             if actually_reset:
                 retryable, exhausted = await self._check_retry_limits(actually_reset)
                 if exhausted:
-                    await self._mark_permanently_failed(exhausted)
+                    failed = await self._mark_permanently_failed(exhausted)
+                    REAPER_RECOVERED_RUNS.labels(outcome="crashed_exhausted").inc(len(failed))
                 if retryable:
-                    await self._reenqueue(retryable)
+                    pushed = await self._reenqueue(retryable)
+                    REAPER_RECOVERED_RUNS.labels(outcome="crashed_retried").inc(len(pushed))
 
         # Stuck pending: just re-enqueue (never executed, no retry budget)
         if stuck_pending:
             logger.warning("Re-enqueueing stuck pending runs", count=len(stuck_pending), run_ids=stuck_pending)
-            await self._reenqueue(stuck_pending)
+            pushed = await self._reenqueue(stuck_pending)
+            REAPER_RECOVERED_RUNS.labels(outcome="stuck_pending").inc(len(pushed))
 
         logger.info(
             "Lease recovery complete",
@@ -136,18 +140,22 @@ class LeaseReaper:
             return reset_ids
 
     @staticmethod
-    async def _reenqueue(run_ids: list[str]) -> None:
+    async def _reenqueue(run_ids: list[str]) -> list[str]:
+        """Push run_ids to the worker queue. Returns only the IDs confirmed pushed."""
         queue_key = settings.worker.WORKER_QUEUE_KEY
+        pushed: list[str] = []
         try:
             client = redis_manager.get_client()
             for run_id in run_ids:
                 await client.rpush(queue_key, run_id)  # type: ignore[arg-type]
+                pushed.append(run_id)
                 logger.info("Re-enqueued recovered run", run_id=run_id)
         except RedisError:
             logger.warning(
                 "Redis unavailable during re-enqueue; workers will pick up via Postgres poll",
-                run_ids=run_ids,
+                run_ids=run_ids[len(pushed) :],
             )
+        return pushed
 
     @staticmethod
     async def _check_retry_limits(run_ids: list[str]) -> tuple[list[str], list[str]]:
@@ -194,11 +202,11 @@ class LeaseReaper:
         return retryable, exhausted
 
     @staticmethod
-    async def _mark_permanently_failed(run_ids: list[str]) -> None:
-        """Mark runs as error with max retries exceeded message."""
+    async def _mark_permanently_failed(run_ids: list[str]) -> list[str]:
+        """Mark runs as error with max retries exceeded message. Returns IDs actually updated."""
         maker = _get_session_maker()
         async with maker() as session:
-            await session.execute(
+            result = await session.execute(
                 update(RunORM)
                 .where(RunORM.run_id.in_(run_ids))
                 .values(
@@ -207,8 +215,11 @@ class LeaseReaper:
                     claimed_by=None,
                     lease_expires_at=None,
                 )
+                .returning(RunORM.run_id)
             )
+            failed_ids = [row[0] for row in result.fetchall()]
             await session.commit()
+            return failed_ids
 
 
 lease_reaper = LeaseReaper()

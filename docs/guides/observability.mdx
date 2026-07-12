@@ -161,6 +161,20 @@ ENABLE_PROMETHEUS_METRICS=true
 
 This exposes a `/metrics` endpoint with standard HTTP request metrics in Prometheus exposition format. Scrape it with any Prometheus-compatible collector and visualize with Grafana.
 
+### Lease reaper metrics
+
+In production mode (`REDIS_BROKER_ENABLED=true`), the [lease reaper](/guides/worker-architecture) reports the runs it recovers:
+
+| Metric | Labels | Meaning |
+|--------|--------|---------|
+| `aegra_reaper_recovered_runs_total` | `outcome="crashed_retried"` | Runs whose worker lease expired; reset to pending and re-enqueued |
+| | `outcome="crashed_exhausted"` | Crashed runs that exceeded `BG_JOB_MAX_RETRIES`; marked permanently failed |
+| | `outcome="stuck_pending"` | Runs never claimed by a worker; re-enqueued without charging retry budget |
+
+The counter increments only for confirmed operations: a successful Redis push for `crashed_retried`/`stuck_pending`, a successful DB update for `crashed_exhausted`. If Redis is down during recovery, workers still pick the runs up via the Postgres poll fallback, but those recoveries are not counted (the metric never overcounts, though it can undercount during a Redis outage).
+
+All three series are exported as `0` from startup, so `rate()` queries and alerts work before the first recovery. A sustained non-zero rate of `crashed_retried` means workers are dying mid-run (check memory limits and crash loops); any growth in `crashed_exhausted` means runs are being lost permanently and is worth alerting on. In dev mode (`aegra dev`) the reaper does not run and these counters stay at zero.
+
 The `/metrics` endpoint is **not** protected by Aegra's authentication middleware. This is intentional — Prometheus scrapers typically do not support application-level auth. If you need to restrict access, use network-level controls (firewall rules, internal load-balancer listeners, etc.).
 
 See the [environment variables reference](/reference/environment-variables#prometheus-metrics) for details.

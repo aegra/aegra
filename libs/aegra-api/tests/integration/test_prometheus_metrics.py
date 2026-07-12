@@ -81,6 +81,20 @@ def test_instrumented_request_on_included_router_route_does_not_500(
     assert response.json() == {"item_id": "42"}
 
 
+def test_reaper_counter_exposed_in_default_registry() -> None:
+    """The reaper counter must live in the default registry the app exposes.
+
+    ``setup_prometheus_metrics`` is called without a registry in production
+    (main.py), so /metrics serves ``prometheus_client.REGISTRY``. All three
+    outcome series are pre-created and must render even before any recovery.
+    """
+    body = prometheus_client.generate_latest(prometheus_client.REGISTRY).decode()
+
+    assert "aegra_reaper_recovered_runs_total" in body
+    for outcome in ("crashed_retried", "crashed_exhausted", "stuck_pending"):
+        assert f'outcome="{outcome}"' in body
+
+
 def test_metrics_endpoint_not_exposed_when_disabled(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

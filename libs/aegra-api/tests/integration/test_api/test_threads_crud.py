@@ -1,5 +1,6 @@
 """Integration tests for threads CRUD operations"""
 
+from base64 import b64encode
 from contextlib import asynccontextmanager
 from unittest.mock import AsyncMock, MagicMock, Mock, patch
 
@@ -1075,3 +1076,150 @@ class TestUpdateThread:
         data = resp.json()
         # Data should not have changed
         assert data["metadata"]["initial"] is True
+
+
+# ------------------------------------------------------------------
+# Regression: non-UTF-8 bytes in checkpoint state must not 500
+# See: https://github.com/aegra/aegra/issues/451
+# ------------------------------------------------------------------
+
+BINARY_BLOB = b"\x89PNG\r\n\x1a\n\xff\xfe"
+BINARY_BASE64 = b64encode(BINARY_BLOB).decode("ascii")
+
+
+def _make_binary_snapshot_mock(checkpoint_id: str = "cp-bin") -> Mock:
+    """Create a StateSnapshot mock with non-UTF-8 binary values and metadata."""
+    mock_snapshot = Mock(spec=StateSnapshot)
+    mock_snapshot.values = {"blob": BINARY_BLOB, "text": "hello"}
+    mock_snapshot.next = []
+    mock_snapshot.tasks = []
+    mock_snapshot.interrupts = []
+    mock_snapshot.metadata = {"snapshot": BINARY_BLOB}
+    mock_snapshot.config = {"configurable": {"checkpoint_id": checkpoint_id}}
+    mock_snapshot.created_at = "2024-01-01T00:00:00Z"
+    mock_snapshot.parent_config = None
+    return mock_snapshot
+
+
+class TestThreadStateWithBinaryValues:
+    """Test state and checkpoint endpoints return 200 with Base64 for non-UTF-8 bytes.
+
+    Covers GET /threads/{id}/state, GET /threads/{id}/state/{checkpoint_id},
+    POST /threads/{id}/state/checkpoint, and the POST /threads/{id}/state
+    GET shim -- all routes that use response_model=ThreadState.
+    """
+
+    def test_get_latest_state_with_binary_values(self):
+        """GET /threads/{id}/state returns 200 with Base64-encoded binary values."""
+        app = create_test_app(include_runs=False, include_threads=True)
+        thread = _thread_row("test-123", metadata={"graph_id": "test-graph"})
+
+        class Session(DummySessionBase):
+            async def scalar(self, _stmt):
+                return thread
+
+        app.dependency_overrides[core_get_session] = override_get_session_dep(Session)
+        client = make_client(app)
+
+        mock_snapshot = _make_binary_snapshot_mock("cp-1")
+        mock_agent = AsyncMock()
+        mock_agent.aget_state.return_value = mock_snapshot
+        mock_agent.with_config = Mock(return_value=mock_agent)
+
+        with patch("aegra_api.services.langgraph_service.get_langgraph_service") as mock_get_service:
+            mock_service = mock_get_service.return_value
+            mock_service.get_graph = create_get_graph_mock(return_value=mock_agent)
+
+            resp = client.get("/threads/test-123/state")
+            assert resp.status_code == 200, resp.text
+            state = resp.json()
+            assert state["values"]["blob"] == BINARY_BASE64
+            assert state["values"]["text"] == "hello"
+            assert state["metadata"]["snapshot"] == BINARY_BASE64
+
+    def test_get_state_at_checkpoint_with_binary_values(self):
+        """GET /threads/{id}/state/{checkpoint_id} returns 200 with Base64-encoded binary values."""
+        app = create_test_app(include_runs=False, include_threads=True)
+        thread = _thread_row("test-123", metadata={"graph_id": "test-graph"})
+
+        class Session(DummySessionBase):
+            async def scalar(self, _stmt):
+                return thread
+
+        app.dependency_overrides[core_get_session] = override_get_session_dep(Session)
+        client = make_client(app)
+
+        mock_snapshot = _make_binary_snapshot_mock("cp-target")
+        mock_agent = AsyncMock()
+        mock_agent.aget_state.return_value = mock_snapshot
+        mock_agent.with_config = Mock(return_value=mock_agent)
+
+        with patch("aegra_api.services.langgraph_service.get_langgraph_service") as mock_get_service:
+            mock_service = mock_get_service.return_value
+            mock_service.get_graph = create_get_graph_mock(return_value=mock_agent)
+
+            resp = client.get("/threads/test-123/state/cp-target")
+            assert resp.status_code == 200, resp.text
+            state = resp.json()
+            assert state["checkpoint"]["checkpoint_id"] == "cp-target"
+            assert state["values"]["blob"] == BINARY_BASE64
+            assert state["metadata"]["snapshot"] == BINARY_BASE64
+
+    def test_post_checkpoint_with_binary_values(self):
+        """POST /threads/{id}/state/checkpoint returns 200 with Base64-encoded binary values."""
+        app = create_test_app(include_runs=False, include_threads=True)
+        thread = _thread_row("test-123", metadata={"graph_id": "test-graph"})
+
+        class Session(DummySessionBase):
+            async def scalar(self, _stmt):
+                return thread
+
+        app.dependency_overrides[core_get_session] = override_get_session_dep(Session)
+        client = make_client(app)
+
+        mock_snapshot = _make_binary_snapshot_mock("cp-post")
+        mock_agent = AsyncMock()
+        mock_agent.aget_state.return_value = mock_snapshot
+        mock_agent.with_config = Mock(return_value=mock_agent)
+
+        with patch("aegra_api.services.langgraph_service.get_langgraph_service") as mock_get_service:
+            mock_service = mock_get_service.return_value
+            mock_service.get_graph = create_get_graph_mock(return_value=mock_agent)
+
+            resp = client.post(
+                "/threads/test-123/state/checkpoint",
+                json={"checkpoint": {"checkpoint_id": "cp-post"}},
+            )
+            assert resp.status_code == 200, resp.text
+            state = resp.json()
+            assert state["checkpoint"]["checkpoint_id"] == "cp-post"
+            assert state["values"]["blob"] == BINARY_BASE64
+            assert state["metadata"]["snapshot"] == BINARY_BASE64
+
+    def test_post_state_get_shim_with_binary_values(self):
+        """POST /threads/{id}/state (GET shim) returns 200 with Base64-encoded binary values."""
+        app = create_test_app(include_runs=False, include_threads=True)
+        thread = _thread_row("test-123", metadata={"graph_id": "test-graph"})
+
+        class Session(DummySessionBase):
+            async def scalar(self, _stmt):
+                return thread
+
+        app.dependency_overrides[core_get_session] = override_get_session_dep(Session)
+        client = make_client(app)
+
+        mock_snapshot = _make_binary_snapshot_mock("cp-shim")
+        mock_agent = AsyncMock()
+        mock_agent.aget_state.return_value = mock_snapshot
+        mock_agent.with_config = Mock(return_value=mock_agent)
+
+        with patch("aegra_api.services.langgraph_service.get_langgraph_service") as mock_get_service:
+            mock_service = mock_get_service.return_value
+            mock_service.get_graph = create_get_graph_mock(return_value=mock_agent)
+
+            resp = client.post("/threads/test-123/state", json={})
+            assert resp.status_code == 200, resp.text
+            state = resp.json()
+            assert state["values"]["blob"] == BINARY_BASE64
+            assert state["values"]["text"] == "hello"
+            assert state["metadata"]["snapshot"] == BINARY_BASE64

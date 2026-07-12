@@ -1,7 +1,11 @@
 """Unit tests for ThreadStateService."""
 
+import json
+from base64 import b64encode
 from datetime import UTC, datetime
 from unittest.mock import patch
+
+from pydantic import TypeAdapter
 
 from aegra_api.services.thread_state_service import ThreadStateService
 from tests.fixtures.langgraph import make_interrupt, make_snapshot, make_task
@@ -128,3 +132,44 @@ def test_convert_snapshots_to_thread_states_skips_failures():
 
     assert result == ["converted"]
     assert mock_convert.call_count == 2
+
+
+BINARY_BLOB = b"\x89PNG\r\n\x1a\n\xff\xfe"
+BINARY_BASE64 = b64encode(BINARY_BLOB).decode("ascii")
+
+
+def test_subgraph_with_binary_state_serializes_as_base64():
+    """Binary state in a subgraph snapshot survives the full service path:
+    snapshot -> ThreadStateService recursion -> nested ThreadState -> list adapter.
+    """
+    service = ThreadStateService()
+
+    child_snapshot = make_snapshot(
+        {"blob": BINARY_BLOB},
+        {"configurable": {"checkpoint_id": "checkpoint-child", "checkpoint_ns": "child"}},
+        created_at="2025-11-10T16:53:21.706336Z",
+        next_nodes=("subgraph_node",),
+        metadata={"step": 1, "user_id": "anonymous"},
+        tasks=(make_task(id="child-task", name="subgraph_node", path=("subgraph_node",), state=None),),
+        interrupts=(make_interrupt(interrupt_id="child-interrupt"),),
+    )
+
+    top_task = make_task(
+        id="top-task",
+        state=child_snapshot,
+    )
+    parent_snapshot = make_snapshot(
+        {},
+        {"configurable": {"checkpoint_id": "checkpoint-1", "checkpoint_ns": ""}},
+        created_at="2025-11-10T16:53:21.701708Z",
+        next_nodes=("node_1",),
+        metadata={"step": 0, "user_id": "anonymous"},
+        tasks=(top_task,),
+        interrupts=(make_interrupt(interrupt_id="top-interrupt"),),
+    )
+
+    result = service.convert_snapshot_to_thread_state(parent_snapshot, "thread-123", subgraphs=True)
+
+    payload = json.loads(TypeAdapter(list).dump_json([result.model_dump(mode="json")]))
+    task_state = payload[0]["tasks"][0]["state"]
+    assert task_state["values"]["blob"] == BINARY_BASE64

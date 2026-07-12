@@ -6,6 +6,8 @@ from aegra_api.models.assistants import (
     AssistantCreate,
     AssistantList,
     AssistantSearchRequest,
+    AssistantShareCreate,
+    AssistantShareResponse,
     AssistantUpdate,
 )
 from aegra_api.models.auth import AuthContext, TokenPayload, User
@@ -51,6 +53,8 @@ __all__ = [
     "AssistantSearchRequest",
     "AssistantUpdate",
     "AgentSchemas",
+    "AssistantShareCreate",
+    "AssistantShareResponse",
     # Threads
     "Thread",
     "ThreadCreate",

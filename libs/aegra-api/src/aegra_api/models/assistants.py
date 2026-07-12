@@ -22,6 +22,9 @@ class AssistantCreate(BaseModel):
         default_factory=dict, description="Metadata to use for searching and filtering assistants."
     )
     if_exists: str | None = Field("error", description="What to do if assistant exists: error or do_nothing")
+    secrets: dict[str, str] | None = Field(
+        None, description="Named secrets (e.g. api_key) stored encrypted at rest; never returned in responses."
+    )
 
 
 class Assistant(BaseModel):
@@ -60,6 +63,9 @@ class AssistantUpdate(BaseModel):
     metadata: dict[str, Any] | None = Field(
         default_factory=dict, description="Metadata to use for searching and filtering assistants."
     )
+    secrets: dict[str, str] | None = Field(
+        None, description="Named secrets (e.g. api_key) stored encrypted at rest; never returned in responses."
+    )
 
 
 class AssistantList(BaseModel):
@@ -75,6 +81,8 @@ class AssistantSearchRequest(BaseModel):
     name: str | None = Field(None, description="Filter by assistant name")
     description: str | None = Field(None, description="Filter by assistant description")
     graph_id: str | None = Field(None, description="Filter by graph ID")
+    user_id: str | None = Field(None, description="Filter by user_id (within the caller's authorization scope)")
+    tenant_id: str | None = Field(None, description="Filter by tenant_id (within the caller's authorization scope)")
     limit: int | None = Field(20, le=100, ge=1, description="Maximum results")
     offset: int | None = Field(0, ge=0, description="Results offset")
     metadata: dict[str, Any] | None = Field(
@@ -98,3 +106,23 @@ class AgentSchemas(BaseModel):
     output_schema: dict[str, Any] = Field(..., description="JSON Schema for agent outputs")
     state_schema: dict[str, Any] = Field(..., description="JSON Schema for agent state")
     config_schema: dict[str, Any] = Field(..., description="JSON Schema for agent config")
+
+
+class AssistantShareCreate(BaseModel):
+    """Create-share request."""
+
+    grantee: str = Field(
+        ...,
+        pattern=r"^(public|user:.+|tenant:.+)$",
+        description='Grant target: "user:<id>", "tenant:<id>", or "public"',
+    )
+
+
+class AssistantShareResponse(BaseModel):
+    """Share record response."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    assistant_id: str
+    grantee: str
+    created_at: datetime

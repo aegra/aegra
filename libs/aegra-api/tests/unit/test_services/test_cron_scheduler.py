@@ -24,6 +24,7 @@ def _make_cron_orm(
     assistant_id: str = "asst-001",
     thread_id: str | None = None,
     user_id: str = "test-user",
+    tenant_id: str | None = None,
     schedule: str = "*/5 * * * *",
     payload: dict[str, Any] | None = None,
     enabled: bool = True,
@@ -38,6 +39,7 @@ def _make_cron_orm(
     cron.assistant_id = assistant_id
     cron.thread_id = thread_id
     cron.user_id = user_id
+    cron.tenant_id = tenant_id
     cron.schedule = schedule
     cron.payload = payload if payload is not None else {"input": {"msg": "tick"}}
     cron.enabled = enabled

@@ -18,6 +18,7 @@ from pydantic import ValidationError
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from aegra_api.core.authz import owner_filter
 from aegra_api.core.orm import Run as RunORM
 from aegra_api.core.orm import Thread as ThreadORM
 from aegra_api.models import User
@@ -132,7 +133,7 @@ async def _run_start(
 
 async def _thread_is_interrupted(session: AsyncSession, thread_id: str, user: User) -> bool:
     status = await session.scalar(
-        select(ThreadORM.status).where(ThreadORM.thread_id == thread_id, ThreadORM.user_id == user.identity)
+        select(ThreadORM.status).where(ThreadORM.thread_id == thread_id, owner_filter(ThreadORM, user))
     )
     return status == "interrupted"
 
@@ -215,7 +216,7 @@ async def _thread_assistant_id(session: AsyncSession, thread_id: str, user: User
     """The assistant bound to the thread's most recent run, user-scoped."""
     return await session.scalar(
         select(RunORM.assistant_id)
-        .where(RunORM.thread_id == thread_id, RunORM.user_id == user.identity)
+        .where(RunORM.thread_id == thread_id, owner_filter(RunORM, user))
         .order_by(RunORM.created_at.desc())
         .limit(1)
     )

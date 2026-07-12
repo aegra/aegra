@@ -157,7 +157,12 @@ crons = await client.crons.search(thread_id="<thread_id>")
 
 # Count matching crons
 total = await client.crons.count(assistant_id="agent")
+
+# Filter by tenant / user (within the caller's authorization boundary)
+crons = await client.crons.search(tenant_id="acme", user_id="alice")
 ```
+
+Search / count support filtering by `assistant_id`, `thread_id`, `enabled`, `user_id`, and `tenant_id`. `user_id` / `tenant_id` layer on top of the caller's isolation boundary — they can only narrow within what you may access, never escalate. The list and search endpoints for threads / runs / assistants gained the same `user_id` / `tenant_id` filters.
 
 ## Updating a cron
 

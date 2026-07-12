@@ -677,9 +677,9 @@ def inject_user_context(user: Any | None, base_config: dict[str, Any] | None = N
 
     # All user-related data injection (only if user exists)
     if user:
-        # Basic user identity for multi-tenant scoping
-        config["configurable"].setdefault("user_id", user.identity)
-        config["configurable"].setdefault("user_display_name", getattr(user, "display_name", None) or user.identity)
+        config["configurable"]["user_id"] = user.user_id
+        config["configurable"]["tenant_id"] = getattr(user, "tenant_id", None)
+        config["configurable"].setdefault("user_display_name", getattr(user, "display_name", None) or user.user_id)
 
         config["configurable"]["langgraph_auth_user"] = user
 
@@ -703,14 +703,17 @@ def create_run_config(
     thread_id: str,
     user: User | BaseUser | None,
     *,
+    assistant_id: str | None = None,
     additional_config: dict[str, Any] | None = None,
     checkpoint: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Create LangGraph configuration for a specific run with full context.
 
-    Additive for client keys, except thread_id/run_id which are forced: a
-    body-supplied configurable.thread_id would redirect execution to another
-    user's thread (the checkpointer keys on thread_id alone).
+    Additive for client keys, except thread_id/run_id/assistant_id which are
+    forced: a body-supplied configurable.thread_id would redirect execution to
+    another user's thread (the checkpointer keys on thread_id alone), and a
+    body-supplied configurable.assistant_id would point graph factories at
+    another assistant's per-assistant resources.
     """
     from copy import deepcopy
 
@@ -720,6 +723,8 @@ def create_run_config(
     # Server-authoritative — overwrite, never honor a client override.
     cfg["configurable"]["thread_id"] = thread_id
     cfg["configurable"]["run_id"] = run_id
+    if assistant_id:
+        cfg["configurable"]["assistant_id"] = assistant_id
 
     # Ensure the root run ID is set to match so that astream_events recognizes it
     cfg.setdefault("run_id", run_id)
@@ -737,7 +742,7 @@ def create_run_config(
 
     # Add metadata from all observability providers (independent of callbacks)
     cfg.setdefault("metadata", {})
-    user_identity = user.identity if user else None
+    user_identity = user.user_id if user else None
     observability_metadata = get_tracing_metadata(run_id, thread_id, user_identity)
     cfg["metadata"].update(observability_metadata)
 

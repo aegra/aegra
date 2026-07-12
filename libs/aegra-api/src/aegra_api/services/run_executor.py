@@ -10,9 +10,13 @@ import asyncio
 from typing import Any
 
 import structlog
+from sqlalchemy import select
 
 from aegra_api.core.active_runs import active_runs
 from aegra_api.core.auth_ctx import with_auth_ctx
+from aegra_api.core.crypto import decrypt
+from aegra_api.core.orm import Assistant as AssistantORM
+from aegra_api.core.orm import get_session_maker
 from aegra_api.core.redis_manager import redis_manager
 from aegra_api.models.run_job import RunJob
 from aegra_api.services.broker import broker_manager
@@ -130,6 +134,7 @@ async def _stream_graph(job: RunJob) -> _GraphResult:
     run_config = _build_run_config(job)
     execution_input = _resolve_input(job)
     stream_modes = _resolve_stream_modes(job.execution.stream_mode)
+    execution_context = await _resolve_context(job)
 
     langgraph_service = get_langgraph_service()
     result = _GraphResult()
@@ -140,7 +145,7 @@ async def _stream_graph(job: RunJob) -> _GraphResult:
             config=run_config,
             access_context="threads.create_run",
             user=job.user,
-            context=job.execution.context,
+            context=execution_context,
         ) as graph,
         with_auth_ctx(job.user, job.user.permissions),  # type: ignore[arg-type]
     ):
@@ -214,12 +219,27 @@ async def _stream_native_v2(
             result.data = data
 
 
+async def _resolve_context(job: RunJob) -> dict[str, Any]:
+    """Merge the assistant's decrypted secrets into the run context (in-memory, not persisted)."""
+    ctx = dict(job.execution.context or {})
+    assistant_id = job.identity.assistant_id
+    if not assistant_id:
+        return ctx
+    async with get_session_maker()() as session:
+        secrets = await session.scalar(select(AssistantORM.secrets).where(AssistantORM.assistant_id == assistant_id))
+    if secrets:
+        for name, token in secrets.items():
+            ctx[name] = decrypt(token)
+    return ctx
+
+
 def _build_run_config(job: RunJob) -> dict[str, Any]:
     """Assemble the LangGraph run config from a RunJob."""
     config = create_run_config(
         job.identity.run_id,
         job.identity.thread_id,
         job.user,
+        assistant_id=job.identity.assistant_id,
         additional_config=job.execution.config,
         checkpoint=job.execution.checkpoint,
     )

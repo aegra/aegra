@@ -17,7 +17,11 @@ from $slug.utils import load_chat_model
 
 async def call_model(state: State, runtime: Runtime[Context]) -> dict:
     """Invoke the model with the current messages and bound tools."""
-    model = load_chat_model(runtime.context.model).bind_tools(TOOLS)
+    model = load_chat_model(
+        runtime.context.model,
+        base_url=runtime.context.base_url,
+        api_key=runtime.context.api_key,
+    ).bind_tools(TOOLS)
     system_message = SystemMessage(
         content=runtime.context.system_prompt.format(
             system_time=datetime.now(tz=UTC).isoformat(),

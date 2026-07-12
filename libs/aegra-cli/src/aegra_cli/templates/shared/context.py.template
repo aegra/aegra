@@ -26,12 +26,24 @@ class Context:
     model: Annotated[str, {"description": "LLM model as 'provider/model'."}] = field(
         default="openai/gpt-4o-mini",
     )
+    base_url: str | None = field(
+        default=None,
+        metadata={"description": "OpenAI-compatible base URL; overrides OPENAI_BASE_URL."},
+    )
+    api_key: str | None = field(
+        default=None,
+        metadata={"description": "API key; overrides OPENAI_API_KEY. Persisted if stored on an assistant."},
+    )
 
     def __post_init__(self) -> None:
         """Override defaults with environment variables when set."""
-        env_model = os.environ.get("MODEL")
+        env_model = os.environ.get("OPENAI_MODEL")
         if env_model:
             self.model = env_model
+        if self.base_url is None:
+            self.base_url = os.environ.get("OPENAI_BASE_URL")
+        if self.api_key is None:
+            self.api_key = os.environ.get("OPENAI_API_KEY")
         env_prompt = os.environ.get("SYSTEM_PROMPT")
         if env_prompt:
             self.system_prompt = env_prompt

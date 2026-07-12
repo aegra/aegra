@@ -1,5 +1,7 @@
 """Utility & helper functions."""
 
+from typing import Any
+
 from langchain.chat_models import init_chat_model
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import BaseMessage
@@ -17,11 +19,23 @@ def get_message_text(msg: BaseMessage) -> str:
         return "".join(txts).strip()
 
 
-def load_chat_model(fully_specified_name: str) -> BaseChatModel:
+def load_chat_model(
+    fully_specified_name: str,
+    *,
+    base_url: str | None = None,
+    api_key: str | None = None,
+) -> BaseChatModel:
     """Load a chat model from a fully specified name.
 
     Args:
-        fully_specified_name (str): String in the format 'provider/model'.
+        fully_specified_name: String in the format 'provider/model'.
+        base_url: Optional OpenAI-compatible base URL (overrides OPENAI_BASE_URL).
+        api_key: Optional API key (overrides OPENAI_API_KEY).
     """
     provider, model = fully_specified_name.split("/", maxsplit=1)
-    return init_chat_model(model, model_provider=provider)
+    kwargs: dict[str, Any] = {}
+    if base_url:
+        kwargs["base_url"] = base_url
+    if api_key:
+        kwargs["api_key"] = api_key
+    return init_chat_model(model, model_provider=provider, **kwargs)

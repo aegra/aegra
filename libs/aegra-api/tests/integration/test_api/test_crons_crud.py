@@ -70,6 +70,7 @@ def client(mock_cron_service: AsyncMock) -> Iterator[TestClient]:
     # ownership gate passes in the happy path.
     owned_thread = Mock()
     owned_thread.user_id = "test-user"
+    owned_thread.tenant_id = None
 
     async def _mock_session() -> AsyncIterator[AsyncMock]:
         sess = AsyncMock()

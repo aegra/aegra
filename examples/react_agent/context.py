@@ -8,6 +8,13 @@ from typing import Annotated
 
 from react_agent import prompts
 
+# Fallback mapping from context field name to env var name (OPENAI_ prefix).
+_ENV_ALIASES = {
+    "model": "OPENAI_MODEL",
+    "base_url": "OPENAI_BASE_URL",
+    "api_key": "OPENAI_API_KEY",
+}
+
 
 @dataclass(kw_only=True)
 class Context:
@@ -29,6 +36,19 @@ class Context:
         },
     )
 
+    base_url: str | None = field(
+        default=None,
+        metadata={"description": "Base URL for an OpenAI-compatible endpoint; overrides the OPENAI_BASE_URL env var."},
+    )
+
+    api_key: str | None = field(
+        default=None,
+        metadata={
+            "description": "API key overriding OPENAI_API_KEY. Note: storing it in an assistant persists it;"
+            " for sensitive use, prefer an environment variable."
+        },
+    )
+
     max_search_results: int = field(
         default=10,
         metadata={"description": "The maximum number of search results to return for each search query."},
@@ -41,4 +61,5 @@ class Context:
                 continue
 
             if getattr(self, f.name) == f.default:
-                setattr(self, f.name, os.environ.get(f.name.upper(), f.default))
+                env_name = _ENV_ALIASES.get(f.name, f.name.upper())
+                setattr(self, f.name, os.environ.get(env_name, f.default))

@@ -21,6 +21,8 @@ from aegra_api.models import (
     AssistantCreate,
     AssistantList,
     AssistantSearchRequest,
+    AssistantShareCreate,
+    AssistantShareResponse,
     AssistantUpdate,
 )
 from aegra_api.models.errors import NOT_FOUND
@@ -57,14 +59,16 @@ async def create_assistant(
 
 @router.get("/assistants", response_model=AssistantList, response_model_by_alias=False)
 async def list_assistants(
+    user_id: str | None = Query(None, description="Filter by user_id (within the caller's authorization scope)"),
+    tenant_id: str | None = Query(None, description="Filter by tenant_id (within the caller's authorization scope)"),
     service: AssistantService = Depends(get_assistant_service),
 ):
-    """List all assistants owned by the authenticated user.
+    """List assistants visible to the caller, optionally narrowed by user_id / tenant_id.
 
-    Returns every assistant without filtering. Use the search endpoint for
-    filtered queries.
+    Filters narrow within the caller's authorization scope — they never widen
+    visibility. Use the search endpoint for name/metadata filters and paging.
     """
-    assistants = await service.list_assistants()
+    assistants = await service.list_assistants(user_id=user_id, tenant_id=tenant_id)
     return AssistantList(assistants=assistants, total=len(assistants))
 
 
@@ -231,3 +235,44 @@ async def get_assistant_subgraphs(
     namespace.
     """
     return await service.get_assistant_subgraphs(assistant_id, namespace, recurse)
+
+
+@router.post(
+    "/assistants/{assistant_id}/share",
+    response_model=AssistantShareResponse,
+    responses={**NOT_FOUND},
+)
+async def create_assistant_share(
+    assistant_id: str,
+    request: AssistantShareCreate,
+    service: AssistantService = Depends(get_assistant_service),
+):
+    """Share an assistant with a specific user, a specific tenant, or fully public.
+
+    Only the owner may share. Grantees can read (config/context secrets are redacted) and execute
+    the assistant (execution reuses the owner-stored config, including real secrets).
+    """
+    return await service.create_share(assistant_id, request)
+
+
+@router.get(
+    "/assistants/{assistant_id}/shares",
+    response_model=list[AssistantShareResponse],
+    responses={**NOT_FOUND},
+)
+async def list_assistant_shares(
+    assistant_id: str,
+    service: AssistantService = Depends(get_assistant_service),
+):
+    """List all share records for this assistant. Owner only."""
+    return await service.list_shares(assistant_id)
+
+
+@router.delete("/assistants/{assistant_id}/shares/{grantee}", responses={**NOT_FOUND})
+async def delete_assistant_share(
+    assistant_id: str,
+    grantee: str,
+    service: AssistantService = Depends(get_assistant_service),
+):
+    """Revoke a grant (grantee is "user:<id>", "tenant:<id>", or "public"). Owner only."""
+    return await service.delete_share(assistant_id, grantee)

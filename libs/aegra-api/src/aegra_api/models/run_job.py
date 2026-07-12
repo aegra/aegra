@@ -28,6 +28,7 @@ class RunIdentity(BaseModel):
     run_id: str
     thread_id: str
     graph_id: str
+    assistant_id: str | None = None
 
 
 class RunExecution(BaseModel):
@@ -99,6 +100,7 @@ class RunJob(BaseModel):
                 run_id=run_orm.run_id,
                 thread_id=run_orm.thread_id,
                 graph_id=params["graph_id"],
+                assistant_id=run_orm.assistant_id,
             ),
             user=User.model_validate(params["user"]),
             execution=RunExecution.model_validate(params["execution"]),

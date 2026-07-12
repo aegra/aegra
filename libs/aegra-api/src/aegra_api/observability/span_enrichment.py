@@ -14,7 +14,7 @@ Usage::
 
     # Inside the asyncio task that runs graph execution:
     set_trace_context(
-        user_id=user.identity,
+        user_id=user.user_id,
         session_id=thread_id,
         trace_name=graph_id,
     )

@@ -60,7 +60,9 @@ The `@auth.authenticate` decorator registers your authentication function. It re
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `identity` | `string` | Unique user identifier |
+| `user_id` | `string` | Unique user identifier (formerly `identity`, still accepted) |
+
+> Returning either `user_id` or `identity` works: `user_id` is the first-class public name, and `identity` is kept for compatibility with the LangGraph SDK `BaseUser` protocol. `user.user_id` and `user.identity` are equivalent.
 
 ### Optional fields
 
@@ -69,8 +71,28 @@ The `@auth.authenticate` decorator registers your authentication function. It re
 | `display_name` | `string` | Same as `identity` | Display name |
 | `permissions` | `list[str]` | `[]` | Permission strings |
 | `is_authenticated` | `bool` | `True` | Authentication status |
+| `tenant_id` | `string | None` | `None` | Multi-tenant isolation identifier (see below) |
 
 Any additional fields you return (like `role`, `team_id`, etc.) are preserved and accessible via `ctx.user` in authorization handlers and via the `User` model in custom routes.
+
+### Multi-tenant isolation (tenant_id)
+
+Returning `tenant_id` enables tenant-level isolation for all resources (assistants, threads, runs, crons, store), layered on top of `user_id`:
+
+- **When `tenant_id` is returned**: resource access requires both `user_id` and `tenant_id` to match. `tenant` is a hard isolation boundary — even with the same `identity`, data in different `tenant`s stays isolated.
+- **When omitted (`None`)**: falls back to pure `user_id` isolation, behaving exactly as before.
+
+`tenant_id` can only be returned by `@auth.authenticate` (server-authoritative); clients cannot forge or tamper with it via requests. A resource records its `tenant_id` at creation and it is immutable.
+
+```python
+@auth.authenticate
+async def authenticate(headers: dict) -> dict:
+    claims = verify_jwt(headers.get("Authorization", ""))
+    return {
+        "identity": claims["sub"],
+        "tenant_id": claims.get("org_id"),  # None falls back to pure user_id isolation
+    }
+```
 
 ### Denying access
 
@@ -307,6 +329,13 @@ Convenience shortcuts are also available directly on `config["configurable"]`:
 
 - `config["configurable"]["user_id"]` -- the user's identity
 - `config["configurable"]["user_display_name"]` -- the user's display name
+
+At execution time the server also pins run identity keys into
+`config["configurable"]` — `thread_id`, `run_id`, and `assistant_id` (the
+server-resolved, ownership-checked assistant) are overwritten server-side and
+never honor a client-supplied override. Graph factories can safely key
+per-assistant resources (skills, tools, memories) on
+`configurable["assistant_id"]`.
 
 ## Provider examples
 

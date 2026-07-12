@@ -231,7 +231,7 @@ class TestGetStoreItem:
             resp = client.get("/store/items?namespace=&key=test-key")
 
         assert resp.status_code == 200
-        spy.assert_called_once_with("test-user", [])
+        spy.assert_called_once_with("test-user", None, [])
         call_args = mock_store.aget.call_args
         assert call_args[0][0] == ("users", "test-user")
 
@@ -279,7 +279,7 @@ class TestDeleteStoreItem:
             resp = client.delete("/store/items?key=test-key&namespace=")
 
         assert resp.status_code == 204
-        spy.assert_called_once_with("test-user", [])
+        spy.assert_called_once_with("test-user", None, [])
         call_args = mock_store.adelete.call_args
         assert call_args[0][0] == ("users", "test-user")
 

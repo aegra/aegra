@@ -44,7 +44,7 @@ async def put_store_item(request: StorePutRequest, user: User = Depends(get_curr
             request.value = filters["value"]
 
     # Apply user namespace scoping
-    scoped_namespace = apply_user_namespace_scoping(user.identity, request.namespace)
+    scoped_namespace = apply_user_namespace_scoping(user.user_id, user.tenant_id,request.namespace)
 
     store = db_manager.get_store()
 
@@ -78,7 +78,7 @@ async def get_store_item(
             key = filters["key"]
 
     # Apply user namespace scoping
-    scoped_namespace = apply_user_namespace_scoping(user.identity, _normalize_namespace(namespace))
+    scoped_namespace = apply_user_namespace_scoping(user.user_id, user.tenant_id,_normalize_namespace(namespace))
 
     store = db_manager.get_store()
 
@@ -127,7 +127,7 @@ async def delete_store_item(
             k = filters["key"]
 
     # Apply user namespace scoping
-    scoped_namespace = apply_user_namespace_scoping(user.identity, ns)
+    scoped_namespace = apply_user_namespace_scoping(user.user_id, user.tenant_id,ns)
 
     store = db_manager.get_store()
 
@@ -160,7 +160,7 @@ async def search_store_items(
             request.filter = {**(request.filter or {}), **handler_filters}
 
     # Apply user namespace scoping
-    scoped_prefix = apply_user_namespace_scoping(user.identity, request.namespace_prefix)
+    scoped_prefix = apply_user_namespace_scoping(user.user_id, user.tenant_id,request.namespace_prefix)
 
     store = db_manager.get_store()
 
@@ -207,7 +207,7 @@ async def list_namespaces(
             request.suffix = filters["suffix"]
 
     # Apply user namespace scoping to prefix
-    scoped_prefix = apply_user_namespace_scoping(user.identity, request.prefix or [])
+    scoped_prefix = apply_user_namespace_scoping(user.user_id, user.tenant_id,request.prefix or [])
     prefix: tuple[str, ...] = tuple(scoped_prefix)
     suffix: tuple[str, ...] | None = tuple(request.suffix) if request.suffix else None
 
@@ -233,17 +233,19 @@ def _normalize_namespace(value: str | list[str] | None) -> list[str]:
     return []
 
 
-def apply_user_namespace_scoping(user_id: str, namespace: list[str]) -> list[str]:
-    """Apply user-based namespace scoping for data isolation.
+def apply_user_namespace_scoping(user_id: str, tenant_id: str | None, namespace: list[str]) -> list[str]:
+    """Tenant/user namespace isolation.
 
-    All store operations are scoped to the authenticated user's namespace.
-    Users can only access namespaces under ["users", <their_user_id>].
+    With a tenant, scope under the ["tenants", <tenant_id>, "users", <user_id>] prefix;
+    without a tenant, fall back to ["users", <user_id>]. Any client-supplied namespace is
+    forced under that prefix, so no cross-user data access is possible.
     """
+    prefix = ["tenants", tenant_id, "users", user_id] if tenant_id else ["users", user_id]
     if not namespace:
-        return ["users", user_id]
+        return prefix
 
-    if namespace[0] == "users" and len(namespace) >= 2 and namespace[1] == user_id:
+    if namespace[: len(prefix)] == prefix:
         return namespace
 
-    # Scope any other namespace under the user's prefix
-    return ["users", user_id] + namespace
+    # Scope any other namespace under the tenant/user prefix
+    return prefix + namespace

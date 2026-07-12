@@ -45,6 +45,11 @@ class LangGraphUser(BaseUser):
         return self._user_data["identity"]
 
     @property
+    def user_id(self) -> str:
+        """First-class user_id accessor; the wrapped _user_data is identity-keyed for the LangGraph BaseUser protocol."""
+        return self.identity
+
+    @property
     def is_authenticated(self) -> bool:
         return self._user_data.get("is_authenticated", True)
 
@@ -262,8 +267,12 @@ class LangGraphAuthBackend(AuthenticationBackend):
             if not user_data or not isinstance(user_data, dict):
                 raise AuthenticationError("Invalid user data returned from auth handler")
 
+            # Accept user_id as an alias for identity; identity is kept for LangGraph protocol compatibility.
+            if "identity" not in user_data and "user_id" in user_data:
+                user_data["identity"] = user_data["user_id"]
+
             if "identity" not in user_data:
-                raise AuthenticationError("Auth handler must return 'identity' field")
+                raise AuthenticationError("Auth handler must return 'user_id' (or 'identity') field")
 
             # Extract permissions for credentials
             permissions = user_data.get("permissions", [])
@@ -274,7 +283,7 @@ class LangGraphAuthBackend(AuthenticationBackend):
             credentials = AuthCredentials(permissions)
             user = LangGraphUser(user_data)
 
-            logger.debug(f"Successfully authenticated user: {user.identity}")
+            logger.debug(f"Successfully authenticated user: {user.user_id}")
             return credentials, user
 
         except Auth.exceptions.HTTPException as e:

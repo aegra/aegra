@@ -534,7 +534,7 @@ class TestLangGraphServiceContext:
     def test_inject_user_context_with_user(self):
         """Test injecting user context with user object"""
         mock_user = Mock()
-        mock_user.identity = "user-123"
+        mock_user.user_id = "user-123"
         mock_user.display_name = "Test User"
 
         base_config = {"existing": "value"}
@@ -559,7 +559,7 @@ class TestLangGraphServiceContext:
     def test_inject_user_context_no_base_config(self):
         """Test injecting context without base config"""
         mock_user = Mock()
-        mock_user.identity = "user-123"
+        mock_user.user_id = "user-123"
         mock_user.display_name = "Test User"
 
         result = inject_user_context(mock_user, None)
@@ -570,7 +570,7 @@ class TestLangGraphServiceContext:
     def test_inject_user_context_user_object_passed_directly(self):
         """Test that the user object is passed directly (not serialized)."""
         mock_user = Mock()
-        mock_user.identity = "user-123"
+        mock_user.user_id = "user-123"
         mock_user.display_name = "Test User"
 
         result = inject_user_context(mock_user, {})
@@ -582,7 +582,7 @@ class TestLangGraphServiceContext:
     def test_inject_user_context_existing_configurable(self):
         """Test preserving existing configurable values"""
         mock_user = Mock()
-        mock_user.identity = "user-123"
+        mock_user.user_id = "user-123"
         mock_user.display_name = "Test User"
 
         base_config = {"configurable": {"existing_key": "existing_value"}}
@@ -599,7 +599,7 @@ class TestLangGraphServiceConfigs:
     def test_create_thread_config(self):
         """Test creating thread configuration"""
         mock_user = Mock()
-        mock_user.identity = "user-123"
+        mock_user.user_id = "user-123"
         mock_user.display_name = "Test User"
 
         thread_id = "thread-456"
@@ -614,7 +614,7 @@ class TestLangGraphServiceConfigs:
     def test_create_thread_config_no_additional(self):
         """Test creating thread config without additional config"""
         mock_user = Mock()
-        mock_user.identity = "user-123"
+        mock_user.user_id = "user-123"
         mock_user.display_name = "Test User"
 
         thread_id = "thread-456"
@@ -627,7 +627,7 @@ class TestLangGraphServiceConfigs:
     def test_create_run_config(self):
         """Test creating run configuration"""
         mock_user = Mock()
-        mock_user.identity = "user-123"
+        mock_user.user_id = "user-123"
         mock_user.display_name = "Test User"
 
         run_id = "run-789"
@@ -648,7 +648,7 @@ class TestLangGraphServiceConfigs:
     def test_create_run_config_with_checkpoint(self):
         """Test creating run config with checkpoint"""
         mock_user = Mock()
-        mock_user.identity = "user-123"
+        mock_user.user_id = "user-123"
         mock_user.display_name = "Test User"
 
         run_id = "run-789"
@@ -671,7 +671,7 @@ class TestLangGraphServiceConfigs:
         ownership check.
         """
         mock_user = Mock()
-        mock_user.identity = "user-123"
+        mock_user.user_id = "user-123"
         mock_user.display_name = "Test User"
 
         attacker_override = {"configurable": {"thread_id": "victim-thread", "run_id": "victim-run"}}
@@ -692,7 +692,7 @@ class TestLangGraphServiceConfigs:
         would otherwise win over the server-pinned value at the final merge.
         """
         mock_user = Mock()
-        mock_user.identity = "user-123"
+        mock_user.user_id = "user-123"
         mock_user.display_name = "Test User"
 
         malicious_checkpoint = {"thread_id": "victim-thread", "checkpoint_id": "cp-9"}
@@ -706,10 +706,69 @@ class TestLangGraphServiceConfigs:
         assert result["configurable"]["thread_id"] == "thread-456"
         assert result["configurable"]["checkpoint_id"] == "cp-9"
 
+    def test_create_run_config_injects_assistant_id(self):
+        """The resolved assistant_id is injected into configurable so graph
+        factories can key per-assistant resources on a server-verified value."""
+        mock_user = Mock()
+        mock_user.user_id = "user-123"
+        mock_user.display_name = "Test User"
+
+        with patch(
+            "aegra_api.services.langgraph_service.get_tracing_callbacks",
+            return_value=[],
+        ):
+            result = create_run_config("run-789", "thread-456", mock_user, assistant_id="asst-abc")
+
+        assert result["configurable"]["assistant_id"] == "asst-abc"
+
+    def test_create_run_config_ignores_client_assistant_id_override(self):
+        """A client-supplied configurable.assistant_id must not win over the
+        server-resolved one — it would point graph factories at another
+        assistant's per-assistant resources (skills, tools, memories)."""
+        mock_user = Mock()
+        mock_user.user_id = "user-123"
+        mock_user.display_name = "Test User"
+
+        attacker_override = {"configurable": {"assistant_id": "victim-assistant"}}
+        malicious_checkpoint = {"assistant_id": "victim-assistant", "checkpoint_id": "cp-9"}
+
+        with patch(
+            "aegra_api.services.langgraph_service.get_tracing_callbacks",
+            return_value=[],
+        ):
+            result = create_run_config(
+                "run-789",
+                "thread-456",
+                mock_user,
+                assistant_id="asst-abc",
+                additional_config=attacker_override,
+                checkpoint=malicious_checkpoint,
+            )
+
+        assert result["configurable"]["assistant_id"] == "asst-abc"
+        assert result["configurable"]["checkpoint_id"] == "cp-9"
+
+    def test_create_run_config_without_assistant_id_keeps_client_value(self):
+        """No server-side assistant_id (identity-less job) — the client value
+        passes through unchanged for backward compatibility."""
+        mock_user = Mock()
+        mock_user.user_id = "user-123"
+        mock_user.display_name = "Test User"
+
+        client_config = {"configurable": {"assistant_id": "client-chosen"}}
+
+        with patch(
+            "aegra_api.services.langgraph_service.get_tracing_callbacks",
+            return_value=[],
+        ):
+            result = create_run_config("run-789", "thread-456", mock_user, additional_config=client_config)
+
+        assert result["configurable"]["assistant_id"] == "client-chosen"
+
     def test_create_run_config_with_tracing_callbacks(self):
         """Test creating run config with tracing callbacks"""
         mock_user = Mock()
-        mock_user.identity = "user-123"
+        mock_user.user_id = "user-123"
         mock_user.display_name = "Test User"
 
         run_id = "run-789"
@@ -731,7 +790,7 @@ class TestLangGraphServiceConfigs:
                         "aegra_run",
                         f"run:{run_id}",
                         f"thread:{thread_id}",
-                        f"user:{mock_user.identity}",
+                        f"user:{mock_user.user_id}",
                     ],
                 },
             ),
@@ -744,12 +803,12 @@ class TestLangGraphServiceConfigs:
         assert "aegra_run" in result["metadata"]["langfuse_tags"]
         assert f"run:{run_id}" in result["metadata"]["langfuse_tags"]
         assert f"thread:{thread_id}" in result["metadata"]["langfuse_tags"]
-        assert f"user:{mock_user.identity}" in result["metadata"]["langfuse_tags"]
+        assert f"user:{mock_user.user_id}" in result["metadata"]["langfuse_tags"]
 
     def test_create_run_config_existing_callbacks(self):
         """Test creating run config with existing callbacks"""
         mock_user = Mock()
-        mock_user.identity = "user-123"
+        mock_user.user_id = "user-123"
         mock_user.display_name = "Test User"
 
         run_id = "run-789"
@@ -774,7 +833,7 @@ class TestLangGraphServiceConfigs:
     def test_create_run_config_invalid_callbacks(self):
         """Test creating run config with invalid callbacks type"""
         mock_user = Mock()
-        mock_user.identity = "user-123"
+        mock_user.user_id = "user-123"
         mock_user.display_name = "Test User"
 
         run_id = "run-789"
@@ -812,7 +871,7 @@ class TestLangGraphServiceConfigs:
     def test_create_run_config_sets_top_level_run_id(self):
         """Regression: run_id must appear at top-level so astream_events uses it as root run ID."""
         mock_user = Mock()
-        mock_user.identity = "user-123"
+        mock_user.user_id = "user-123"
         mock_user.display_name = "Test User"
 
         run_id = "run-abc-123"
@@ -1015,3 +1074,19 @@ class TestSetupDependencies:
             assert idx1 < idx2  # dep1 has higher priority (lower index)
         finally:
             sys.path = original_path
+
+
+class TestInjectUserContextAuthority:
+    """Identity keys are server-authoritative: client-preset values must be overwritten."""
+
+    def test_client_preset_identity_is_overwritten(self) -> None:
+        mock_user = Mock()
+        mock_user.user_id = "real-user"
+        mock_user.tenant_id = "real-tenant"
+        mock_user.display_name = "Real"
+        base = {"configurable": {"user_id": "forged", "tenant_id": "other-tenant"}}
+
+        result = inject_user_context(mock_user, base)
+
+        assert result["configurable"]["user_id"] == "real-user"
+        assert result["configurable"]["tenant_id"] == "real-tenant"

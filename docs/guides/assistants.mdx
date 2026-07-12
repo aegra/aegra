@@ -44,6 +44,26 @@ async def main():
 asyncio.run(main())
 ```
 
+### Custom LLM (model / base_url / api_key)
+
+The example agent reads `model` / `base_url` from the assistant's `context`; credentials go in `secrets` (encrypted at rest, never returned). Unset fields fall back to the `OPENAI_MODEL` / `OPENAI_BASE_URL` / `OPENAI_API_KEY` environment variables:
+
+```python
+assistant = await client.assistants.create(
+    graph_id="agent",
+    name="GPT-4o via proxy",
+    context={
+        "model": "openai/gpt-4o",
+        "base_url": "https://my-openai-proxy/v1",
+    },
+    secrets={"api_key": "sk-..."},
+)
+```
+
+<Note>
+  Put credentials in `secrets` (not `config`/`context`): values are Fernet-encrypted at rest, never returned in any response, and decrypted into the runtime context only during execution. Requires `AEGRA_SECRET_KEY` to be set. Non-secret fields like `model` / `base_url` stay in `context`.
+</Note>
+
 ### Idempotent creation
 
 Use `if_exists` to avoid errors when the assistant already exists:
@@ -76,6 +96,9 @@ results = await client.assistants.search(
 
 # Search by name
 results = await client.assistants.search(name="Customer Support")
+
+# Search by user_id / tenant_id (narrows only within the caller's authorization boundary)
+results = await client.assistants.search(user_id="alice", tenant_id="acme")
 ```
 
 ## Updating assistants

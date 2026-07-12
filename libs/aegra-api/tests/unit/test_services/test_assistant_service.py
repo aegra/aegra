@@ -13,7 +13,7 @@ from unittest.mock import AsyncMock, Mock, patch
 import pytest
 from fastapi import HTTPException
 
-from aegra_api.models import Assistant, AssistantCreate, AssistantUpdate
+from aegra_api.models import Assistant, AssistantCreate, AssistantShareCreate, AssistantUpdate
 from aegra_api.models.auth import User
 from aegra_api.services.assistant_service import AssistantService, to_pydantic
 
@@ -1158,3 +1158,66 @@ class TestAuthDispatch:
         stmt = assistant_service.session.scalars.call_args.args[0]
         compiled = stmt.compile(dialect=postgresql.dialect())
         assert {"owner": "user-123"} in compiled.params.values()
+
+
+class TestAssistantSharing:
+    """Share CRUD: ownership gate (owner only) + insert/idempotency. Visibility SQL: see test_sharing.py."""
+
+    @pytest.mark.asyncio
+    async def test_create_share_404_when_not_owner(
+        self, assistant_service: AssistantService, mock_session: AsyncMock
+    ) -> None:
+        assistant_service._dispatch = AsyncMock(return_value=None)
+        mock_session.scalar = AsyncMock(return_value=None)  # owner_filter miss -> not owner
+        with pytest.raises(HTTPException) as exc:
+            await assistant_service.create_share("a1", AssistantShareCreate(grantee="public"))
+        assert exc.value.status_code == 404
+        mock_session.add.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_delete_share_404_when_missing(
+        self, assistant_service: AssistantService, mock_session: AsyncMock
+    ) -> None:
+        assistant_service._dispatch = AsyncMock(return_value=None)
+        mock_session.scalar = AsyncMock(return_value=Mock())  # owned
+        mock_session.get = AsyncMock(return_value=None)  # grant absent
+        with pytest.raises(HTTPException) as exc:
+            await assistant_service.delete_share("a1", "user:bob")
+        assert exc.value.status_code == 404
+
+    @pytest.mark.asyncio
+    async def test_list_shares_404_when_not_owner(
+        self, assistant_service: AssistantService, mock_session: AsyncMock
+    ) -> None:
+        assistant_service._dispatch = AsyncMock(return_value=None)
+        mock_session.scalar = AsyncMock(return_value=None)
+        with pytest.raises(HTTPException) as exc:
+            await assistant_service.list_shares("a1")
+        assert exc.value.status_code == 404
+
+    @pytest.mark.asyncio
+    async def test_create_share_inserts_when_owned_and_new(
+        self, assistant_service: AssistantService, mock_session: AsyncMock
+    ) -> None:
+        assistant_service._dispatch = AsyncMock(return_value=None)
+        mock_session.scalar = AsyncMock(return_value=Mock())  # owned
+        mock_session.get = AsyncMock(return_value=None)  # no existing grant
+        with patch("aegra_api.services.assistant_service.AssistantShareResponse") as resp:
+            resp.model_validate.return_value = "SHARE_RESPONSE"
+            result = await assistant_service.create_share("a1", AssistantShareCreate(grantee="user:bob"))
+        assert result == "SHARE_RESPONSE"
+        mock_session.add.assert_called_once()
+        mock_session.commit.assert_awaited()
+
+    @pytest.mark.asyncio
+    async def test_create_share_idempotent_when_grant_exists(
+        self, assistant_service: AssistantService, mock_session: AsyncMock
+    ) -> None:
+        assistant_service._dispatch = AsyncMock(return_value=None)
+        mock_session.scalar = AsyncMock(return_value=Mock())  # owned
+        mock_session.get = AsyncMock(return_value=Mock())  # grant already present
+        with patch("aegra_api.services.assistant_service.AssistantShareResponse") as resp:
+            resp.model_validate.return_value = "EXISTING"
+            result = await assistant_service.create_share("a1", AssistantShareCreate(grantee="public"))
+        assert result == "EXISTING"
+        mock_session.add.assert_not_called()

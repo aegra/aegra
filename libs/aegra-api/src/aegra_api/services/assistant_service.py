@@ -27,10 +27,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from aegra_api.core.auth_deps import get_current_user
 from aegra_api.core.auth_filters import build_metadata_filter
+from aegra_api.core.authz import owner_filter
+from aegra_api.core.crypto import encrypt_values
 from aegra_api.core.orm import Assistant as AssistantORM
+from aegra_api.core.orm import AssistantShare as AssistantShareORM
 from aegra_api.core.orm import AssistantVersion as AssistantVersionORM
 from aegra_api.core.orm import get_session
-from aegra_api.models import Assistant, AssistantCreate, AssistantUpdate
+from aegra_api.core.sharing import visible_assistant_filter
+from aegra_api.models import Assistant, AssistantCreate, AssistantShareCreate, AssistantShareResponse, AssistantUpdate
 from aegra_api.models.auth import User
 from aegra_api.services.authenticated import Authenticated
 from aegra_api.services.langgraph_service import LangGraphService, get_langgraph_service
@@ -53,7 +57,8 @@ def to_pydantic(row: AssistantORM) -> Assistant:
         row.user_id = str(row.user_id)
 
     # Use Pydantic's built-in ORM conversion with from_attributes=True
-    return Assistant.model_validate(row, from_attributes=True)
+    assistant = Assistant.model_validate(row, from_attributes=True)
+    return assistant
 
 
 def _state_jsonschema(graph) -> dict | None:
@@ -138,7 +143,7 @@ def _injected_metadata(
     """Fold metadata a create/update handler injected into ``value`` onto the request.
 
     Handlers inject by mutating ``value["metadata"]`` in place (e.g.
-    ``value["metadata"]["created_by"] = ctx.user.identity``). The handler's
+    ``value["metadata"]["created_by"] = ctx.user.user_id``). The handler's
     *return* is a query filter with no insert meaning, so it is not read here.
     """
     value_meta = value.get("metadata")
@@ -202,7 +207,7 @@ class AssistantService(Authenticated):
 
         # Check if an assistant already exists for this user, graph and config pair
         existing_stmt = select(AssistantORM).where(
-            AssistantORM.user_id == self.user.identity,
+            owner_filter(AssistantORM, self.user),
             or_(
                 (AssistantORM.graph_id == graph_id) & (AssistantORM.config == config),
                 AssistantORM.assistant_id == assistant_id,
@@ -224,7 +229,9 @@ class AssistantService(Authenticated):
             config=config,
             context=context,
             graph_id=graph_id,
-            user_id=self.user.identity,
+            user_id=self.user.user_id,
+            tenant_id=self.user.tenant_id,
+            secrets=encrypt_values(request.secrets) if request.secrets else {},
             metadata_dict=request.metadata,
             version=1,
         )
@@ -261,7 +268,7 @@ class AssistantService(Authenticated):
         filters = await self._dispatch("search", value)
 
         stmt = select(AssistantORM).where(
-            or_(AssistantORM.user_id == self.user.identity, AssistantORM.user_id == "system")
+            visible_assistant_filter(self.user)
         )
         auth_filter = build_metadata_filter(AssistantORM.metadata_dict, filters)
         if auth_filter is not None:
@@ -281,7 +288,7 @@ class AssistantService(Authenticated):
         filters = await self._dispatch("search", value)
 
         stmt = select(AssistantORM).where(
-            or_(AssistantORM.user_id == self.user.identity, AssistantORM.user_id == "system")
+            visible_assistant_filter(self.user)
         )
 
         if request.name:
@@ -292,6 +299,12 @@ class AssistantService(Authenticated):
 
         if request.graph_id:
             stmt = stmt.where(AssistantORM.graph_id == request.graph_id)
+
+        if request.user_id:
+            stmt = stmt.where(AssistantORM.user_id == request.user_id)
+
+        if request.tenant_id:
+            stmt = stmt.where(AssistantORM.tenant_id == request.tenant_id)
 
         if request.metadata:
             stmt = stmt.where(AssistantORM.metadata_dict.op("@>")(request.metadata))
@@ -320,7 +333,7 @@ class AssistantService(Authenticated):
 
         # Include both user's assistants and system assistants (like search_assistants does)
         stmt = select(func.count()).where(
-            or_(AssistantORM.user_id == self.user.identity, AssistantORM.user_id == "system")
+            visible_assistant_filter(self.user)
         )
 
         if request.name:
@@ -331,6 +344,12 @@ class AssistantService(Authenticated):
 
         if request.graph_id:
             stmt = stmt.where(AssistantORM.graph_id == request.graph_id)
+
+        if request.user_id:
+            stmt = stmt.where(AssistantORM.user_id == request.user_id)
+
+        if request.tenant_id:
+            stmt = stmt.where(AssistantORM.tenant_id == request.tenant_id)
 
         if request.metadata:
             stmt = stmt.where(AssistantORM.metadata_dict.op("@>")(request.metadata))
@@ -353,7 +372,7 @@ class AssistantService(Authenticated):
 
         stmt = select(AssistantORM).where(
             AssistantORM.assistant_id == assistant_id,
-            or_(AssistantORM.user_id == self.user.identity, AssistantORM.user_id == "system"),
+            visible_assistant_filter(self.user),
         )
         auth_filter = build_metadata_filter(AssistantORM.metadata_dict, filters)
         if auth_filter is not None:
@@ -392,7 +411,7 @@ class AssistantService(Authenticated):
 
         stmt = select(AssistantORM).where(
             AssistantORM.assistant_id == assistant_id,
-            AssistantORM.user_id == self.user.identity,
+            owner_filter(AssistantORM, self.user),
         )
         auth_filter = build_metadata_filter(AssistantORM.metadata_dict, filters)
         if auth_filter is not None:
@@ -428,7 +447,7 @@ class AssistantService(Authenticated):
             update(AssistantORM)
             .where(
                 AssistantORM.assistant_id == assistant_id,
-                AssistantORM.user_id == self.user.identity,
+                owner_filter(AssistantORM, self.user),
             )
             .values(
                 name=new_version_details["name"],
@@ -442,6 +461,12 @@ class AssistantService(Authenticated):
             )
         )
         await self.session.execute(assistant_update)
+        if request.secrets:
+            await self.session.execute(
+                update(AssistantORM)
+                .where(AssistantORM.assistant_id == assistant_id, owner_filter(AssistantORM, self.user))
+                .values(secrets=encrypt_values(request.secrets))
+            )
         await self.session.commit()
         updated_assistant = await self.session.scalar(stmt)
         return to_pydantic(updated_assistant)
@@ -452,7 +477,7 @@ class AssistantService(Authenticated):
 
         stmt = select(AssistantORM).where(
             AssistantORM.assistant_id == assistant_id,
-            AssistantORM.user_id == self.user.identity,
+            owner_filter(AssistantORM, self.user),
         )
         auth_filter = build_metadata_filter(AssistantORM.metadata_dict, filters)
         if auth_filter is not None:
@@ -473,7 +498,7 @@ class AssistantService(Authenticated):
 
         stmt = select(AssistantORM).where(
             AssistantORM.assistant_id == assistant_id,
-            AssistantORM.user_id == self.user.identity,
+            owner_filter(AssistantORM, self.user),
         )
         auth_filter = build_metadata_filter(AssistantORM.metadata_dict, filters)
         if auth_filter is not None:
@@ -494,7 +519,7 @@ class AssistantService(Authenticated):
             update(AssistantORM)
             .where(
                 AssistantORM.assistant_id == assistant_id,
-                AssistantORM.user_id == self.user.identity,
+                owner_filter(AssistantORM, self.user),
             )
             .values(
                 name=assistant_version.name,
@@ -520,7 +545,7 @@ class AssistantService(Authenticated):
 
         stmt = select(AssistantORM).where(
             AssistantORM.assistant_id == assistant_id,
-            or_(AssistantORM.user_id == self.user.identity, AssistantORM.user_id == "system"),
+            visible_assistant_filter(self.user),
         )
         auth_filter = build_metadata_filter(AssistantORM.metadata_dict, filters)
         if auth_filter is not None:
@@ -549,7 +574,7 @@ class AssistantService(Authenticated):
                 config=v.config or {},
                 context=v.context or {},
                 graph_id=v.graph_id,
-                user_id=self.user.identity,
+                user_id=self.user.user_id,
                 version=v.version,
                 created_at=v.created_at,
                 updated_at=v.created_at,
@@ -641,6 +666,50 @@ class AssistantService(Authenticated):
             raise
         except Exception as e:
             raise HTTPException(400, f"Failed to get subgraphs: {str(e)}") from e
+
+    async def _owned(self, assistant_id: str) -> None:
+        """404 unless the caller owns the assistant (write-side gate for share management)."""
+        row = await self.session.scalar(
+            select(AssistantORM).where(
+                AssistantORM.assistant_id == assistant_id,
+                owner_filter(AssistantORM, self.user),
+            )
+        )
+        if not row:
+            raise HTTPException(404, f"Assistant '{assistant_id}' not found")
+
+    async def create_share(self, assistant_id: str, request: AssistantShareCreate) -> AssistantShareResponse:
+        """Grant read/execute on an assistant to a user, a tenant, or the public. Owner only."""
+        await self._dispatch("update", {"assistant_id": assistant_id})
+        await self._owned(assistant_id)
+
+        share = await self.session.get(AssistantShareORM, (assistant_id, request.grantee))
+        if share is None:
+            share = AssistantShareORM(assistant_id=assistant_id, grantee=request.grantee)
+            self.session.add(share)
+            await self.session.commit()
+            await self.session.refresh(share)
+        return AssistantShareResponse.model_validate(share)
+
+    async def list_shares(self, assistant_id: str) -> list[AssistantShareResponse]:
+        """List all grants of the owner's own assistant. Owner only."""
+        await self._dispatch("read", {"assistant_id": assistant_id})
+        await self._owned(assistant_id)
+        rows = await self.session.scalars(
+            select(AssistantShareORM).where(AssistantShareORM.assistant_id == assistant_id)
+        )
+        return [AssistantShareResponse.model_validate(r) for r in rows.all()]
+
+    async def delete_share(self, assistant_id: str, grantee: str) -> dict:
+        """Revoke a grant. Owner only."""
+        await self._dispatch("update", {"assistant_id": assistant_id})
+        await self._owned(assistant_id)
+        share = await self.session.get(AssistantShareORM, (assistant_id, grantee))
+        if not share:
+            raise HTTPException(404, f"Share '{grantee}' not found")
+        await self.session.delete(share)
+        await self.session.commit()
+        return {"status": "deleted"}
 
 
 def get_assistant_service(

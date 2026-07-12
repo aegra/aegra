@@ -100,7 +100,10 @@ class Assistant(Base):
     graph_id: Mapped[str] = mapped_column(Text, nullable=False)
     config: Mapped[dict] = mapped_column(JsonbSafe, server_default=text("'{}'::jsonb"))
     context: Mapped[dict] = mapped_column(JsonbSafe, server_default=text("'{}'::jsonb"))
+    # Encrypted per-assistant secrets {name: fernet_token}; excluded from all responses.
+    secrets: Mapped[dict] = mapped_column(JsonbSafe, server_default=text("'{}'::jsonb"))
     user_id: Mapped[str] = mapped_column(Text, nullable=False)
+    tenant_id: Mapped[str | None] = mapped_column(Text, nullable=True)
     version: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("1"))
     metadata_dict: Mapped[dict] = mapped_column(JsonbSafe, server_default=text("'{}'::jsonb"), name="metadata")
     created_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), server_default=text("now()"))
@@ -109,9 +112,13 @@ class Assistant(Base):
     # Indexes for performance
     __table_args__ = (
         Index("idx_assistant_user", "user_id"),
+        Index("idx_assistant_tenant_user", "tenant_id", "user_id"),
         Index("idx_assistant_user_assistant", "user_id", "assistant_id", unique=True),
+        # coalesce(tenant_id, empty-string) normalizes NULL so tenant-less rows cannot bypass uniqueness (NULL != NULL);
+        # md5(config::text) keeps large configs under the btree limit. See the migration for the real DDL.
         Index(
             "idx_assistant_user_graph_config",
+            text("coalesce(tenant_id, '')"),
             "user_id",
             "graph_id",
             text("md5(config::text)"),
@@ -144,11 +151,15 @@ class Thread(Base):
     # Database column is 'metadata_json' (per database.py). ORM attribute 'metadata_json' must map to that column.
     metadata_json: Mapped[dict] = mapped_column("metadata_json", JsonbSafe, server_default=text("'{}'::jsonb"))
     user_id: Mapped[str] = mapped_column(Text, nullable=False)
+    tenant_id: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), server_default=text("now()"))
     updated_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), server_default=text("now()"))
 
     # Indexes for performance
-    __table_args__ = (Index("idx_thread_user", "user_id"),)
+    __table_args__ = (
+        Index("idx_thread_user", "user_id"),
+        Index("idx_thread_tenant_user", "tenant_id", "user_id"),
+    )
 
 
 class Run(Base):
@@ -167,6 +178,7 @@ class Run(Base):
     output: Mapped[dict | None] = mapped_column(JsonbSafe)
     error_message: Mapped[str | None] = mapped_column(Text)
     user_id: Mapped[str] = mapped_column(Text, nullable=False)
+    tenant_id: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), server_default=text("now()"))
     updated_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), server_default=text("now()"))
 
@@ -184,6 +196,7 @@ class Run(Base):
     __table_args__ = (
         Index("idx_runs_thread_id", "thread_id"),
         Index("idx_runs_user", "user_id"),
+        Index("idx_runs_tenant_user", "tenant_id", "user_id"),
         Index("idx_runs_status", "status"),
         Index("idx_runs_assistant_id", "assistant_id"),
         Index("idx_runs_created_at", "created_at"),
@@ -203,6 +216,7 @@ class Cron(Base):
         Text, ForeignKey("thread.thread_id", ondelete="CASCADE"), nullable=True
     )
     user_id: Mapped[str] = mapped_column(Text, nullable=False)
+    tenant_id: Mapped[str | None] = mapped_column(Text, nullable=True)
     schedule: Mapped[str] = mapped_column(Text, nullable=False)
     # JsonbSafe strips NULL bytes from user payloads — same protection as runs.input.
     payload: Mapped[dict] = mapped_column(JsonbSafe, server_default=text("'{}'::jsonb"))
@@ -217,10 +231,24 @@ class Cron(Base):
 
     __table_args__ = (
         Index("idx_cron_user", "user_id"),
+        Index("idx_cron_tenant_user", "tenant_id", "user_id"),
         Index("idx_cron_assistant_id", "assistant_id"),
         Index("idx_cron_thread_id", "thread_id"),
         Index("idx_cron_next_run", "enabled", "next_run_date"),
     )
+
+
+class AssistantShare(Base):
+    __tablename__ = "assistant_share"
+
+    assistant_id: Mapped[str] = mapped_column(
+        Text, ForeignKey("assistant.assistant_id", ondelete="CASCADE"), primary_key=True
+    )
+    # Grant target: "user:<id>" | "tenant:<id>" | "public"
+    grantee: Mapped[str] = mapped_column(Text, primary_key=True)
+    created_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), server_default=text("now()"))
+
+    __table_args__ = (Index("idx_assistant_share_grantee", "grantee"),)
 
 
 # ---------------------------------------------------------------------------

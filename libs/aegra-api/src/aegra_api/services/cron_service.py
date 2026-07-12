@@ -13,9 +13,10 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 import structlog
 from croniter import croniter
 from fastapi import Depends, HTTPException
-from sqlalchemy import CursorResult, func, or_, select, update
+from sqlalchemy import CursorResult, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from aegra_api.core.authz import scope
 from aegra_api.core.orm import Assistant as AssistantORM
 from aegra_api.core.orm import Cron as CronORM
 from aegra_api.core.orm import get_session
@@ -30,6 +31,7 @@ from aegra_api.models.crons import (
 from aegra_api.services.langgraph_service import LangGraphService, get_langgraph_service
 from aegra_api.settings import settings
 from aegra_api.utils.assistants import resolve_assistant_id
+from aegra_api.utils.redaction import redact_secrets
 
 logger = structlog.getLogger(__name__)
 
@@ -49,6 +51,9 @@ def _build_payload(request: CronCreate | CronUpdate) -> dict[str, Any]:
         "interrupt_before",
         "interrupt_after",
         "webhook",
+        "webhook_headers",
+        "webhook_body",
+        "webhook_query",
         "multitask_strategy",
         "stream_mode",
         "stream_subgraphs",
@@ -150,6 +155,9 @@ def _redact_payload(payload: dict[str, Any] | None) -> dict[str, Any]:
     webhook = masked.get("webhook")
     if isinstance(webhook, str) and webhook:
         masked["webhook"] = _mask_webhook_credentials(webhook)
+    for field in ("webhook_headers",):
+        if isinstance(masked.get(field), dict):
+            masked[field] = redact_secrets(masked[field])
     return masked
 
 
@@ -203,7 +211,8 @@ class CronService:
     async def create_cron(
         self,
         request: CronCreate,
-        user_identity: str,
+        user_id: str,
+        tenant_id: str | None = None,
         *,
         thread_id: str | None = None,
     ) -> CronORM:
@@ -233,7 +242,7 @@ class CronService:
         max_per_user = settings.cron.CRON_MAX_PER_USER
         if max_per_user > 0:
             existing = await self.session.scalar(
-                select(func.count()).select_from(CronORM).where(CronORM.user_id == user_identity)
+                select(func.count()).select_from(CronORM).where(scope(CronORM, user_id, tenant_id))
             )
             if (existing or 0) >= max_per_user:
                 raise HTTPException(
@@ -250,7 +259,7 @@ class CronService:
         assistant = await self.session.scalar(
             select(AssistantORM).where(
                 AssistantORM.assistant_id == resolved_assistant_id,
-                or_(AssistantORM.user_id == user_identity, AssistantORM.user_id == "system"),
+                scope(AssistantORM, user_id, tenant_id, allow_system=True),
             )
         )
         if not assistant:
@@ -279,7 +288,8 @@ class CronService:
             cron_id=str(uuid4()),
             assistant_id=resolved_assistant_id,
             thread_id=thread_id,
-            user_id=user_identity,
+            user_id=user_id,
+            tenant_id=tenant_id,
             schedule=request.schedule,
             payload=payload,
             metadata_dict=request.metadata or {},
@@ -301,10 +311,11 @@ class CronService:
         self,
         cron_id: str,
         request: CronUpdate,
-        user_identity: str,
+        user_id: str,
+        tenant_id: str | None = None,
     ) -> CronResponse:
         """Update an existing cron job and return the updated ``CronResponse``."""
-        cron = await self._get_cron_or_404(cron_id, user_identity, lock=True)
+        cron = await self._get_cron_or_404(cron_id, user_id, tenant_id, lock=True)
 
         values: dict[str, Any] = {"updated_at": datetime.now(UTC)}
         existing_payload = dict(cron.payload or {})
@@ -358,7 +369,7 @@ class CronService:
             values["next_run_date"] = _compute_next_run(schedule, timezone=timezone)
 
         result: CursorResult[Any] = await self.session.execute(
-            update(CronORM).where(CronORM.cron_id == cron_id, CronORM.user_id == user_identity).values(**values)
+            update(CronORM).where(CronORM.cron_id == cron_id, scope(CronORM, user_id, tenant_id)).values(**values)
         )
         # DML execute() returns CursorResult; the explicit annotation makes
         # ``.rowcount`` reachable without a type: ignore.
@@ -367,7 +378,7 @@ class CronService:
         await self.session.commit()
 
         updated = await self.session.scalar(
-            select(CronORM).where(CronORM.cron_id == cron_id, CronORM.user_id == user_identity)
+            select(CronORM).where(CronORM.cron_id == cron_id, scope(CronORM, user_id, tenant_id))
         )
         if not updated:
             raise HTTPException(404, f"Cron '{cron_id}' not found")
@@ -375,9 +386,9 @@ class CronService:
         logger.info("Updated cron job", cron_id=cron_id)
         return _cron_to_response(updated)
 
-    async def delete_cron(self, cron_id: str, user_identity: str) -> None:
+    async def delete_cron(self, cron_id: str, user_id: str, tenant_id: str | None = None) -> None:
         """Delete a cron job."""
-        cron = await self._get_cron_or_404(cron_id, user_identity, lock=True)
+        cron = await self._get_cron_or_404(cron_id, user_id, tenant_id, lock=True)
         await self.session.delete(cron)
         await self.session.commit()
         logger.info("Deleted cron job", cron_id=cron_id)
@@ -385,10 +396,11 @@ class CronService:
     async def search_crons(
         self,
         request: CronSearchRequest,
-        user_identity: str,
+        user_id: str,
+        tenant_id: str | None = None,
     ) -> list[CronResponse]:
         """Search cron jobs with filters, pagination, and sorting."""
-        stmt = select(CronORM).where(CronORM.user_id == user_identity)
+        stmt = select(CronORM).where(scope(CronORM, user_id, tenant_id))
 
         if request.assistant_id is not None:
             resolved_assistant_id = self._resolve_assistant_identifier(request.assistant_id)
@@ -397,6 +409,10 @@ class CronService:
             stmt = stmt.where(CronORM.thread_id == request.thread_id)
         if request.enabled is not None:
             stmt = stmt.where(CronORM.enabled == request.enabled)
+        if request.user_id is not None:
+            stmt = stmt.where(CronORM.user_id == request.user_id)
+        if request.tenant_id is not None:
+            stmt = stmt.where(CronORM.tenant_id == request.tenant_id)
 
         # Sorting
         sort_column = CronORM.created_at
@@ -418,16 +434,21 @@ class CronService:
     async def count_crons(
         self,
         request: CronCountRequest,
-        user_identity: str,
+        user_id: str,
+        tenant_id: str | None = None,
     ) -> int:
         """Count cron jobs matching filters."""
-        stmt = select(func.count()).select_from(CronORM).where(CronORM.user_id == user_identity)
+        stmt = select(func.count()).select_from(CronORM).where(scope(CronORM, user_id, tenant_id))
 
         if request.assistant_id is not None:
             resolved_assistant_id = self._resolve_assistant_identifier(request.assistant_id)
             stmt = stmt.where(CronORM.assistant_id == resolved_assistant_id)
         if request.thread_id is not None:
             stmt = stmt.where(CronORM.thread_id == request.thread_id)
+        if request.user_id is not None:
+            stmt = stmt.where(CronORM.user_id == request.user_id)
+        if request.tenant_id is not None:
+            stmt = stmt.where(CronORM.tenant_id == request.tenant_id)
 
         total = await self.session.scalar(stmt)
         return total or 0
@@ -514,7 +535,8 @@ class CronService:
     async def _get_cron_or_404(
         self,
         cron_id: str,
-        user_identity: str,
+        user_id: str,
+        tenant_id: str | None = None,
         *,
         lock: bool = False,
     ) -> CronORM:
@@ -523,7 +545,7 @@ class CronService:
         When *lock* is True the row is selected ``FOR UPDATE`` so concurrent
         scheduler ticks cannot race the API write.
         """
-        stmt = select(CronORM).where(CronORM.cron_id == cron_id, CronORM.user_id == user_identity)
+        stmt = select(CronORM).where(CronORM.cron_id == cron_id, scope(CronORM, user_id, tenant_id))
         if lock:
             stmt = stmt.with_for_update()
         cron = await self.session.scalar(stmt)

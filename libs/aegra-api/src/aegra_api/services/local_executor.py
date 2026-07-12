@@ -29,7 +29,7 @@ class LocalExecutor(BaseExecutor):
             job.identity.run_id,
             job.identity.thread_id,
             job.identity.graph_id,
-            job.user.identity,
+            job.user.user_id,
             extra_metadata=job.run_metadata,
         )
         task = asyncio.create_task(execute_run(job), context=trace_ctx)

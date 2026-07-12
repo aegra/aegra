@@ -2,7 +2,7 @@
 
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, model_validator
 
 
 class User(BaseModel):
@@ -16,7 +16,7 @@ class User(BaseModel):
     model_config = ConfigDict(extra="allow")
 
     # Required
-    identity: str
+    user_id: str
 
     # Optional with defaults
     is_authenticated: bool = True
@@ -26,6 +26,22 @@ class User(BaseModel):
     # Common optional fields (for IDE hints)
     org_id: str | None = None
     email: str | None = None
+    # Multi-tenant isolation field. Returned by the auth handler, server-authoritative, not client-forgeable.
+    # None falls back to pure user_id isolation (tenant optional).
+    tenant_id: str | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def _accept_identity_alias(cls, data: Any) -> Any:
+        """Auth handlers may return identity (LangGraph convention); converge on user_id."""
+        if isinstance(data, dict) and not data.get("user_id") and data.get("identity"):
+            data = {**data, "user_id": data["identity"]}
+        return data
+
+    @property
+    def identity(self) -> str:
+        """Only to satisfy the LangGraph/starlette BaseUser protocol (matched by attribute name); business code should use user_id."""
+        return self.user_id
 
     def to_dict(self) -> dict[str, Any]:
         """Convert to dict including all extra fields."""

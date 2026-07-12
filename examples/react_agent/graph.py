@@ -32,7 +32,7 @@ async def call_model(state: State, runtime: Runtime[Context]) -> dict[str, list[
         dict: A dictionary containing the model's response message.
     """
     # Initialize the model with tool binding. Change the model or add more tools here.
-    # model / base_url / api_key 可由 assistant 的 context 自定义,回退到 OPENAI_* 环境变量。
+    # model / base_url / api_key can be customized via the assistant context, falling back to OPENAI_* env vars.
     model = load_chat_model(
         runtime.context.model,
         base_url=runtime.context.base_url,

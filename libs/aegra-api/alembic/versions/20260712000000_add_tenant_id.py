@@ -1,13 +1,13 @@
 """Add optional tenant_id to assistant/thread/runs/crons for multi-tenant isolation.
 
-tenant_id 是可选的多租户隔离维度,由 auth handler 提供(服务端权威),为 NULL 时
-退回纯 user_id 隔离。查询层用 `tenant_id IS NOT DISTINCT FROM :t` 做 NULL-safe
-匹配,故列可空、无默认值。
+tenant_id is an optional multi-tenant isolation dimension supplied by the auth handler
+(server-authoritative); when NULL it falls back to pure user_id isolation. The query layer uses
+`tenant_id IS NOT DISTINCT FROM :t` for NULL-safe matching, so the column is nullable with no default.
 
-Assistant 唯一索引 idx_assistant_user_graph_config 重建为纳入 tenant_id:用
-coalesce(tenant_id, '') 把 NULL 归一为同一分组,避免 Postgres 默认 NULL!=NULL
-在无租户场景削弱唯一性(不依赖 PG15+ 的 NULLS NOT DISTINCT)。保留 md5(config)
-表达式以支持大 config。
+The assistant unique index idx_assistant_user_graph_config is rebuilt to include tenant_id: it uses
+coalesce(tenant_id, '') to normalize NULL into one group, avoiding the Postgres default NULL!=NULL
+weakening uniqueness in the tenant-less case (without relying on PG15+ NULLS NOT DISTINCT). The md5(config)
+expression is kept to support large configs.
 
 Revision ID: a7b8c9d0e1f2
 Revises: b88bb61be638
@@ -23,7 +23,7 @@ down_revision = "b88bb61be638"
 branch_labels = None
 depends_on = None
 
-# 索引名沿用各表既有命名前缀(runs 复数、cron 单数),与 orm.py 保持一致。
+# Index names follow each table's existing prefix (runs plural, cron singular), matching orm.py.
 _TENANT_INDEXES = {
     "assistant": "idx_assistant_tenant_user",
     "thread": "idx_thread_tenant_user",
@@ -37,8 +37,8 @@ def upgrade() -> None:
         op.add_column(table, sa.Column("tenant_id", sa.Text(), nullable=True))
         op.create_index(index_name, table, ["tenant_id", "user_id"])
 
-    # 重建 Assistant 唯一索引,纳入 tenant_id(coalesce 归一 NULL),保留 md5(config)。
-    # CREATE INDEX 不能在事务内用 CONCURRENTLY;assistant 表小,一次性 ShareLock 可接受。
+    # Rebuild the assistant unique index to include tenant_id (coalesce normalizes NULL), keeping md5(config).
+    # CREATE INDEX cannot use CONCURRENTLY in a transaction; the assistant table is small, so a one-shot ShareLock is acceptable.
     op.drop_index("idx_assistant_user_graph_config", table_name="assistant")
     op.execute(
         "CREATE UNIQUE INDEX idx_assistant_user_graph_config "

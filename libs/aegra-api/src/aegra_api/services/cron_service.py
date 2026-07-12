@@ -155,7 +155,7 @@ def _redact_payload(payload: dict[str, Any] | None) -> dict[str, Any]:
     webhook = masked.get("webhook")
     if isinstance(webhook, str) and webhook:
         masked["webhook"] = _mask_webhook_credentials(webhook)
-    # webhook_headers 按 header 名、config/context 按嵌套 key —— 统一交给 redact_secrets。
+    # webhook_headers by header name, config/context by nested key — all delegated to redact_secrets.
     for field in ("webhook_headers", "config", "context"):
         if isinstance(masked.get(field), dict):
             masked[field] = redact_secrets(masked[field])

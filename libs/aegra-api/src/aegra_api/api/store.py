@@ -44,7 +44,7 @@ async def put_store_item(request: StorePutRequest, user: User = Depends(get_curr
             request.value = filters["value"]
 
     # Apply user namespace scoping
-    scoped_namespace = apply_user_namespace_scoping(user.identity, user.tenant_id,request.namespace)
+    scoped_namespace = apply_user_namespace_scoping(user.user_id, user.tenant_id,request.namespace)
 
     store = db_manager.get_store()
 
@@ -78,7 +78,7 @@ async def get_store_item(
             key = filters["key"]
 
     # Apply user namespace scoping
-    scoped_namespace = apply_user_namespace_scoping(user.identity, user.tenant_id,_normalize_namespace(namespace))
+    scoped_namespace = apply_user_namespace_scoping(user.user_id, user.tenant_id,_normalize_namespace(namespace))
 
     store = db_manager.get_store()
 
@@ -127,7 +127,7 @@ async def delete_store_item(
             k = filters["key"]
 
     # Apply user namespace scoping
-    scoped_namespace = apply_user_namespace_scoping(user.identity, user.tenant_id,ns)
+    scoped_namespace = apply_user_namespace_scoping(user.user_id, user.tenant_id,ns)
 
     store = db_manager.get_store()
 
@@ -160,7 +160,7 @@ async def search_store_items(
             request.filter = {**(request.filter or {}), **handler_filters}
 
     # Apply user namespace scoping
-    scoped_prefix = apply_user_namespace_scoping(user.identity, user.tenant_id,request.namespace_prefix)
+    scoped_prefix = apply_user_namespace_scoping(user.user_id, user.tenant_id,request.namespace_prefix)
 
     store = db_manager.get_store()
 
@@ -207,7 +207,7 @@ async def list_namespaces(
             request.suffix = filters["suffix"]
 
     # Apply user namespace scoping to prefix
-    scoped_prefix = apply_user_namespace_scoping(user.identity, user.tenant_id,request.prefix or [])
+    scoped_prefix = apply_user_namespace_scoping(user.user_id, user.tenant_id,request.prefix or [])
     prefix: tuple[str, ...] = tuple(scoped_prefix)
     suffix: tuple[str, ...] | None = tuple(request.suffix) if request.suffix else None
 
@@ -234,11 +234,11 @@ def _normalize_namespace(value: str | list[str] | None) -> list[str]:
 
 
 def apply_user_namespace_scoping(user_id: str, tenant_id: str | None, namespace: list[str]) -> list[str]:
-    """租户/用户命名空间隔离。
+    """Tenant/user namespace isolation.
 
-    有 tenant 时限定在 ["tenants", <tenant_id>, "users", <user_id>] 前缀下,
-    无 tenant 时退回 ["users", <user_id>]。客户端传入的其他 namespace 一律被
-    强制包在该前缀内,无法越权访问他人数据。
+    With a tenant, scope under the ["tenants", <tenant_id>, "users", <user_id>] prefix;
+    without a tenant, fall back to ["users", <user_id>]. Any client-supplied namespace is
+    forced under that prefix, so no cross-user data access is possible.
     """
     prefix = ["tenants", tenant_id, "users", user_id] if tenant_id else ["users", user_id]
     if not namespace:

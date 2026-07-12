@@ -46,7 +46,7 @@ class LangGraphUser(BaseUser):
 
     @property
     def user_id(self) -> str:
-        """`identity` 的对外一等别名;identity 保留以兼容 LangGraph BaseUser 协议。"""
+        """First-class user_id accessor; the wrapped _user_data is identity-keyed for the LangGraph BaseUser protocol."""
         return self.identity
 
     @property
@@ -267,7 +267,7 @@ class LangGraphAuthBackend(AuthenticationBackend):
             if not user_data or not isinstance(user_data, dict):
                 raise AuthenticationError("Invalid user data returned from auth handler")
 
-            # 接受 user_id 作为 identity 的别名;identity 保留以兼容 LangGraph 协议。
+            # Accept user_id as an alias for identity; identity is kept for LangGraph protocol compatibility.
             if "identity" not in user_data and "user_id" in user_data:
                 user_data["identity"] = user_data["user_id"]
 
@@ -283,7 +283,7 @@ class LangGraphAuthBackend(AuthenticationBackend):
             credentials = AuthCredentials(permissions)
             user = LangGraphUser(user_data)
 
-            logger.debug(f"Successfully authenticated user: {user.identity}")
+            logger.debug(f"Successfully authenticated user: {user.user_id}")
             return credentials, user
 
         except Auth.exceptions.HTTPException as e:

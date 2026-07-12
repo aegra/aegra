@@ -100,6 +100,8 @@ class Assistant(Base):
     graph_id: Mapped[str] = mapped_column(Text, nullable=False)
     config: Mapped[dict] = mapped_column(JsonbSafe, server_default=text("'{}'::jsonb"))
     context: Mapped[dict] = mapped_column(JsonbSafe, server_default=text("'{}'::jsonb"))
+    # Encrypted per-assistant secrets {name: fernet_token}; excluded from all responses.
+    secrets: Mapped[dict] = mapped_column(JsonbSafe, server_default=text("'{}'::jsonb"))
     user_id: Mapped[str] = mapped_column(Text, nullable=False)
     tenant_id: Mapped[str | None] = mapped_column(Text, nullable=True)
     version: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("1"))
@@ -112,8 +114,8 @@ class Assistant(Base):
         Index("idx_assistant_user", "user_id"),
         Index("idx_assistant_tenant_user", "tenant_id", "user_id"),
         Index("idx_assistant_user_assistant", "user_id", "assistant_id", unique=True),
-        # coalesce(tenant_id,'') 归一 NULL,避免无租户行因 NULL!=NULL 绕过唯一性;
-        # md5(config::text) 保证大 config 不超 btree 上限。真实 DDL 见迁移。
+        # coalesce(tenant_id, empty-string) normalizes NULL so tenant-less rows cannot bypass uniqueness (NULL != NULL);
+        # md5(config::text) keeps large configs under the btree limit. See the migration for the real DDL.
         Index(
             "idx_assistant_user_graph_config",
             text("coalesce(tenant_id, '')"),
@@ -233,6 +235,31 @@ class Cron(Base):
         Index("idx_cron_assistant_id", "assistant_id"),
         Index("idx_cron_thread_id", "thread_id"),
         Index("idx_cron_next_run", "enabled", "next_run_date"),
+    )
+
+
+class AssistantShare(Base):
+    __tablename__ = "assistant_share"
+
+    # gen_random_uuid() is in Postgres 13+ core; no extension needed.
+    share_id: Mapped[str] = mapped_column(Text, primary_key=True, server_default=text("gen_random_uuid()::text"))
+    assistant_id: Mapped[str] = mapped_column(
+        Text, ForeignKey("assistant.assistant_id", ondelete="CASCADE"), nullable=False
+    )
+    # Sharer ownership: only the owner may manage (add/remove) shares of their assistant
+    owner_user_id: Mapped[str] = mapped_column(Text, nullable=False)
+    owner_tenant_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Share scope: user=a specific user / tenant=a specific tenant / public=fully public
+    share_type: Mapped[str] = mapped_column(Text, nullable=False)
+    target_user_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    target_tenant_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), server_default=text("now()"))
+
+    __table_args__ = (
+        Index("idx_assistant_share_assistant", "assistant_id"),
+        Index("idx_assistant_share_target_user", "target_user_id"),
+        Index("idx_assistant_share_target_tenant", "target_tenant_id"),
+        Index("idx_assistant_share_owner", "owner_user_id"),
     )
 
 

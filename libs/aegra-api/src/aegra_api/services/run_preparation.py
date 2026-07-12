@@ -15,11 +15,11 @@ from fastapi import HTTPException
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from aegra_api.core.authz import owner_filter
 from aegra_api.core.orm import Assistant as AssistantORM
 from aegra_api.core.orm import Run as RunORM
 from aegra_api.core.orm import Thread as ThreadORM
 from aegra_api.core.orm import _get_session_maker
+from aegra_api.core.sharing import visible_assistant_filter
 from aegra_api.models import Run, RunCreate, User
 from aegra_api.models.run_job import RunBehavior, RunExecution, RunIdentity, RunJob
 from aegra_api.services.executor import executor
@@ -212,7 +212,7 @@ async def _prepare_run(
         "Scheduling run",
         run_id=run_id,
         thread_id=thread_id,
-        user_id=user.identity,
+        user_id=user.user_id,
         status=initial_status,
     )
 
@@ -233,7 +233,7 @@ async def _prepare_run(
 
     assistant_stmt = select(AssistantORM).where(
         AssistantORM.assistant_id == resolved_assistant_id,
-        owner_filter(AssistantORM, user, allow_system=True),
+        visible_assistant_filter(user),
     )
     assistant = await session.scalar(assistant_stmt)
     if not assistant:
@@ -253,7 +253,7 @@ async def _prepare_run(
         thread_id,
         assistant.assistant_id,
         assistant.graph_id,
-        user_id=user.identity,
+        user_id=user.user_id,
         tenant_id=user.tenant_id,
         input_data=request.input,
     )
@@ -261,7 +261,7 @@ async def _prepare_run(
 
     # Build the RunJob before persisting so we can store execution_params
     job = RunJob(
-        identity=RunIdentity(run_id=run_id, thread_id=thread_id, graph_id=assistant.graph_id),
+        identity=RunIdentity(run_id=run_id, thread_id=thread_id, graph_id=assistant.graph_id, assistant_id=assistant.assistant_id),
         user=user,
         execution=RunExecution(
             input_data=request.input,  # preserve None so LangGraph resumes from checkpoint
@@ -287,7 +287,7 @@ async def _prepare_run(
     exec_params = job.to_execution_params()
     exec_params["trace"] = {
         "correlation_id": correlation_id.get(""),
-        "user_id": user.identity,
+        "user_id": user.user_id,
         "tenant_id": user.tenant_id,
         "thread_id": thread_id,
         "graph_id": assistant.graph_id,
@@ -302,7 +302,7 @@ async def _prepare_run(
         input=request.input,  # preserve None for checkpoint-only resume; matches RunExecution.input_data
         config=config,
         context=context,
-        user_id=user.identity,
+        user_id=user.user_id,
         tenant_id=user.tenant_id,
         created_at=now,
         updated_at=now,

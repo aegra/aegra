@@ -197,7 +197,7 @@ async def create_thread(
 
     metadata = request.metadata or {}
     # Always enforce owner from authenticated user
-    metadata["owner"] = user.identity
+    metadata["owner"] = user.user_id
     # Preserve client-provided values; only set defaults if missing.
     metadata.setdefault("assistant_id", None)
     metadata.setdefault("graph_id", None)
@@ -207,7 +207,7 @@ async def create_thread(
         thread_id=thread_id,
         status="idle",
         metadata_json=metadata,
-        user_id=user.identity,
+        user_id=user.user_id,
         tenant_id=user.tenant_id,
     )
 

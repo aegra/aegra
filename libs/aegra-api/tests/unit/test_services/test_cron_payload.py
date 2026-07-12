@@ -1,11 +1,11 @@
-"""Tests for cron webhook payload (自定义 headers/body/query) 与 search 过滤字段。"""
+"""Tests for cron webhook payload (custom headers/body/query) and search filter fields."""
 
 from aegra_api.models.crons import CronCountRequest, CronCreate, CronSearchRequest
 from aegra_api.services.cron_service import _build_payload, _redact_payload
 
 
 class TestWebhookPayload:
-    """需求 C:cron webhook 支持自定义请求头 / body / query,并存入 payload。"""
+    """Requirement C: cron webhook supports custom headers / body / query, stored in payload."""
 
     def test_custom_webhook_fields_stored(self) -> None:
         req = CronCreate(
@@ -35,7 +35,7 @@ class TestWebhookPayload:
 
 
 class TestSearchTenantUserFilters:
-    """需求 B:search/count 请求接受 user_id / tenant_id 过滤字段。"""
+    """Requirement B: search/count requests accept user_id / tenant_id filter fields."""
 
     def test_search_accepts_user_and_tenant(self) -> None:
         req = CronSearchRequest(user_id="u1", tenant_id="t1")

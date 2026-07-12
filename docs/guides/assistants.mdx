@@ -44,9 +44,9 @@ async def main():
 asyncio.run(main())
 ```
 
-### 自定义 LLM(model / base_url / api_key)
+### Custom LLM (model / base_url / api_key)
 
-示例 agent 从 assistant 的 `context` 读取 LLM 配置,可为不同 assistant 指向不同模型或 OpenAI 兼容端点;未设置的字段回退到 `OPENAI_MODEL` / `OPENAI_BASE_URL` / `OPENAI_API_KEY` 环境变量:
+The example agent reads `model` / `base_url` from the assistant's `context`; credentials go in `secrets` (encrypted at rest, never returned). Unset fields fall back to the `OPENAI_MODEL` / `OPENAI_BASE_URL` / `OPENAI_API_KEY` environment variables:
 
 ```python
 assistant = await client.assistants.create(
@@ -55,13 +55,13 @@ assistant = await client.assistants.create(
     context={
         "model": "openai/gpt-4o",
         "base_url": "https://my-openai-proxy/v1",
-        "api_key": "sk-...",
     },
+    secrets={"api_key": "sk-..."},
 )
 ```
 
 <Note>
-  存入 `context`(或 `config`)的 `api_key` 会持久化,但在 `get` / `search` 响应中会被脱敏为 `***` —— 不影响 graph 执行读取真实值。敏感场景建议改用环境变量。
+  Put credentials in `secrets` (not `config`/`context`): values are Fernet-encrypted at rest, never returned in any response, and decrypted into the runtime context only during execution. Requires `AEGRA_SECRET_KEY` to be set. Non-secret fields like `model` / `base_url` stay in `context`.
 </Note>
 
 ### Idempotent creation
@@ -97,7 +97,7 @@ results = await client.assistants.search(
 # Search by name
 results = await client.assistants.search(name="Customer Support")
 
-# Search by user_id / tenant_id (只在调用者的授权边界内收窄)
+# Search by user_id / tenant_id (narrows only within the caller's authorization boundary)
 results = await client.assistants.search(user_id="alice", tenant_id="acme")
 ```
 

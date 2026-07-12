@@ -3,7 +3,7 @@
 from datetime import datetime
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 class AssistantCreate(BaseModel):
@@ -22,6 +22,9 @@ class AssistantCreate(BaseModel):
         default_factory=dict, description="Metadata to use for searching and filtering assistants."
     )
     if_exists: str | None = Field("error", description="What to do if assistant exists: error or do_nothing")
+    secrets: dict[str, str] | None = Field(
+        None, description="Named secrets (e.g. api_key) stored encrypted at rest; never returned in responses."
+    )
 
 
 class Assistant(BaseModel):
@@ -59,6 +62,9 @@ class AssistantUpdate(BaseModel):
     )
     metadata: dict[str, Any] | None = Field(
         default_factory=dict, description="Metadata to use for searching and filtering assistants."
+    )
+    secrets: dict[str, str] | None = Field(
+        None, description="Named secrets (e.g. api_key) stored encrypted at rest; never returned in responses."
     )
 
 
@@ -100,3 +106,34 @@ class AgentSchemas(BaseModel):
     output_schema: dict[str, Any] = Field(..., description="JSON Schema for agent outputs")
     state_schema: dict[str, Any] = Field(..., description="JSON Schema for agent state")
     config_schema: dict[str, Any] = Field(..., description="JSON Schema for agent config")
+
+
+class AssistantShareCreate(BaseModel):
+    """Create-share request: share_type determines which target field is required."""
+
+    share_type: Literal["user", "tenant", "public"] = Field(..., description="Share scope: user/tenant/public")
+    target_user_id: str | None = Field(None, description="Target user when share_type=user")
+    target_tenant_id: str | None = Field(None, description="Target tenant when share_type=tenant")
+
+    @model_validator(mode="after")
+    def _check_target(self) -> "AssistantShareCreate":
+        if self.share_type == "user" and not self.target_user_id:
+            raise ValueError("share_type=user requires target_user_id")
+        if self.share_type == "tenant" and not self.target_tenant_id:
+            raise ValueError("share_type=tenant requires target_tenant_id")
+        if self.share_type == "public" and (self.target_user_id or self.target_tenant_id):
+            raise ValueError("share_type=public must not carry a target")
+        return self
+
+
+class AssistantShareResponse(BaseModel):
+    """Share record response."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    share_id: str
+    assistant_id: str
+    share_type: str
+    target_user_id: str | None = None
+    target_tenant_id: str | None = None
+    created_at: datetime

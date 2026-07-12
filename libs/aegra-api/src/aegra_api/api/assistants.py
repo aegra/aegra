@@ -21,6 +21,8 @@ from aegra_api.models import (
     AssistantCreate,
     AssistantList,
     AssistantSearchRequest,
+    AssistantShareCreate,
+    AssistantShareResponse,
     AssistantUpdate,
 )
 from aegra_api.models.errors import NOT_FOUND
@@ -231,3 +233,44 @@ async def get_assistant_subgraphs(
     namespace.
     """
     return await service.get_assistant_subgraphs(assistant_id, namespace, recurse)
+
+
+@router.post(
+    "/assistants/{assistant_id}/share",
+    response_model=AssistantShareResponse,
+    responses={**NOT_FOUND},
+)
+async def create_assistant_share(
+    assistant_id: str,
+    request: AssistantShareCreate,
+    service: AssistantService = Depends(get_assistant_service),
+):
+    """Share an assistant with a specific user, a specific tenant, or fully public.
+
+    Only the owner may share. Grantees can read (config/context secrets are redacted) and execute
+    the assistant (execution reuses the owner-stored config, including real secrets).
+    """
+    return await service.create_share(assistant_id, request)
+
+
+@router.get(
+    "/assistants/{assistant_id}/shares",
+    response_model=list[AssistantShareResponse],
+    responses={**NOT_FOUND},
+)
+async def list_assistant_shares(
+    assistant_id: str,
+    service: AssistantService = Depends(get_assistant_service),
+):
+    """List all share records for this assistant. Owner only."""
+    return await service.list_shares(assistant_id)
+
+
+@router.delete("/assistants/{assistant_id}/shares/{share_id}", responses={**NOT_FOUND})
+async def delete_assistant_share(
+    assistant_id: str,
+    share_id: str,
+    service: AssistantService = Depends(get_assistant_service),
+):
+    """Delete a share record. Owner only."""
+    return await service.delete_share(assistant_id, share_id)

@@ -22,20 +22,22 @@ from uuid import uuid4
 from fastapi import Depends, HTTPException
 from langchain_core.runnables.utils import create_model
 from pydantic import TypeAdapter
-from sqlalchemy import func, or_, select, update
+from sqlalchemy import and_, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from aegra_api.core.auth_deps import get_current_user
 from aegra_api.core.auth_filters import build_metadata_filter
 from aegra_api.core.authz import owner_filter
+from aegra_api.core.crypto import encrypt_values
 from aegra_api.core.orm import Assistant as AssistantORM
+from aegra_api.core.orm import AssistantShare as AssistantShareORM
 from aegra_api.core.orm import AssistantVersion as AssistantVersionORM
 from aegra_api.core.orm import get_session
-from aegra_api.models import Assistant, AssistantCreate, AssistantUpdate
+from aegra_api.core.sharing import visible_assistant_filter
+from aegra_api.models import Assistant, AssistantCreate, AssistantShareCreate, AssistantShareResponse, AssistantUpdate
 from aegra_api.models.auth import User
 from aegra_api.services.authenticated import Authenticated
 from aegra_api.services.langgraph_service import LangGraphService, get_langgraph_service
-from aegra_api.utils.redaction import redact_secrets
 
 
 def to_pydantic(row: AssistantORM) -> Assistant:
@@ -56,10 +58,6 @@ def to_pydantic(row: AssistantORM) -> Assistant:
 
     # Use Pydantic's built-in ORM conversion with from_attributes=True
     assistant = Assistant.model_validate(row, from_attributes=True)
-    # 脱敏回传:config/context 可能含 api_key 等密钥(如自定义 OpenAI 端点)。
-    # 只脱敏响应副本,不改 DB——graph 执行经 run_preparation 直读原始值。
-    assistant.config = redact_secrets(assistant.config)
-    assistant.context = redact_secrets(assistant.context)
     return assistant
 
 
@@ -145,7 +143,7 @@ def _injected_metadata(
     """Fold metadata a create/update handler injected into ``value`` onto the request.
 
     Handlers inject by mutating ``value["metadata"]`` in place (e.g.
-    ``value["metadata"]["created_by"] = ctx.user.identity``). The handler's
+    ``value["metadata"]["created_by"] = ctx.user.user_id``). The handler's
     *return* is a query filter with no insert meaning, so it is not read here.
     """
     value_meta = value.get("metadata")
@@ -231,8 +229,9 @@ class AssistantService(Authenticated):
             config=config,
             context=context,
             graph_id=graph_id,
-            user_id=self.user.identity,
+            user_id=self.user.user_id,
             tenant_id=self.user.tenant_id,
+            secrets=encrypt_values(request.secrets) if request.secrets else {},
             metadata_dict=request.metadata,
             version=1,
         )
@@ -269,7 +268,7 @@ class AssistantService(Authenticated):
         filters = await self._dispatch("search", value)
 
         stmt = select(AssistantORM).where(
-            owner_filter(AssistantORM, self.user, allow_system=True)
+            visible_assistant_filter(self.user)
         )
         auth_filter = build_metadata_filter(AssistantORM.metadata_dict, filters)
         if auth_filter is not None:
@@ -289,7 +288,7 @@ class AssistantService(Authenticated):
         filters = await self._dispatch("search", value)
 
         stmt = select(AssistantORM).where(
-            owner_filter(AssistantORM, self.user, allow_system=True)
+            visible_assistant_filter(self.user)
         )
 
         if request.name:
@@ -334,7 +333,7 @@ class AssistantService(Authenticated):
 
         # Include both user's assistants and system assistants (like search_assistants does)
         stmt = select(func.count()).where(
-            owner_filter(AssistantORM, self.user, allow_system=True)
+            visible_assistant_filter(self.user)
         )
 
         if request.name:
@@ -373,7 +372,7 @@ class AssistantService(Authenticated):
 
         stmt = select(AssistantORM).where(
             AssistantORM.assistant_id == assistant_id,
-            owner_filter(AssistantORM, self.user, allow_system=True),
+            visible_assistant_filter(self.user),
         )
         auth_filter = build_metadata_filter(AssistantORM.metadata_dict, filters)
         if auth_filter is not None:
@@ -462,6 +461,12 @@ class AssistantService(Authenticated):
             )
         )
         await self.session.execute(assistant_update)
+        if request.secrets:
+            await self.session.execute(
+                update(AssistantORM)
+                .where(AssistantORM.assistant_id == assistant_id, owner_filter(AssistantORM, self.user))
+                .values(secrets=encrypt_values(request.secrets))
+            )
         await self.session.commit()
         updated_assistant = await self.session.scalar(stmt)
         return to_pydantic(updated_assistant)
@@ -540,7 +545,7 @@ class AssistantService(Authenticated):
 
         stmt = select(AssistantORM).where(
             AssistantORM.assistant_id == assistant_id,
-            owner_filter(AssistantORM, self.user, allow_system=True),
+            visible_assistant_filter(self.user),
         )
         auth_filter = build_metadata_filter(AssistantORM.metadata_dict, filters)
         if auth_filter is not None:
@@ -569,7 +574,7 @@ class AssistantService(Authenticated):
                 config=v.config or {},
                 context=v.context or {},
                 graph_id=v.graph_id,
-                user_id=self.user.identity,
+                user_id=self.user.user_id,
                 version=v.version,
                 created_at=v.created_at,
                 updated_at=v.created_at,
@@ -661,6 +666,76 @@ class AssistantService(Authenticated):
             raise
         except Exception as e:
             raise HTTPException(400, f"Failed to get subgraphs: {str(e)}") from e
+
+    async def create_share(
+        self, assistant_id: str, request: AssistantShareCreate
+    ) -> AssistantShareResponse:
+        """Share an assistant with user/tenant/public. Owner only (checked via owner_filter)."""
+        await self._dispatch("update", {"assistant_id": assistant_id})
+        owned = await self.session.scalar(
+            select(AssistantORM).where(
+                AssistantORM.assistant_id == assistant_id,
+                owner_filter(AssistantORM, self.user),
+            )
+        )
+        if not owned:
+            raise HTTPException(404, f"Assistant '{assistant_id}' not found")
+
+        dup = and_(
+            AssistantShareORM.assistant_id == assistant_id,
+            AssistantShareORM.share_type == request.share_type,
+            AssistantShareORM.target_user_id.is_not_distinct_from(request.target_user_id),
+            AssistantShareORM.target_tenant_id.is_not_distinct_from(request.target_tenant_id),
+        )
+        existing = await self.session.scalar(select(AssistantShareORM).where(dup))
+        if existing:
+            return AssistantShareResponse.model_validate(existing)
+
+        share = AssistantShareORM(
+            assistant_id=assistant_id,
+            owner_user_id=self.user.user_id,
+            owner_tenant_id=self.user.tenant_id,
+            share_type=request.share_type,
+            target_user_id=request.target_user_id,
+            target_tenant_id=request.target_tenant_id,
+        )
+        self.session.add(share)
+        await self.session.commit()
+        await self.session.refresh(share)
+        return AssistantShareResponse.model_validate(share)
+
+    async def list_shares(self, assistant_id: str) -> list[AssistantShareResponse]:
+        """List all shares of the owner's own assistant. Owner only."""
+        await self._dispatch("read", {"assistant_id": assistant_id})
+        owned = await self.session.scalar(
+            select(AssistantORM).where(
+                AssistantORM.assistant_id == assistant_id,
+                owner_filter(AssistantORM, self.user),
+            )
+        )
+        if not owned:
+            raise HTTPException(404, f"Assistant '{assistant_id}' not found")
+        rows = await self.session.scalars(
+            select(AssistantShareORM).where(AssistantShareORM.assistant_id == assistant_id)
+        )
+        return [AssistantShareResponse.model_validate(r) for r in rows.all()]
+
+    async def delete_share(self, assistant_id: str, share_id: str) -> dict:
+        """Delete a share. Owner only."""
+        await self._dispatch("update", {"assistant_id": assistant_id})
+        share = await self.session.scalar(
+            select(AssistantShareORM).where(
+                AssistantShareORM.share_id == share_id,
+                AssistantShareORM.assistant_id == assistant_id,
+                AssistantShareORM.owner_user_id == self.user.user_id,
+                AssistantShareORM.owner_tenant_id.is_not_distinct_from(self.user.tenant_id),
+            )
+        )
+        if not share:
+            raise HTTPException(404, f"Share '{share_id}' not found")
+        await self.session.delete(share)
+        await self.session.commit()
+        return {"status": "deleted"}
 
 
 def get_assistant_service(

@@ -678,9 +678,9 @@ def inject_user_context(user: Any | None, base_config: dict[str, Any] | None = N
     # All user-related data injection (only if user exists)
     if user:
         # Basic user identity for multi-tenant scoping
-        config["configurable"].setdefault("user_id", user.identity)
+        config["configurable"].setdefault("user_id", user.user_id)
         config["configurable"].setdefault("tenant_id", getattr(user, "tenant_id", None))
-        config["configurable"].setdefault("user_display_name", getattr(user, "display_name", None) or user.identity)
+        config["configurable"].setdefault("user_display_name", getattr(user, "display_name", None) or user.user_id)
 
         config["configurable"]["langgraph_auth_user"] = user
 
@@ -738,7 +738,7 @@ def create_run_config(
 
     # Add metadata from all observability providers (independent of callbacks)
     cfg.setdefault("metadata", {})
-    user_identity = user.identity if user else None
+    user_identity = user.user_id if user else None
     observability_metadata = get_tracing_metadata(run_id, thread_id, user_identity)
     cfg["metadata"].update(observability_metadata)
 

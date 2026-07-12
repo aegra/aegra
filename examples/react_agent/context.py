@@ -8,7 +8,7 @@ from typing import Annotated
 
 from react_agent import prompts
 
-# context 字段名 → 环境变量名的回退映射(用户要求 OPENAI_ 前缀)。
+# Fallback mapping from context field name to env var name (OPENAI_ prefix).
 _ENV_ALIASES = {
     "model": "OPENAI_MODEL",
     "base_url": "OPENAI_BASE_URL",
@@ -38,14 +38,14 @@ class Context:
 
     base_url: str | None = field(
         default=None,
-        metadata={"description": "OpenAI 兼容端点的 base URL;覆盖 OPENAI_BASE_URL 环境变量。"},
+        metadata={"description": "Base URL for an OpenAI-compatible endpoint; overrides the OPENAI_BASE_URL env var."},
     )
 
     api_key: str | None = field(
         default=None,
         metadata={
-            "description": "覆盖 OPENAI_API_KEY 的 API key。注意:存入 assistant 会被持久化,"
-            "敏感场景建议改用环境变量。"
+            "description": "API key overriding OPENAI_API_KEY. Note: storing it in an assistant persists it;"
+            " for sensitive use, prefer an environment variable."
         },
     )
 

@@ -2,7 +2,7 @@
 
 Putting dispatch on the service (not the route) means an endpoint cannot reach
 the database without authorizing first. `handle_event` is default-allow when no
-handler matches; the SQL-layer `user_id == user.identity` filter is the tenant
+handler matches; the SQL-layer `user_id == user.user_id` filter is the tenant
 boundary (GHSA-m98r-6667-4wq7).
 """
 

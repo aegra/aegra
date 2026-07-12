@@ -16,7 +16,7 @@ class User(BaseModel):
     model_config = ConfigDict(extra="allow")
 
     # Required
-    identity: str
+    user_id: str
 
     # Optional with defaults
     is_authenticated: bool = True
@@ -26,22 +26,22 @@ class User(BaseModel):
     # Common optional fields (for IDE hints)
     org_id: str | None = None
     email: str | None = None
-    # 多租户隔离字段。由 auth handler 返回,服务端权威,客户端不可伪造。
-    # 为 None 时退回纯 user_id 隔离(tenant 可选)。
+    # Multi-tenant isolation field. Returned by the auth handler, server-authoritative, not client-forgeable.
+    # None falls back to pure user_id isolation (tenant optional).
     tenant_id: str | None = None
 
     @model_validator(mode="before")
     @classmethod
-    def _accept_user_id_alias(cls, data: Any) -> Any:
-        """接受 `user_id` 作为 `identity` 的输入别名(auth handler 可返回任一)。"""
-        if isinstance(data, dict) and not data.get("identity") and data.get("user_id"):
-            data = {**data, "identity": data["user_id"]}
+    def _accept_identity_alias(cls, data: Any) -> Any:
+        """Auth handlers may return identity (LangGraph convention); converge on user_id."""
+        if isinstance(data, dict) and not data.get("user_id") and data.get("identity"):
+            data = {**data, "user_id": data["identity"]}
         return data
 
     @property
-    def user_id(self) -> str:
-        """`identity` 的对外一等别名;identity 保留以兼容 LangGraph BaseUser 协议。"""
-        return self.identity
+    def identity(self) -> str:
+        """Only to satisfy the LangGraph/starlette BaseUser protocol (matched by attribute name); business code should use user_id."""
+        return self.user_id
 
     def to_dict(self) -> dict[str, Any]:
         """Convert to dict including all extra fields."""

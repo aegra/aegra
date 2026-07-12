@@ -60,9 +60,9 @@ The `@auth.authenticate` decorator registers your authentication function. It re
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `user_id` | `string` | 用户唯一标识(旧名 `identity`,仍兼容) |
+| `user_id` | `string` | Unique user identifier (formerly `identity`, still accepted) |
 
-> 返回 `user_id` 或 `identity` 均可:`user_id` 是对外一等名称,`identity` 保留以兼容 LangGraph SDK 的 `BaseUser` 协议。`user.user_id` 与 `user.identity` 等价。
+> Returning either `user_id` or `identity` works: `user_id` is the first-class public name, and `identity` is kept for compatibility with the LangGraph SDK `BaseUser` protocol. `user.user_id` and `user.identity` are equivalent.
 
 ### Optional fields
 
@@ -71,18 +71,18 @@ The `@auth.authenticate` decorator registers your authentication function. It re
 | `display_name` | `string` | Same as `identity` | Display name |
 | `permissions` | `list[str]` | `[]` | Permission strings |
 | `is_authenticated` | `bool` | `True` | Authentication status |
-| `tenant_id` | `string \| None` | `None` | 多租户隔离标识(见下) |
+| `tenant_id` | `string | None` | `None` | Multi-tenant isolation identifier (see below) |
 
 Any additional fields you return (like `role`, `team_id`, etc.) are preserved and accessible via `ctx.user` in authorization handlers and via the `User` model in custom routes.
 
-### 多租户隔离(tenant_id)
+### Multi-tenant isolation (tenant_id)
 
-返回 `tenant_id` 即可为所有资源(assistants、threads、runs、crons、store)启用租户级隔离,叠加在 `user_id` 之上:
+Returning `tenant_id` enables tenant-level isolation for all resources (assistants, threads, runs, crons, store), layered on top of `user_id`:
 
-- **返回 `tenant_id` 时**:资源访问要求 `user_id` 与 `tenant_id` 同时匹配。`tenant` 是硬隔离边界——即使 `identity` 相同,不同 `tenant` 的数据也互相隔离。
-- **不返回(为 `None`)时**:退回纯 `user_id` 隔离,行为与之前完全一致。
+- **When `tenant_id` is returned**: resource access requires both `user_id` and `tenant_id` to match. `tenant` is a hard isolation boundary — even with the same `identity`, data in different `tenant`s stays isolated.
+- **When omitted (`None`)**: falls back to pure `user_id` isolation, behaving exactly as before.
 
-`tenant_id` 只能由 `@auth.authenticate` 返回(服务端权威),客户端无法通过请求伪造或篡改;资源在创建时记录其 `tenant_id` 且不可更改。
+`tenant_id` can only be returned by `@auth.authenticate` (server-authoritative); clients cannot forge or tamper with it via requests. A resource records its `tenant_id` at creation and it is immutable.
 
 ```python
 @auth.authenticate
@@ -90,7 +90,7 @@ async def authenticate(headers: dict) -> dict:
     claims = verify_jwt(headers.get("Authorization", ""))
     return {
         "identity": claims["sub"],
-        "tenant_id": claims.get("org_id"),  # 无则退回纯 user_id 隔离
+        "tenant_id": claims.get("org_id"),  # None falls back to pure user_id isolation
     }
 ```
 

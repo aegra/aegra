@@ -15,13 +15,14 @@ members = [
 
 [[package]]
 name = "aegra-api"
-version = "0.10.0"
+version = "0.11.0"
 source = { editable = "libs/aegra-api" }
 dependencies = [
     { name = "alembic" },
     { name = "asgi-correlation-id" },
     { name = "asyncpg" },
     { name = "croniter" },
+    { name = "cryptography" },
     { name = "fastapi" },
     { name = "greenlet" },
     { name = "langgraph" },
@@ -63,6 +64,7 @@ requires-dist = [
     { name = "asgi-correlation-id", specifier = ">=4.3.4" },
     { name = "asyncpg", specifier = ">=0.30.0" },
     { name = "croniter", specifier = ">=6.0.0" },
+    { name = "cryptography", specifier = ">=42.0.0" },
     { name = "fastapi", specifier = ">=0.110.1" },
     { name = "greenlet", specifier = ">=3.1.0" },
     { name = "langgraph", specifier = ">=1.0.3" },
@@ -100,7 +102,7 @@ dev = [
 
 [[package]]
 name = "aegra-cli"
-version = "0.10.0"
+version = "0.11.0"
 source = { editable = "libs/aegra-cli" }
 dependencies = [
     { name = "aegra-api" },

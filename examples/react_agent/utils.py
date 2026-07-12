@@ -29,8 +29,8 @@ def load_chat_model(
 
     Args:
         fully_specified_name: String in the format 'provider/model'.
-        base_url: 可选的 OpenAI 兼容 base URL(覆盖 OPENAI_BASE_URL)。
-        api_key: 可选的 API key(覆盖 OPENAI_API_KEY)。
+        base_url: Optional OpenAI-compatible base URL (overrides OPENAI_BASE_URL).
+        api_key: Optional API key (overrides OPENAI_API_KEY).
     """
     provider, model = fully_specified_name.split("/", maxsplit=1)
     kwargs: dict[str, Any] = {}

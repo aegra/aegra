@@ -493,7 +493,7 @@ def _restore_trace_context(run_id: str, job: RunJob, trace: dict[str, str]) -> N
     if original_request_id:
         system_metadata["original_request_id"] = original_request_id
     set_trace_context(
-        user_id=job.user.identity,
+        user_id=job.user.user_id,
         session_id=job.identity.thread_id,
         trace_name=job.identity.graph_id,
         metadata=merge_run_metadata(job.run_metadata, system_metadata),
@@ -503,6 +503,6 @@ def _restore_trace_context(run_id: str, job: RunJob, trace: dict[str, str]) -> N
         run_id=run_id,
         thread_id=job.identity.thread_id,
         graph_id=job.identity.graph_id,
-        user_id=job.user.identity,
+        user_id=job.user.user_id,
         original_request_id=original_request_id,
     )

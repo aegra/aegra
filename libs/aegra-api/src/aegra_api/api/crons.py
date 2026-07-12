@@ -156,7 +156,7 @@ async def update_cron(
     value = {"cron_id": cron_id, **request.model_dump(exclude_none=True)}
     await handle_event(ctx, value)
 
-    return await service.update_cron(cron_id, request, user.identity, user.tenant_id)
+    return await service.update_cron(cron_id, request, user.user_id, user.tenant_id)
 
 
 # ---------------------------------------------------------------------------
@@ -175,7 +175,7 @@ async def delete_cron(
     value = {"cron_id": cron_id}
     await handle_event(ctx, value)
 
-    await service.delete_cron(cron_id, user.identity, user.tenant_id)
+    await service.delete_cron(cron_id, user.user_id, user.tenant_id)
     return Response(status_code=204)
 
 
@@ -195,7 +195,7 @@ async def search_crons(
     value = request.model_dump(exclude_none=True)
     await handle_event(ctx, value)
 
-    return await service.search_crons(request, user.identity, user.tenant_id)
+    return await service.search_crons(request, user.user_id, user.tenant_id)
 
 
 # ---------------------------------------------------------------------------
@@ -214,7 +214,7 @@ async def count_crons(
     value = request.model_dump(exclude_none=True)
     await handle_event(ctx, value)
 
-    return await service.count_crons(request, user.identity, user.tenant_id)
+    return await service.count_crons(request, user.user_id, user.tenant_id)
 
 
 # ---------------------------------------------------------------------------
@@ -237,7 +237,7 @@ async def _create_cron_atomic(
     When ``request.enabled`` is False the first run is suppressed entirely
     and the persisted ``Cron`` is returned instead of a ``Run``.
     """
-    cron = await service.create_cron(request, user.identity, user.tenant_id, thread_id=thread_id)
+    cron = await service.create_cron(request, user.user_id, user.tenant_id, thread_id=thread_id)
 
     if request.enabled is False:
         return _cron_to_response(cron)
@@ -246,7 +246,7 @@ async def _create_cron_atomic(
         return await _trigger_first_run(session, cron, user, thread_id=thread_id)
     except Exception:
         try:
-            await service.delete_cron(cron.cron_id, user.identity, user.tenant_id)
+            await service.delete_cron(cron.cron_id, user.user_id, user.tenant_id)
         except Exception:
             logger.exception(
                 "Failed to roll back cron after first-run setup error",
@@ -279,7 +279,7 @@ async def _trigger_first_run(
     except Exception:
         if should_delete_thread:
             try:
-                await delete_thread_by_id(effective_thread_id, user.identity)
+                await delete_thread_by_id(effective_thread_id, user.user_id)
             except Exception:
                 logger.exception(
                     "Failed to delete stateless cron thread after initial run setup error",
@@ -289,6 +289,6 @@ async def _trigger_first_run(
         raise
 
     if should_delete_thread:
-        schedule_background_cleanup(_run_id, effective_thread_id, user.identity)
+        schedule_background_cleanup(_run_id, effective_thread_id, user.user_id)
 
     return run

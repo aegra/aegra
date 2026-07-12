@@ -60,7 +60,7 @@ class TestApplyUserNamespaceScoping:
         result = apply_user_namespace_scoping("user-123", None,ns)
         assert result == ["users", "user-123", "a", "b", "c"]
 
-    # --- tenant 维度 ---
+    # --- tenant dimension ---
 
     def test_empty_namespace_with_tenant(self) -> None:
         result = apply_user_namespace_scoping("user-123", "tenant-a", [])
@@ -76,7 +76,7 @@ class TestApplyUserNamespaceScoping:
         assert result == ns
 
     def test_cross_tenant_namespace_is_rescoped(self) -> None:
-        """带他人 tenant 前缀的 namespace 被强制包在自己的 tenant 下,无法越权。"""
+        """A namespace carrying another tenant prefix is forced under the caller's own tenant — no escalation."""
         ns = ["tenants", "victim-tenant", "users", "user-123", "secrets"]
         result = apply_user_namespace_scoping("user-123", "tenant-a", ns)
         assert result[:2] == ["tenants", "tenant-a"]

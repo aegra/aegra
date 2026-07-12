@@ -25,9 +25,9 @@ def _extract_user_data(user_obj: Any) -> dict[str, Any]:
         return user_obj.to_dict()
     if hasattr(user_obj, "dict"):
         return user_obj.dict()
-    # Fallback: try to extract known attributes
+    # Fallback: extract known attributes (user_id first, identity as alias)
     return {
-        "identity": getattr(user_obj, "identity", str(user_obj)),
+        "user_id": getattr(user_obj, "user_id", None) or getattr(user_obj, "identity", str(user_obj)),
         "is_authenticated": getattr(user_obj, "is_authenticated", True),
     }
 
@@ -43,13 +43,13 @@ def _to_user_model(user: Any) -> User:
     """
     user_data = _extract_user_data(user)
 
-    # Ensure identity exists
-    if "identity" not in user_data:
-        raise HTTPException(status_code=401, detail="User identity not provided")
+    # user_id is primary; accept the LangGraph-style identity key as an alias
+    if "user_id" not in user_data and "identity" not in user_data:
+        raise HTTPException(status_code=401, detail="User id not provided")
 
     # Set display_name default if not provided
     if user_data.get("display_name") is None:
-        user_data["display_name"] = user_data["identity"]
+        user_data["display_name"] = user_data.get("user_id") or user_data["identity"]
 
     # Pass all fields through to User model (extra fields allowed via ConfigDict)
     return User(**user_data)
@@ -149,7 +149,7 @@ def get_user_id(user: User = Depends(get_current_user)) -> str:
     Returns:
         User identity string
     """
-    return user.identity
+    return user.user_id
 
 
 def require_permission(permission: str):

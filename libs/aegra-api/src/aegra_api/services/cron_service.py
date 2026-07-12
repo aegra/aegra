@@ -147,22 +147,16 @@ def _mask_webhook_credentials(url: str) -> str:
     return urlunparse(parsed._replace(netloc=netloc))
 
 
-# 响应回传时需脱敏的敏感 webhook 请求头(避免 GET cron 泄漏令牌)。
-_SENSITIVE_HEADERS = frozenset({"authorization", "proxy-authorization", "x-api-key", "cookie"})
-
-
 def _redact_payload(payload: dict[str, Any] | None) -> dict[str, Any]:
-    """Return a copy of *payload* with webhook credentials masked."""
+    """Return a copy of *payload* with webhook/config/context credentials masked."""
     if not payload:
         return {}
     masked = dict(payload)
     webhook = masked.get("webhook")
     if isinstance(webhook, str) and webhook:
         masked["webhook"] = _mask_webhook_credentials(webhook)
-    headers = masked.get("webhook_headers")
-    if isinstance(headers, dict):
-        masked["webhook_headers"] = {k: ("***" if k.lower() in _SENSITIVE_HEADERS else v) for k, v in headers.items()}
-    for field in ("config", "context"):
+    # webhook_headers 按 header 名、config/context 按嵌套 key —— 统一交给 redact_secrets。
+    for field in ("webhook_headers", "config", "context"):
         if isinstance(masked.get(field), dict):
             masked[field] = redact_secrets(masked[field])
     return masked

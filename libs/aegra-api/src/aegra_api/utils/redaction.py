@@ -12,12 +12,14 @@ _REDACTED = "***"
 _SENSITIVE_KEYS = frozenset(
     {
         "apikey",
+        "xapikey",
         "password",
         "secret",
         "token",
         "accesstoken",
         "refreshtoken",
         "authorization",
+        "proxyauthorization",
         "cookie",
         "clientsecret",
     }

@@ -42,6 +42,7 @@ from aegra_api.models.threads import (
     ThreadStateUpdateResponse,
     ThreadUpdate,
 )
+from aegra_api.models.webhooks import WebhookConfig
 
 __all__ = [
     # Assistants
@@ -73,6 +74,8 @@ __all__ = [
     "CronUpdate",
     "CronSearchRequest",
     "CronCountRequest",
+    # Webhooks
+    "WebhookConfig",
     # Store
     "StorePutRequest",
     "StoreGetResponse",

@@ -1,6 +1,6 @@
 [project]
 name = "aegra-api"
-version = "0.9.24"
+version = "0.9.25"
 description = "Aegra core API - Self-hosted Agent Protocol server"
 readme = "README.md"
 requires-python = ">=3.12"
@@ -56,6 +56,9 @@ dependencies = [
 
     # Cron expression parsing
     "croniter>=6.0.0",
+
+    # Outbound webhook delivery (also a transitive dep of langgraph-sdk; pinned direct here)
+    "httpx>=0.27.0",
 ]
 
 [project.urls]

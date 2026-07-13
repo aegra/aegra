@@ -60,6 +60,7 @@ def _make_run_orm(
     orm.run_id = run_id
     orm.thread_id = thread_id
     orm.status = status
+    orm.assistant_id = "test-assistant"
     orm.execution_params = execution_params or {
         "graph_id": "test-graph",
         "user": {"identity": "test-user", "is_authenticated": True, "permissions": []},

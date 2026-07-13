@@ -32,7 +32,8 @@ class TestWebhookValidation:
     @pytest.mark.parametrize("url", ["http://example.com/hook", "https://example.com/hook"])
     def test_accepts_http_https(self, url: str) -> None:
         req = CronCreate(assistant_id="a", schedule="* * * * *", webhook=url)
-        assert req.webhook == url
+        assert req.webhook is not None
+        assert req.webhook.url == url
 
 
 class TestEndTimeMustBeFuture:

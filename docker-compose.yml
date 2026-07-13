@@ -37,6 +37,10 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+    # Lets the container reach host-run services (e.g. local webhook receivers
+    # in e2e tests) via host.docker.internal on Linux as well as Docker Desktop.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     healthcheck:
       test: ["CMD-SHELL", "curl -sf http://localhost:$${PORT:-2026}/health || exit 1"]
       interval: 30s

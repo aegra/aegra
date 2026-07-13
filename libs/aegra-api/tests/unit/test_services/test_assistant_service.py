@@ -120,7 +120,6 @@ class TestToPydantic:
         mock_orm.config = {}
         mock_orm.context = {}
         mock_orm.metadata_dict = {}
-
         result = to_pydantic(mock_orm)
 
         assert isinstance(result, Assistant)
@@ -178,7 +177,6 @@ class TestToPydantic:
         mock_orm.config = {}
         mock_orm.context = {}
         mock_orm.metadata_dict = {}
-
         result = to_pydantic(mock_orm)
 
         assert result.assistant_id == str(test_uuid)
@@ -232,7 +230,6 @@ class TestToPydantic:
         mock_orm.config = {}
         mock_orm.context = {}
         mock_orm.metadata_dict = {}
-
         result = to_pydantic(mock_orm)
 
         assert result.assistant_id == "test-id"
@@ -267,7 +264,6 @@ class TestAssistantServiceCreate:
         mock_assistant.config = {}
         mock_assistant.context = {}
         mock_assistant.metadata_dict = {}
-
         assistant_service.session.add = Mock()
         assistant_service.session.commit = AsyncMock()
 
@@ -439,7 +435,6 @@ class TestAssistantServiceCreate:
         existing_assistant.config = {}
         existing_assistant.context = {}
         existing_assistant.metadata_dict = {}
-
         mock_table = Mock()
         mock_column = Mock()
         mock_column.name = "assistant_id"
@@ -501,7 +496,6 @@ class TestAssistantServiceGet:
         mock_assistant.config = {}
         mock_assistant.context = {}
         mock_assistant.metadata_dict = {}
-
         mock_table = Mock()
         mock_column1 = Mock()
         mock_column1.name = "assistant_id"
@@ -547,7 +541,6 @@ class TestAssistantServiceGet:
         mock_assistant.config = {}
         mock_assistant.context = {}
         mock_assistant.metadata_dict = {}
-
         mock_table = Mock()
         mock_column1 = Mock()
         mock_column1.name = "assistant_id"
@@ -589,7 +582,6 @@ class TestAssistantServiceUpdate:
         mock_assistant.config = {}
         mock_assistant.context = {}
         mock_assistant.metadata_dict = {}
-
         mock_updated_assistant = Mock()
         mock_updated_assistant.assistant_id = "test-id"
         mock_updated_assistant.name = "Updated Assistant"
@@ -602,7 +594,6 @@ class TestAssistantServiceUpdate:
         mock_updated_assistant.config = {"temperature": 0.8}
         mock_updated_assistant.context = {}
         mock_updated_assistant.metadata_dict = {"env": "updated"}
-
         mock_table = Mock()
         mock_column1 = Mock()
         mock_column1.name = "assistant_id"
@@ -721,7 +712,6 @@ class TestAssistantServiceVersionManagement:
         mock_assistant.config = {}
         mock_assistant.context = {}
         mock_assistant.metadata_dict = {"version": "latest"}
-
         # Mock existing version
         mock_version = Mock()
         mock_version.name = "Version Name"
@@ -730,7 +720,6 @@ class TestAssistantServiceVersionManagement:
         mock_version.context = {"ctx": "val"}
         mock_version.graph_id = "test-graph"
         mock_version.metadata_dict = {"version": "latest"}
-
         assistant_service.session.scalar.side_effect = [
             mock_assistant,
             mock_version,

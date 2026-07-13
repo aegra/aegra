@@ -21,6 +21,7 @@ from aegra_api.services.graph_streaming import stream_graph_events
 from aegra_api.services.langgraph_service import create_run_config, get_langgraph_service
 from aegra_api.services.run_status import finalize_run, update_run_status
 from aegra_api.services.streaming_service import streaming_service
+from aegra_api.services.webhook_service import dispatch as dispatch_webhook
 from aegra_api.settings import settings
 from aegra_api.utils.run_utils import map_command_to_langgraph
 
@@ -48,6 +49,11 @@ async def execute_run(job: RunJob) -> None:
     run_id = job.identity.run_id
     thread_id = job.identity.thread_id
     is_lease_loss = False
+    # Terminal outcome captured for best-effort webhook delivery (fired in finally).
+    # Left None on lease loss so the losing worker never double-delivers.
+    webhook_status: str | None = None
+    webhook_output: dict[str, Any] | None = None
+    webhook_error: str | None = None
 
     try:
         await update_run_status(run_id, "running")
@@ -62,6 +68,7 @@ async def execute_run(job: RunJob) -> None:
                 thread_status="interrupted",
                 output=final_output.data,
             )
+            webhook_status, webhook_output = "interrupted", final_output.data
         else:
             await finalize_run(
                 run_id,
@@ -70,6 +77,7 @@ async def execute_run(job: RunJob) -> None:
                 thread_status="idle",
                 output=final_output.data,
             )
+            webhook_status, webhook_output = "success", final_output.data
 
     except asyncio.CancelledError:
         if run_id in _lease_loss_cancellations:
@@ -81,12 +89,14 @@ async def execute_run(job: RunJob) -> None:
         else:
             await finalize_run(run_id, thread_id, status="interrupted", thread_status="idle", output={})
             await _best_effort_signal(streaming_service.signal_run_cancelled, run_id)
+            webhook_status, webhook_output = "interrupted", {}
         raise
     except Exception as exc:
         logger.exception("Run failed", run_id=run_id)
         safe_message = f"{type(exc).__name__}: execution failed"
         await finalize_run(run_id, thread_id, status="error", thread_status="error", output={}, error=str(exc))
         await _best_effort_signal(streaming_service.signal_run_error, run_id, safe_message, type(exc).__name__)
+        webhook_status, webhook_error = "error", str(exc)
     else:
         status = "interrupted" if final_output.has_interrupt else "success"
         await _best_effort_signal(_signal_end_event, run_id, status)
@@ -96,6 +106,8 @@ async def execute_run(job: RunJob) -> None:
         if not is_lease_loss:
             await streaming_service.cleanup_run(run_id)
             await _signal_run_done(run_id)
+            if webhook_status is not None:
+                dispatch_webhook(job, webhook_status, webhook_output, webhook_error)
 
 
 # ------------------------------------------------------------------

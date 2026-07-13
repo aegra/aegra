@@ -15,7 +15,7 @@ members = [
 
 [[package]]
 name = "aegra-api"
-version = "0.9.24"
+version = "0.9.25"
 source = { editable = "libs/aegra-api" }
 dependencies = [
     { name = "alembic" },
@@ -24,6 +24,7 @@ dependencies = [
     { name = "croniter" },
     { name = "fastapi" },
     { name = "greenlet" },
+    { name = "httpx" },
     { name = "langgraph" },
     { name = "langgraph-checkpoint-postgres" },
     { name = "langgraph-sdk" },
@@ -65,6 +66,7 @@ requires-dist = [
     { name = "croniter", specifier = ">=6.0.0" },
     { name = "fastapi", specifier = ">=0.110.1" },
     { name = "greenlet", specifier = ">=3.1.0" },
+    { name = "httpx", specifier = ">=0.27.0" },
     { name = "langgraph", specifier = ">=1.0.3" },
     { name = "langgraph-checkpoint-postgres", specifier = ">=2.0.23" },
     { name = "langgraph-sdk", specifier = ">=0.3.5" },
@@ -100,7 +102,7 @@ dev = [
 
 [[package]]
 name = "aegra-cli"
-version = "0.9.24"
+version = "0.9.25"
 source = { editable = "libs/aegra-cli" }
 dependencies = [
     { name = "aegra-api" },

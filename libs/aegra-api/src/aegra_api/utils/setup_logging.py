@@ -1,12 +1,63 @@
 import logging
 import logging.config
+import re
 import sys
 from typing import Any
 
 import structlog
 import structlog.typing
+from pydantic import SecretStr
 
 from aegra_api.settings import settings
+
+# Keys whose values are secrets. Bare "token" is intentionally excluded so
+# usage counts (total_tokens, ...) survive; the real token secrets are matched
+# via their access/refresh/auth prefixes.
+_SECRET_KEY_RE = re.compile(
+    r"api[_-]?key|apikey|secret|password|passwd|authorization|"
+    r"access[_-]?token|refresh[_-]?token|auth[_-]?token|private[_-]?key",
+    re.IGNORECASE,
+)
+_REDACTED = "***REDACTED***"
+_MAX_REDACT_DEPTH = 6
+
+
+def _redact(value: Any, depth: int = 0) -> Any:
+    """Mask secret-looking dict keys and unwrap SecretStr for safe rendering.
+
+    Copy-on-first-change: the container is copied only once a descendant actually
+    changes; a clean (no-secret) value is returned by identity with zero allocation,
+    so the common log line costs only the per-key scan. Container type is preserved
+    — structlog's ``positional_args`` tuple must stay a tuple for ``event % args``.
+    """
+    if isinstance(value, SecretStr):
+        return str(value)  # "**********"; also stops JSONRenderer choking on SecretStr
+    if depth >= _MAX_REDACT_DEPTH:
+        return value
+    if isinstance(value, dict):
+        result: dict[Any, Any] | None = None
+        for key, val in value.items():
+            new = _REDACTED if (isinstance(key, str) and _SECRET_KEY_RE.search(key)) else _redact(val, depth + 1)
+            if new is not val:
+                if result is None:
+                    result = dict(value)  # lazy copy; unchanged keys keep their original values
+                result[key] = new
+        return result if result is not None else value
+    if isinstance(value, (list, tuple)):
+        result = None
+        for index, item in enumerate(value):
+            new = _redact(item, depth + 1)
+            if new is not item:
+                if result is None:
+                    result = list(value)  # lazy copy
+                result[index] = new
+        return value if result is None else type(value)(result)
+    return value
+
+
+def redact_secrets(_logger: Any, _method: str, event_dict: structlog.typing.EventDict) -> structlog.typing.EventDict:
+    """structlog processor: mask secret-looking keys and unwrap SecretStr values."""
+    return _redact(event_dict, 0)
 
 
 def get_logging_config() -> dict[str, Any]:
@@ -57,6 +108,8 @@ def get_logging_config() -> dict[str, Any]:
     #   - format_exc_info (production only) must come after StackInfoRenderer
     shared_processors: list[Any] = [
         structlog.contextvars.merge_contextvars,
+        # After merge_contextvars so context-bound secrets are masked too.
+        redact_secrets,
         structlog.stdlib.add_log_level,
         structlog.stdlib.add_logger_name,
         structlog.stdlib.ExtraAdder(),

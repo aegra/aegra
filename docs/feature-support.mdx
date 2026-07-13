@@ -42,6 +42,7 @@ description: "What Aegra supports today, what's coming soon, and what's not yet 
 | Subgraph streaming | Supported | Stream events from nested subgraphs. |
 | Stateless runs | Supported | Execute without persisting thread state. |
 | Cron / scheduled jobs | Supported | Trigger runs on a schedule. Standard and seconds-level cron expressions. IANA timezone support. |
+| Webhook callbacks | Supported | POST a signed callback to a URL when a run completes. Bare URL or rich object (method/headers/query/body/HMAC secret). Set per run or per cron. |
 
 ### Scaling and reliability
 
@@ -120,8 +121,7 @@ description: "What Aegra supports today, what's coming soon, and what's not yet 
 | Feature | Status | Notes |
 |:--|:--|:--|
 | RemoteGraph | Not yet planned | Call remote graphs as local subgraphs. |
-| Encryption at rest | Not yet planned | Database-level encryption. Use Postgres TDE or volume encryption. |
-| Webhook callbacks | Not yet planned | Notify external services on run completion. |
+| Encryption at rest | Not yet planned | Database-level encryption. Webhook secrets are stored plaintext; use Postgres TDE or volume encryption. |
 | Rate limiting | Not yet planned | Per-user or per-key request throttling. |
 | Multi-org workspaces | Not yet planned | Tenant isolation within a single deployment. |
 

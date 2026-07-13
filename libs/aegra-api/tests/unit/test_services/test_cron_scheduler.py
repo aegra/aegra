@@ -588,3 +588,39 @@ class TestSchedulerLoop:
             await scheduler._loop()
 
         assert call_count == 2
+
+
+# ---------------------------------------------------------------------------
+# _build_run_create webhook forwarding (regression for the previously-dropped link)
+# ---------------------------------------------------------------------------
+
+
+class TestBuildRunCreateWebhook:
+    """_build_run_create must forward the stored webhook onto the fired RunCreate."""
+
+    def test_forwards_bare_url_webhook(self) -> None:
+        from aegra_api.services.cron_scheduler import _build_run_create
+
+        cron = _make_cron_orm(payload={"input": {"msg": "tick"}, "webhook": "https://hooks.example.com/x"})
+        run_create = _build_run_create(cron)
+        assert run_create.webhook is not None
+        assert run_create.webhook.url == "https://hooks.example.com/x"
+
+    def test_forwards_rich_webhook(self) -> None:
+        from aegra_api.services.cron_scheduler import _build_run_create
+
+        cron = _make_cron_orm(
+            payload={
+                "input": {"msg": "tick"},
+                "webhook": {"url": "https://h.io/x", "headers": {"Authorization": "Bearer t"}},
+            }
+        )
+        run_create = _build_run_create(cron)
+        assert run_create.webhook is not None
+        assert run_create.webhook.headers == {"Authorization": "Bearer t"}
+
+    def test_none_when_absent(self) -> None:
+        from aegra_api.services.cron_scheduler import _build_run_create
+
+        cron = _make_cron_orm(payload={"input": {"msg": "tick"}})
+        assert _build_run_create(cron).webhook is None

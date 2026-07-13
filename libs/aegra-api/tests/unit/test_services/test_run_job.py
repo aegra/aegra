@@ -171,3 +171,34 @@ class TestRunJob:
 
         restored = RunJob.from_run_orm(LegacyORM())
         assert restored.run_metadata == {}
+
+
+class TestRunExecutionWebhook:
+    """webhook round-trips through execution_params in both executor modes."""
+
+    def test_webhook_roundtrip(self) -> None:
+        from aegra_api.models.webhooks import WebhookConfig
+
+        job = RunJob(
+            identity=RunIdentity(run_id="r1", thread_id="t1", graph_id="g1", assistant_id="a1"),
+            user=User(identity="u1"),
+            execution=RunExecution(
+                webhook=WebhookConfig(url="https://h.io/x", headers={"Authorization": "Bearer t"}, secret="s")
+            ),
+        )
+        params = job.to_execution_params()
+        assert params["execution"]["webhook"]["url"] == "https://h.io/x"
+
+        class FakeORM:
+            run_id = "r1"
+            thread_id = "t1"
+            assistant_id = "a1"
+            execution_params = params
+
+        restored = RunJob.from_run_orm(FakeORM())
+        assert restored.execution.webhook == job.execution.webhook
+        assert restored.identity.assistant_id == "a1"
+
+    def test_no_webhook_defaults_none(self) -> None:
+        execution = RunExecution()
+        assert execution.webhook is None

@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING, Any
 from pydantic import BaseModel, ConfigDict, Field
 
 from aegra_api.models.auth import User
+from aegra_api.models.webhooks import WebhookConfig
 
 if TYPE_CHECKING:
     from aegra_api.core.orm import Run as RunORM
@@ -28,6 +29,8 @@ class RunIdentity(BaseModel):
     run_id: str
     thread_id: str
     graph_id: str
+    # Carried so the completion webhook payload can report assistant_id.
+    assistant_id: str | None = None
 
 
 class RunExecution(BaseModel):
@@ -43,6 +46,9 @@ class RunExecution(BaseModel):
     command: dict[str, Any] | None = None
     # When true, stream via the native v3 protocol producer for Agent Protocol v2.
     event_streaming_v2: bool = False
+    # POSTed on run completion; round-trips through execution_params in both executors.
+    # Its secret/headers sit unmasked there, but execution_params has no client read path.
+    webhook: WebhookConfig | None = None
 
 
 class RunBehavior(BaseModel):
@@ -99,6 +105,8 @@ class RunJob(BaseModel):
                 run_id=run_orm.run_id,
                 thread_id=run_orm.thread_id,
                 graph_id=params["graph_id"],
+                # getattr tolerates lightweight fake ORMs in tests; real rows always have it.
+                assistant_id=getattr(run_orm, "assistant_id", None),
             ),
             user=User.model_validate(params["user"]),
             execution=RunExecution.model_validate(params["execution"]),

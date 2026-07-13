@@ -3,7 +3,7 @@
   "info": {
     "title": "Aegra",
     "description": "Production-ready Agent Protocol server",
-    "version": "0.9.24"
+    "version": "0.9.25"
   },
   "paths": {
     "/info": {
@@ -3854,14 +3854,12 @@
           "webhook": {
             "anyOf": [
               {
-                "type": "string",
-                "maxLength": 2048
+                "$ref": "#/components/schemas/WebhookConfig"
               },
               {
                 "type": "null"
               }
-            ],
-            "title": "Webhook"
+            ]
           },
           "on_run_completed": {
             "anyOf": [
@@ -4226,14 +4224,12 @@
           "webhook": {
             "anyOf": [
               {
-                "type": "string",
-                "maxLength": 2048
+                "$ref": "#/components/schemas/WebhookConfig"
               },
               {
                 "type": "null"
               }
-            ],
-            "title": "Webhook"
+            ]
           },
           "interrupt_before": {
             "anyOf": [
@@ -4803,6 +4799,17 @@
             "title": "Stream Subgraphs",
             "description": "Whether to include subgraph events in streaming. When True, includes events from all subgraphs. When False (default when None), excludes subgraph events. Defaults to False for backwards compatibility.",
             "default": false
+          },
+          "webhook": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/WebhookConfig"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "URL or webhook object POSTed when the run completes."
           },
           "metadata": {
             "anyOf": [
@@ -5846,6 +5853,89 @@
           "type"
         ],
         "title": "ValidationError"
+      },
+      "WebhookConfig": {
+        "properties": {
+          "url": {
+            "type": "string",
+            "maxLength": 2048,
+            "title": "Url",
+            "description": "Callback URL (http/https)."
+          },
+          "method": {
+            "type": "string",
+            "enum": [
+              "POST",
+              "PUT",
+              "PATCH"
+            ],
+            "title": "Method",
+            "description": "HTTP method for the callback.",
+            "default": "POST"
+          },
+          "headers": {
+            "anyOf": [
+              {
+                "additionalProperties": {
+                  "type": "string"
+                },
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Headers",
+            "description": "Extra request headers (may carry auth; masked on read)."
+          },
+          "params": {
+            "anyOf": [
+              {
+                "additionalProperties": {
+                  "type": "string"
+                },
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Params",
+            "description": "Query-string parameters appended to the URL."
+          },
+          "body": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Body",
+            "description": "Fields merged over the run payload in the request body."
+          },
+          "secret": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 256
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Secret",
+            "description": "HMAC signing key. When set, Standard Webhooks signature headers are added."
+          }
+        },
+        "type": "object",
+        "required": [
+          "url"
+        ],
+        "title": "WebhookConfig",
+        "description": "Where and how to POST a run-completion callback."
       }
     }
   },

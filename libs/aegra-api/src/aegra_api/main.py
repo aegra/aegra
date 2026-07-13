@@ -39,6 +39,7 @@ from aegra_api.services.cron_scheduler import cron_scheduler
 from aegra_api.services.executor import executor
 from aegra_api.services.langgraph_service import get_langgraph_service
 from aegra_api.services.lease_reaper import lease_reaper
+from aegra_api.services.webhook_service import drain as drain_webhooks
 from aegra_api.settings import settings
 from aegra_api.utils.setup_logging import setup_logging
 
@@ -140,12 +141,14 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
 
     yield
 
-    # Shutdown order: cron → reaper → executor (drains jobs) → broker → Redis → DB
+    # Shutdown order: cron → reaper → executor (drains jobs) → webhooks → broker → Redis → DB
     if settings.cron.CRON_ENABLED:
         await cron_scheduler.stop()
     if settings.redis.REDIS_BROKER_ENABLED:
         await lease_reaper.stop()
     await executor.stop()
+    # Drain in-flight webhook deliveries created as jobs finalized during executor.stop().
+    await drain_webhooks()
     await broker_manager.stop()
 
     # Close Redis broker (if enabled)

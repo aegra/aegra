@@ -441,6 +441,33 @@ class EventStreamingSettings(EnvBase):
     FF_V2_EVENT_STREAMING: bool = True
 
 
+class WebhookSettings(EnvBase):
+    """Outbound webhook delivery on run completion.
+
+    Delivery is best-effort: a failed webhook is logged and never fails or
+    delays the run. See services/webhook_service.py.
+    """
+
+    WEBHOOK_ENABLED: bool = True
+    WEBHOOK_TIMEOUT_SECONDS: float = 15.0
+    WEBHOOK_MAX_ATTEMPTS: int = 3
+    WEBHOOK_BACKOFF_BASE_SECONDS: float = 1.0
+    # Also refuse loopback/private ranges (link-local/metadata is always refused).
+    # Off by default so internal hooks (e.g. host.docker.internal) keep working.
+    WEBHOOK_BLOCK_PRIVATE_IPS: bool = False
+
+    @model_validator(mode="after")
+    def _validate(self) -> "WebhookSettings":
+        """Reject non-positive timeouts/attempts during settings validation."""
+        if self.WEBHOOK_TIMEOUT_SECONDS <= 0:
+            raise ValueError(f"WEBHOOK_TIMEOUT_SECONDS must be greater than 0, got {self.WEBHOOK_TIMEOUT_SECONDS}")
+        if self.WEBHOOK_MAX_ATTEMPTS < 1:
+            raise ValueError(f"WEBHOOK_MAX_ATTEMPTS must be >= 1, got {self.WEBHOOK_MAX_ATTEMPTS}")
+        if self.WEBHOOK_BACKOFF_BASE_SECONDS < 0:
+            raise ValueError(f"WEBHOOK_BACKOFF_BASE_SECONDS must be >= 0, got {self.WEBHOOK_BACKOFF_BASE_SECONDS}")
+        return self
+
+
 class Settings:
     """Container object that instantiates all application settings groups."""
 
@@ -454,6 +481,7 @@ class Settings:
         self.worker = WorkerSettings()
         self.cron = CronSettings()
         self.event_streaming = EventStreamingSettings()
+        self.webhook = WebhookSettings()
 
 
 settings = Settings()

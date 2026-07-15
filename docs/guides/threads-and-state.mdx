@@ -152,6 +152,36 @@ Deleting a thread cancels any active runs and removes all state:
 await client.threads.delete(thread_id)
 ```
 
+## Copying threads
+
+`POST /threads/{thread_id}/copy` produces a new thread whose checkpoint history is identical to the source, matching the `client.threads.copy()` semantics on LangSmith Deployments. The `checkpoint_id` and `parent_checkpoint_id` chain are preserved verbatim, so the new thread can be queried by the same checkpoint identifiers as the source and `get_state_at_checkpoint(...)` returns the same values on both sides.
+
+```python
+new_thread = await client.threads.copy(thread_id)
+print(new_thread["thread_id"])  # freshly generated UUID
+```
+
+### What is preserved
+
+- The full checkpoint history (`checkpoints`, `checkpoint_writes`, `checkpoint_blobs` rows) under the new `thread_id`.
+- Thread metadata, inherited as-is except for the two adjustments below. This includes keys written by previous runs, auth handlers, or admin tooling — if a key must not propagate to copies, strip it in a `threads:create` handler.
+- `assistant_id` / `graph_id` in metadata are kept intentionally, so a copy can continue the same conversation (fork use case).
+
+### What is regenerated
+
+- `thread_id`: a fresh UUID is always generated server-side.
+- `created_at` and `updated_at`: set to the time of the copy, not inherited from the source.
+- `status`: active states (`busy`/`running`) reset to `idle`; other states (`idle`, `error`, `interrupted`) copy verbatim. The copy has no `runs` row, so an inherited active status would never transition and the thread would appear permanently stuck.
+- `metadata.owner`: rewritten to the caller's identity, matching `POST /threads` (creation) behaviour. The source thread's owner attribution is intentionally not inherited so any code reading `metadata.owner` instead of the canonical `user_id` column stays consistent.
+
+### Atomicity
+
+The new thread row and the three checkpoint-table `INSERT...SELECT` statements all run inside a single Postgres transaction at `REPEATABLE READ` isolation on the checkpointer pool, reading the source thread row and its checkpoint history from one pinned snapshot. A concurrent writer on the source (for example a run mid-execution) cannot leave the copy with a partially-copied history or a thread row inconsistent with it: the snapshot is fixed at transaction start, and any failure rolls the whole copy back. There is no intermediate state where a new thread row exists without its checkpoint chain or vice versa.
+
+### Authorization
+
+The endpoint requires the caller to own the source thread (`user_id == user.identity`); a missing or non-owned source thread returns `404`. Copies reuse the `threads:create` auth event rather than a dedicated `threads:copy` hook: handlers see the new `thread_id` alongside `src_thread_id` in the payload, so a handler that needs copy-specific policy (blocking cross-tenant copies, a separate quota counter) can branch on the presence of `src_thread_id`.
+
 ## Thread metadata
 
 Threads automatically track metadata about their usage:

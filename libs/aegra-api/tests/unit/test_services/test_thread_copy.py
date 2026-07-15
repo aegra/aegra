@@ -9,19 +9,24 @@ from psycopg.types.json import Jsonb
 from aegra_api.services.thread_copy import (
     _CHECKPOINT_TABLES,
     _copy_checkpoint_table,
+    _copy_thread_row,
     _table_columns,
     copy_thread_atomically,
 )
 
+_THREAD_COLS: list[str] = ["thread_id", "status", "metadata_json", "user_id", "created_at", "updated_at"]
 
-def _make_async_cursor(column_names: list[str]) -> AsyncMock:
+
+def _make_async_cursor(column_names: list[str], rowcount: int = 1) -> AsyncMock:
     """Build an awaitable cursor whose ``fetchall`` returns ``dict_row``-style rows.
 
     Mirrors the pool's ``row_factory=dict_row`` configuration (see
     ``core/database.py``): each row is a dict keyed by column name.
+    ``rowcount`` backs the affected-row check after an ``INSERT``.
     """
     cur = AsyncMock()
     cur.fetchall = AsyncMock(return_value=[{"column_name": name} for name in column_names])
+    cur.rowcount = rowcount
     return cur
 
 
@@ -115,8 +120,7 @@ class TestCopyCheckpointTable:
         the SELECT clause unchanged, so the new thread inherits the source's
         chain identifiers byte-for-byte. This is the headline differentiator
         vs ``checkpoint-fork`` (which regenerates checkpoint IDs); end-to-end
-        verification against a live Postgres lives in the integration suite
-        (see follow-up F3 in `infra/aegra/README.md`)."""
+        verification against a live Postgres lives in the e2e suite."""
         cols_cursor = _make_async_cursor(
             [
                 "thread_id",
@@ -147,6 +151,121 @@ class TestCopyCheckpointTable:
         assert "gen_random_uuid" not in sql_str.lower()
 
 
+class TestCopyThreadRow:
+    @pytest.mark.asyncio()
+    async def test_builds_insert_select_from_source_thread(self) -> None:
+        cols_cursor = _make_async_cursor(_THREAD_COLS)
+        insert_cursor = _make_async_cursor([], rowcount=1)
+        conn = _make_async_connection([cols_cursor, insert_cursor])
+
+        await _copy_thread_row(conn, src_thread_id="src", new_thread_id="new", user_identity="u", metadata_overrides={})
+
+        assert conn.execute.await_count == 2  # introspection + INSERT...SELECT
+        stmt = conn.execute.await_args_list[1].args[0]
+        sql_str = stmt.as_string(None)
+        assert sql_str.startswith('INSERT INTO "thread"')
+        assert 'FROM "thread" WHERE "thread_id" = %s' in sql_str
+        assert "NOW()" in sql_str  # timestamps regenerated, not inherited
+
+    @pytest.mark.asyncio()
+    async def test_active_status_resets_to_idle(self) -> None:
+        """Regression: a ``busy``/``running`` source must not copy into a
+        permanently-stuck thread. The copy has no ``runs`` row to advance an
+        active status, so the SQL normalises it to ``idle`` while leaving
+        terminal states untouched."""
+        cols_cursor = _make_async_cursor(_THREAD_COLS)
+        insert_cursor = _make_async_cursor([], rowcount=1)
+        conn = _make_async_connection([cols_cursor, insert_cursor])
+
+        await _copy_thread_row(conn, src_thread_id="src", new_thread_id="new", user_identity="u", metadata_overrides={})
+
+        sql_str = conn.execute.await_args_list[1].args[0].as_string(None)
+        assert "CASE WHEN \"status\" IN ('busy', 'running') THEN 'idle' ELSE \"status\" END" in sql_str
+
+    @pytest.mark.asyncio()
+    async def test_metadata_merges_source_then_handler_then_owner(self) -> None:
+        """Merge order is source ``||`` handler overrides ``||`` ``owner``.
+        The owner rewrite wins even over a handler-supplied ``owner`` key —
+        it is the security invariant that attributes the copy to the caller."""
+        cols_cursor = _make_async_cursor(_THREAD_COLS)
+        insert_cursor = _make_async_cursor([], rowcount=1)
+        conn = _make_async_connection([cols_cursor, insert_cursor])
+
+        await _copy_thread_row(
+            conn,
+            src_thread_id="src",
+            new_thread_id="new",
+            user_identity="bob",
+            metadata_overrides={"team": "x", "owner": "alice"},
+        )
+
+        stmt, params = conn.execute.await_args_list[1].args
+        sql_str = stmt.as_string(None)
+        # Source metadata inherited via jsonb concat, handler/owner layered on top.
+        assert "COALESCE(\"metadata_json\", '{}'::jsonb) ||" in sql_str
+        jsonb_param = next(p for p in params if isinstance(p, Jsonb))
+        assert jsonb_param.obj == {"team": "x", "owner": "bob"}
+
+    @pytest.mark.asyncio()
+    async def test_binds_identity_columns_as_params_in_column_order(self) -> None:
+        cols_cursor = _make_async_cursor(_THREAD_COLS)
+        insert_cursor = _make_async_cursor([], rowcount=1)
+        conn = _make_async_connection([cols_cursor, insert_cursor])
+
+        await _copy_thread_row(
+            conn, src_thread_id="src-uuid", new_thread_id="new-uuid", user_identity="user-1", metadata_overrides={}
+        )
+
+        params = conn.execute.await_args_list[1].args[1]
+        # SELECT-list order (thread_id, metadata_json, user_id) then WHERE src.
+        assert params[0] == "new-uuid"
+        assert isinstance(params[1], Jsonb)
+        assert params[2] == "user-1"
+        assert params[-1] == "src-uuid"
+
+    @pytest.mark.asyncio()
+    async def test_inherits_unknown_future_column_verbatim(self) -> None:
+        """Regression: a column outside the override set is copied as-is, so a
+        NOT NULL column added upstream is inherited from the source rather than
+        silently dropped from the INSERT."""
+        cols = [*_THREAD_COLS, "tenant_id"]
+        cols_cursor = _make_async_cursor(cols)
+        insert_cursor = _make_async_cursor([], rowcount=1)
+        conn = _make_async_connection([cols_cursor, insert_cursor])
+
+        await _copy_thread_row(conn, src_thread_id="src", new_thread_id="new", user_identity="u", metadata_overrides={})
+
+        sql_str = conn.execute.await_args_list[1].args[0].as_string(None)
+        # tenant_id in both the INSERT column list and the SELECT projection.
+        assert sql_str.count('"tenant_id"') == 2
+
+    @pytest.mark.asyncio()
+    async def test_raises_when_thread_id_column_missing(self) -> None:
+        cols_cursor = _make_async_cursor(["status", "user_id"])
+        conn = _make_async_connection([cols_cursor])
+
+        with pytest.raises(RuntimeError, match="thread_id"):
+            await _copy_thread_row(
+                conn, src_thread_id="src", new_thread_id="new", user_identity="u", metadata_overrides={}
+            )
+
+        assert conn.execute.await_count == 1  # introspection only, no INSERT
+
+    @pytest.mark.asyncio()
+    async def test_raises_when_source_row_vanished(self) -> None:
+        """TOCTOU: the source may be deleted between the ownership check and
+        the copy. Zero affected rows raises so the transaction rolls back
+        instead of leaving a thread with no checkpoint history."""
+        cols_cursor = _make_async_cursor(_THREAD_COLS)
+        insert_cursor = _make_async_cursor([], rowcount=0)
+        conn = _make_async_connection([cols_cursor, insert_cursor])
+
+        with pytest.raises(RuntimeError, match="disappeared"):
+            await _copy_thread_row(
+                conn, src_thread_id="gone", new_thread_id="new", user_identity="u", metadata_overrides={}
+            )
+
+
 def _make_atomic_pool_mocks() -> tuple[MagicMock, MagicMock]:
     """Build a (pool, conn) pair wired with the async context-manager protocol."""
     mock_conn = MagicMock()
@@ -167,12 +286,14 @@ def _make_atomic_pool_mocks() -> tuple[MagicMock, MagicMock]:
 
 class TestCopyThreadAtomically:
     @pytest.mark.asyncio()
-    async def test_inserts_thread_row_then_copies_three_checkpoint_tables(self) -> None:
-        """SET TRANSACTION → thread INSERT → checkpoint INSERT...SELECT calls,
-        all inside the same connection transaction."""
+    async def test_sets_repeatable_read_then_copies_thread_then_checkpoints(self) -> None:
+        """SET TRANSACTION is the first statement, then the thread row, then
+        each checkpoint table in order — all on the same connection so they
+        share one Postgres transaction."""
         mock_pool, mock_conn = _make_atomic_pool_mocks()
 
         with (
+            patch("aegra_api.services.thread_copy._copy_thread_row", new=AsyncMock()) as mock_thread,
             patch("aegra_api.services.thread_copy._copy_checkpoint_table", new=AsyncMock()) as mock_copy,
             patch("aegra_api.services.thread_copy.db_manager") as mock_db,
         ):
@@ -181,147 +302,43 @@ class TestCopyThreadAtomically:
             await copy_thread_atomically(
                 src_thread_id="src-uuid",
                 new_thread_id="new-uuid",
-                src_status="idle",
-                src_metadata={"k": "v"},
                 user_identity="user-1",
+                metadata_overrides={"k": "v"},
             )
 
-        # Two execute calls on the connection: SET TRANSACTION first, then the
-        # thread INSERT. Checkpoint tables go through the patched helper.
-        assert mock_conn.execute.await_count == 2
-        thread_sql, thread_params = mock_conn.execute.await_args_list[1].args
-        assert thread_sql.startswith('INSERT INTO "thread"')
-        assert thread_params[0] == "new-uuid"
-        assert thread_params[1] == "idle"
-        assert thread_params[3] == "user-1"
-        # The checkpoint copy was invoked once per checkpoint table, in order.
+        # Only SET TRANSACTION runs directly on the connection; the row and
+        # checkpoint copies go through the patched helpers.
+        assert mock_conn.execute.await_count == 1
+        assert "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ" in mock_conn.execute.await_args_list[0].args[0]
+
+        mock_thread.assert_awaited_once()
+        assert mock_thread.await_args.args[0] is mock_conn
+        assert mock_thread.await_args.kwargs["src_thread_id"] == "src-uuid"
+        assert mock_thread.await_args.kwargs["metadata_overrides"] == {"k": "v"}
+
         tables_copied = [call.args[1] for call in mock_copy.await_args_list]
         assert tables_copied == list(_CHECKPOINT_TABLES)
         for call in mock_copy.await_args_list:
-            # Same connection ref ⇒ same Postgres tx as the thread INSERT.
-            assert call.args[0] is mock_conn
-            assert call.args[2] == "src-uuid"
-            assert call.args[3] == "new-uuid"
+            assert call.args[0] is mock_conn  # same connection ⇒ same tx
 
     @pytest.mark.asyncio()
-    async def test_sets_repeatable_read_isolation_before_dml(self) -> None:
-        """``SET TRANSACTION ISOLATION LEVEL REPEATABLE READ`` must be the
-        first statement inside the ``conn.transaction()`` block. PostgreSQL
-        only honours the directive when no DML has run yet, so the order
-        matters; without REPEATABLE READ the three checkpoint INSERT...SELECT
-        statements can see different snapshots if a concurrent run on the
-        source thread commits between them."""
-        mock_pool, mock_conn = _make_atomic_pool_mocks()
-
-        with (
-            patch("aegra_api.services.thread_copy._copy_checkpoint_table", new=AsyncMock()),
-            patch("aegra_api.services.thread_copy.db_manager") as mock_db,
-        ):
-            mock_db.lg_pool = mock_pool
-
-            await copy_thread_atomically(
-                src_thread_id="src",
-                new_thread_id="new",
-                src_status="idle",
-                src_metadata={},
-                user_identity="u",
-            )
-
-        first_sql = mock_conn.execute.await_args_list[0].args[0]
-        assert "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ" in first_sql
-
-    @pytest.mark.asyncio()
-    async def test_serializes_metadata_via_jsonb_adapter(self) -> None:
-        """Metadata is bound through psycopg's ``Jsonb`` adapter rather than
-        a string + ``::jsonb`` cast. The adapter goes through psycopg's
-        adapter chain, so non-JSON-serializable values (e.g. datetime, UUID)
-        raise at adapt-time with a clear error rather than blowing up
-        ``json.dumps`` mid-transaction."""
-        mock_pool, mock_conn = _make_atomic_pool_mocks()
-
-        with (
-            patch("aegra_api.services.thread_copy._copy_checkpoint_table", new=AsyncMock()),
-            patch("aegra_api.services.thread_copy.db_manager") as mock_db,
-        ):
-            mock_db.lg_pool = mock_pool
-
-            await copy_thread_atomically(
-                src_thread_id="src",
-                new_thread_id="new",
-                src_status="idle",
-                src_metadata={"graph_id": "agent"},
-                user_identity="alice",
-            )
-
-        thread_sql, thread_params = mock_conn.execute.await_args_list[1].args
-        # No ``::jsonb`` cast in the SQL — psycopg infers the column type.
-        assert "::jsonb" not in thread_sql
-        # Third positional argument is the bound value: a Jsonb wrapper, not a
-        # string, so psycopg adapts it natively.
-        assert isinstance(thread_params[2], Jsonb)
-
-    @pytest.mark.asyncio()
-    async def test_metadata_owner_rewritten_to_caller(self) -> None:
-        """``metadata.owner`` is overwritten with the caller identity. Without
-        this rewrite the new thread inherits the source owner field, which
-        misattributes the row for any code reading ``metadata.owner`` instead
-        of the canonical ``thread.user_id`` column. ``create_thread`` enforces
-        the same invariant for fresh threads."""
-        mock_pool, mock_conn = _make_atomic_pool_mocks()
-
-        with (
-            patch("aegra_api.services.thread_copy._copy_checkpoint_table", new=AsyncMock()),
-            patch("aegra_api.services.thread_copy.db_manager") as mock_db,
-        ):
-            mock_db.lg_pool = mock_pool
-
-            await copy_thread_atomically(
-                src_thread_id="src",
-                new_thread_id="new",
-                src_status="idle",
-                src_metadata={"owner": "alice", "graph_id": "agent"},
-                user_identity="bob",
-            )
-
-        thread_params = mock_conn.execute.await_args_list[1].args[1]
-        bound_metadata = thread_params[2].obj  # Jsonb stores the dict on `.obj`
-        assert bound_metadata["owner"] == "bob"
-        # Other keys are preserved verbatim.
-        assert bound_metadata["graph_id"] == "agent"
-
-    @pytest.mark.asyncio()
-    async def test_does_not_mutate_caller_metadata_dict(self) -> None:
-        """Owner rewrite must operate on a copy, otherwise the caller's
-        ``ThreadORM.metadata_json`` dict (a SQLAlchemy mutable JSONB) would
-        see ``owner`` change in place — a subtle ORM-state corruption."""
+    async def test_defaults_metadata_overrides_to_empty(self) -> None:
         mock_pool, _ = _make_atomic_pool_mocks()
-        original = {"owner": "alice", "graph_id": "agent"}
 
         with (
+            patch("aegra_api.services.thread_copy._copy_thread_row", new=AsyncMock()) as mock_thread,
             patch("aegra_api.services.thread_copy._copy_checkpoint_table", new=AsyncMock()),
             patch("aegra_api.services.thread_copy.db_manager") as mock_db,
         ):
             mock_db.lg_pool = mock_pool
 
-            await copy_thread_atomically(
-                src_thread_id="src",
-                new_thread_id="new",
-                src_status="idle",
-                src_metadata=original,
-                user_identity="bob",
-            )
+            await copy_thread_atomically(src_thread_id="src", new_thread_id="new", user_identity="u")
 
-        assert original == {"owner": "alice", "graph_id": "agent"}
+        assert mock_thread.await_args.kwargs["metadata_overrides"] == {}
 
     @pytest.mark.asyncio()
     async def test_raises_when_pool_not_initialized(self) -> None:
         with patch("aegra_api.services.thread_copy.db_manager") as mock_db:
             mock_db.lg_pool = None
             with pytest.raises(RuntimeError, match="not initialized"):
-                await copy_thread_atomically(
-                    src_thread_id="src",
-                    new_thread_id="new",
-                    src_status="idle",
-                    src_metadata={},
-                    user_identity="u",
-                )
+                await copy_thread_atomically(src_thread_id="src", new_thread_id="new", user_identity="u")

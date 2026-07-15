@@ -863,11 +863,14 @@ async def copy_thread(
 ) -> Thread:
     """Deep-copy a thread, preserving its ``checkpoint_id`` chain.
 
-    Status and metadata are inherited from the source (including ``running``
-    or ``error``); ``created_at``/``updated_at`` are regenerated.
+    Metadata is inherited from the source; ``created_at``/``updated_at`` are
+    regenerated and active ``status`` (``busy``/``running``) resets to
+    ``idle`` since the copy has no run to advance it.
     """
     # ``new_id`` is generated up-front and exposed to the auth event so handlers
     # can key per-thread resources (tenant, quota, billing) to the new row.
+    # ``threads:create`` fires for copies too; ``src_thread_id`` in the payload
+    # lets a handler apply copy-specific policy without a dedicated event.
     new_id = str(uuid4())
     ctx = build_auth_context(user, "threads", "create")
     filters = await handle_event(
@@ -884,32 +887,31 @@ async def copy_thread(
     if not src:
         raise HTTPException(404, f"Thread '{thread_id}' not found")
 
-    # Mirror ``create_thread``: handler metadata wins over source, then
-    # ``copy_thread_atomically`` rewrites ``owner`` last as security invariant.
-    src_metadata = dict(src.metadata_json or {})
-    if filters and "metadata" in filters:
+    # Only the handler overrides travel to the copy; source metadata is read
+    # inside the snapshot by ``copy_thread_atomically`` and merged there, with
+    # ``owner`` rewritten to the caller last as a security invariant.
+    handler_meta: dict[str, Any] = {}
+    if filters and isinstance(filters.get("metadata"), dict):
         handler_meta = filters["metadata"]
-        if isinstance(handler_meta, dict):
-            src_metadata = {**src_metadata, **handler_meta}
 
     try:
         await copy_thread_atomically(
             src_thread_id=thread_id,
             new_thread_id=new_id,
-            src_status=src.status,
-            src_metadata=src_metadata,
             user_identity=user.identity,
+            metadata_overrides=handler_meta,
         )
-    except Exception:
+    except Exception as e:
         logger.exception(
             "Failed to copy thread",
             src_thread_id=thread_id,
             new_thread_id=new_id,
         )
-        raise HTTPException(500, "Failed to copy thread") from None
+        raise HTTPException(500, "Failed to copy thread") from e
 
-    # Commit before reload so REPEATABLE READ/SERIALIZABLE engines see the row
-    # (the lg_pool INSERT is invisible to a frozen session snapshot otherwise).
+    # ``copy_thread_atomically`` already committed via lg_pool — the source of
+    # truth. Do not ``session.add(...)`` above this line: an ORM rollback would
+    # orphan the durable copy. Commit so the reload snapshot sees the new row.
     await session.commit()
 
     new_thread = await session.scalar(select(ThreadORM).where(ThreadORM.thread_id == new_id))

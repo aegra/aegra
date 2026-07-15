@@ -164,22 +164,23 @@ print(new_thread["thread_id"])  # freshly generated UUID
 ### What is preserved
 
 - The full checkpoint history (`checkpoints`, `checkpoint_writes`, `checkpoint_blobs` rows) under the new `thread_id`.
-- Thread `status` from the source — including non-idle states like `running` or `error` if present at the time of the copy.
-- Thread metadata, with two adjustments described below.
+- Thread metadata, inherited as-is except for the two adjustments below. This includes keys written by previous runs, auth handlers, or admin tooling — if a key must not propagate to copies, strip it in a `threads:create` handler.
+- `assistant_id` / `graph_id` in metadata are kept intentionally, so a copy can continue the same conversation (fork use case).
 
 ### What is regenerated
 
 - `thread_id`: a fresh UUID is always generated server-side.
 - `created_at` and `updated_at`: set to the time of the copy, not inherited from the source.
+- `status`: active states (`busy`/`running`) reset to `idle`; other states (`idle`, `error`, `interrupted`) copy verbatim. The copy has no `runs` row, so an inherited active status would never transition and the thread would appear permanently stuck.
 - `metadata.owner`: rewritten to the caller's identity, matching `POST /threads` (creation) behaviour. The source thread's owner attribution is intentionally not inherited so any code reading `metadata.owner` instead of the canonical `user_id` column stays consistent.
 
 ### Atomicity
 
-Both the new thread row and the three checkpoint-table `INSERT...SELECT` statements run inside a single Postgres transaction at `REPEATABLE READ` isolation on the checkpointer pool. A concurrent writer on the source thread (for example a run mid-execution) cannot leave the new thread with a partially-copied checkpoint history: the snapshot is pinned at transaction start, and on any failure the whole copy is rolled back. There is no intermediate state where a new thread row exists without its checkpoint chain or vice versa.
+The new thread row and the three checkpoint-table `INSERT...SELECT` statements all run inside a single Postgres transaction at `REPEATABLE READ` isolation on the checkpointer pool, reading the source thread row and its checkpoint history from one pinned snapshot. A concurrent writer on the source (for example a run mid-execution) cannot leave the copy with a partially-copied history or a thread row inconsistent with it: the snapshot is fixed at transaction start, and any failure rolls the whole copy back. There is no intermediate state where a new thread row exists without its checkpoint chain or vice versa.
 
 ### Authorization
 
-The endpoint requires the caller to own the source thread (`user_id == user.identity`); a missing or non-owned source thread returns `404`. Custom auth handlers registered for `threads:create` see the new `thread_id` in the event payload (alongside `src_thread_id`) so they can provision per-thread resources keyed to the new row.
+The endpoint requires the caller to own the source thread (`user_id == user.identity`); a missing or non-owned source thread returns `404`. Copies reuse the `threads:create` auth event rather than a dedicated `threads:copy` hook: handlers see the new `thread_id` alongside `src_thread_id` in the payload, so a handler that needs copy-specific policy (blocking cross-tenant copies, a separate quota counter) can branch on the presence of `src_thread_id`.
 
 ## Thread metadata
 

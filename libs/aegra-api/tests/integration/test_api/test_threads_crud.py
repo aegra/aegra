@@ -441,10 +441,10 @@ class TestCopyThread:
             resp = client.post("/threads/src-123/copy")
 
         assert resp.status_code == 200
-        # Handler-injected key reaches the service call site.
-        assert captured_call["src_metadata"]["tenant_id"] == "acme"
-        # Source metadata is preserved on the same dict.
-        assert captured_call["src_metadata"]["graph_id"] == "agent"
+        # Handler-injected key reaches the service as a metadata override.
+        # Source metadata is inherited inside the copy transaction (SQL-side),
+        # so it is no longer re-passed through the endpoint call site.
+        assert captured_call["metadata_overrides"]["tenant_id"] == "acme"
 
     def test_copy_thread_event_payload_includes_new_thread_id(self):
         """Handlers that provision per-thread resources need the *new* thread

@@ -707,3 +707,42 @@ class TestValidateChannels:
     def test_non_list_is_error(self) -> None:
         valid, invalid = validate_channels("messages")
         assert invalid
+
+
+class TestQueuedRunHandling:
+    """A parked (queued) double-text publishes no broker events and has no task:
+    draining it would emit a false 'running' lifecycle and wedge on an empty broker."""
+
+    async def test_queued_run_is_deferred_not_drained(self, manager: BrokerManager) -> None:
+        session = _make_session("t1", channels={"lifecycle"}, run_ids=("q1",), statuses={"q1": "queued"})
+
+        async with asyncio.timeout(5):  # pre-fix behavior blocks forever in broker.aiter()
+            events = await _collect(session)
+
+        assert events == []  # no false lifecycle seed, session ends via idle grace
+
+    async def test_dropped_queued_run_drains_terminal_on_a_later_tick(self, manager: BrokerManager) -> None:
+        # Tick 1 sees the run queued (skipped); a multitask gate then drops it to
+        # 'interrupted' — tick 2 must treat it as terminal instead of tailing it.
+        statuses = {"q1": "queued"}
+        calls = 0
+
+        async def list_run_ids() -> list[tuple[str, str | None, str | None]]:
+            nonlocal calls
+            calls += 1
+            if calls > 1:
+                statuses["q1"] = "interrupted"
+            return [("q1", statuses["q1"], None)]
+
+        session = ThreadEventSession(
+            "t1",
+            channels={"lifecycle"},
+            list_run_ids=list_run_ids,
+            idle_grace_seconds=0.0,
+        )
+
+        async with asyncio.timeout(5):
+            events = await _collect(session)
+
+        assert events == []  # empty replay + terminal status → silent drain, no wedge
+        assert "q1" in session._drained

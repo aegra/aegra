@@ -63,8 +63,9 @@ class TestLocalExecutor:
     @pytest.mark.asyncio
     async def test_wait_for_completion_returns_on_missing_run(self) -> None:
         executor = LocalExecutor()
-        # Should return immediately, not raise
-        await executor.wait_for_completion("nonexistent", timeout=1.0)
+        # Absent from active_runs and terminal/absent in DB → returns, not hang/raise.
+        with patch("aegra_api.services.local_executor._is_run_terminal", new_callable=AsyncMock, return_value=True):
+            await executor.wait_for_completion("nonexistent", timeout=1.0)
 
     @pytest.mark.asyncio
     async def test_stop_cancels_active_tasks(self) -> None:
@@ -111,7 +112,7 @@ class TestRunExecutorBoundaryConditions:
 
         with (
             patch("aegra_api.services.run_executor.get_langgraph_service", return_value=mock_service),
-            patch("aegra_api.services.run_executor.update_run_status", new_callable=AsyncMock),
+            patch("aegra_api.services.run_executor.try_mark_run_running", new_callable=AsyncMock, return_value=True),
             patch("aegra_api.services.run_executor.finalize_run", new_callable=AsyncMock),
             patch("aegra_api.services.run_executor.streaming_service") as mock_streaming,
             patch("aegra_api.services.run_executor.stream_graph_events", return_value=_empty_async_gen()),
@@ -147,3 +148,147 @@ class TestExecutorFactory:
 
             result = _create_executor()
             assert isinstance(result, WorkerExecutor)
+
+
+class TestRecoverOrphanedQueue:
+    """LocalExecutor restart recovery for queued/orphaned runs (dev mode)."""
+
+    @staticmethod
+    def _maker(session: AsyncMock) -> MagicMock:
+        ctx = AsyncMock()
+        ctx.__aenter__ = AsyncMock(return_value=session)
+        ctx.__aexit__ = AsyncMock(return_value=False)
+        return MagicMock(return_value=ctx)
+
+    @pytest.mark.asyncio
+    async def test_errors_orphans_and_dispatches_per_affected_thread(self) -> None:
+        executor = LocalExecutor()
+        session = AsyncMock()
+        affected = MagicMock()
+        affected.all.return_value = [("t1",)]
+        affected.rowcount = 1  # the orphan-error UPDATE reports a matched run
+        session.execute = AsyncMock(return_value=affected)
+        session.commit = AsyncMock()
+
+        with (
+            patch(
+                "aegra_api.services.local_executor._get_session_maker",
+                return_value=TestRecoverOrphanedQueue._maker(session),
+            ),
+            patch.object(executor, "dispatch_next_for_thread", new_callable=AsyncMock) as mock_dispatch,
+        ):
+            await executor._recover_orphaned_queue()
+
+        mock_dispatch.assert_awaited_once_with("t1")
+        assert session.execute.await_count >= 2  # distinct SELECT + orphan-error UPDATE
+        session.commit.assert_awaited()
+
+    @pytest.mark.asyncio
+    async def test_orphaned_thread_status_reset_to_error(self) -> None:
+        # The orphans' finalizes never ran — recovery must reset the thread the way an
+        # error finalize would, so it is not left 'busy' forever with no active run.
+        executor = LocalExecutor()
+        session = AsyncMock()
+        statements: list[str] = []
+
+        async def _exec(stmt: object, *a: object, **k: object) -> MagicMock:
+            statements.append(str(stmt))
+            result = MagicMock()
+            result.all.return_value = [("t1",)]
+            result.rowcount = 1  # the orphan-error UPDATE matched a run
+            return result
+
+        session.execute = _exec
+        session.commit = AsyncMock()
+
+        with (
+            patch(
+                "aegra_api.services.local_executor._get_session_maker",
+                return_value=TestRecoverOrphanedQueue._maker(session),
+            ),
+            patch.object(executor, "dispatch_next_for_thread", new_callable=AsyncMock),
+        ):
+            await executor._recover_orphaned_queue()
+
+        thread_updates = [s for s in statements if s.startswith("UPDATE thread ")]
+        assert len(thread_updates) == 1
+        assert "status" in thread_updates[0]
+
+    @pytest.mark.asyncio
+    async def test_queued_only_thread_status_untouched(self) -> None:
+        # A thread with only parked (queued) runs has no orphan to error; its status —
+        # possibly a HITL 'interrupted' pause — must not be overwritten by recovery.
+        executor = LocalExecutor()
+        session = AsyncMock()
+        statements: list[str] = []
+
+        async def _exec(stmt: object, *a: object, **k: object) -> MagicMock:
+            statements.append(str(stmt))
+            result = MagicMock()
+            result.all.return_value = [("t1",)]
+            result.rowcount = 0  # no running/pending orphan matched
+            return result
+
+        session.execute = _exec
+        session.commit = AsyncMock()
+
+        with (
+            patch(
+                "aegra_api.services.local_executor._get_session_maker",
+                return_value=TestRecoverOrphanedQueue._maker(session),
+            ),
+            patch.object(executor, "dispatch_next_for_thread", new_callable=AsyncMock) as mock_dispatch,
+        ):
+            await executor._recover_orphaned_queue()
+
+        assert not any(s.startswith("UPDATE thread ") for s in statements)
+        mock_dispatch.assert_awaited_once_with("t1")  # queued run still gets promoted
+
+    @pytest.mark.asyncio
+    async def test_noop_when_no_affected_threads(self) -> None:
+        executor = LocalExecutor()
+        session = AsyncMock()
+        empty = MagicMock()
+        empty.all.return_value = []
+        session.execute = AsyncMock(return_value=empty)
+
+        with (
+            patch(
+                "aegra_api.services.local_executor._get_session_maker",
+                return_value=TestRecoverOrphanedQueue._maker(session),
+            ),
+            patch.object(executor, "dispatch_next_for_thread", new_callable=AsyncMock) as mock_dispatch,
+        ):
+            await executor._recover_orphaned_queue()
+
+        mock_dispatch.assert_not_awaited()
+
+
+class TestStrandedQueueSweep:
+    """Dev periodic stranded-queue recovery must survive a bad row (mirrors the prod reaper)."""
+
+    @pytest.mark.asyncio
+    async def test_sweep_survives_non_sqlalchemy_error(self) -> None:
+        # A corrupt-params queued row makes dispatch raise ValueError (not SQLAlchemyError);
+        # per-thread isolation must keep the sweep alive and still attempt the other threads.
+        executor = LocalExecutor()
+        session = AsyncMock()
+        threads = MagicMock()
+        threads.all.return_value = [("t1",), ("t2",)]
+        session.execute = AsyncMock(return_value=threads)
+
+        with (
+            patch(
+                "aegra_api.services.local_executor._get_session_maker",
+                return_value=TestRecoverOrphanedQueue._maker(session),
+            ),
+            patch.object(
+                executor,
+                "dispatch_next_for_thread",
+                new_callable=AsyncMock,
+                side_effect=ValueError("corrupt execution_params"),
+            ) as mock_dispatch,
+        ):
+            await executor._sweep_stranded_queues()  # must NOT raise
+
+        assert mock_dispatch.await_count == 2  # both threads attempted despite the first raising

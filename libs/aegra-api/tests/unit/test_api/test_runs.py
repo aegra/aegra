@@ -82,6 +82,10 @@ class TestRunsEndpoints:
 
             # DB setup: first scalar = thread ownership check (None = new thread), second = assistant
             mock_session.scalar.side_effect = [None, sample_assistant]
+            # No in-flight run on the thread → multitask gate lets this run start now.
+            no_active = MagicMock()
+            no_active.all.return_value = []
+            mock_session.scalars.return_value = no_active
 
             result = await create_run(thread_id, request, mock_user, mock_session)
 
@@ -273,10 +277,16 @@ class TestRunsEndpoints:
         # scalar called twice: first to find for update, second to return
         mock_session.scalar.side_effect = [run_orm, run_orm]
 
-        with patch(
-            "aegra_api.api.runs.streaming_service.interrupt_run",
-            new_callable=AsyncMock,
-        ) as mock_interrupt:
+        with (
+            patch(
+                "aegra_api.api.runs.streaming_service.interrupt_run",
+                new_callable=AsyncMock,
+            ) as mock_interrupt,
+            patch(
+                "aegra_api.api.runs.terminalize_user_cancel",
+                new_callable=AsyncMock,
+            ) as mock_terminalize,
+        ):
             result = await update_run(
                 thread_id,
                 run_id,
@@ -286,8 +296,9 @@ class TestRunsEndpoints:
             )
 
             mock_interrupt.assert_called_once_with(run_id)
-            mock_session.execute.assert_called_once()  # Update statement
-            mock_session.commit.assert_called_once()
+            # The endpoint converges through terminalize_user_cancel (thread reset +
+            # queued dispatch happen there), not through a raw status UPDATE.
+            mock_terminalize.assert_awaited_once_with(run_id, thread_id)
             assert result.run_id == run_id
 
     @pytest.mark.asyncio

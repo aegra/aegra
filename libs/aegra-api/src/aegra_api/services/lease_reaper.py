@@ -13,6 +13,7 @@ from datetime import UTC, datetime, timedelta
 import structlog
 from redis import RedisError
 from sqlalchemy import select, update
+from sqlalchemy.exc import SQLAlchemyError
 
 from aegra_api.core.orm import Run as RunORM
 from aegra_api.core.orm import _get_session_maker
@@ -61,9 +62,6 @@ class LeaseReaper:
         """Find crashed workers and stuck pending runs, recover them."""
         crashed, stuck_pending = await self._find_recoverable()
 
-        if not crashed and not stuck_pending:
-            return
-
         # Crashed workers: reset first (atomic claim), then check retries
         if crashed:
             logger.warning("Reaping crashed worker runs", count=len(crashed), run_ids=crashed)
@@ -80,11 +78,59 @@ class LeaseReaper:
             logger.warning("Re-enqueueing stuck pending runs", count=len(stuck_pending), run_ids=stuck_pending)
             await self._reenqueue(stuck_pending)
 
+        # Stranded queued: a prior run's dispatch wakeup was lost (process died,
+        # or its head run was just permanently-failed above). Detect AFTER the
+        # crashed/stuck handling so a freshly-failed head's successor is caught
+        # this cycle, not the next. Restart the queue.
+        stranded_queued = await self._find_stranded_queued_threads()
+        if stranded_queued:
+            logger.warning("Dispatching stranded queued runs", thread_count=len(stranded_queued))
+            await self._dispatch_stranded_queued(stranded_queued)
+
+        if not crashed and not stuck_pending and not stranded_queued:
+            return
+
         logger.info(
             "Lease recovery complete",
             crashed_recovered=len(crashed),
             stuck_reenqueued=len(stuck_pending),
+            stranded_dispatched=len(stranded_queued),
         )
+
+    @staticmethod
+    async def _find_stranded_queued_threads() -> list[str]:
+        """Threads with a queued run but no running/pending run holding them."""
+        maker = _get_session_maker()
+        async with maker() as session:
+            queued = {
+                row[0]
+                for row in (
+                    await session.execute(select(RunORM.thread_id).where(RunORM.status == "queued").distinct())
+                ).all()
+            }
+            if not queued:
+                return []
+            active = {
+                row[0]
+                for row in (
+                    await session.execute(
+                        select(RunORM.thread_id).where(RunORM.status.in_(("running", "pending"))).distinct()
+                    )
+                ).all()
+            }
+            return list(queued - active)
+
+    @staticmethod
+    async def _dispatch_stranded_queued(thread_ids: list[str]) -> None:
+        # Deferred import: executor -> run_executor -> run_status, none of which
+        # may import lease_reaper at module load.
+        from aegra_api.services.executor import executor
+
+        for thread_id in thread_ids:
+            try:
+                await executor.dispatch_next_for_thread(thread_id)
+            except (RedisError, SQLAlchemyError):
+                logger.exception("Failed to dispatch stranded queued run", thread_id=thread_id)
 
     @staticmethod
     async def _find_recoverable() -> tuple[list[str], list[str]]:
@@ -109,7 +155,9 @@ class LeaseReaper:
                 select(RunORM.run_id).where(
                     RunORM.status == "pending",
                     RunORM.claimed_by.is_(None),
-                    RunORM.created_at < now - timedelta(seconds=settings.worker.STUCK_PENDING_THRESHOLD_SECONDS),
+                    # updated_at, not created_at: a queued run promoted to pending keeps its
+                    # original created_at, so created_at would flag fresh promotions as stuck.
+                    RunORM.updated_at < now - timedelta(seconds=settings.worker.STUCK_PENDING_THRESHOLD_SECONDS),
                 )
             )
             stuck_pending = [row[0] for row in stuck_result.fetchall()]

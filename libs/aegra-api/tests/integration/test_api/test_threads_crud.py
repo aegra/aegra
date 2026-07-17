@@ -381,6 +381,44 @@ class TestDeleteThread:
         assert resp.status_code == 200
         assert resp.json()["status"] == "deleted"
 
+    def test_delete_thread_cancels_queued_run(self):
+        """A queued run on the thread is included in cleanup and signalled."""
+        app = create_test_app(include_runs=False, include_threads=True)
+
+        thread = _thread_row("test-123")
+        queued_run = MagicMock()
+        queued_run.run_id = "q1"
+
+        class Session(DummySessionBase):
+            async def scalar(self, _stmt):
+                return thread
+
+            async def scalars(self, _stmt):
+                # Only surface the queued run if the cleanup query's status filter
+                # actually includes 'queued' — so dropping it from threads.py reds this test.
+                compiled = str(_stmt.compile(compile_kwargs={"literal_binds": True}))
+                rows = [queued_run] if "queued" in compiled else []
+
+                class Result:
+                    def all(self):
+                        return rows
+
+                return Result()
+
+            async def delete(self, obj):
+                pass
+
+            async def commit(self):
+                pass
+
+        with patch("aegra_api.api.threads.streaming_service.cancel_run", new_callable=AsyncMock) as mock_cancel:
+            app.dependency_overrides[core_get_session] = override_get_session_dep(Session)
+            client = make_client(app)
+            resp = client.delete("/threads/test-123")
+
+        assert resp.status_code == 200
+        mock_cancel.assert_awaited_once_with("q1")
+
 
 class TestSearchThreads:
     """Test POST /threads/search endpoint"""

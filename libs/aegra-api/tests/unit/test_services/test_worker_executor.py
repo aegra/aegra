@@ -623,6 +623,8 @@ class TestExecuteAndRelease:
             status="error",
             thread_status="error",
             error="Job exceeded maximum execution time",
+            allow_terminal_override=True,  # overrides the cancel handler's 'interrupted' finalize
+            claimed_by="worker-0",  # scoped to our lease so gate-owned runs are never stomped
         )
         mock_release.assert_awaited_once_with(run_id, "worker-0")
         # Semaphore released even on timeout

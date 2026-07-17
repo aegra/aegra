@@ -20,12 +20,14 @@ from aegra_api.core.orm import Run as RunORM
 from aegra_api.core.orm import Thread as ThreadORM
 from aegra_api.core.orm import _get_session_maker
 from aegra_api.models import Run, RunCreate, User
+from aegra_api.models.enums import MULTITASK_DEFAULT
 from aegra_api.models.run_job import RunBehavior, RunExecution, RunIdentity, RunJob
 from aegra_api.services.executor import executor
 from aegra_api.services.langgraph_service import get_langgraph_service
 from aegra_api.services.run_status import set_thread_status
+from aegra_api.services.streaming_service import streaming_service
 from aegra_api.utils.assistants import resolve_assistant_id
-from aegra_api.utils.run_utils import _merge_jsonb
+from aegra_api.utils.run_utils import _merge_jsonb, map_command_to_langgraph
 
 logger = structlog.getLogger(__name__)
 
@@ -39,34 +41,74 @@ _RESUME_SETTLE_ATTEMPTS = 10
 _RESUME_SETTLE_INTERVAL_SECONDS = 0.1
 
 
-async def _validate_resume_command(session: AsyncSession, thread_id: str, command: dict[str, Any] | None) -> None:
-    """Validate resume command requirements.
+async def _validate_resume_command(
+    session: AsyncSession, thread_id: str, command: dict[str, Any] | None, user: User
+) -> None:
+    """Validate a run's input mode against the thread's interrupt state.
 
-    Guard on the presence of the ``resume`` key, not a non-None value: ``None``
-    is a valid resume payload, and a ``{"resume": None}`` command must still be
-    rejected against a thread that is not interrupted.
+    A command bearing a ``resume`` key requires the thread to be paused, and a
+    ``None`` resume payload is rejected outright: LangGraph's ``map_command``
+    drops it, so the run would produce no writes and crash the pause to 'error'.
+    Symmetrically, a plain fresh-input run (no command) must not land on a thread
+    paused at a human-in-the-loop ``interrupt()``: running plain input there
+    silently consumes the pending interrupt, so reject and direct the caller to
+    resume with a command.
     """
-    if not command or "resume" not in command:
+    if command is not None:
+        # Reject a malformed command shape up front (e.g. {'goto': [0]}) so it can't bypass the
+        # gate and crash to 'error' mid-run — which on a paused thread would corrupt the HITL pause.
+        try:
+            map_command_to_langgraph(command)
+        except (TypeError, KeyError, ValueError, AttributeError) as exc:
+            raise HTTPException(status_code=422, detail=f"Invalid command: {exc}") from exc
+    # Key presence, not a non-None value: {'resume': None} must be gated as a resume
+    # attempt too, or it slips through and errors out mid-run on whatever thread it hits.
+    resume_shaped = command is not None and "resume" in command
+    # Truthiness matches LangGraph's map_command (`if cmd.update:` / `if cmd.goto:`): an
+    # empty container ({'update': {}}, {'goto': []}) produces no writes and would crash a
+    # paused thread to 'error', so it must NOT early-return — it falls through to the gate.
+    state_op = bool(command and (command.get("update") or command.get("goto")))
+    if command is not None and not resume_shaped and state_op:
+        # A deliberate update/goto command manipulates graph state directly and is allowed even
+        # on a paused thread. Safety here leans on two LangGraph behaviours: empty containers are
+        # falsy (so they fall through to the 409 gate, not here), and an unknown goto/Send target
+        # is silently ignored rather than raising. If a future LangGraph version raised on unknown
+        # targets, such a command could crash mid-run and clobber a HITL pause — gate it here then.
         return
 
-    thread_stmt = select(ThreadORM).where(ThreadORM.thread_id == thread_id)
+    thread_stmt = select(ThreadORM).where(ThreadORM.thread_id == thread_id, ThreadORM.user_id == user.identity)
     thread = await session.scalar(thread_stmt)
-    if not thread:
-        raise HTTPException(404, f"Thread '{thread_id}' not found")
-    if thread.status == "interrupted":
+    if resume_shaped:
+        if not thread:
+            raise HTTPException(404, f"Thread '{thread_id}' not found")
+        status = thread.status
+        if status != "interrupted":
+            # Not interrupted on the request session's snapshot — poll fresh sessions in
+            # case finalize_run's commit is still in flight.
+            maker = _get_session_maker()
+            for _ in range(_RESUME_SETTLE_ATTEMPTS):
+                await asyncio.sleep(_RESUME_SETTLE_INTERVAL_SECONDS)
+                async with maker() as fresh:
+                    fresh_thread = await fresh.scalar(thread_stmt)
+                if fresh_thread is not None and fresh_thread.status == "interrupted":
+                    status = "interrupted"
+                    break
+        if status != "interrupted":
+            raise HTTPException(400, "Cannot resume: thread is not in interrupted state")
+        if command is not None and command.get("resume") is None:
+            # map_command drops a None resume; the run would crash the pause to 'error'.
+            raise HTTPException(
+                409,
+                "Thread is paused on a human-in-the-loop interrupt; resume it with "
+                "a non-null command={'resume': ...} payload",
+            )
         return
-
-    # Not interrupted on the request session's snapshot — poll fresh sessions in
-    # case finalize_run's commit is still in flight.
-    maker = _get_session_maker()
-    for _ in range(_RESUME_SETTLE_ATTEMPTS):
-        await asyncio.sleep(_RESUME_SETTLE_INTERVAL_SECONDS)
-        async with maker() as fresh:
-            fresh_thread = await fresh.scalar(thread_stmt)
-        if fresh_thread is not None and fresh_thread.status == "interrupted":
-            return
-
-    raise HTTPException(400, "Cannot resume: thread is not in interrupted state")
+    if thread is not None and thread.status == "interrupted":
+        raise HTTPException(
+            409,
+            "Thread is paused on a human-in-the-loop interrupt; resume it with "
+            "command={'resume': ...} instead of starting a new run",
+        )
 
 
 _THREAD_NAME_MAX_LENGTH = 100
@@ -186,6 +228,115 @@ async def update_thread_metadata(
     )
 
 
+def _is_resume_run(run: RunORM) -> bool:
+    """Whether a run row was created to resume a HITL interrupt (command bears a resume key)."""
+    params = run.execution_params or {}
+    command = (params.get("execution") or {}).get("command")
+    return isinstance(command, dict) and "resume" in command
+
+
+# A run holds (or is queued for) its thread while in one of these states.
+_ACTIVE_RUN_STATUSES = ("running", "pending", "queued")
+# Only an actually-dispatched run has a task/worker to cancel.
+_CANCELLABLE_RUN_STATUSES = ("running", "pending")
+# Terminal states a rollback may target when no run is currently active.
+_TERMINAL_RUN_STATUSES = ("interrupted", "error", "success")
+
+
+async def _apply_multitask_strategy(
+    session: AsyncSession, thread_id: str, strategy: str, user: User, *, is_resume: bool = False
+) -> tuple[bool, list[str], str | None]:
+    """Resolve a new run against the thread's in-flight runs per ``strategy``.
+
+    Locks the thread row ``FOR UPDATE`` (thread-then-run order, matching
+    finalize_run) so concurrent creates serialize. Returns ``(should_run,
+    cancel_ids, rollback_target_run_id)``: should_run is True to execute now,
+    False to park as ``queued``; cancel_ids are runs the caller cancels AFTER
+    commit (so the lock is released before the cancel triggers the run's own
+    finalize); rollback_target_run_id is the prior run whose checkpoints the
+    worker will revert by forking. Raises 409 for reject. interrupt/rollback
+    mark the active run interrupted (no rows are deleted — rollback reverts via
+    a checkpoint fork, leaving the old branch as harmless siblings).
+    """
+    await session.execute(
+        select(ThreadORM.thread_id)
+        .where(ThreadORM.thread_id == thread_id, ThreadORM.user_id == user.identity)
+        .with_for_update()
+    )
+    active = (
+        await session.scalars(
+            select(RunORM)
+            .where(
+                RunORM.thread_id == thread_id,
+                RunORM.user_id == user.identity,
+                RunORM.status.in_(_ACTIVE_RUN_STATUSES),
+            )
+            .order_by(RunORM.created_at.asc())
+        )
+    ).all()
+    if is_resume:
+        # A resume jumps ahead of merely-*queued* runs (it alone can clear a HITL pause), but
+        # must still serialize behind a running/pending run. Checked under the FOR UPDATE lock,
+        # this rejects a second concurrent resume (which unblocks after the first commits its
+        # pending run) so two resumes cannot double-execute on one paused checkpoint.
+        if any(run.status in _CANCELLABLE_RUN_STATUSES for run in active):
+            raise HTTPException(status_code=409, detail=f"Thread '{thread_id}' already has an active run")
+        return True, [], None
+    if not active:
+        # Idle thread: rollback repairs a broken last turn (an interrupted/errored run can
+        # leave an orphaned tool call) but never silently reverts a cleanly completed one.
+        if strategy == "rollback":
+            last = await session.scalar(
+                select(RunORM)
+                .where(
+                    RunORM.thread_id == thread_id,
+                    RunORM.user_id == user.identity,
+                    RunORM.status.in_(_TERMINAL_RUN_STATUSES),
+                )
+                .order_by(RunORM.created_at.desc())
+                .limit(1)
+            )
+            target = last.run_id if last is not None and last.status != "success" else None
+            return True, [], target
+        return True, [], None
+
+    if strategy == "reject":
+        raise HTTPException(status_code=409, detail=f"Thread '{thread_id}' already has an active run")
+    if strategy == "enqueue":
+        return False, [], None
+
+    # interrupt / rollback: abandon all in-flight work (the active run AND any runs the
+    # user double-texted earlier that are still queued), then run the new one now.
+    cancel_ids: list[str] = []
+    rollback_target: str | None = None
+    for run in active:
+        if run.status == "queued":
+            # Parked behind the active run with no task/broker to cancel: drop it from
+            # the queue so it does not execute after the new run (stale double-text).
+            run.status = "interrupted"
+            continue
+        if run.status not in _CANCELLABLE_RUN_STATUSES:
+            continue
+        if _is_resume_run(run):
+            # Cancelling an in-flight resume and running fresh input would land the new
+            # run on the pending-interrupt checkpoint, silently consuming the HITL pause.
+            raise HTTPException(
+                status_code=409,
+                detail="Thread has a resume in flight for a pending interrupt; "
+                "wait for it to settle instead of pre-empting it",
+            )
+        cancel_ids.append(run.run_id)
+        run.status = "interrupted"
+        # Release the lease with the pre-emption so a prod worker whose pub/sub cancel
+        # is lost detects lease loss on its next heartbeat and self-cancels the job.
+        run.claimed_by = None
+        run.lease_expires_at = None
+        # The rollback target is the run that actually executed, never a queued one.
+        if strategy == "rollback" and rollback_target is None:
+            rollback_target = run.run_id
+    return True, cancel_ids, rollback_target
+
+
 async def _prepare_run(
     session: AsyncSession,
     thread_id: str,
@@ -201,7 +352,7 @@ async def _prepare_run(
     builds a RunJob, submits it to the executor, and returns the triple
     ``(run_id, run_model, job)``.
     """
-    await _validate_resume_command(session, thread_id, request.command)
+    await _validate_resume_command(session, thread_id, request.command, user)
 
     run_id = str(uuid4())
     langgraph_service = get_langgraph_service()
@@ -250,6 +401,27 @@ async def _prepare_run(
     )
     await set_thread_status(session, thread_id, "busy")
 
+    # Resolve double-texting: run now, queue behind the active run, reject, or
+    # interrupt/rollback the active run. None defaults to enqueue.
+    strategy = request.multitask_strategy or MULTITASK_DEFAULT
+    is_resume = bool(request.command and request.command.get("resume") is not None)
+    should_run, cancel_ids, rollback_target = await _apply_multitask_strategy(
+        session, thread_id, strategy, user, is_resume=is_resume
+    )
+    run_status = initial_status if should_run else "queued"
+
+    # rollback only makes sense for a fresh dict-input run (not a resume/command
+    # or an explicit client checkpoint, which target state themselves).
+    rollback_target_run_id = (
+        rollback_target
+        if strategy == "rollback"
+        and rollback_target is not None
+        and isinstance(request.input, dict)
+        and request.command is None
+        and request.checkpoint is None
+        else None
+    )
+
     # Build the RunJob before persisting so we can store execution_params
     job = RunJob(
         identity=RunIdentity(run_id=run_id, thread_id=thread_id, graph_id=assistant.graph_id),
@@ -262,6 +434,7 @@ async def _prepare_run(
             checkpoint=request.checkpoint,
             command=request.command,
             event_streaming_v2=event_streaming_v2,
+            rollback_target_run_id=rollback_target_run_id,
         ),
         behavior=RunBehavior(
             interrupt_before=request.interrupt_before,
@@ -288,7 +461,7 @@ async def _prepare_run(
         run_id=run_id,
         thread_id=thread_id,
         assistant_id=resolved_assistant_id,
-        status=initial_status,
+        status=run_status,
         input=request.input,  # preserve None for checkpoint-only resume; matches RunExecution.input_data
         config=config,
         context=context,
@@ -304,8 +477,18 @@ async def _prepare_run(
 
     run = Run.model_validate(run_orm)
 
-    # Submit to executor
-    await executor.submit(job)
-    logger.info("Submitted run to executor", run_id=run_id)
+    # Cancel pre-empted runs after commit so the thread lock is released before
+    # the cancel triggers their finalize (which also locks the thread row). The
+    # cancel is fire-and-forget, so a rolled-back active run may write one late
+    # checkpoint that briefly out-orders the new run's head in GET state until it
+    # stops — harmless: the rollback fork resolves its base by run_id, not by head.
+    for cancelled_id in cancel_ids:
+        await streaming_service.cancel_run(cancelled_id)
+
+    if should_run:
+        await executor.submit(job)
+        logger.info("Submitted run to executor", run_id=run_id)
+    else:
+        logger.info("Run queued behind active run", run_id=run_id, thread_id=thread_id)
 
     return run_id, run, job

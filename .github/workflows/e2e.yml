@@ -300,7 +300,7 @@ jobs:
         env:
           SERVER_URL: http://localhost:2026
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-        run: uv run pytest tests/e2e/manual_auth_tests -v --tb=short -m auth_only
+        run: uv run pytest tests/e2e/manual_auth_tests -v --tb=short -m auth_only -o addopts="--strict-markers -ra --color=yes"
 
       - name: Show server logs on failure
         if: failure()

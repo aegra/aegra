@@ -1,11 +1,9 @@
 """E2E tests for authorization handlers (@auth.on.*)
 
-⚠️ MANUAL TESTS - These are skipped by default. Run with: pytest -m manual_auth
+Require an auth-enabled server (aegra.auth.json). Skipped by default.
+Run with: make e2e-auth  or  pytest -m auth_only
 
-These tests require a running Aegra server started with auth enabled (create your own
-config file) which includes authorization handlers.
-
-See tests/e2e/manual_auth_tests/README.md for details on when and how to run these tests.
+See tests/e2e/manual_auth_tests/README.md for details.
 
 **Hybrid Testing Approach:**
 - **SDK Client**: Used for standard API endpoints (threads, assistants)
@@ -15,15 +13,6 @@ See tests/e2e/manual_auth_tests/README.md for details on when and how to run the
 - **httpx**: Used for custom routes (/custom/*) and GET /threads (list endpoint)
   - SDK doesn't support custom routes
   - GET /threads uses different endpoint than SDK's search()
-
-To run these tests:
-1. Create a config file with auth.path pointing to jwt_mock_auth_example.py:auth
-2. Start the server with your auth config:
-   AEGRA_CONFIG=my_auth_config.json python run_server.py
-   # OR: AEGRA_CONFIG=my_auth_config.json docker compose up
-
-3. Run tests explicitly:
-   pytest tests/e2e/manual_auth_tests/test_authorization_handlers_e2e.py -v -m manual_auth
 """
 
 import httpx
@@ -66,7 +55,7 @@ def get_client_with_auth(user_id: str = "alice", role: str = "user", team_id: st
 
 
 @pytest.mark.e2e
-@pytest.mark.manual_auth
+@pytest.mark.auth_only
 class TestThreadAuthorization:
     """Test authorization handlers for thread operations"""
 
@@ -103,7 +92,7 @@ class TestThreadAuthorization:
 
 
 @pytest.mark.e2e
-@pytest.mark.manual_auth
+@pytest.mark.auth_only
 class TestAssistantAuthorization:
     """Test authorization handlers for assistant operations"""
 
@@ -185,7 +174,7 @@ class TestAssistantAuthorization:
 
 
 @pytest.mark.e2e
-@pytest.mark.manual_auth
+@pytest.mark.auth_only
 class TestAuthorizationHandlerPrecedence:
     """Test that handler precedence works correctly"""
 
@@ -198,7 +187,7 @@ class TestAuthorizationHandlerPrecedence:
 
 
 @pytest.mark.e2e
-@pytest.mark.manual_auth
+@pytest.mark.auth_only
 class TestAuthorizationMetadataInjection:
     """Test that authorization handlers can inject metadata"""
 

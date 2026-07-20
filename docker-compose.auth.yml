@@ -1,0 +1,28 @@
+# Auth E2E override — JWT mock auth + custom routes, no Redis host ports.
+# Usage:
+#   docker compose -f docker-compose.yml -f docker-compose.dev.yml -f docker-compose.auth.yml up -d postgres aegra
+#
+# Postgres is published on 5433 to avoid clashing with a local Postgres on 5432.
+# Redis is profile-gated so it is not started for auth E2E.
+
+services:
+  postgres:
+    ports: !override
+      - "5433:5432"
+
+  redis:
+    profiles:
+      - redis
+
+  aegra:
+    environment:
+      - AUTH_TYPE=custom
+      - AEGRA_CONFIG=/app/aegra.auth.json
+      - REDIS_BROKER_ENABLED=false
+      - POSTGRES_HOST=postgres
+      - PYTHONPATH=/app/src:/app/examples
+    volumes:
+      - ./aegra.auth.json:/app/aegra.auth.json:ro
+    depends_on: !override
+      postgres:
+        condition: service_healthy

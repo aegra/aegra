@@ -1,4 +1,4 @@
-.PHONY: help install dev-install setup-hooks format lint type-check security test test-api test-cli test-cov clean run ci-check openapi e2e-dev e2e-prod e2e-both
+.PHONY: help install dev-install setup-hooks format lint type-check security test test-api test-cli test-cov clean run ci-check openapi e2e-dev e2e-prod e2e-auth e2e-both
 
 help:
 	@echo "Available commands:"
@@ -17,6 +17,7 @@ help:
 	@echo "  make ci-check      - Run all CI checks locally"
 	@echo "  make e2e-dev       - Run E2E tests in dev mode (no Redis)"
 	@echo "  make e2e-prod      - Run E2E tests in prod mode (Redis workers)"
+	@echo "  make e2e-auth      - Run auth E2E tests (JWT mock auth enabled)"
 	@echo "  make e2e-both      - Run E2E tests in both modes"
 	@echo "  make clean         - Clean cache files"
 	@echo "  make run           - Run the server"
@@ -102,6 +103,26 @@ e2e-prod:
 	@rc=0; \
 	uv run --package aegra-api pytest libs/aegra-api/tests/e2e/ $(E2E_IGNORE) -v --tb=short || rc=$$?; \
 	docker compose down; \
+	exit $$rc
+
+e2e-auth:
+	@echo "Starting auth mode (JWT mock auth, LocalExecutor)..."
+	@docker compose -f docker-compose.yml -f docker-compose.dev.yml -f docker-compose.auth.yml up -d postgres aegra
+	@echo "Waiting for server..."; \
+	ready=0; \
+	for i in $$(seq 1 45); do \
+		if curl -s http://localhost:2026/health > /dev/null 2>&1; then ready=1; break; fi; \
+		sleep 2; \
+	done; \
+	if [ "$$ready" = "0" ]; then \
+		echo "Server failed to start within 90s"; \
+		docker compose -f docker-compose.yml -f docker-compose.dev.yml -f docker-compose.auth.yml logs --tail=80; \
+		docker compose -f docker-compose.yml -f docker-compose.dev.yml -f docker-compose.auth.yml down; \
+		exit 1; \
+	fi
+	@rc=0; \
+	uv run --package aegra-api pytest libs/aegra-api/tests/e2e/manual_auth_tests/ -v --tb=short -m auth_only -o addopts="--strict-markers -ra --color=yes" || rc=$$?; \
+	docker compose -f docker-compose.yml -f docker-compose.dev.yml -f docker-compose.auth.yml down; \
 	exit $$rc
 
 e2e-both: e2e-dev e2e-prod

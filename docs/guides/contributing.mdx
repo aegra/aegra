@@ -50,6 +50,9 @@ make type-check    # Run type checking
 make test          # Run tests
 make test-cov      # Tests with coverage
 make ci-check      # Run all CI checks locally
+make e2e-dev       # E2E in LocalExecutor mode
+make e2e-prod      # E2E with Redis workers
+make e2e-auth      # Auth E2E (JWT mock auth)
 make clean         # Clean cache files
 ```
 
@@ -196,6 +199,7 @@ Every feature needs tests at all applicable levels:
 | Unit | `tests/unit/` | Isolated functions with mocked dependencies |
 | Integration | `tests/integration/` | HTTP requests via FastAPI TestClient with mocked DB |
 | E2E | `tests/e2e/` | Real server + real database via LangGraph SDK |
+| Auth E2E | `tests/e2e/manual_auth_tests/` | Auth-enabled server (`make e2e-auth`, marker `auth_only`) |
 
 ## LangGraph service architecture
 

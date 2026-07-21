@@ -161,6 +161,17 @@ ENABLE_PROMETHEUS_METRICS=true
 
 This exposes a `/metrics` endpoint with standard HTTP request metrics in Prometheus exposition format. Scrape it with any Prometheus-compatible collector and visualize with Grafana.
 
+### Exposed metrics
+
+| Metric | Type | Description |
+| --- | --- | --- |
+| `http_requests_total` | Counter | Total requests by method, status, and handler |
+| `http_request_duration_seconds` | Histogram | Request latency by handler (few buckets, for aggregation) |
+| `http_request_duration_highr_seconds` | Histogram | Request latency with many buckets (for accurate percentiles) |
+| `http_request_size_bytes` | Summary | Content length of incoming requests by handler |
+| `http_response_size_bytes` | Summary | Content length of outgoing responses by handler |
+| `http_server_active_requests` | Gauge | Number of HTTP requests currently in progress |
+
 The `/metrics` endpoint is **not** protected by Aegra's authentication middleware. This is intentional — Prometheus scrapers typically do not support application-level auth. If you need to restrict access, use network-level controls (firewall rules, internal load-balancer listeners, etc.).
 
 See the [environment variables reference](/reference/environment-variables#prometheus-metrics) for details.

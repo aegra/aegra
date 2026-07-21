@@ -41,8 +41,11 @@ def setup_prometheus_metrics(
     instrumentator = Instrumentator(
         should_group_status_codes=False,
         should_ignore_untemplated=True,
+        should_instrument_requests_inprogress=True,
         excluded_handlers=["/health", "/ready", "/live", "/info", "/metrics", "/docs", "/redoc", "/openapi.json"],
         registry=registry,
+        inprogress_name="http_server_active_requests",
+        inprogress_labels=True,
     )
     instrumentator.instrument(app)
     instrumentator.expose(app, endpoint="/metrics", include_in_schema=False)

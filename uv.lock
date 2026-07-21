@@ -15,7 +15,7 @@ members = [
 
 [[package]]
 name = "aegra-api"
-version = "0.9.24"
+version = "0.9.25"
 source = { editable = "libs/aegra-api" }
 dependencies = [
     { name = "alembic" },
@@ -100,7 +100,7 @@ dev = [
 
 [[package]]
 name = "aegra-cli"
-version = "0.9.24"
+version = "0.9.25"
 source = { editable = "libs/aegra-cli" }
 dependencies = [
     { name = "aegra-api" },

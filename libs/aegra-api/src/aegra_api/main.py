@@ -353,7 +353,9 @@ def create_app() -> FastAPI:
         _add_common_middleware(application, cors_config)
 
         # Apply auth to custom routes if enabled
-        if http_config and http_config.get("enable_custom_route_auth", False):
+        if http_config and http_config.get("enable_custom_route_auth", True):
+            # Default changed to True: custom routes are authenticated by default.
+            # Set enable_custom_route_auth=false to opt out (not recommended).
             _apply_auth_to_routes(application, auth_dependency)
     else:
         application = FastAPI(

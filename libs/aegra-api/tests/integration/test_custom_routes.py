@@ -3,7 +3,9 @@
 import json
 
 import pytest
-from fastapi import FastAPI
+from fastapi import APIRoute, FastAPI
+
+from aegra_api.core.auth_deps import auth_dependency
 
 
 @pytest.fixture
@@ -111,6 +113,54 @@ async def test_custom_routes_with_auth_config(tmp_path, custom_app_file, monkeyp
     http_config = load_http_config()
     assert http_config is not None
     assert http_config.get("enable_custom_route_auth") is True
+
+
+def _find_route(app: FastAPI, path: str) -> APIRoute:
+    for route in app.routes:
+        if isinstance(route, APIRoute) and route.path == path:
+            return route
+    raise AssertionError(f"Route {path} not found")
+
+
+@pytest.mark.asyncio
+async def test_create_app_enables_custom_route_auth_by_default(
+    aegra_config_with_custom_app,
+):
+    """Custom routes should inherit auth unless explicitly opted out."""
+    from aegra_api.main import create_app
+
+    app = create_app()
+    route = _find_route(app, "/custom/hello")
+
+    assert route.dependencies[: len(auth_dependency)] == auth_dependency
+
+
+@pytest.mark.asyncio
+async def test_create_app_allows_explicit_custom_route_auth_opt_out(
+    tmp_path, custom_app_file, monkeypatch
+):
+    """Setting enable_custom_route_auth=false should keep custom routes public."""
+    monkeypatch.chdir(tmp_path)
+
+    config_file = tmp_path / "aegra.json"
+    config_file.write_text(
+        json.dumps(
+            {
+                "graphs": {"test": "./test.py:graph"},
+                "http": {
+                    "app": f"./{custom_app_file.name}:app",
+                    "enable_custom_route_auth": False,
+                },
+            }
+        )
+    )
+
+    from aegra_api.main import create_app
+
+    app = create_app()
+    route = _find_route(app, "/custom/hello")
+
+    assert route.dependencies == []
 
 
 @pytest.mark.asyncio

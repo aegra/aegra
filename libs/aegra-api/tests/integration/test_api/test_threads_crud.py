@@ -507,6 +507,41 @@ class TestSearchThreads:
         assert resp.status_code == 200
         assert isinstance(resp.json(), list)
 
+    def test_search_rejects_unknown_select_field(self, client):
+        """Unknown select fields are rejected with 422."""
+        resp = client.post("/threads/search", json={"select": ["thread_id", "nope"]})
+        assert resp.status_code == 422
+
+    def test_search_rejects_bad_extract_path(self, client):
+        """extract paths must use an allowed prefix."""
+        resp = client.post(
+            "/threads/search",
+            json={"extract": {"title": "state.messages[0].content"}},
+        )
+        assert resp.status_code == 422
+
+    def test_search_with_select_thread_id_only(self, client):
+        """select projects response fields without requiring checkpoint join."""
+        resp = client.post("/threads/search", json={"select": ["thread_id", "status"]})
+        assert resp.status_code == 200
+        data = resp.json()
+        assert isinstance(data, list)
+        assert len(data) >= 1
+        assert set(data[0].keys()) == {"thread_id", "status"}
+
+    def test_search_with_select_values_without_graph_returns_empty_values(self, client):
+        """select including values joins state; missing graph_id yields empty values."""
+        resp = client.post(
+            "/threads/search",
+            json={"select": ["thread_id", "values"]},
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert len(data) == 3
+        for row in data:
+            assert set(row.keys()) == {"thread_id", "values"}
+            assert row["values"] == {}
+
 
 class TestThreadGetState:
     """Test GET /threads/{thread_id}/state endpoint"""

@@ -198,3 +198,62 @@ async def test_search_malformed_order_by_falls_back_e2e() -> None:
             assert resp.status_code == 200, f"order_by={bad!r} → {resp.status_code}: {resp.text}"
             returned = {t["thread_id"] for t in resp.json()}
             assert returned == set(created), f"order_by={bad!r} dropped rows: {returned}"
+
+
+@pytest.mark.e2e
+@pytest.mark.asyncio
+async def test_search_select_and_extract_values_e2e() -> None:
+    """select/extract return projected values from latest state in one search call."""
+    client = get_e2e_client()
+    tag = f"select-extract-{uuid.uuid4().hex[:8]}"
+    thread = await client.threads.create(metadata={"search_test_tag": tag, "graph_id": "agent"})
+    thread_id = thread["thread_id"]
+
+    await client.threads.update_state(
+        thread_id,
+        values={
+            "messages": [
+                {"type": "human", "content": "what is rust?"},
+                {"type": "ai", "content": "A systems language."},
+            ]
+        },
+        as_node="__start__",
+    )
+
+    async with AsyncClient(base_url=settings.app.SERVER_URL, timeout=30.0) as http_client:
+        resp = await http_client.post(
+            "/threads/search",
+            json={
+                "metadata": {"search_test_tag": tag},
+                "select": ["thread_id"],
+                "extract": {
+                    "title": "values.messages[0].content",
+                    "last_msg": "values.messages[-1].content",
+                },
+            },
+        )
+        assert resp.status_code == 200, resp.text
+        rows = resp.json()
+        assert len(rows) == 1
+        assert rows[0]["thread_id"] == thread_id
+        assert "values" not in rows[0]
+        extracted = rows[0]["extracted"]
+        # Content may be plain string or structured depending on serializer
+        title = extracted["title"]
+        last = extracted["last_msg"]
+        title_text = title if isinstance(title, str) else str(title)
+        last_text = last if isinstance(last, str) else str(last)
+        assert "rust" in title_text.lower()
+        assert "systems" in last_text.lower() or "language" in last_text.lower()
+
+        values_resp = await http_client.post(
+            "/threads/search",
+            json={
+                "metadata": {"search_test_tag": tag},
+                "select": ["thread_id", "values"],
+            },
+        )
+        assert values_resp.status_code == 200, values_resp.text
+        values_rows = values_resp.json()
+        assert "values" in values_rows[0]
+        assert "messages" in values_rows[0]["values"]

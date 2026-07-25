@@ -111,9 +111,9 @@ class ThreadSearchRequest(BaseModel):
     extract: dict[str, str] | None = Field(
         None,
         description=(
-            "Optional JSON-path projections. Keys are response aliases; values are paths "
-            "starting with values., metadata., config., or interrupts. "
-            "Resolved values appear under 'extracted' on each result."
+            "Optional JSON-path projections (max 10). Keys are response aliases; values are "
+            "paths starting with values., metadata., or config. "
+            "Resolved values appear under 'extracted' on each result. Unknown/malformed paths → 422."
         ),
     )
 
@@ -157,7 +157,13 @@ class ThreadSearchRequest(BaseModel):
 
 
 class ThreadSearchItem(Thread):
-    """Thread search result with optional state projection and extract map."""
+    """Documented shape for projected ``POST /threads/search`` results.
+
+    Used for OpenAPI/SDK typing of optional ``values`` / ``interrupts`` /
+    ``config`` / ``extracted`` fields. Not used as a validating
+    ``response_model`` because sparse ``select`` projections may omit
+    inherited required Thread fields.
+    """
 
     values: dict[str, Any] | None = Field(None, description="Latest checkpoint channel values")
     interrupts: list[dict[str, Any]] | None = Field(None, description="Pending interrupts from latest state")

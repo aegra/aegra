@@ -23,6 +23,8 @@ logger = structlog.getLogger(__name__)
 
 _VALUES_SOFT_CAP_BYTES = 256 * 1024
 _STATE_FETCH_CONCURRENCY = 8
+# Bound per-thread checkpoint join so a stuck graph load cannot stall search.
+_STATE_FETCH_TIMEOUT_SECS = 15.0
 
 _BASE_THREAD_FIELD_ORDER: tuple[str, ...] = (
     "thread_id",
@@ -58,7 +60,7 @@ class ThreadSearchService:
         extract_sources = sources_needed_by_extract(extract) if extract else set()
 
         need_checkpoint = bool(select_fields & CHECKPOINT_SELECT_FIELDS) or bool(
-            extract_sources & {"values", "interrupts", "config"}
+            extract_sources & {"values", "config"}
         )
 
         state_by_id: dict[str, dict[str, Any]] = {}
@@ -95,7 +97,6 @@ class ThreadSearchService:
                     "values": state_blob["values"],
                     "metadata": base.get("metadata") or {},
                     "config": state_blob["config"],
-                    "interrupts": state_blob["interrupts"],
                 }
                 extracted: dict[str, Any] = {}
                 for alias, path in extract.items():
@@ -138,7 +139,7 @@ class ThreadSearchService:
         langgraph_service = get_langgraph_service()
         config = create_thread_config(thread_id, user)
 
-        try:
+        async def _load_snapshot() -> Any:
             async with langgraph_service.get_graph(
                 graph_id,
                 config=config,
@@ -146,7 +147,18 @@ class ThreadSearchService:
                 user=user,
             ) as agent:
                 agent = agent.with_config(config)
-                snapshot = await agent.aget_state(config, subgraphs=False)
+                return await agent.aget_state(config, subgraphs=False)
+
+        try:
+            snapshot = await asyncio.wait_for(_load_snapshot(), timeout=_STATE_FETCH_TIMEOUT_SECS)
+        except TimeoutError as exc:
+            logger.warning(
+                "thread search state join failed",
+                thread_id=thread_id,
+                graph_id=graph_id,
+                error=f"timeout after {_STATE_FETCH_TIMEOUT_SECS}s: {exc}",
+            )
+            return empty
         except Exception as exc:
             logger.warning(
                 "thread search state join failed",

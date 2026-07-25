@@ -157,6 +157,8 @@ threads = await client.threads.search(
 # -> [{"thread_id": "...", "extracted": {"title": "...", "last_msg": "..."}}]
 ```
 
+`extract` accepts at most **10** paths. Unknown `select` fields or malformed `extract` paths return **HTTP 422**.
+
 When `select` / `extract` are omitted, the response shape is unchanged (thin thread metadata only).
 
 ## Listing threads

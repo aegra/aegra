@@ -856,7 +856,28 @@ async def delete_thread(
     return {"status": "deleted"}
 
 
-@router.post("/threads/search", response_model=None)
+@router.post(
+    "/threads/search",
+    response_model=None,
+    responses={
+        200: {
+            "description": (
+                "Thread list. Without select/extract: full Thread objects. "
+                "With select/extract: sparse objects shaped like ThreadSearchItem "
+                "(selected fields plus optional extracted); inherited Thread "
+                "fields may be omitted when not selected."
+            ),
+            "content": {
+                "application/json": {
+                    "schema": {
+                        "type": "array",
+                        "items": {"$ref": "#/components/schemas/ThreadSearchItem"},
+                    }
+                }
+            },
+        }
+    },
+)
 async def search_threads(
     request: ThreadSearchRequest,
     user: User = Depends(get_current_user),

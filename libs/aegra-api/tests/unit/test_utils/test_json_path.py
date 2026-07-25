@@ -17,7 +17,11 @@ def test_validate_extract_path_accepts_supported_forms() -> None:
     validate_extract_path("values.messages[-1].content")
     validate_extract_path("metadata.title")
     validate_extract_path("config.configurable.thread_id")
-    validate_extract_path("interrupts.items[0].value")
+
+
+def test_validate_extract_path_rejects_interrupts_root() -> None:
+    with pytest.raises(ValueError, match="must start with"):
+        validate_extract_path("interrupts.items[0].value")
 
 
 def test_validate_extract_path_rejects_bad_prefix() -> None:

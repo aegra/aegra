@@ -8,7 +8,7 @@ from __future__ import annotations
 import re
 from typing import Any
 
-_EXTRACT_PREFIXES: tuple[str, ...] = ("values.", "metadata.", "config.", "interrupts.")
+_EXTRACT_PREFIXES: tuple[str, ...] = ("values.", "metadata.", "config.")
 _MAX_EXTRACT_PATHS = 10
 
 _SEGMENT_RE = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)(?:\[(-?\d+)\])?$")
@@ -102,10 +102,10 @@ def resolve_json_path(root: Any, path: str) -> Any:
 
 
 def sources_needed_by_extract(extract: dict[str, str]) -> set[str]:
-    """Return source names (values/metadata/config/interrupts) referenced by paths."""
+    """Return source names (values/metadata/config) referenced by paths."""
     needed: set[str] = set()
     for path in extract.values():
         root = path.split(".", 1)[0]
-        if root in {"values", "metadata", "config", "interrupts"}:
+        if root in {"values", "metadata", "config"}:
             needed.add(root)
     return needed

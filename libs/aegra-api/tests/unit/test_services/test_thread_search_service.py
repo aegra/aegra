@@ -1,5 +1,6 @@
 """Unit tests for ThreadSearchService projection and truncation."""
 
+import asyncio
 from datetime import UTC, datetime
 from types import SimpleNamespace
 from typing import Any
@@ -135,6 +136,39 @@ def test_maybe_truncate_values_marks_large_payloads() -> None:
     truncated = _maybe_truncate_values(huge)
     assert truncated == {"__truncated__": True}
     assert _maybe_truncate_values({"ok": True}) == {"ok": True}
+
+
+@pytest.mark.asyncio
+async def test_load_thread_state_fields_timeout_returns_empty(monkeypatch: pytest.MonkeyPatch) -> None:
+    service = ThreadSearchService()
+    row = _orm()
+
+    class _GraphCtx:
+        async def __aenter__(self) -> Any:
+            await asyncio.sleep(60)
+            return MagicMock()
+
+        async def __aexit__(self, *args: object) -> None:
+            return None
+
+    mock_lg = MagicMock()
+    mock_lg.get_graph.return_value = _GraphCtx()
+
+    monkeypatch.setattr(
+        "aegra_api.services.langgraph_service.get_langgraph_service",
+        lambda: mock_lg,
+    )
+    monkeypatch.setattr(
+        "aegra_api.services.langgraph_service.create_thread_config",
+        lambda thread_id, user: {"configurable": {"thread_id": thread_id}},
+    )
+    monkeypatch.setattr(
+        "aegra_api.services.thread_search_service._STATE_FETCH_TIMEOUT_SECS",
+        0.01,
+    )
+
+    result = await service._load_thread_state_fields(row, user=User(identity="u"))
+    assert result == {"values": {}, "interrupts": [], "config": {}}
 
 
 @pytest.mark.asyncio

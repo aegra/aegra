@@ -6,6 +6,10 @@ on:
   pull_request:
     branches: [main, develop]
 
+env:
+  # Keep in sync with the ruff floor in libs/*/pyproject.toml dev dependencies.
+  RUFF_VERSION: "0.16.0"
+
 jobs:
   lint:
     runs-on: ubuntu-latest
@@ -20,11 +24,13 @@ jobs:
       - name: Set up Python
         run: uv python install 3.12
 
+      # Pinned: an unpinned uvx pulls the newest ruff, so a release can turn
+      # every open PR red without a single line of repo code changing.
       - name: Check formatting with ruff
-        run: uvx ruff format --check .
+        run: uvx ruff@${{ env.RUFF_VERSION }} format --check .
 
       - name: Lint with ruff
-        run: uvx ruff check .
+        run: uvx ruff@${{ env.RUFF_VERSION }} check .
 
   test-api:
     runs-on: ubuntu-latest

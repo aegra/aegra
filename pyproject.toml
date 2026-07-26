@@ -21,6 +21,12 @@ dev = [
 line-length = 120
 target-version = "py312"
 
+[tool.ruff.format]
+# Docs contain deliberately-wrong examples (see the "# WRONG" blocks in
+# CLAUDE.md). Formatting markdown rewrites them into correct style and destroys
+# the point. Ruff only began picking up .md in 0.15; this keeps prior behavior.
+exclude = ["**/*.md"]
+
 [tool.ruff.lint]
 select = [
     "E",     # pycodestyle errors

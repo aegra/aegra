@@ -47,6 +47,11 @@ packages = ["src/aegra_cli"]
 line-length = 100
 target-version = "py312"
 
+[tool.ruff.format]
+# This package's [tool.ruff] overrides the root config for files beneath it, so
+# the markdown exclusion has to be repeated here. See the root pyproject.toml.
+exclude = ["**/*.md"]
+
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP"]
 ignore = ["F841"]  # Unused variables (common in tests where we invoke but check side effects)
@@ -59,5 +64,5 @@ dev = [
     "pytest>=9.0.2",
     "pytest-asyncio>=1.3.0",
     "pytest-cov>=6.0.0",
-    "ruff>=0.13.0",
+    "ruff>=0.16.0",
 ]

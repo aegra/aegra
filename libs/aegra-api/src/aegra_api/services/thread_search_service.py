@@ -16,6 +16,10 @@ from aegra_api.models.threads import (
     Thread,
     ThreadSearchRequest,
 )
+from aegra_api.services.langgraph_service import (
+    create_thread_config,
+    get_langgraph_service,
+)
 from aegra_api.services.thread_state_service import ThreadStateService
 from aegra_api.utils.json_path import resolve_json_path, sources_needed_by_extract
 
@@ -130,11 +134,6 @@ class ThreadSearchService:
         if not graph_id:
             return empty
 
-        from aegra_api.services.langgraph_service import (
-            create_thread_config,
-            get_langgraph_service,
-        )
-
         thread_id = str(row.thread_id)
         langgraph_service = get_langgraph_service()
         config = create_thread_config(thread_id, user)
@@ -181,11 +180,18 @@ class ThreadSearchService:
             )
             return empty
 
-        values = _maybe_truncate_values(dict(thread_state.values or {}))
+        # Checkpoint values may hold LangChain message objects; flatten to
+        # JSON-shaped dicts so select and extract share the same navigation model.
+        serialized_values = self._state_service.serializer.serialize(thread_state.values or {})
+        if not isinstance(serialized_values, dict):
+            serialized_values = {}
+        values = _maybe_truncate_values(serialized_values)
+
         config_out: dict[str, Any] = {}
         snap_config = getattr(snapshot, "config", None)
         if isinstance(snap_config, dict):
-            config_out = snap_config
+            serialized_config = self._state_service.serializer.serialize(snap_config)
+            config_out = serialized_config if isinstance(serialized_config, dict) else {}
 
         return {
             "values": values,

@@ -14,6 +14,7 @@ from aegra_api.services.thread_search_service import (
     ThreadSearchService,
     _maybe_truncate_values,
 )
+from aegra_api.utils.json_path import resolve_json_path
 
 
 def _thread(thread_id: str = "t1") -> Thread:
@@ -155,11 +156,11 @@ async def test_load_thread_state_fields_timeout_returns_empty(monkeypatch: pytes
     mock_lg.get_graph.return_value = _GraphCtx()
 
     monkeypatch.setattr(
-        "aegra_api.services.langgraph_service.get_langgraph_service",
+        "aegra_api.services.thread_search_service.get_langgraph_service",
         lambda: mock_lg,
     )
     monkeypatch.setattr(
-        "aegra_api.services.langgraph_service.create_thread_config",
+        "aegra_api.services.thread_search_service.create_thread_config",
         lambda thread_id, user: {"configurable": {"thread_id": thread_id}},
     )
     monkeypatch.setattr(
@@ -206,11 +207,11 @@ async def test_load_thread_state_fields_converts_snapshot(monkeypatch: pytest.Mo
     mock_lg.get_graph.return_value = _GraphCtx()
 
     monkeypatch.setattr(
-        "aegra_api.services.langgraph_service.get_langgraph_service",
+        "aegra_api.services.thread_search_service.get_langgraph_service",
         lambda: mock_lg,
     )
     monkeypatch.setattr(
-        "aegra_api.services.langgraph_service.create_thread_config",
+        "aegra_api.services.thread_search_service.create_thread_config",
         lambda thread_id, user: {"configurable": {"thread_id": thread_id}},
     )
     monkeypatch.setattr(
@@ -222,3 +223,63 @@ async def test_load_thread_state_fields_converts_snapshot(monkeypatch: pytest.Mo
     result = await service._load_thread_state_fields(row, user=User(identity="u"))
     assert result["values"]["messages"][0]["content"] == "hi"
     assert result["config"]["configurable"]["thread_id"] == "t1"
+
+
+@pytest.mark.asyncio
+async def test_load_thread_state_fields_serializes_message_objects(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """LangChain-style message objects must become dicts before extract navigation."""
+
+    class _Msg:
+        def __init__(self, content: str) -> None:
+            self.content = content
+
+        def model_dump(self) -> dict[str, str]:
+            return {"content": self.content}
+
+    service = ThreadSearchService()
+    row = _orm()
+    snapshot = SimpleNamespace(values={"messages": [_Msg("what is rust?")]}, config={})
+    thread_state = ThreadState(
+        values={"messages": [_Msg("what is rust?")]},
+        next=[],
+        tasks=[],
+        interrupts=[],
+        metadata={},
+        created_at=None,
+        checkpoint={"checkpoint_id": "cp1", "thread_id": "t1", "checkpoint_ns": ""},
+        parent_checkpoint=None,
+    )
+
+    mock_agent = MagicMock()
+    mock_agent.with_config.return_value = mock_agent
+    mock_agent.aget_state = AsyncMock(return_value=snapshot)
+
+    class _GraphCtx:
+        async def __aenter__(self) -> MagicMock:
+            return mock_agent
+
+        async def __aexit__(self, *args: object) -> None:
+            return None
+
+    mock_lg = MagicMock()
+    mock_lg.get_graph.return_value = _GraphCtx()
+    monkeypatch.setattr(
+        "aegra_api.services.thread_search_service.get_langgraph_service",
+        lambda: mock_lg,
+    )
+    monkeypatch.setattr(
+        "aegra_api.services.thread_search_service.create_thread_config",
+        lambda thread_id, user: {"configurable": {"thread_id": thread_id}},
+    )
+    monkeypatch.setattr(
+        service._state_service,
+        "convert_snapshot_to_thread_state",
+        lambda snap, tid, subgraphs=False: thread_state,
+    )
+
+    result = await service._load_thread_state_fields(row, user=User(identity="u"))
+    assert isinstance(result["values"]["messages"][0], dict)
+    assert result["values"]["messages"][0]["content"] == "what is rust?"
+    assert resolve_json_path(result["values"], "values.messages[0].content") == "what is rust?"

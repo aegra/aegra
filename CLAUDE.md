@@ -79,8 +79,9 @@ aegra/
 ### Run Execution Architecture
 - **Production mode** (`REDIS_BROKER_ENABLED=true`): Runs are dispatched via a Redis job queue (BLPOP). Workers run as concurrent asyncio tasks inside each instance (default: 3 workers x 10 jobs = 30 concurrent runs per instance). Lease-based crash recovery with heartbeat and reaper. Execution params stored in Postgres so workers can reconstruct jobs. OpenTelemetry trace context propagates across the Redis queue boundary.
 - **Dev mode** (`aegra dev`, `REDIS_BROKER_ENABLED=false`): Runs execute as in-process asyncio tasks via `LocalExecutor`. No Redis needed. SSE uses an in-memory broker.
+- **Double-texting (`multitask_strategy`)**: when a run is created on a thread that already has an active run, the per-thread admission gate in `run_preparation._apply_multitask_strategy` (under a `FOR UPDATE` thread lock) applies the strategy — `enqueue` (default; parks the run as `queued` internally, reported as `pending` over the API), `reject` (409), `interrupt`, or `rollback`. Queued runs are promoted FIFO by `BaseExecutor.dispatch_next_for_thread` from `run_status.finalize_run`, with stranded-queue recovery in `lease_reaper` (prod) and `LocalExecutor.start` (dev). User cancels converge through `run_status.terminalize_user_cancel` (CAS against the run task's own finalize).
 - Key files: `services/executor.py` (factory), `services/local_executor.py` (dev), `services/worker_executor.py` (prod), `services/lease_reaper.py` (crash recovery), `models/run_job.py` (serialized execution params).
-- See `docs/guides/worker-architecture.mdx` for the full architecture documentation.
+- See `docs/guides/worker-architecture.mdx` for the full architecture documentation, and `docs/guides/double-texting.mdx` for multitask strategies.
 
 ## Development Rules
 

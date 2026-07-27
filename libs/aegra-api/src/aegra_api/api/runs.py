@@ -3,14 +3,14 @@
 import asyncio
 import contextlib
 from collections.abc import AsyncGenerator, MutableMapping
-from datetime import UTC, datetime
 from typing import Any
 
 import structlog
 from fastapi import APIRouter, Depends, Header, HTTPException, Query
 from fastapi.responses import StreamingResponse
 from redis import RedisError
-from sqlalchemy import delete, select, update
+from sqlalchemy import delete, select
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sse_starlette import EventSourceResponse
 
@@ -25,6 +25,7 @@ from aegra_api.models import Run, RunCreate, RunStatus, User
 from aegra_api.models.errors import CONFLICT, NOT_FOUND, SSE_RESPONSE
 from aegra_api.services.broker import broker_manager
 from aegra_api.services.run_preparation import _prepare_run
+from aegra_api.services.run_status import terminalize_user_cancel
 from aegra_api.services.run_waiters import TERMINAL_STATES, encode_output, heartbeat_wait_body
 from aegra_api.services.streaming_service import streaming_service
 from aegra_api.settings import settings
@@ -120,7 +121,11 @@ async def create_and_stream_run(
     async def _cancel_on_client_close(_msg: MutableMapping[str, Any]) -> None:
         try:
             await broker_manager.request_cancel(run_id, "cancel")
-        except (RedisError, OSError):
+            # Converge the terminal state: unpark a still-queued run, or CAS-finalize one
+            # already promoted past the request_cancel above (its execution-start CAS then
+            # fails, so a run promoted inside this window can never execute orphaned).
+            await terminalize_user_cancel(run_id, thread_id)
+        except (RedisError, OSError, SQLAlchemyError):
             # Swallow infra/transport failures so sse-starlette's task group
             # tears down cleanly. Programmer errors (TypeError, AttributeError,
             # ...) propagate. The lease reaper picks up unreachable runs.
@@ -244,14 +249,9 @@ async def update_run(
         logger.info(f"[update_run] cancelling/interrupting run_id={run_id} user={user.identity} thread_id={thread_id}")
         # Handle interruption - use interrupt_run for cooperative interruption
         await streaming_service.interrupt_run(run_id)
-        logger.info(f"[update_run] set DB status=interrupted run_id={run_id}")
-        await session.execute(
-            update(RunORM)
-            .where(RunORM.run_id == str(run_id))
-            .values(status="interrupted", updated_at=datetime.now(UTC))
-        )
-        await session.commit()
-        logger.info(f"[update_run] commit done (interrupted) run_id={run_id}")
+        # Converge the terminal state (CAS races the run task's own finalize benignly):
+        # the winner also resets the thread row and promotes the next queued run.
+        await terminalize_user_cancel(str(run_id), thread_id)
 
     # Return final run state
     run_orm = await session.scalar(select(RunORM).where(RunORM.run_id == run_id))
@@ -465,23 +465,12 @@ async def cancel_run_endpoint(
     if action == "interrupt":
         logger.info(f"[cancel_run] interrupt run_id={run_id} user={user.identity} thread_id={thread_id}")
         await streaming_service.interrupt_run(run_id)
-        # Persist status as interrupted
-        await session.execute(
-            update(RunORM)
-            .where(RunORM.run_id == str(run_id))
-            .values(status="interrupted", updated_at=datetime.now(UTC))
-        )
-        await session.commit()
     else:
         logger.info(f"[cancel_run] cancel run_id={run_id} user={user.identity} thread_id={thread_id}")
         await streaming_service.cancel_run(run_id)
-        # Persist status as interrupted
-        await session.execute(
-            update(RunORM)
-            .where(RunORM.run_id == str(run_id))
-            .values(status="interrupted", updated_at=datetime.now(UTC))
-        )
-        await session.commit()
+    # Converge the terminal state (CAS races the run task's own finalize benignly):
+    # the winner also resets the thread row and promotes the next queued run.
+    await terminalize_user_cancel(str(run_id), thread_id)
 
     # Optionally wait for the run to settle
     if wait:
@@ -495,6 +484,9 @@ async def cancel_run_endpoint(
             if fresh and fresh.status in TERMINAL_STATES:
                 break
 
+    # terminalize_user_cancel wrote through its own session; expire this one so the
+    # reload below reads the committed terminal state, not the identity-mapped row.
+    session.expire_all()
     # Reload and return updated Run (do NOT delete here; deletion is a separate endpoint)
     run_orm = await session.scalar(
         select(RunORM).where(
@@ -522,8 +514,8 @@ async def delete_run(
 ) -> None:
     """Delete a run record.
 
-    If the run is active (pending or running) and `force=0`, returns 409
-    Conflict. Set `force=1` to cancel the run first (best-effort) and then
+    If the run is active (queued, pending, or running) and `force=0`, returns
+    409 Conflict. Set `force=1` to cancel the run first (best-effort) and then
     delete it. Returns 204 No Content on success.
     """
     # Authorization check (delete action on runs resource)
@@ -542,7 +534,7 @@ async def delete_run(
         raise HTTPException(404, f"Run '{run_id}' not found")
 
     # If active and not forcing, reject deletion
-    if run_orm.status in ["pending", "running"] and not force:
+    if run_orm.status in ["queued", "pending", "running"] and not force:
         raise HTTPException(
             status_code=409,
             detail="Run is active. Retry with force=1 to cancel and delete.",
@@ -557,6 +549,13 @@ async def delete_run(
         if task:
             with contextlib.suppress(asyncio.CancelledError, Exception):
                 await task
+        # Converge BEFORE deleting the row: once it is gone the task's finalize
+        # matches nothing, so the thread reset and queued dispatch must happen here.
+        await terminalize_user_cancel(str(run_id), thread_id)
+    elif force and run_orm.status == "queued":
+        # No task/broker to cancel, but if this run heads a stranded queue the runs
+        # parked behind it must be promoted — converge before the row disappears.
+        await terminalize_user_cancel(str(run_id), thread_id)
 
     # Delete the record
     await session.execute(

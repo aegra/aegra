@@ -188,6 +188,8 @@ class Run(Base):
         Index("idx_runs_assistant_id", "assistant_id"),
         Index("idx_runs_created_at", "created_at"),
         Index("idx_runs_lease_reaper", "status", "lease_expires_at"),
+        # Per-thread multitask admission + FIFO queued-run dispatch.
+        Index("idx_runs_thread_status_created", "thread_id", "status", "created_at"),
     )
 
 

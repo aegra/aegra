@@ -1,7 +1,7 @@
 """Tests for v2 command dispatch (run.start, input.respond, errors)."""
 
 from typing import Any
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -23,7 +23,12 @@ def prepared_run(monkeypatch: pytest.MonkeyPatch) -> AsyncMock:
 
 
 async def _dispatch(payload: dict[str, Any], user: User, *, session: Any = None) -> tuple[dict, str | None]:
-    return await cmd.handle_command(payload, session=session or AsyncMock(), thread_id="t1", user=user)
+    if session is None:
+        # Default session: no thread row and no in-flight run, so the run.start
+        # interrupt classification neither converts to a resume nor settle-polls.
+        session = AsyncMock()
+        session.scalar = AsyncMock(return_value=None)
+    return await cmd.handle_command(payload, session=session, thread_id="t1", user=user)
 
 
 class TestRunStart:
@@ -292,3 +297,78 @@ class TestErrors:
         assert resp["type"] == "error"
         assert resp["error"] == "invalid_argument"
         assert run_id is None
+
+
+class TestRunStartInterruptSettle:
+    """run.start's interrupt classification must tolerate the event-before-commit race:
+    the interrupt reaches the client before finalize commits thread='interrupted'."""
+
+    def _settle_session(self, statuses: list[str | None]) -> Any:
+        """Replacement for _get_session_maker: each fresh session's scalar returns
+        the next status in sequence (the last one repeats)."""
+        seq = list(statuses)
+
+        def _new_ctx() -> Any:
+            fresh = AsyncMock()
+            fresh.scalar = AsyncMock(return_value=seq.pop(0) if len(seq) > 1 else seq[0])
+            ctx = MagicMock()
+            ctx.__aenter__ = AsyncMock(return_value=fresh)
+            ctx.__aexit__ = AsyncMock(return_value=False)
+            return ctx
+
+        def _get_maker() -> Any:
+            return lambda: _new_ctx()
+
+        return _get_maker
+
+    async def test_answer_racing_finalize_commit_still_resumes(
+        self, prepared_run: AsyncMock, user: User, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Request session: thread 'busy' (finalize not committed yet), one in-flight run.
+        session = AsyncMock()
+        session.scalar = AsyncMock(side_effect=["busy", "run-in-flight"])
+        monkeypatch.setattr(cmd, "_RESUME_SETTLE_INTERVAL_SECONDS", 0)
+        monkeypatch.setattr(cmd, "_get_session_maker", self._settle_session(["busy", "interrupted"]))
+
+        await _dispatch(
+            {"id": 1, "method": "run.start", "params": {"assistant_id": "agent", "input": {"answer": 42}}},
+            user,
+            session=session,
+        )
+
+        # The settle poll saw the commit land: the input is a resume, not a fresh turn.
+        request = prepared_run.call_args.args[2]
+        assert request.command == {"resume": {"answer": 42}}
+        assert request.input is None
+
+    async def test_genuine_double_text_stays_fresh_input(
+        self, prepared_run: AsyncMock, user: User, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        session = AsyncMock()
+        session.scalar = AsyncMock(side_effect=["busy", "run-in-flight"])
+        monkeypatch.setattr(cmd, "_RESUME_SETTLE_INTERVAL_SECONDS", 0)
+        monkeypatch.setattr(cmd, "_get_session_maker", self._settle_session(["busy"]))
+
+        await _dispatch(
+            {"id": 1, "method": "run.start", "params": {"assistant_id": "agent", "input": {"q": "hi"}}},
+            user,
+            session=session,
+        )
+
+        request = prepared_run.call_args.args[2]
+        assert request.command is None
+        assert request.input == {"q": "hi"}
+
+    async def test_no_in_flight_run_skips_the_poll(self, prepared_run: AsyncMock, user: User) -> None:
+        # Idle thread: no interrupt can be in flight, so no settle latency is added.
+        session = AsyncMock()
+        session.scalar = AsyncMock(side_effect=["idle", None])
+
+        await _dispatch(
+            {"id": 1, "method": "run.start", "params": {"assistant_id": "agent", "input": {"q": "hi"}}},
+            user,
+            session=session,
+        )
+
+        request = prepared_run.call_args.args[2]
+        assert request.input == {"q": "hi"}

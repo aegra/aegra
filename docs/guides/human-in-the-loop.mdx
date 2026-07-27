@@ -224,5 +224,11 @@ if state["interrupts"]:
 
 - Interrupts work transparently across subgraph boundaries
 - The thread status changes to `"interrupted"` when paused and `"idle"` when completed
+- **A paused thread refuses fresh input.** Creating a run with plain `input` on a
+  thread whose status is `"interrupted"` returns `409 Conflict` (under any
+  [`multitask_strategy`](/guides/double-texting)) — running it would silently consume
+  the pending interrupt. Resume with `command={"resume": ...}` instead; a `null`
+  resume payload is refused the same way. Runs enqueued before the pause stay parked
+  until a resume clears it.
 - You can inspect the interrupt payload in thread state to show the user what the agent wants to do
 - Multiple sequential interrupts are supported in a single run

@@ -9,6 +9,7 @@ identical; only the transport differs.
 
 from __future__ import annotations
 
+import asyncio
 import re
 from typing import Any
 
@@ -20,10 +21,15 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from aegra_api.core.orm import Run as RunORM
 from aegra_api.core.orm import Thread as ThreadORM
+from aegra_api.core.orm import _get_session_maker
 from aegra_api.models import User
 from aegra_api.models.runs import RunCreate
 from aegra_api.services.event_streaming.protocol import ErrorCode, build_error, build_success
-from aegra_api.services.run_preparation import _prepare_run
+from aegra_api.services.run_preparation import (
+    _RESUME_SETTLE_ATTEMPTS,
+    _RESUME_SETTLE_INTERVAL_SECONDS,
+    _prepare_run,
+)
 
 logger = structlog.getLogger(__name__)
 
@@ -108,7 +114,7 @@ async def _run_start(
     # would discard the pending tasks.
     input_data = params.get("input")
     command: dict[str, Any] | None = None
-    if input_data is not None and await _thread_is_interrupted(session, thread_id, user):
+    if input_data is not None and await _thread_interrupted_with_settle(session, thread_id, user):
         command = {"resume": input_data}
         input_data = None
 
@@ -135,6 +141,43 @@ async def _thread_is_interrupted(session: AsyncSession, thread_id: str, user: Us
         select(ThreadORM.status).where(ThreadORM.thread_id == thread_id, ThreadORM.user_id == user.identity)
     )
     return status == "interrupted"
+
+
+async def _thread_interrupted_with_settle(session: AsyncSession, thread_id: str, user: User) -> bool:
+    """Interrupt check for run.start input classification, settle-aware.
+
+    The interrupt event reaches the client (via the broker) before finalize_run
+    commits thread_status='interrupted' (see run_preparation's settle note). A client
+    answering the instant it sees the interrupt would be misclassified as fresh input
+    and parked behind the pause forever — so when a run is still in flight, poll fresh
+    sessions for the commit before deciding.
+    """
+    if await _thread_is_interrupted(session, thread_id, user):
+        return True
+    in_flight = await session.scalar(
+        select(RunORM.run_id)
+        .where(
+            RunORM.thread_id == thread_id,
+            RunORM.user_id == user.identity,
+            RunORM.status.in_(("running", "pending")),
+        )
+        .limit(1)
+    )
+    if in_flight is None:
+        return False
+    maker = _get_session_maker()
+    thread_stmt = select(ThreadORM.status).where(ThreadORM.thread_id == thread_id, ThreadORM.user_id == user.identity)
+    for _ in range(_RESUME_SETTLE_ATTEMPTS):
+        await asyncio.sleep(_RESUME_SETTLE_INTERVAL_SECONDS)
+        async with maker() as fresh:
+            status = await fresh.scalar(thread_stmt)
+        if status == "interrupted":
+            return True
+        if status != "busy":
+            # Settled to idle/error: the in-flight run finished without pausing,
+            # so this input is a genuine fresh turn.
+            return False
+    return False
 
 
 # langgraph interrupt ids are xxh3-128 hexdigests; a resume map is only

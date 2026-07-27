@@ -325,6 +325,7 @@ class TestCleanupAfterBackgroundRun:
 
         with (
             patch("aegra_api.services.run_cleanup.active_runs", {run_id: task}),
+            patch("aegra_api.services.run_cleanup.executor.wait_for_completion", new_callable=AsyncMock),
             patch(
                 "aegra_api.services.run_cleanup.delete_thread_by_id",
                 new_callable=AsyncMock,
@@ -344,6 +345,7 @@ class TestCleanupAfterBackgroundRun:
 
         with (
             patch("aegra_api.services.run_cleanup.active_runs", {}),
+            patch("aegra_api.services.run_cleanup.executor.wait_for_completion", new_callable=AsyncMock),
             patch(
                 "aegra_api.services.run_cleanup.delete_thread_by_id",
                 new_callable=AsyncMock,

@@ -43,6 +43,9 @@ class RunExecution(BaseModel):
     command: dict[str, Any] | None = None
     # When true, stream via the native v3 protocol producer for Agent Protocol v2.
     event_streaming_v2: bool = False
+    # rollback multitask: id of the prior run to revert. The worker resolves the
+    # pre-run base checkpoint by it and forks this run from there (no deletes).
+    rollback_target_run_id: str | None = None
 
 
 class RunBehavior(BaseModel):

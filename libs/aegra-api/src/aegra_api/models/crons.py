@@ -6,6 +6,7 @@ from urllib.parse import urlparse
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from aegra_api.models.enums import MultitaskStrategy
 from aegra_api.settings import settings
 
 # Field length caps. Keep these conservative; cron metadata is small by nature.
@@ -55,7 +56,7 @@ class CronCreate(BaseModel):
     interrupt_after: Literal["*"] | list[str] | None = None
     webhook: str | None = Field(None, max_length=_WEBHOOK_MAX_LEN)
     on_run_completed: OnRunCompleted | None = None
-    multitask_strategy: str | None = Field(None, max_length=_STR_FIELD_MAX_LEN)
+    multitask_strategy: MultitaskStrategy | None = Field(None)
     end_time: datetime | None = None
     enabled: bool | None = None
     stream_mode: str | list[str] | None = None
@@ -112,7 +113,7 @@ class CronUpdate(BaseModel):
     interrupt_before: Literal["*"] | list[str] | None = None
     interrupt_after: Literal["*"] | list[str] | None = None
     on_run_completed: OnRunCompleted | None = None
-    multitask_strategy: str | None = Field(None, max_length=_STR_FIELD_MAX_LEN)
+    multitask_strategy: MultitaskStrategy | None = Field(None)
     enabled: bool | None = None
     stream_mode: str | list[str] | None = None
     stream_subgraphs: bool | None = None

@@ -3,7 +3,7 @@
   "info": {
     "title": "Aegra",
     "description": "Production-ready Agent Protocol server",
-    "version": "0.9.24"
+    "version": "0.10.0"
   },
   "paths": {
     "/info": {
@@ -1946,7 +1946,7 @@
           "Thread Runs"
         ],
         "summary": "Delete Run",
-        "description": "Delete a run record.\n\nIf the run is active (pending or running) and `force=0`, returns 409\nConflict. Set `force=1` to cancel the run first (best-effort) and then\ndelete it. Returns 204 No Content on success.",
+        "description": "Delete a run record.\n\nIf the run is active (queued, pending, or running) and `force=0`, returns\n409 Conflict. Set `force=1` to cancel the run first (best-effort) and then\ndelete it. Returns 204 No Content on success.",
         "operationId": "delete_run_threads__thread_id__runs__run_id__delete",
         "parameters": [
           {
@@ -3882,7 +3882,12 @@
             "anyOf": [
               {
                 "type": "string",
-                "maxLength": 256
+                "enum": [
+                  "reject",
+                  "rollback",
+                  "interrupt",
+                  "enqueue"
+                ]
               },
               {
                 "type": "null"
@@ -4290,7 +4295,12 @@
             "anyOf": [
               {
                 "type": "string",
-                "maxLength": 256
+                "enum": [
+                  "reject",
+                  "rollback",
+                  "interrupt",
+                  "enqueue"
+                ]
               },
               {
                 "type": "null"
@@ -4522,7 +4532,7 @@
           "status": {
             "type": "string",
             "title": "Status",
-            "description": "Current run status: pending, running, error, success, timeout, or interrupted.",
+            "description": "Current run status: pending (includes runs enqueued behind another run), running, error, success, timeout, or interrupted.",
             "default": "pending"
           },
           "input": {
@@ -4617,7 +4627,7 @@
           "updated_at"
         ],
         "title": "Run",
-        "description": "Run entity model\n\nStatus values: pending, running, error, success, timeout, interrupted"
+        "description": "Run entity model\n\nStatus values: pending, running, error, success, timeout, interrupted.\nA run parked behind another run (double-texting enqueue) is internally\n'queued' and reported as 'pending', matching the LangGraph SDK vocabulary."
       },
       "RunCreate": {
         "properties": {
@@ -4733,14 +4743,20 @@
           "multitask_strategy": {
             "anyOf": [
               {
-                "type": "string"
+                "type": "string",
+                "enum": [
+                  "reject",
+                  "rollback",
+                  "interrupt",
+                  "enqueue"
+                ]
               },
               {
                 "type": "null"
               }
             ],
             "title": "Multitask Strategy",
-            "description": "Strategy for handling concurrent runs on same thread: 'reject', 'interrupt', 'rollback', or 'enqueue'."
+            "description": "How to handle a new run when the thread already has an active run. 'enqueue' (default) queues it to run after; 'reject' returns 409; 'interrupt' cancels the active run then starts this one; 'rollback' cancels the active run (kept as interrupted) \u2014 or, with no active run, reverts the last run only if it was left interrupted/errored (repairing a broken thread; a completed run is untouched) \u2014 then forks this run from the checkpoint preceding it, reverting that run's writes. None defaults to 'enqueue'."
           },
           "command": {
             "anyOf": [

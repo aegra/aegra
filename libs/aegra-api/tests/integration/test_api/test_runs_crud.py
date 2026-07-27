@@ -317,6 +317,9 @@ class TestCancelRun:
         run = _run_row(status="running")
 
         class Session(DummySessionBase):
+            def expire_all(self) -> None:
+                pass
+
             async def scalar(self, _stmt):
                 return run
 
@@ -329,12 +332,17 @@ class TestCancelRun:
         override_session_dependency(app, Session)
         client = make_client(app)
 
-        with patch("aegra_api.api.runs.streaming_service") as mock_streaming:
+        with (
+            patch("aegra_api.api.runs.streaming_service") as mock_streaming,
+            patch("aegra_api.api.runs.terminalize_user_cancel", new_callable=AsyncMock) as mock_terminalize,
+        ):
             mock_streaming.cancel_run = AsyncMock()
 
             resp = client.post("/threads/test-thread-123/runs/test-run-123/cancel")
 
             assert resp.status_code == 200
+            # Terminal-state convergence (thread reset + queued dispatch) is delegated.
+            mock_terminalize.assert_awaited_once_with("test-run-123", "test-thread-123")
 
 
 class TestDeleteRun:
@@ -396,6 +404,56 @@ class TestDeleteRun:
         resp = client.delete("/threads/test-thread-123/runs/test-run-123")
 
         assert resp.status_code == 204
+
+    def test_delete_run_queued_not_allowed(self):
+        """A queued run is active; deleting without force returns 409."""
+        app = create_test_app(include_runs=True, include_threads=False)
+
+        run = _run_row(status="queued")
+
+        class Session(DummySessionBase):
+            async def scalar(self, _stmt):
+                return run
+
+        override_session_dependency(app, Session)
+        client = make_client(app)
+
+        resp = client.delete("/threads/test-thread-123/runs/test-run-123")
+
+        assert resp.status_code == 409
+        assert "active" in resp.json()["detail"].lower()
+
+    def test_delete_run_force_queued_succeeds_without_cancel(self):
+        """Force-deleting a queued run removes the row but does not cancel (no task)."""
+        app = create_test_app(include_runs=True, include_threads=False)
+
+        run = _run_row(status="queued")
+        executed: list[str] = []
+
+        class Session(DummySessionBase):
+            async def scalar(self, _stmt):
+                return run
+
+            async def execute(self, _stmt):
+                executed.append(str(_stmt))
+
+            async def commit(self):
+                pass
+
+        with (
+            patch("aegra_api.api.runs.streaming_service.cancel_run", new_callable=AsyncMock) as mock_cancel,
+            patch("aegra_api.api.runs.terminalize_user_cancel", new_callable=AsyncMock) as mock_terminalize,
+        ):
+            override_session_dependency(app, Session)
+            client = make_client(app)
+            resp = client.delete("/threads/test-thread-123/runs/test-run-123?force=1")
+
+        assert resp.status_code == 204
+        mock_cancel.assert_not_awaited()  # queued run has no task to cancel
+        # Convergence still runs BEFORE the delete: if this run headed a stranded
+        # queue, the runs parked behind it are promoted rather than left waiting.
+        mock_terminalize.assert_awaited_once_with("test-run-123", "test-thread-123")
+        assert any("DELETE FROM runs" in stmt for stmt in executed)  # row actually removed
 
 
 class TestJoinRun:

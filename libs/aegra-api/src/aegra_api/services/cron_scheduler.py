@@ -15,6 +15,7 @@ Follows the same ``start()/stop()`` lifecycle pattern used by
 import asyncio
 import contextlib
 from datetime import UTC, datetime
+from typing import get_args
 from uuid import uuid4
 
 import structlog
@@ -25,6 +26,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from aegra_api.core.orm import Cron as CronORM
 from aegra_api.core.orm import _get_session_maker
 from aegra_api.models import RunCreate, User
+from aegra_api.models.enums import MultitaskStrategy
 from aegra_api.services.cron_service import (
     CronService,
     should_delete_stateless_thread,
@@ -34,6 +36,8 @@ from aegra_api.services.run_preparation import _prepare_run
 from aegra_api.settings import settings
 
 logger = structlog.getLogger(__name__)
+
+_VALID_MULTITASK = frozenset(get_args(MultitaskStrategy))
 
 
 # Backwards-compat re-export. ``cron_scheduler.py`` previously exposed this
@@ -51,6 +55,11 @@ def _build_run_create(cron: CronORM) -> RunCreate:
     two code paths can never drift.
     """
     payload = cron.payload or {}
+    # Coerce a legacy/invalid stored strategy to None (-> default) so building the
+    # RunCreate can never raise mid-fire and wedge the cron in a claim/expire loop.
+    strategy = payload.get("multitask_strategy")
+    if strategy not in _VALID_MULTITASK:
+        strategy = None
     return RunCreate(
         assistant_id=cron.assistant_id,
         input=payload.get("input"),
@@ -61,7 +70,7 @@ def _build_run_create(cron: CronORM) -> RunCreate:
         interrupt_after=payload.get("interrupt_after"),
         stream_subgraphs=payload.get("stream_subgraphs"),
         stream_mode=payload.get("stream_mode"),
-        multitask_strategy=payload.get("multitask_strategy"),
+        multitask_strategy=strategy,
         # Cron metadata_dict is stored on the cron record for search/filter, not
         # forwarded onto fired runs. Re-wire here if run-level tagging is needed.
         metadata=None,

@@ -12,6 +12,7 @@ from pydantic import (
     model_validator,
 )
 
+from aegra_api.models.enums import MultitaskStrategy
 from aegra_api.utils.status_compat import validate_run_status
 
 # Constraints for ``RunCreate.metadata`` keys/values, enforced at request
@@ -52,9 +53,15 @@ class RunCreate(BaseModel):
         description="Behavior after stateless run completes: 'delete' (default) removes the ephemeral thread, 'keep' preserves it.",
     )
 
-    multitask_strategy: str | None = Field(
+    multitask_strategy: MultitaskStrategy | None = Field(
         None,
-        description="Strategy for handling concurrent runs on same thread: 'reject', 'interrupt', 'rollback', or 'enqueue'.",
+        description="How to handle a new run when the thread already has an active run. "
+        "'enqueue' (default) queues it to run after; 'reject' returns 409; "
+        "'interrupt' cancels the active run then starts this one; 'rollback' cancels the active "
+        "run (kept as interrupted) — or, with no active run, reverts the last run only if it was "
+        "left interrupted/errored (repairing a broken thread; a completed run is untouched) — then "
+        "forks this run from the checkpoint preceding it, reverting that run's writes. None defaults "
+        "to 'enqueue'.",
     )
 
     # Human-in-the-loop fields (core HITL functionality)
@@ -144,7 +151,9 @@ class RunCreate(BaseModel):
 class Run(BaseModel):
     """Run entity model
 
-    Status values: pending, running, error, success, timeout, interrupted
+    Status values: pending, running, error, success, timeout, interrupted.
+    A run parked behind another run (double-texting enqueue) is internally
+    'queued' and reported as 'pending', matching the LangGraph SDK vocabulary.
     """
 
     model_config = ConfigDict(from_attributes=True)
@@ -153,7 +162,8 @@ class Run(BaseModel):
     thread_id: str = Field(..., description="Thread this run belongs to.")
     assistant_id: str = Field(..., description="Assistant that is executing this run.")
     status: str = Field(
-        "pending", description="Current run status: pending, running, error, success, timeout, or interrupted."
+        "pending",
+        description="Current run status: pending (includes runs enqueued behind another run), running, error, success, timeout, or interrupted.",
     )
     input: dict[str, Any] | None = Field(
         None, description="Input data provided to the run. None for checkpoint-only resume."
@@ -178,6 +188,10 @@ class Run(BaseModel):
         """Validate status conforms to API specification."""
         if not isinstance(v, str):
             raise ValueError(f"Status must be a string, got {type(v)}")
+        # 'queued' is internal (double-texting park state); the LangGraph SDK's closed
+        # RunStatus vocabulary has no such value, so the wire reports it as 'pending'.
+        if v == "queued":
+            return "pending"
         return validate_run_status(v)
 
 

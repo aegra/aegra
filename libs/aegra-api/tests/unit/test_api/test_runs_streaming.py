@@ -83,6 +83,10 @@ class TestRunsStreamingEndpoints:
 
             # DB setup: first scalar = thread ownership check (None = new thread), second = assistant
             mock_session.scalar.side_effect = [None, sample_assistant]
+            # No in-flight run on the thread → multitask gate lets this run start now.
+            no_active = MagicMock()
+            no_active.all.return_value = []
+            mock_session.scalars.return_value = no_active
 
             # Mock generator for streaming response
             async def mock_generator() -> AsyncGenerator:
@@ -157,11 +161,13 @@ class TestRunsStreamingEndpoints:
             patch("aegra_api.api.runs.active_runs", {}),
             patch("aegra_api.api.runs.streaming_service.stream_run_execution", return_value=_fake_stream()),
             patch("aegra_api.api.runs.broker_manager.request_cancel", new_callable=AsyncMock) as mock_cancel,
+            patch("aegra_api.api.runs.terminalize_user_cancel", new_callable=AsyncMock) as mock_terminalize,
             patch("aegra_api.api.runs._get_session_maker", return_value=_make_session_maker(mock_session)),
         ):
             mock_lg_service.return_value.list_graphs.return_value = ["test-graph"]
             # First scalar = thread ownership check (None = new thread); second = assistant
             mock_session.scalar.side_effect = [None, sample_assistant]
+            mock_session.scalars.return_value = MagicMock(all=MagicMock(return_value=[]))  # no in-flight run
 
             response = await create_and_stream_run(thread_id, request, mock_user)
 
@@ -174,6 +180,7 @@ class TestRunsStreamingEndpoints:
             await handler({"type": "http.disconnect"})
             if expect_request_cancel:
                 mock_cancel.assert_awaited_once_with(run_id, "cancel")
+                mock_terminalize.assert_awaited_once_with(run_id, thread_id)
             else:
                 mock_cancel.assert_not_awaited()
 
@@ -217,12 +224,60 @@ class TestRunsStreamingEndpoints:
             mock_lg_service.return_value.list_graphs.return_value = ["test-graph"]
             # First scalar = thread ownership check (None = new thread); second = assistant
             mock_session.scalar.side_effect = [None, sample_assistant]
+            mock_session.scalars.return_value = MagicMock(all=MagicMock(return_value=[]))  # no in-flight run
 
             response = await create_and_stream_run(thread_id, request, mock_user)
             handler = response.client_close_handler_callable
             assert handler is not None
             # Must not raise even though the broker side-effect blows up
             await handler({"type": "http.disconnect"})
+
+    @pytest.mark.asyncio
+    async def test_disconnect_interrupts_queued_run(
+        self, mock_user: User, mock_session: AsyncMock, sample_assistant: AssistantORM
+    ) -> None:
+        """On disconnect, the handler converges the queued run via terminalize_user_cancel."""
+        thread_id = "t"
+        run_id = str(uuid4())
+        request = RunCreate(assistant_id="test-assistant", input={})  # default enqueue
+
+        async def _fake_stream() -> AsyncGenerator:
+            yield "data"
+
+        with (
+            patch("aegra_api.services.run_preparation._validate_resume_command", new_callable=AsyncMock),
+            patch("aegra_api.services.run_preparation.get_langgraph_service") as mock_lg_service,
+            patch("aegra_api.services.run_preparation.resolve_assistant_id", return_value="test-assistant"),
+            patch("aegra_api.services.run_preparation.update_thread_metadata", new_callable=AsyncMock),
+            patch("aegra_api.services.run_preparation.set_thread_status", new_callable=AsyncMock),
+            patch("aegra_api.services.run_preparation.uuid4", return_value=run_id),
+            patch("aegra_api.api.runs.active_runs", {}),
+            patch("aegra_api.api.runs.streaming_service.stream_run_execution", return_value=_fake_stream()),
+            patch("aegra_api.api.runs.broker_manager.request_cancel", new_callable=AsyncMock) as mock_cancel,
+            patch("aegra_api.api.runs.terminalize_user_cancel", new_callable=AsyncMock) as mock_terminalize,
+            patch("aegra_api.api.runs._get_session_maker", return_value=_make_session_maker(mock_session)),
+        ):
+            mock_lg_service.return_value.list_graphs.return_value = ["test-graph"]
+            mock_session.scalar.side_effect = [None, sample_assistant]
+            # An active run already holds the thread → the new run is queued (default enqueue).
+            active = MagicMock()
+            active.status = "running"
+            active.run_id = "other"
+            active.execution_params = {"execution": {"command": None}}
+            active_res = MagicMock()
+            active_res.all.return_value = [active]
+            mock_session.scalars.return_value = active_res
+
+            response = await create_and_stream_run(thread_id, request, mock_user)
+            handler = response.client_close_handler_callable
+            assert handler is not None
+
+            await handler({"type": "http.disconnect"})
+
+            mock_cancel.assert_awaited_once_with(run_id, "cancel")
+            # Convergence (queued unpark, or CAS-finalize if already promoted) is
+            # delegated to terminalize_user_cancel, closing the promotion race.
+            mock_terminalize.assert_awaited_once_with(run_id, thread_id)
 
     @pytest.mark.asyncio
     async def test_stream_run_success(self, mock_user: User, mock_session: AsyncMock) -> None:
@@ -364,7 +419,7 @@ class TestRunsStreamingEndpoints:
                 "aegra_api.services.run_executor.stream_graph_events",
                 return_value=failing_stream(),
             ),
-            patch("aegra_api.services.run_executor.update_run_status", new_callable=AsyncMock),
+            patch("aegra_api.services.run_executor.try_mark_run_running", new_callable=AsyncMock, return_value=True),
             patch("aegra_api.services.run_executor.finalize_run", new_callable=AsyncMock),
         ):
             mock_graph = MagicMock()

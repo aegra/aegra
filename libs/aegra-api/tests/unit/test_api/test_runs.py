@@ -7,7 +7,7 @@ from uuid import uuid4
 import pytest
 from fastapi import HTTPException
 
-from aegra_api.api.runs import create_run, get_run, join_run, list_runs, update_run
+from aegra_api.api.runs import _apply_create_run_auth, create_run, get_run, join_run, list_runs, update_run
 from aegra_api.core.orm import Assistant as AssistantORM
 from aegra_api.core.orm import Run as RunORM
 from aegra_api.core.orm import Thread as ThreadORM
@@ -382,3 +382,58 @@ class TestRunsEndpoints:
 # Note: _resolve_context was removed from runs.py during the worker architecture
 # refactor — context resolution is now handled in services/run_preparation.py.
 # The equivalent tests live in tests/unit/test_services/.
+
+
+class TestApplyCreateRunAuth:
+    """Unit tests for the threads.create_run auth helper's config/context merge contract."""
+
+    @pytest.fixture
+    def mock_user(self) -> User:
+        return User(identity="test-user", scopes=[])
+
+    @pytest.mark.asyncio
+    async def test_empty_filter_dict_wins_over_value_mutations(self, mock_user: User) -> None:
+        """An explicit empty dict {} suppresses in-place value mutations.
+
+        Regression: ``filters if filters`` treated {} as falsy and fell back to
+        ``value``, applying in-place mutations despite the handler returning a dict.
+        """
+        request = RunCreate(assistant_id="a", input={}, config={"original": "kept"})
+
+        def _handler(_ctx: object, value: dict) -> dict:
+            value["config"] = {"injected_via_value": True}
+            return {}
+
+        with patch("aegra_api.api.runs.handle_event", new_callable=AsyncMock, side_effect=_handler):
+            await _apply_create_run_auth(mock_user, "t", request)
+
+        assert request.config == {"original": "kept"}
+
+    @pytest.mark.asyncio
+    async def test_none_result_falls_back_to_value_mutations(self, mock_user: User) -> None:
+        """A handler returning None applies its in-place value mutations."""
+        request = RunCreate(assistant_id="a", input={}, config={"original": "kept"})
+
+        def _handler(_ctx: object, value: dict) -> None:
+            value["config"] = {"injected_via_value": True}
+            return None
+
+        with patch("aegra_api.api.runs.handle_event", new_callable=AsyncMock, side_effect=_handler):
+            await _apply_create_run_auth(mock_user, "t", request)
+
+        assert request.config == {"original": "kept", "injected_via_value": True}
+
+    @pytest.mark.asyncio
+    async def test_filter_dict_overrides_merge_into_request(self, mock_user: User) -> None:
+        """Config/context keys in the returned filter dict merge over the request."""
+        request = RunCreate(assistant_id="a", input={}, config={"original": "kept"})
+
+        with patch(
+            "aegra_api.api.runs.handle_event",
+            new_callable=AsyncMock,
+            return_value={"config": {"injected": True}, "context": {"injected_ctx": 2}},
+        ):
+            await _apply_create_run_auth(mock_user, "t", request)
+
+        assert request.config == {"original": "kept", "injected": True}
+        assert request.context == {"injected_ctx": 2}

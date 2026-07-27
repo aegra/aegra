@@ -175,7 +175,7 @@ async def general_exception_handler(_request: Request, exc: Exception) -> JSONRe
         content=AgentProtocolError(
             error="internal_error",
             message="An unexpected error occurred",
-            details={"exception": str(exc)},
+            details=None,  # FIX: do not leak internal exception details
         ).model_dump(),
     )
 

@@ -23,6 +23,11 @@ def _make_session_maker(session: AsyncMock) -> MagicMock:
     return MagicMock(return_value=ctx)
 
 
+async def _single_event_stream() -> AsyncGenerator:
+    """Minimal async generator standing in for the streaming service output."""
+    yield "data"
+
+
 class TestRunsStreamingEndpoints:
     """Test streaming run endpoints."""
 
@@ -223,6 +228,101 @@ class TestRunsStreamingEndpoints:
             assert handler is not None
             # Must not raise even though the broker side-effect blows up
             await handler({"type": "http.disconnect"})
+
+    @pytest.mark.asyncio
+    async def test_create_and_stream_run_invokes_create_run_auth_handler(
+        self,
+        mock_user: User,
+        mock_session: AsyncMock,
+    ) -> None:
+        """The threads.create_run auth handler must fire for the stream endpoint.
+
+        Regression for the silent skip: previously the streaming endpoint never
+        dispatched ``@auth.on.threads.create_run``, so handler-based usage
+        metering, throttling, or metadata injection silently no-op'd here.
+        """
+        thread_id = "t"
+        run_id = str(uuid4())
+        request = RunCreate(assistant_id="test-assistant", input={})
+
+        with (
+            patch("aegra_api.api.runs.handle_event", new_callable=AsyncMock) as mock_handle,
+            patch("aegra_api.api.runs._prepare_run", new_callable=AsyncMock) as mock_prepare,
+            patch("aegra_api.api.runs.streaming_service.stream_run_execution", return_value=_single_event_stream()),
+            patch("aegra_api.api.runs._get_session_maker", return_value=_make_session_maker(mock_session)),
+        ):
+            mock_session.scalar.return_value = None  # new thread passes ownership check
+            mock_handle.return_value = None  # default-allow
+            mock_prepare.return_value = (run_id, MagicMock(), MagicMock())
+
+            response = await create_and_stream_run(thread_id, request, mock_user)
+
+        assert response.status_code == 200
+        mock_handle.assert_awaited_once()
+        ctx, value = mock_handle.call_args[0]
+        assert ctx.resource == "threads"
+        assert ctx.action == "create_run"
+        assert value["thread_id"] == thread_id
+
+    @pytest.mark.asyncio
+    async def test_create_and_stream_run_auth_handler_denies_with_403(
+        self,
+        mock_user: User,
+        mock_session: AsyncMock,
+    ) -> None:
+        """A create_run handler that denies must abort the stream before run prep."""
+        thread_id = "t"
+        request = RunCreate(assistant_id="test-assistant", input={})
+
+        with (
+            patch("aegra_api.api.runs.handle_event", new_callable=AsyncMock) as mock_handle,
+            patch("aegra_api.api.runs._prepare_run", new_callable=AsyncMock) as mock_prepare,
+            patch("aegra_api.api.runs._get_session_maker", return_value=_make_session_maker(mock_session)),
+            pytest.raises(HTTPException) as exc,
+        ):
+            mock_session.scalar.return_value = None
+            mock_handle.side_effect = HTTPException(status_code=403, detail="forbidden")
+
+            await create_and_stream_run(thread_id, request, mock_user)
+
+        assert exc.value.status_code == 403
+        assert exc.value.detail == "forbidden"
+        mock_prepare.assert_not_called()  # never reached run creation
+
+    @pytest.mark.asyncio
+    async def test_create_and_stream_run_auth_handler_merges_config_context(
+        self,
+        mock_user: User,
+        mock_session: AsyncMock,
+    ) -> None:
+        """Handler-returned config/context overrides merge into the run request."""
+        thread_id = "t"
+        run_id = str(uuid4())
+        request = RunCreate(
+            assistant_id="test-assistant",
+            input={},
+            config={"original": "kept"},
+            context={"orig_ctx": "kept"},
+        )
+
+        with (
+            patch("aegra_api.api.runs.handle_event", new_callable=AsyncMock) as mock_handle,
+            patch("aegra_api.api.runs._prepare_run", new_callable=AsyncMock) as mock_prepare,
+            patch("aegra_api.api.runs.streaming_service.stream_run_execution", return_value=_single_event_stream()),
+            patch("aegra_api.api.runs._get_session_maker", return_value=_make_session_maker(mock_session)),
+        ):
+            mock_session.scalar.return_value = None
+            mock_handle.return_value = {"config": {"injected": True}, "context": {"injected_ctx": 2}}
+            mock_prepare.return_value = (run_id, MagicMock(), MagicMock())
+
+            response = await create_and_stream_run(thread_id, request, mock_user)
+
+        assert response.status_code == 200
+        # Originals preserved, handler overrides merged on top.
+        assert request.config == {"original": "kept", "injected": True}
+        assert request.context == {"orig_ctx": "kept", "injected_ctx": 2}
+        # Merged request reached run preparation.
+        assert mock_prepare.call_args[0][2] is request
 
     @pytest.mark.asyncio
     async def test_stream_run_success(self, mock_user: User, mock_session: AsyncMock) -> None:

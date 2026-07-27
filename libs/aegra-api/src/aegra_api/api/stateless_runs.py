@@ -195,7 +195,6 @@ async def stateless_wait_for_run(
 async def stateless_stream_run(
     request: RunCreate,
     user: User = Depends(get_current_user),
-    session: AsyncSession = Depends(get_session),
 ) -> EventSourceResponse:
     """Create a stateless run and stream its execution.
 
@@ -207,7 +206,7 @@ async def stateless_stream_run(
     should_delete = request.on_completion != "keep"
 
     try:
-        response = await create_and_stream_run(thread_id, request, user, session)
+        response = await create_and_stream_run(thread_id, request, user)
     except Exception:
         # create_and_stream_run may have auto-created the thread via
         # update_thread_metadata before raising; clean up to avoid orphans.

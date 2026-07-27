@@ -453,10 +453,12 @@ class TestStreamRun:
             async def scalar(self, _stmt):
                 return None
 
-        override_session_dependency(app, BasicSession)
         client = make_client(app)
 
-        resp = client.get("/threads/test-thread-123/runs/nonexistent/stream")
+        # stream_run manages its session via _get_session_maker (not Depends),
+        # so the DI override doesn't apply — patch the maker instead.
+        with patch("aegra_api.api.runs._get_session_maker", return_value=_make_session_maker(Session())):
+            resp = client.get("/threads/test-thread-123/runs/nonexistent/stream")
 
         assert resp.status_code == 404
 
@@ -683,7 +685,16 @@ class TestWaitForRun:
         override_session_dependency(app, Session)
         client = make_client(app)
 
-        with patch("aegra_api.api.runs._get_session_maker", return_value=_make_session_maker(Session())):
+        # Resume validation polls fresh sessions via run_preparation._get_session_maker
+        # when the first read is not interrupted; keep those returning idle too, and
+        # collapse the settle backoff so the reject path does not wait.
+        maker = _make_session_maker(Session())
+        with (
+            patch("aegra_api.api.runs._get_session_maker", return_value=maker),
+            patch("aegra_api.services.run_preparation._get_session_maker", return_value=maker),
+            patch("aegra_api.services.run_preparation._RESUME_SETTLE_ATTEMPTS", 1),
+            patch("aegra_api.services.run_preparation._RESUME_SETTLE_INTERVAL_SECONDS", 0),
+        ):
             resp = client.post(
                 "/threads/test-thread-123/runs/wait",
                 json={

@@ -5,6 +5,7 @@ import logging
 from unittest.mock import MagicMock
 
 import pytest
+import structlog
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import SimpleSpanProcessor
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import (
@@ -211,8 +212,9 @@ class TestMakeRunTraceContext:
     """Tests for make_run_trace_context()."""
 
     def setup_method(self) -> None:
-        """Reset context var before each test."""
+        """Reset context vars before each test."""
         _trace_attrs.set(None)
+        structlog.contextvars.clear_contextvars()
 
     def test_returned_context_contains_expected_attributes(self) -> None:
         """Returned context has all trace attributes pre-set."""
@@ -272,6 +274,36 @@ class TestMakeRunTraceContext:
         attrs = ctx.run(_trace_attrs.get)
         assert attrs["langfuse.trace.metadata.run_id"] == "run-actual"
         assert attrs["langfuse.trace.metadata.tenant"] == "acme"
+
+    def test_returned_context_binds_structlog_vars(self) -> None:
+        """Returned context has structlog context vars bound for run logs."""
+        ctx = make_run_trace_context("run-1", "thread-1", "my_graph", "user-1")
+
+        bound = ctx.run(structlog.contextvars.get_contextvars)
+        assert bound["run_id"] == "run-1"
+        assert bound["thread_id"] == "thread-1"
+        assert bound["graph_id"] == "my_graph"
+        assert bound["user_id"] == "user-1"
+
+    def test_structlog_binding_does_not_pollute_caller_context(self) -> None:
+        """Binding happens inside the returned context, not the caller's."""
+        make_run_trace_context("run-1", "thread-1", "my_graph", "user-1")
+
+        assert structlog.contextvars.get_contextvars() == {}
+
+    def test_anonymous_user_omits_structlog_user_id(self) -> None:
+        """user_identity=None omits user_id instead of binding it as None.
+
+        Mirrors the OTEL path, which skips user.id for anonymous runs, so
+        logs never carry a noisy ``user_id=None``.
+        """
+        ctx = make_run_trace_context("run-1", "thread-1", "my_graph", None)
+
+        bound = ctx.run(structlog.contextvars.get_contextvars)
+        assert "user_id" not in bound
+        assert bound["run_id"] == "run-1"
+        assert bound["thread_id"] == "thread-1"
+        assert bound["graph_id"] == "my_graph"
 
 
 class TestMergeRunMetadata:

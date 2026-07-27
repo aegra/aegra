@@ -259,7 +259,11 @@ class TestBeforeParameterFormats:
         assert captured[0] == {"configurable": {"checkpoint_id": "cp_xyz789"}}
 
     def test_before_as_raw_checkpoint_dict(self, capturing_client: tuple) -> None:
-        """Raw checkpoint dict (no 'configurable' key) should be wrapped."""
+        """Raw checkpoint dict (no 'configurable' key) is wrapped, passed as-is.
+
+        No thread_id scrub: aget_state_history reads only checkpoint_id from
+        `before`; the thread comes from the main config.
+        """
         client, captured = capturing_client
         thread_id = _ensure_thread(client)
 

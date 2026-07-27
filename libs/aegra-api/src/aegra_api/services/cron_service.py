@@ -13,7 +13,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 import structlog
 from croniter import croniter
 from fastapi import Depends, HTTPException
-from sqlalchemy import CursorResult, func, select, update
+from sqlalchemy import CursorResult, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from aegra_api.core.orm import Assistant as AssistantORM
@@ -245,9 +245,13 @@ class CronService:
         requested_assistant_id = str(request.assistant_id)
         resolved_assistant_id = resolve_assistant_id(requested_assistant_id, available_graphs)
 
-        # Validate assistant exists
+        # Scope to caller (or system): without it, a user could pin another
+        # user's assistant — and its private config — onto a cron.
         assistant = await self.session.scalar(
-            select(AssistantORM).where(AssistantORM.assistant_id == resolved_assistant_id)
+            select(AssistantORM).where(
+                AssistantORM.assistant_id == resolved_assistant_id,
+                or_(AssistantORM.user_id == user_identity, AssistantORM.user_id == "system"),
+            )
         )
         if not assistant:
             raise HTTPException(404, f"Assistant '{request.assistant_id}' not found")

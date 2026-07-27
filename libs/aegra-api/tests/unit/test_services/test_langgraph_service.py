@@ -663,6 +663,49 @@ class TestLangGraphServiceConfigs:
 
         assert result["configurable"]["checkpoint_key"] == "checkpoint_value"
 
+    def test_create_run_config_ignores_client_thread_id_override(self):
+        """A client-supplied configurable.thread_id must not redirect execution.
+
+        The checkpointer keys solely on thread_id, so honoring a body override
+        would let a user read/write another user's thread despite the route
+        ownership check.
+        """
+        mock_user = Mock()
+        mock_user.identity = "user-123"
+        mock_user.display_name = "Test User"
+
+        attacker_override = {"configurable": {"thread_id": "victim-thread", "run_id": "victim-run"}}
+
+        with patch(
+            "aegra_api.services.langgraph_service.get_tracing_callbacks",
+            return_value=[],
+        ):
+            result = create_run_config("run-789", "thread-456", mock_user, additional_config=attacker_override)
+
+        assert result["configurable"]["thread_id"] == "thread-456"
+        assert result["configurable"]["run_id"] == "run-789"
+
+    def test_create_run_config_checkpoint_cannot_override_thread_id(self):
+        """The checkpoint param is merged last; it must not redefine thread_id.
+
+        RunCreate.checkpoint is a free-form client dict — a thread_id inside it
+        would otherwise win over the server-pinned value at the final merge.
+        """
+        mock_user = Mock()
+        mock_user.identity = "user-123"
+        mock_user.display_name = "Test User"
+
+        malicious_checkpoint = {"thread_id": "victim-thread", "checkpoint_id": "cp-9"}
+
+        with patch(
+            "aegra_api.services.langgraph_service.get_tracing_callbacks",
+            return_value=[],
+        ):
+            result = create_run_config("run-789", "thread-456", mock_user, checkpoint=malicious_checkpoint)
+
+        assert result["configurable"]["thread_id"] == "thread-456"
+        assert result["configurable"]["checkpoint_id"] == "cp-9"
+
     def test_create_run_config_with_tracing_callbacks(self):
         """Test creating run config with tracing callbacks"""
         mock_user = Mock()

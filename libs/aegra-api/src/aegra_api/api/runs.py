@@ -41,6 +41,24 @@ logger = structlog.getLogger(__name__)
 DEFAULT_STREAM_MODES = ["values"]
 
 
+async def _apply_create_run_auth(user: User, thread_id: str, request: RunCreate) -> None:
+    """Authorize threads.create_run and merge config/context overrides into request.
+
+    Handler-returned filter dict wins; otherwise fall back to in-place value mutations.
+    """
+    ctx = build_auth_context(user, "threads", "create_run")
+    value = {**request.model_dump(), "thread_id": thread_id}
+    filters = await handle_event(ctx, value)
+
+    source = filters if filters is not None else value
+    config_overrides = source.get("config")
+    if isinstance(config_overrides, dict):
+        request.config = {**(request.config or {}), **config_overrides}
+    context_overrides = source.get("context")
+    if isinstance(context_overrides, dict):
+        request.context = {**(request.context or {}), **context_overrides}
+
+
 @router.post("/threads/{thread_id}/runs", response_model=Run, responses={**NOT_FOUND, **CONFLICT})
 async def create_run(
     thread_id: str,
@@ -59,25 +77,7 @@ async def create_run(
     if existing_thread and existing_thread.user_id != user.identity:
         raise HTTPException(404, f"Thread '{thread_id}' not found")
 
-    # Authorization check (create_run action on threads resource)
-    ctx = build_auth_context(user, "threads", "create_run")
-    value = {**request.model_dump(), "thread_id": thread_id}
-    filters = await handle_event(ctx, value)
-
-    # If handler modified config/context, update request
-    if filters:
-        if "config" in filters and isinstance(filters["config"], dict):
-            request.config = {**(request.config or {}), **filters["config"]}
-        if "context" in filters and isinstance(filters["context"], dict):
-            request.context = {**(request.context or {}), **filters["context"]}
-    else:
-        value_config = value.get("config")
-        if isinstance(value_config, dict):
-            request.config = {**(request.config or {}), **value_config}
-
-        value_context = value.get("context")
-        if isinstance(value_context, dict):
-            request.context = {**(request.context or {}), **value_context}
+    await _apply_create_run_auth(user, thread_id, request)
 
     _run_id, run, _job = await _prepare_run(session, thread_id, request, user, initial_status="pending")
 
@@ -89,7 +89,6 @@ async def create_and_stream_run(
     thread_id: str,
     request: RunCreate,
     user: User = Depends(get_current_user),
-    session: AsyncSession = Depends(get_session),
 ) -> EventSourceResponse:
     """Create a new run and stream its execution via SSE.
 
@@ -105,11 +104,15 @@ async def create_and_stream_run(
     ``KEEPALIVE_INTERVAL_SECS`` so idle proxies don't drop long-running
     silent nodes (e.g. agents holding an upstream WebSocket).
     """
-    existing_thread = await session.scalar(select(ThreadORM).where(ThreadORM.thread_id == thread_id))
-    if existing_thread and existing_thread.user_id != user.identity:
-        raise HTTPException(404, f"Thread '{thread_id}' not found")
+    maker = _get_session_maker()
+    async with maker() as session:
+        existing_thread = await session.scalar(select(ThreadORM).where(ThreadORM.thread_id == thread_id))
+        if existing_thread and existing_thread.user_id != user.identity:
+            raise HTTPException(404, f"Thread '{thread_id}' not found")
 
-    run_id, run, _job = await _prepare_run(session, thread_id, request, user, initial_status="pending")
+        await _apply_create_run_auth(user, thread_id, request)
+
+        run_id, run, _job = await _prepare_run(session, thread_id, request, user, initial_status="pending")
 
     # Default to cancel on disconnect - this matches user expectation that clicking
     # "Cancel" in the frontend will stop the backend task. Users can explicitly
@@ -340,6 +343,8 @@ async def wait_for_run(
         if existing_thread and existing_thread.user_id != user.identity:
             raise HTTPException(404, f"Thread '{thread_id}' not found")
 
+        await _apply_create_run_auth(user, thread_id, request)
+
         run_id, _run, _job = await _prepare_run(session, thread_id, request, user, initial_status="pending")
 
     # No pool connection held from here — safe for long waits
@@ -365,7 +370,6 @@ async def stream_run(
     last_event_id: str | None = Header(None, alias="Last-Event-ID"),
     _stream_mode: str | None = Query(None, description="Override the stream mode for this connection."),
     user: User = Depends(get_current_user),
-    session: AsyncSession = Depends(get_session),
 ) -> EventSourceResponse:
     """Stream an existing run's execution via SSE.
 
@@ -377,31 +381,35 @@ async def stream_run(
     A periodic SSE keepalive comment is sent every
     ``KEEPALIVE_INTERVAL_SECS`` so idle proxies don't drop attached streams.
     """
-    logger.info(f"[stream_run] fetch for stream run_id={run_id} thread_id={thread_id} user={user.identity}")
-    run_orm = await session.scalar(
-        select(RunORM).where(
-            RunORM.run_id == str(run_id),
-            RunORM.thread_id == thread_id,
-            RunORM.user_id == user.identity,
+    maker = _get_session_maker()
+    async with maker() as session:
+        logger.info(f"[stream_run] fetch for stream run_id={run_id} thread_id={thread_id} user={user.identity}")
+        run_orm = await session.scalar(
+            select(RunORM).where(
+                RunORM.run_id == str(run_id),
+                RunORM.thread_id == thread_id,
+                RunORM.user_id == user.identity,
+            )
         )
-    )
-    if not run_orm:
-        raise HTTPException(404, f"Run '{run_id}' not found")
+        if not run_orm:
+            raise HTTPException(404, f"Run '{run_id}' not found")
 
-    logger.info(f"[stream_run] status={run_orm.status} user={user.identity} thread_id={thread_id} run_id={run_id}")
+        logger.info(f"[stream_run] status={run_orm.status} user={user.identity} thread_id={thread_id} run_id={run_id}")
+        run_status = run_orm.status
+        run_model = Run.model_validate(run_orm)
     # No client_close_handler_callable: this is a reconnect-style endpoint, so
     # a single client disconnecting must not cancel the shared run — other
     # consumers may still be attached via /join or another /stream.
     # If already terminal and no Last-Event-ID, just emit end.
     # If Last-Event-ID is present, fall through to stream_run_execution
     # which will replay missed events from the buffer before ending.
-    if run_orm.status in TERMINAL_STATES and not last_event_id:
-        final_status = "error" if run_orm.status == "error" else run_orm.status
+    if run_status in TERMINAL_STATES and not last_event_id:
+        final_status = "error" if run_status == "error" else run_status
 
         async def generate_final() -> AsyncGenerator[str, None]:
             yield create_end_event(status=final_status)
 
-        logger.info(f"[stream_run] starting terminal stream run_id={run_id} status={run_orm.status}")
+        logger.info(f"[stream_run] starting terminal stream run_id={run_id} status={run_status}")
         return make_sse_response(
             sse_to_bytes(generate_final()),
             headers={
@@ -412,9 +420,6 @@ async def stream_run(
         )
 
     # Stream active or pending runs via broker
-
-    # Build a lightweight Pydantic Run from ORM for streaming context (IDs already strings)
-    run_model = Run.model_validate(run_orm)
 
     return make_sse_response(
         sse_to_bytes(streaming_service.stream_run_execution(run_model, last_event_id)),

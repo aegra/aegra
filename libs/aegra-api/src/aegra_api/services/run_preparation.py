@@ -4,6 +4,7 @@ Contains the shared run-creation helper, thread metadata updates,
 resume-command validation, and config/context merging logic.
 """
 
+import asyncio
 from datetime import UTC, datetime
 from typing import Any
 from uuid import uuid4
@@ -17,6 +18,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from aegra_api.core.orm import Assistant as AssistantORM
 from aegra_api.core.orm import Run as RunORM
 from aegra_api.core.orm import Thread as ThreadORM
+from aegra_api.core.orm import _get_session_maker
 from aegra_api.models import Run, RunCreate, User
 from aegra_api.models.run_job import RunBehavior, RunExecution, RunIdentity, RunJob
 from aegra_api.services.executor import executor
@@ -28,16 +30,43 @@ from aegra_api.utils.run_utils import _merge_jsonb
 logger = structlog.getLogger(__name__)
 
 
+# The interrupt reaches the client (via the broker/SSE) before the run executor
+# commits thread_status="interrupted" in finalize_run. A client that resumes the
+# instant it sees the interrupt can beat that commit, so after the first read poll
+# a few times on FRESH sessions (each a new snapshot that sees the commit) before
+# rejecting — otherwise a valid resume races to a spurious 400.
+_RESUME_SETTLE_ATTEMPTS = 10
+_RESUME_SETTLE_INTERVAL_SECONDS = 0.1
+
+
 async def _validate_resume_command(session: AsyncSession, thread_id: str, command: dict[str, Any] | None) -> None:
-    """Validate resume command requirements."""
-    if command and command.get("resume") is not None:
-        # Check if thread exists and is in interrupted state
-        thread_stmt = select(ThreadORM).where(ThreadORM.thread_id == thread_id)
-        thread = await session.scalar(thread_stmt)
-        if not thread:
-            raise HTTPException(404, f"Thread '{thread_id}' not found")
-        if thread.status != "interrupted":
-            raise HTTPException(400, "Cannot resume: thread is not in interrupted state")
+    """Validate resume command requirements.
+
+    Guard on the presence of the ``resume`` key, not a non-None value: ``None``
+    is a valid resume payload, and a ``{"resume": None}`` command must still be
+    rejected against a thread that is not interrupted.
+    """
+    if not command or "resume" not in command:
+        return
+
+    thread_stmt = select(ThreadORM).where(ThreadORM.thread_id == thread_id)
+    thread = await session.scalar(thread_stmt)
+    if not thread:
+        raise HTTPException(404, f"Thread '{thread_id}' not found")
+    if thread.status == "interrupted":
+        return
+
+    # Not interrupted on the request session's snapshot — poll fresh sessions in
+    # case finalize_run's commit is still in flight.
+    maker = _get_session_maker()
+    for _ in range(_RESUME_SETTLE_ATTEMPTS):
+        await asyncio.sleep(_RESUME_SETTLE_INTERVAL_SECONDS)
+        async with maker() as fresh:
+            fresh_thread = await fresh.scalar(thread_stmt)
+        if fresh_thread is not None and fresh_thread.status == "interrupted":
+            return
+
+    raise HTTPException(400, "Cannot resume: thread is not in interrupted state")
 
 
 _THREAD_NAME_MAX_LENGTH = 100
@@ -164,6 +193,7 @@ async def _prepare_run(
     user: User,
     *,
     initial_status: str,
+    event_streaming_v2: bool = False,
 ) -> tuple[str, Run, RunJob]:
     """Shared run-creation logic used by create, stream, and wait endpoints.
 
@@ -231,6 +261,7 @@ async def _prepare_run(
             stream_mode=request.stream_mode,
             checkpoint=request.checkpoint,
             command=request.command,
+            event_streaming_v2=event_streaming_v2,
         ),
         behavior=RunBehavior(
             interrupt_before=request.interrupt_before,

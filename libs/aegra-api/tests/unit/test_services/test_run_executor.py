@@ -144,6 +144,50 @@ class TestExecuteRunException:
         assert "execution failed" in error_args.args[1]
 
 
+def _v3_stream(*events: tuple[str, dict]):  # type: ignore[no-untyped-def]
+    async def gen(**_kwargs):  # type: ignore[no-untyped-def]
+        for method, event in events:
+            yield method, event
+
+    return gen
+
+
+class TestStreamNativeV2InterruptDetection:
+    """_stream_native_v2 must flag has_interrupt for every interrupt shape, else
+    the run finalizes 'success' and the client gets input.requested + completed."""
+
+    async def _run(self, *events: tuple[str, dict]) -> bool:
+        from aegra_api.services import run_executor as mod
+        from aegra_api.services.run_executor import _GraphResult, _stream_native_v2
+
+        result = _GraphResult()
+        with (
+            patch.object(mod, "stream_native_v3_events", _v3_stream(*events)),
+            patch.object(mod, "broker_manager") as bm,
+            patch.object(mod, "streaming_service") as ss,
+        ):
+            bm.allocate_event_id = AsyncMock(return_value="run-1_event_1")
+            ss.put_to_broker = AsyncMock()
+            await _stream_native_v2(_make_job(), MagicMock(), {"msg": "x"}, {}, result)
+        return result.has_interrupt
+
+    @pytest.mark.asyncio
+    async def test_interrupt_via_values_params_interrupts(self) -> None:
+        event = {"params": {"data": {"messages": []}, "interrupts": [{"id": "i1", "value": 1}]}}
+        assert await self._run(("values", event)) is True
+
+    @pytest.mark.asyncio
+    async def test_interrupt_via_updates_dunder_interrupt(self) -> None:
+        # The path session.py routes to input.requested but the executor missed.
+        event = {"params": {"data": {"__interrupt__": [{"id": "i1", "value": 1}]}}}
+        assert await self._run(("updates", event)) is True
+
+    @pytest.mark.asyncio
+    async def test_no_interrupt_when_absent(self) -> None:
+        event = {"params": {"data": {"messages": []}}}
+        assert await self._run(("values", event)) is False
+
+
 class TestSignalEndEvent:
     @pytest.mark.asyncio
     async def test_publishes_end_event(self) -> None:

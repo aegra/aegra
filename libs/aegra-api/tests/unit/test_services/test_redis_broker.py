@@ -1,5 +1,6 @@
 """Unit tests for RedisRunBroker and RedisBrokerManager"""
 
+import asyncio
 import json
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -7,6 +8,7 @@ import pytest
 from redis.exceptions import ConnectionError as RedisConnectionError
 
 from aegra_api.services.redis_broker import (
+    _PUT_MAX_ATTEMPTS,
     RedisBrokerManager,
     RedisRunBroker,
     _deserialize_payload,
@@ -158,11 +160,182 @@ class TestRedisRunBroker:
         mock_client.publish = AsyncMock()
         mock_client.pipeline.return_value = mock_pipe
 
+        with (
+            patch("aegra_api.services.redis_broker.redis_manager") as mock_rm,
+            patch("aegra_api.services.redis_broker.asyncio.sleep", new_callable=AsyncMock),
+        ):
+            mock_rm.get_client.return_value = mock_client
+
+            # Should not raise even after retries are exhausted
+            await broker.put("evt-1", ("values", {"data": "test"}))
+
+        # Retried up to the bounded limit before giving up
+        assert mock_pipe.execute.await_count == _PUT_MAX_ATTEMPTS
+
+    @pytest.mark.asyncio
+    async def test_put_retries_cache_write_then_succeeds(self) -> None:
+        """A transient RedisError on the cache pipeline is retried, not dropped.
+
+        Mirrors the read path (aiter), which already retries on RedisError.
+        """
+        broker = self._make_broker()
+        mock_pipe = MagicMock()
+        mock_pipe.execute = AsyncMock(side_effect=[RedisConnectionError("blip"), None])
+        mock_client = MagicMock()
+        mock_client.publish = AsyncMock()
+        mock_client.pipeline.return_value = mock_pipe
+
+        with (
+            patch("aegra_api.services.redis_broker.redis_manager") as mock_rm,
+            patch("aegra_api.services.redis_broker.asyncio.sleep", new_callable=AsyncMock) as mock_sleep,
+        ):
+            mock_rm.get_client.return_value = mock_client
+
+            await broker.put("evt-1", ("values", {"msg": "hi"}))
+
+        assert mock_pipe.execute.await_count == 2  # one retry
+        mock_client.publish.assert_awaited_once()  # publish runs after cache succeeds
+        mock_sleep.assert_awaited()  # backed off between attempts
+
+    @pytest.mark.asyncio
+    async def test_put_retries_publish_without_rerunning_cache(self) -> None:
+        """A publish failure retries publish only — the cache pipeline is not
+        re-run, so the replay buffer is never double-written (no duplicate RPUSH)."""
+        broker = self._make_broker()
+        mock_pipe = MagicMock()
+        mock_pipe.execute = AsyncMock()
+        mock_client = MagicMock()
+        mock_client.publish = AsyncMock(side_effect=[RedisConnectionError("blip"), None])
+        mock_client.pipeline.return_value = mock_pipe
+
+        with (
+            patch("aegra_api.services.redis_broker.redis_manager") as mock_rm,
+            patch("aegra_api.services.redis_broker.asyncio.sleep", new_callable=AsyncMock),
+        ):
+            mock_rm.get_client.return_value = mock_client
+
+            await broker.put("evt-1", ("values", {"msg": "hi"}))
+
+        assert mock_client.publish.await_count == 2  # publish retried
+        mock_pipe.execute.assert_awaited_once()  # cache written exactly once
+
+    @pytest.mark.asyncio
+    async def test_put_end_event_marks_finished_even_when_dropped(self) -> None:
+        """If an 'end' event can't be delivered after retries, the broker is still
+        marked finished so aiter() can exit instead of looping forever."""
+        broker = self._make_broker()
+        mock_pipe = MagicMock()
+        mock_pipe.execute = AsyncMock(side_effect=RedisConnectionError("down"))
+        mock_client = MagicMock()
+        mock_client.publish = AsyncMock(side_effect=RedisConnectionError("down"))
+        mock_client.pipeline.return_value = mock_pipe
+
+        with (
+            patch("aegra_api.services.redis_broker.redis_manager") as mock_rm,
+            patch("aegra_api.services.redis_broker.asyncio.sleep", new_callable=AsyncMock),
+        ):
+            mock_rm.get_client.return_value = mock_client
+
+            await broker.put("evt-end", ("end", {"status": "success"}))
+
+        assert broker.is_finished()
+
+    @pytest.mark.asyncio
+    async def test_put_serializes_concurrent_calls(self) -> None:
+        """The per-broker write lock keeps concurrent put() calls from
+        interleaving: a second put cannot start writing while the first is
+        mid-flight, preserving cache-then-publish event ordering."""
+        broker = self._make_broker()
+        order: list[str] = []
+        gate = asyncio.Event()
+
+        async def slow_first_cache(message: str) -> None:
+            order.append("A-cache-start")
+            await gate.wait()  # hold the write lock until released
+            order.append("A-cache-end")
+
+        async def publish_noop(message: str) -> None:
+            order.append("publish")
+
+        async def second_cache(message: str) -> None:
+            order.append("B-cache")
+
+        broker._cache_event = slow_first_cache  # type: ignore[method-assign]
+        broker._publish_event = publish_noop  # type: ignore[method-assign]
+        task_a = asyncio.create_task(broker.put("evt-A", ("values", {})))
+        await asyncio.sleep(0)  # let A acquire the lock and enter its cache write
+        assert order == ["A-cache-start"]
+
+        # B is queued while A holds the lock — it must not write yet.
+        broker._cache_event = second_cache  # type: ignore[method-assign]
+        task_b = asyncio.create_task(broker.put("evt-B", ("values", {})))
+        await asyncio.sleep(0)
+        assert "B-cache" not in order
+
+        gate.set()  # release A
+        await asyncio.gather(task_a, task_b)
+
+        # A fully completes (cache then publish) before B begins.
+        assert order == ["A-cache-start", "A-cache-end", "publish", "B-cache", "publish"]
+
+    @pytest.mark.asyncio
+    async def test_replay_dedups_adjacent_duplicate_event(self) -> None:
+        """An at-least-once retry can RPUSH the same event twice; replay() drops
+        the adjacent duplicate so a resuming client doesn't receive it twice."""
+        broker = self._make_broker()
+        mock_client = AsyncMock()
+        mock_client.lrange.return_value = [
+            json.dumps({"event_id": "evt-1", "payload": ["values", {"a": 1}]}),
+            json.dumps({"event_id": "evt-2", "payload": ["values", {"a": 2}]}),
+            json.dumps({"event_id": "evt-2", "payload": ["values", {"a": 2}]}),  # duplicate
+            json.dumps({"event_id": "evt-3", "payload": ["end", {}]}),
+        ]
+
         with patch("aegra_api.services.redis_broker.redis_manager") as mock_rm:
             mock_rm.get_client.return_value = mock_client
 
-            # Should not raise
-            await broker.put("evt-1", ("values", {"data": "test"}))
+            events = await broker.replay(None)
+
+        assert [event_id for event_id, _ in events] == ["evt-1", "evt-2", "evt-3"]
+
+    @pytest.mark.asyncio
+    async def test_aiter_dedups_adjacent_duplicate_live_event(self) -> None:
+        """A republished (retried) live event with the same event_id is yielded once."""
+        broker = self._make_broker()
+
+        messages = [
+            {"type": "message", "data": json.dumps({"event_id": "evt-1", "payload": ["values", {"msg": "hi"}]})},
+            {"type": "message", "data": json.dumps({"event_id": "evt-1", "payload": ["values", {"msg": "hi"}]})},  # dup
+            {"type": "message", "data": json.dumps({"event_id": "evt-2", "payload": ["end", {"status": "success"}]})},
+        ]
+        call_count = 0
+
+        async def mock_get_message(ignore_subscribe_messages: bool = True, timeout: float = 0.5) -> dict | None:
+            nonlocal call_count
+            if call_count < len(messages):
+                msg = messages[call_count]
+                call_count += 1
+                return msg
+            return None
+
+        mock_pubsub = AsyncMock()
+        mock_pubsub.get_message = mock_get_message
+        mock_pubsub.subscribe = AsyncMock()
+        mock_pubsub.unsubscribe = AsyncMock()
+        mock_pubsub.aclose = AsyncMock()
+
+        mock_client = MagicMock()
+        mock_client.pubsub.return_value = mock_pubsub
+        mock_client.lrange = AsyncMock(return_value=[])
+
+        with patch("aegra_api.services.redis_broker.redis_manager") as mock_rm:
+            mock_rm.get_client.return_value = mock_client
+
+            events: list[tuple[str, object]] = []
+            async for event_id, payload in broker.aiter():
+                events.append((event_id, payload))
+
+        assert [event_id for event_id, _ in events] == ["evt-1", "evt-2"]
 
     @pytest.mark.asyncio
     async def test_aiter_yields_events(self) -> None:

@@ -11,6 +11,7 @@
 <p align="center">
   <a href="https://pypi.org/project/aegra-api/"><img src="https://img.shields.io/pypi/v/aegra-api?label=aegra-api&color=blue" alt="PyPI API"></a>
   <a href="https://pypi.org/project/aegra-cli/"><img src="https://img.shields.io/pypi/v/aegra-cli?label=aegra-cli&color=blue" alt="PyPI CLI"></a>
+  <a href="https://pepy.tech/project/aegra-api"><img src="https://img.shields.io/pepy/dt/aegra-api?label=downloads&color=blue" alt="Downloads"></a>
   <a href="https://github.com/aegra/aegra/actions/workflows/ci.yml"><img src="https://github.com/aegra/aegra/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
   <a href="https://app.codecov.io/gh/aegra/aegra"><img src="https://codecov.io/gh/aegra/aegra/graph/badge.svg" alt="Codecov"></a>
 </p>
@@ -27,6 +28,8 @@
 Aegra is a drop-in replacement for LangSmith Deployments. Use the same LangGraph SDK, same APIs, but run it on your own infrastructure with PostgreSQL persistence.
 
 **Works with:** [Agent Chat UI](https://github.com/langchain-ai/agent-chat-ui) | [LangGraph Studio](https://github.com/langchain-ai/langgraph-studio) | [AG-UI / CopilotKit](https://github.com/CopilotKit/CopilotKit)
+
+> **🆕 New: Agent Protocol v2 streaming.** Thread-scoped SSE with content-block events, per-subgraph lifecycle, and native human-in-the-loop resume — the wire the latest LangGraph SDKs and `useStream()` target. Enabled by default. See the [streaming guide](https://docs.aegra.dev/guides/streaming).
 
 ## 🚀 Quick Start
 
@@ -101,7 +104,7 @@ async for chunk in client.runs.stream(
 - **[Worker architecture](https://docs.aegra.dev/guides/worker-architecture)** - Redis job queue with 30 concurrent runs per instance, lease-based crash recovery, and horizontal scaling across multiple instances
 - **[Scheduled cron jobs](https://docs.aegra.dev/guides/cron)** - Trigger runs on a schedule with standard 5-field or seconds-level 6-field expressions, IANA timezone support, and multi-instance safe `SKIP LOCKED` claim
 - **[Human-in-the-loop](https://docs.aegra.dev/guides/human-in-the-loop)** - Approval gates and user intervention points
-- **[Streaming](https://docs.aegra.dev/guides/streaming)** - Real-time SSE streaming with cross-instance pub/sub and automatic reconnection with event replay
+- **[Streaming](https://docs.aegra.dev/guides/streaming)** - Real-time SSE streaming with cross-instance pub/sub and automatic reconnection with event replay. Supports both the legacy run-scoped stream and **Agent Protocol v2** thread-scoped streaming (content-block events, per-subgraph lifecycle, HITL resume) for the latest LangGraph SDKs and `useStream()`
 - **[Persistent state](https://docs.aegra.dev/guides/threads-and-state)** - PostgreSQL checkpoints via LangGraph
 - **[Configurable auth](https://docs.aegra.dev/guides/authentication)** - JWT, OAuth, Firebase, or none
 - **[Unified Observability](https://docs.aegra.dev/guides/observability)** - Fan-out tracing support via OpenTelemetry

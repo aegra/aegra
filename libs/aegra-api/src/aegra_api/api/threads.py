@@ -36,6 +36,7 @@ from aegra_api.models import (
 from aegra_api.models.errors import CONFLICT, NOT_FOUND
 from aegra_api.services.streaming_service import streaming_service
 from aegra_api.services.thread_state_service import ThreadStateService
+from aegra_api.utils.run_utils import strip_pinned_config_keys
 
 router = APIRouter(tags=["Threads"], dependencies=auth_dependency)
 logger = structlog.getLogger(__name__)
@@ -473,7 +474,7 @@ async def update_thread_state(
         if request.checkpoint_id:
             config["configurable"]["checkpoint_id"] = request.checkpoint_id
         if request.checkpoint:
-            config["configurable"].update(request.checkpoint)
+            config["configurable"].update(strip_pinned_config_keys(request.checkpoint))
         if request.checkpoint_ns:
             config["configurable"]["checkpoint_ns"] = request.checkpoint_ns
 
@@ -716,7 +717,7 @@ async def get_thread_history_post(
 
         config: dict[str, Any] = create_thread_config(thread_id, user)
         if checkpoint:
-            cfg_cp = checkpoint.copy()
+            cfg_cp = strip_pinned_config_keys(checkpoint)
             if checkpoint_ns is not None:
                 cfg_cp.setdefault("checkpoint_ns", checkpoint_ns)
             config["configurable"].update(cfg_cp)
@@ -726,14 +727,13 @@ async def get_thread_history_post(
         # Convert `before` to a RunnableConfig for aget_state_history.
         # The SDK sends `before` as either a checkpoint ID string, a raw
         # checkpoint dict, or a full RunnableConfig with a "configurable" key.
+        # No thread_id scrub here: aget_state_history reads only checkpoint_id
+        # from `before` (the thread comes from the main config, pinned above).
         before_config: dict[str, Any] | None = None
         if isinstance(before, str):
             before_config = {"configurable": {"checkpoint_id": before}}
         elif isinstance(before, dict):
-            if "configurable" in before:
-                before_config = before
-            else:
-                before_config = {"configurable": before}
+            before_config = before if "configurable" in before else {"configurable": before}
 
         state_snapshots = []
         kwargs: dict[str, Any] = {

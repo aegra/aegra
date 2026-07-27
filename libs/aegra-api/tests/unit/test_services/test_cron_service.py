@@ -218,6 +218,28 @@ class TestCreateCron:
         assert exc.value.status_code == 404
 
     @pytest.mark.asyncio
+    async def test_assistant_lookup_is_scoped_to_owner(
+        self,
+        cron_service: CronService,
+        mock_session: AsyncMock,
+        sample_create: CronCreate,
+    ) -> None:
+        """The assistant validation query must filter by the caller's user_id.
+
+        Without it, a user could pin another user's assistant (and its private
+        config) onto a cron via assistant_id.
+        """
+        mock_session.scalar.return_value = _make_assistant_orm()
+
+        await cron_service.create_cron(sample_create, "test-user")
+
+        stmt = mock_session.scalar.await_args_list[0].args[0]
+        sql = str(stmt.compile(compile_kwargs={"literal_binds": True}))
+        assert "user_id" in sql
+        assert "test-user" in sql
+        assert "system" in sql
+
+    @pytest.mark.asyncio
     async def test_rejects_missing_graph(
         self,
         cron_service: CronService,

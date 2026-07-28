@@ -59,6 +59,7 @@ def test_excludes_health_and_docs(
     mock_cls.assert_called_once_with(
         should_group_status_codes=False,
         should_ignore_untemplated=True,
+        should_instrument_requests_inprogress=True,
         excluded_handlers=[
             "/health",
             "/ready",
@@ -70,6 +71,8 @@ def test_excludes_health_and_docs(
             "/openapi.json",
         ],
         registry=None,
+        inprogress_name="http_server_active_requests",
+        inprogress_labels=True,
     )
     mock_instance.instrument.assert_called_once_with(app)
     mock_instance.expose.assert_called_once_with(

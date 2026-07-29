@@ -134,15 +134,16 @@ class ThreadCheckpointPostRequest(BaseModel):
     subgraphs: bool | None = Field(False, description="Include subgraph states")
 
 
-_REFERENCE_OPTIONS = orjson.OPT_SERIALIZE_NUMPY | orjson.OPT_NON_STR_KEYS
+_ORJSON_OPTIONS = orjson.OPT_SERIALIZE_NUMPY | orjson.OPT_NON_STR_KEYS
 
 
 def _json_default(obj: Any) -> Any:
-    """Fallback encoder mirroring langgraph_api/serde.py default().
+    """Fallback encoder for orjson.
 
-    orjson handles dataclasses, NamedTuples, datetime, UUID, and enum
-    natively before this function is called. This covers the remaining
-    types the reference supports.
+    Handles types orjson cannot serialize natively: Pydantic v2 models via
+    model_dump(), Pydantic v1/LangChain objects via dict(), NamedTuples via
+    _asdict(), set/frozenset/deque as arrays, bytes/bytearray as standard
+    Base64, and other supported types. Unknown objects become null.
     """
     if hasattr(obj, "model_dump") and callable(obj.model_dump):
         return obj.model_dump()
@@ -174,21 +175,20 @@ def _json_default(obj: Any) -> Any:
 def _to_jsonable(value: Any) -> Any:
     """Convert arbitrary thread state to a JSON-compatible Python value.
 
-    Uses orjson with the reference default handler and option flags so the
-    wire output matches langgraph-api's serde for bytes, models, dataclasses,
-    NamedTuples, sets, and all other supported types. Returns a parsed Python
-    object (dict/list/str/etc.), not a JSON string.
+    Uses orjson with the default handler and option flags so the output
+    supports bytes, models, dataclasses, NamedTuples, sets, and all other
+    supported types. Returns a parsed Python object (dict/list/str/etc.),
+    not a JSON string.
     """
-    return orjson.loads(orjson.dumps(value, default=_json_default, option=_REFERENCE_OPTIONS))
+    return orjson.loads(orjson.dumps(value, default=_json_default, option=_ORJSON_OPTIONS))
 
 
 class ThreadState(BaseModel):
     """Thread state model for history endpoint
 
     Binary values (``bytes``/``bytearray``) and other non-JSON-native types
-    nested in arbitrary fields are encoded through orjson's default handler,
-    matching ``langgraph-api``'s wire convention. Python-mode access retains
-    raw values.
+    nested in arbitrary fields are encoded through orjson's default handler
+    during JSON serialization. Python-mode access retains raw values.
     """
 
     values: dict[str, Any] = Field(description="Channel values (messages, etc.)")

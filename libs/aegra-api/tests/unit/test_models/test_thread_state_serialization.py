@@ -1,18 +1,21 @@
 """Unit tests for ThreadState binary and arbitrary-type serialization (issue #451).
 
-Verifies that the JSON-only field serializer on ThreadState produces wire
-output matching langgraph-api's serde convention for bytes, models,
-dataclasses, NamedTuples, sets, and all other supported types. Expected
-values are derived from the executed reference orjson invocation, not from
-the production helper.
+Verifies that the JSON-only field serializer on ThreadState produces correct
+wire output for bytes, models, dataclasses, NamedTuples, sets, and all other
+supported types. Expected values are literal, derived from executed behavior,
+not from the production helper.
 """
 
 import json
+import re
 from base64 import b64encode
 from collections import deque
 from dataclasses import dataclass
-from datetime import timedelta
+from datetime import datetime, timedelta
+from decimal import Decimal
 from enum import Enum
+from ipaddress import IPv4Address
+from pathlib import Path
 from typing import Any, NamedTuple
 from uuid import UUID
 from zoneinfo import ZoneInfo
@@ -137,7 +140,7 @@ class TestDeque:
 
 
 class TestNamedTupleAsObject:
-    """NamedTuple serializes as a JSON object (matching orjson/reference), not an array."""
+    """NamedTuple serializes as a JSON object, not an array."""
 
     class _Payload(NamedTuple):
         name: str
@@ -180,7 +183,7 @@ class TestNestedPydanticModel:
 
 
 class TestNonFiniteFloats:
-    """NaN, Infinity, and -Infinity become null (matching orjson reference)."""
+    """NaN, Infinity, and -Infinity become null."""
 
     @pytest.mark.parametrize("value", [float("nan"), float("inf"), float("-inf")])
     def test_non_finite_floats_become_null(self, value):
@@ -190,7 +193,7 @@ class TestNonFiniteFloats:
 
 
 class TestUnknownObjectBecomesNull:
-    """Unknown objects become null (matching reference default returning None)."""
+    """Unknown objects become null."""
 
     class _Unsupported:
         pass
@@ -202,7 +205,7 @@ class TestUnknownObjectBecomesNull:
 
 
 class TestDictionaryKeys:
-    """Dictionary key behavior with OPT_NON_STR_KEYS (derived from reference)."""
+    """Dictionary key behavior with OPT_NON_STR_KEYS."""
 
     def test_uuid_key_supported(self):
         uid = UUID(int=1)
@@ -230,20 +233,15 @@ class TestDictionaryKeys:
 
 
 class TestDatetimeAndTimezoneFormatting:
-    """datetime and timezone formatting match reference output."""
+    """datetime and timezone formatting."""
 
     def test_datetime_with_zoneinfo(self):
-        dt = type("dt", (), {})  # placeholder - use actual datetime
-        from datetime import datetime
-
         dt = datetime(2024, 1, 15, 12, 30, 45, tzinfo=ZoneInfo("America/New_York"))
         state = _make_state(values={"dt": dt})
         result = _dump_list(state)
         assert result["values"]["dt"] == "2024-01-15T12:30:45-05:00"
 
     def test_naive_datetime(self):
-        from datetime import datetime
-
         dt = datetime(2024, 1, 15, 12, 30, 45)
         state = _make_state(values={"dt": dt})
         result = _dump_list(state)
@@ -402,3 +400,54 @@ class TestEdgeCases:
         result = _dump_list(state)
         assert result["values"]["messages"] == ["hello", "world"]
         assert result["values"]["count"] == 3
+
+
+class TestFallbackEncoderBranches:
+    """Direct coverage for each _json_default branch not exercised elsewhere."""
+
+    def test_decimal(self):
+        state = _make_state(values={"val": Decimal("1.5")})
+        result = _dump_list(state)
+        assert result["values"]["val"] == 1.5
+
+    def test_decimal_integer(self):
+        state = _make_state(values={"val": Decimal("3")})
+        result = _dump_list(state)
+        assert result["values"]["val"] == 3
+        assert isinstance(result["values"]["val"], int)
+
+    def test_ipv4_address(self):
+        state = _make_state(values={"ip": IPv4Address("127.0.0.1")})
+        result = _dump_list(state)
+        assert result["values"]["ip"] == "127.0.0.1"
+
+    def test_path(self):
+        state = _make_state(values={"p": Path("/tmp/test")})
+        result = _dump_list(state)
+        assert result["values"]["p"] == str(Path("/tmp/test"))
+
+    def test_compiled_regex(self):
+        pattern = re.compile(r"test")
+        state = _make_state(values={"pat": pattern})
+        result = _dump_list(state)
+        assert result["values"]["pat"] == "test"
+
+    def test_base_exception(self):
+        exc = ValueError("something went wrong")
+        state = _make_state(values={"err": exc})
+        result = _dump_list(state)
+        assert result["values"]["err"] == {"error": "ValueError", "message": "something went wrong"}
+
+    def test_pydantic_v1_style_dict_method(self):
+        """Objects with a dict() method (but no model_dump) are serialized via dict()."""
+
+        class LegacyModel:
+            def __init__(self):
+                self.field = "value"
+
+            def dict(self):
+                return {"field": self.field}
+
+        state = _make_state(values={"legacy": LegacyModel()})
+        result = _dump_list(state)
+        assert result["values"]["legacy"] == {"field": "value"}

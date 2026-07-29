@@ -273,24 +273,47 @@ class TestDictionaryKeys:
         result = _dump_list(state)
         assert result["values"]["color"] == "red"
 
-    def test_top_level_utf8_bytes_key_coerced_to_str(self):
-        """A UTF-8-decodable bytes key at the top level of values is coerced to a
-        plain string key by Pydantic validation, while the same key nested
-        becomes Base64. Both are pinned so the asymmetry reads as intentional.
+    def test_top_level_non_utf8_bytes_key_becomes_base64(self):
+        """A non-UTF-8 bytes key at the top level of values is normalized to
+        Base64 by the model_validator before field validation rejects it.
+        """
+        state = _make_state(values={b"\xff": "x"})
+        result = _dump_list(state)
+        assert result["values"] == {"/w==": "x"}
+
+    def test_top_level_utf8_bytes_key_becomes_base64(self):
+        """A UTF-8-decodable bytes key at the top level of values is normalized
+        to Base64, consistent with nested keys.
         """
         state = _make_state(values={b"utf8ok": "x"})
-        assert "utf8ok" in state.values
-        assert all(isinstance(k, str) for k in state.values)
         result = _dump_list(state)
-        assert result["values"] == {"utf8ok": "x"}
+        assert result["values"] == {"dXRmOG9r": "x"}
+
+    def test_top_level_int_and_none_keys_become_strings(self):
+        """int and None keys at the top level are normalized to strings."""
+        state = _make_state(values={7: "x", None: "y"})
+        result = _dump_list(state)
+        assert result["values"] == {"7": "x", "null": "y"}
+
+    def test_metadata_top_level_bytes_key_becomes_base64(self):
+        """Binary keys in metadata are normalized the same as values."""
+        state = _make_state(metadata={b"\xff": 1})
+        result = _dump_list(state)
+        assert result["metadata"] == {"/w==": 1}
 
     def test_nested_utf8_bytes_key_becomes_base64(self):
         """A UTF-8-decodable bytes key nested inside a value encodes as Base64,
-        unlike the top-level coercion above.
+        consistent with the top-level behavior.
         """
         state = _make_state(values={"payload": {b"utf8ok": "x"}})
         result = _dump_list(state)
         assert result["values"]["payload"] == {"dXRmOG9r": "x"}
+
+    def test_top_level_bytes_key_via_list_adapter(self):
+        """Top-level bytes key survives the list adapter (history endpoint path)."""
+        state = _make_state(values={b"\xff": "x"})
+        result = _dump_list(state)
+        assert result["values"] == {"/w==": "x"}
 
 
 class TestDatetimeAndTimezoneFormatting:

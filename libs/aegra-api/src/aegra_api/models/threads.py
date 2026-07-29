@@ -21,7 +21,7 @@ from typing import Any, Literal
 from uuid import UUID
 from zoneinfo import ZoneInfo
 
-from pydantic import BaseModel, ConfigDict, Field, field_serializer, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_serializer, field_validator, model_validator
 
 from aegra_api.utils.status_compat import validate_thread_status
 
@@ -230,9 +230,10 @@ class ThreadState(BaseModel):
     """Thread state model for history endpoint
 
     Binary values (``bytes``/``bytearray``) and other non-JSON-native types
-    nested in arbitrary fields are encoded during JSON serialization. Dict
-    keys that are bytes also encode as Base64. Python-mode access retains
-    raw values.
+    nested in arbitrary fields are encoded during JSON serialization. Binary
+    dict keys are normalized to Base64 strings at every depth, including the
+    top level of ``values`` and ``metadata``, before field validation.
+    Python-mode access retains raw values.
     """
 
     values: dict[str, Any] = Field(description="Channel values (messages, etc.)")
@@ -245,6 +246,25 @@ class ThreadState(BaseModel):
     parent_checkpoint: ThreadCheckpoint | None = Field(None, description="Parent checkpoint")
     checkpoint_id: str | None = Field(None, description="Checkpoint ID (for backward compatibility)")
     parent_checkpoint_id: str | None = Field(None, description="Parent checkpoint ID (for backward compatibility)")
+
+    @model_validator(mode="before")
+    @classmethod
+    def _normalize_mapping_keys(cls, data: Any) -> Any:
+        """Convert non-string keys in mapping fields before field validation.
+
+        ``values`` and ``metadata`` are typed ``dict[str, Any]``, so validation
+        would reject or silently decode binary channel keys before the field
+        serializers run. Normalizing here keeps top-level keys consistent with
+        nested ones.
+        """
+        if not isinstance(data, dict):
+            return data
+        normalized = dict(data)
+        for field in ("values", "metadata"):
+            mapping = normalized.get(field)
+            if isinstance(mapping, dict) and not all(isinstance(key, str) for key in mapping):
+                normalized[field] = {_json_key(key): value for key, value in mapping.items()}
+        return normalized
 
     @field_serializer("values", "metadata", when_used="json")
     @classmethod

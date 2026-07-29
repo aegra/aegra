@@ -155,7 +155,7 @@ class TestNamedTupleAsObject:
 
 
 class TestDataclassAsObject:
-    """dataclass serializes as a JSON object (orjson handles natively)."""
+    """dataclass serializes as a JSON object."""
 
     @dataclass
     class _DCPayload:

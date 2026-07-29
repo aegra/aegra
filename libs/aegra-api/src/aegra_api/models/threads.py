@@ -2,8 +2,10 @@
 
 from base64 import b64encode
 from collections import deque
-from datetime import datetime, timedelta, timezone
+from dataclasses import asdict, is_dataclass
+from datetime import date, datetime, time, timedelta, timezone
 from decimal import Decimal
+from enum import Enum
 from ipaddress import (
     IPv4Address,
     IPv4Interface,
@@ -12,13 +14,13 @@ from ipaddress import (
     IPv6Interface,
     IPv6Network,
 )
+from math import isfinite
 from pathlib import Path
 from re import Pattern
 from typing import Any, Literal
 from uuid import UUID
 from zoneinfo import ZoneInfo
 
-import orjson
 from pydantic import BaseModel, ConfigDict, Field, field_serializer, field_validator
 
 from aegra_api.utils.status_compat import validate_thread_status
@@ -134,61 +136,87 @@ class ThreadCheckpointPostRequest(BaseModel):
     subgraphs: bool | None = Field(False, description="Include subgraph states")
 
 
-_ORJSON_OPTIONS = orjson.OPT_SERIALIZE_NUMPY | orjson.OPT_NON_STR_KEYS
+def _json_key(key: Any) -> str:
+    """Render an arbitrary dict key as a JSON object key string.
 
-
-def _json_default(obj: Any) -> Any:
-    """Fallback encoder for orjson.
-
-    Handles types orjson cannot serialize natively: Pydantic v2 models via
-    model_dump(), Pydantic v1/LangChain objects via dict(), NamedTuples via
-    _asdict(), set/frozenset/deque as arrays, bytes/bytearray as standard
-    Base64, and other supported types. Unknown objects become null.
+    The fallback encoder never fires for dict keys, so keys that are not
+    already strings must be converted explicitly. bytes/bytearray encode
+    as standard Base64; other types mirror OPT_NON_STR_KEYS output.
     """
-    if hasattr(obj, "model_dump") and callable(obj.model_dump):
-        return obj.model_dump()
-    if hasattr(obj, "dict") and callable(obj.dict):
-        return obj.dict()
-    if hasattr(obj, "_asdict") and callable(obj._asdict):
-        return obj._asdict()
-    if isinstance(obj, BaseException):
-        return {"error": type(obj).__name__, "message": str(obj)}
-    if isinstance(obj, (set, frozenset, deque)):
-        return list(obj)
-    if isinstance(obj, (timezone, ZoneInfo)):
-        return obj.tzname(None)
-    if isinstance(obj, timedelta):
-        return obj.total_seconds()
-    if isinstance(obj, Decimal):
-        return int(obj) if obj.as_tuple().exponent >= 0 else float(obj)
-    if isinstance(obj, UUID):
-        return str(obj)
-    if isinstance(obj, (IPv4Address, IPv4Interface, IPv4Network, IPv6Address, IPv6Interface, IPv6Network, Path)):
-        return str(obj)
-    if isinstance(obj, Pattern):
-        return obj.pattern
-    if isinstance(obj, (bytes, bytearray)):
-        return b64encode(obj).decode("ascii")
-    return None
+    if isinstance(key, str):
+        return key
+    if isinstance(key, (bytes, bytearray)):
+        return b64encode(key).decode("ascii")
+    if isinstance(key, bool):
+        return "true" if key else "false"
+    if isinstance(key, Enum):
+        return str(key.value)
+    if isinstance(key, (datetime, date, time)):
+        return key.isoformat()
+    if isinstance(key, UUID):
+        return str(key)
+    if key is None:
+        return "null"
+    return str(key)
 
 
 def _to_jsonable(value: Any) -> Any:
-    """Convert arbitrary thread state to a JSON-compatible Python value.
+    """Recursively convert arbitrary thread state to a JSON-compatible value.
 
-    Uses orjson with the default handler and option flags so the output
-    supports bytes, models, dataclasses, NamedTuples, sets, and all other
-    supported types. Returns a parsed Python object (dict/list/str/etc.),
-    not a JSON string.
+    Handles bytes/bytearray as standard Base64, dict keys via _json_key,
+    Pydantic models via model_dump(), v1/LangChain objects via dict(),
+    NamedTuples via _asdict(), dataclasses via asdict(), set/frozenset/deque
+    as arrays, and other supported types. Unknown objects become null so the
+    endpoints never 500 on arbitrary checkpointed state.
     """
-    return orjson.loads(orjson.dumps(value, default=_json_default, option=_ORJSON_OPTIONS))
+    if value is None or isinstance(value, (str, int, bool)):
+        return value
+    if isinstance(value, float):
+        return value if isfinite(value) else None
+    if isinstance(value, (bytes, bytearray)):
+        return b64encode(value).decode("ascii")
+    if isinstance(value, dict):
+        return {_json_key(k): _to_jsonable(v) for k, v in value.items()}
+    # NamedTuple is a tuple subclass; convert via _asdict before the generic
+    # container branch, otherwise it would serialize as an array.
+    if isinstance(value, tuple) and hasattr(value, "_asdict"):
+        return _to_jsonable(value._asdict())
+    if isinstance(value, (list, tuple, set, frozenset, deque)):
+        return [_to_jsonable(item) for item in value]
+    if hasattr(value, "model_dump") and callable(value.model_dump):
+        return _to_jsonable(value.model_dump())
+    if hasattr(value, "dict") and callable(value.dict):
+        return _to_jsonable(value.dict())
+    if isinstance(value, BaseException):
+        return {"error": type(value).__name__, "message": str(value)}
+    if isinstance(value, (timezone, ZoneInfo)):
+        return value.tzname(None)
+    if isinstance(value, (datetime, date, time)):
+        return value.isoformat()
+    if isinstance(value, timedelta):
+        return value.total_seconds()
+    if isinstance(value, Decimal):
+        return int(value) if value.as_tuple().exponent >= 0 else float(value)
+    if isinstance(value, UUID):
+        return str(value)
+    if isinstance(value, Enum):
+        return _to_jsonable(value.value)
+    if isinstance(value, (IPv4Address, IPv4Interface, IPv4Network, IPv6Address, IPv6Interface, IPv6Network, Path)):
+        return str(value)
+    if isinstance(value, Pattern):
+        return value.pattern
+    if is_dataclass(value) and not isinstance(value, type):
+        return _to_jsonable(asdict(value))
+    return None
 
 
 class ThreadState(BaseModel):
     """Thread state model for history endpoint
 
     Binary values (``bytes``/``bytearray``) and other non-JSON-native types
-    nested in arbitrary fields are encoded through orjson's default handler
-    during JSON serialization. Python-mode access retains raw values.
+    nested in arbitrary fields are encoded during JSON serialization. Dict
+    keys that are bytes also encode as Base64. Python-mode access retains
+    raw values.
     """
 
     values: dict[str, Any] = Field(description="Channel values (messages, etc.)")
@@ -202,9 +230,14 @@ class ThreadState(BaseModel):
     checkpoint_id: str | None = Field(None, description="Checkpoint ID (for backward compatibility)")
     parent_checkpoint_id: str | None = Field(None, description="Parent checkpoint ID (for backward compatibility)")
 
-    @field_serializer("values", "tasks", "interrupts", "metadata", when_used="json")
+    @field_serializer("values", "metadata", when_used="json")
     @classmethod
-    def _serialize_arbitrary_fields(cls, value: Any) -> Any:
+    def _serialize_mapping_fields(cls, value: dict[str, Any]) -> dict[str, Any]:
+        return _to_jsonable(value)
+
+    @field_serializer("tasks", "interrupts", when_used="json")
+    @classmethod
+    def _serialize_sequence_fields(cls, value: list[dict[str, Any]]) -> list[dict[str, Any]]:
         return _to_jsonable(value)
 
 

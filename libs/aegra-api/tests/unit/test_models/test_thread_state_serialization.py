@@ -205,7 +205,7 @@ class TestUnknownObjectBecomesNull:
 
 
 class TestDictionaryKeys:
-    """Dictionary key behavior with OPT_NON_STR_KEYS."""
+    """Dictionary key behavior for non-string keys and bytes keys."""
 
     def test_uuid_key_supported(self):
         uid = UUID(int=1)
@@ -230,6 +230,67 @@ class TestDictionaryKeys:
         state = _make_state(values={"data": {Color.RED: "val"}})
         result = _dump_list(state)
         assert result["values"]["data"]["red"] == "val"
+
+    def test_bytes_key_nested(self):
+        """bytes dict key inside a nested value encodes as Base64 (Greptile #2)."""
+        state = _make_state(values={"payload": {NON_UTF8: "x"}})
+        result = _dump_list(state)
+        assert result["values"]["payload"] == {NON_UTF8_B64: "x"}
+
+    def test_bytes_key_and_value_in_same_dict(self):
+        state = _make_state(values={"data": {NON_UTF8: NON_UTF8}})
+        result = _dump_list(state)
+        assert result["values"]["data"] == {NON_UTF8_B64: NON_UTF8_B64}
+
+    def test_bytes_key_inside_list(self):
+        state = _make_state(values={"items": [{NON_UTF8: "x"}]})
+        result = _dump_list(state)
+        assert result["values"]["items"] == [{NON_UTF8_B64: "x"}]
+
+    def test_bytes_key_via_model_dump(self):
+        """bytes key inside a Pydantic model field encodes after model_dump."""
+        from pydantic import BaseModel
+
+        class Inner(BaseModel):
+            data: dict[Any, Any]
+
+        state = _make_state(values={"inner": Inner(data={NON_UTF8: "x"})})
+        result = _dump_list(state)
+        assert result["values"]["inner"] == {"data": {NON_UTF8_B64: "x"}}
+
+    def test_bytes_key_in_metadata(self):
+        state = _make_state(metadata={"snapshot": {NON_UTF8: "x"}})
+        result = _dump_list(state)
+        assert result["metadata"]["snapshot"] == {NON_UTF8_B64: "x"}
+
+    def test_enum_as_value(self):
+        """Enum serialized as its value, matching main behavior."""
+
+        class Color(Enum):
+            RED = "red"
+
+        state = _make_state(values={"color": Color.RED})
+        result = _dump_list(state)
+        assert result["values"]["color"] == "red"
+
+    def test_top_level_utf8_bytes_key_coerced_to_str(self):
+        """A UTF-8-decodable bytes key at the top level of values is coerced to a
+        plain string key by Pydantic validation, while the same key nested
+        becomes Base64. Both are pinned so the asymmetry reads as intentional.
+        """
+        state = _make_state(values={b"utf8ok": "x"})
+        assert "utf8ok" in state.values
+        assert all(isinstance(k, str) for k in state.values)
+        result = _dump_list(state)
+        assert result["values"] == {"utf8ok": "x"}
+
+    def test_nested_utf8_bytes_key_becomes_base64(self):
+        """A UTF-8-decodable bytes key nested inside a value encodes as Base64,
+        unlike the top-level coercion above.
+        """
+        state = _make_state(values={"payload": {b"utf8ok": "x"}})
+        result = _dump_list(state)
+        assert result["values"]["payload"] == {"dXRmOG9r": "x"}
 
 
 class TestDatetimeAndTimezoneFormatting:

@@ -3,6 +3,9 @@
 import json
 from datetime import datetime
 
+from langchain_core.messages import ToolMessage
+from langgraph.types import Command
+
 from aegra_api.core.sse import (
     SSEEvent,
     create_debug_event,
@@ -123,6 +126,29 @@ class TestFormatSSEMessage:
         result = format_sse_message("test_event", data, serializer=custom_serializer)
 
         assert "custom_date" in result
+
+    def test_format_message_serializes_langgraph_command_structurally(self):
+        """A Command embedded in an events payload (astream_events surfaces a
+        tool-returned Command as on_tool_end.data.output) must reach the wire as a
+        structural dict, not a repr string, so consumers can read
+        output.update.messages instead of an undefined tool_call_id off a string."""
+        event = {
+            "event": "on_tool_end",
+            "data": {
+                "output": Command(
+                    update={"messages": [ToolMessage("done", tool_call_id="call_abc", name="write_todos")]}
+                )
+            },
+        }
+
+        result = format_sse_message("events", event)
+
+        data_line = next(line[len("data: ") :] for line in result.splitlines() if line.startswith("data: "))
+        output = json.loads(data_line)["data"]["output"]
+        assert isinstance(output, dict), "Command must not reach the wire as a repr string"
+        message = output["update"]["messages"][0]
+        assert message["type"] == "tool"
+        assert message["tool_call_id"] == "call_abc"
 
 
 class TestCreateMetadataEvent:

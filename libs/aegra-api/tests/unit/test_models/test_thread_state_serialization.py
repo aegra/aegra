@@ -11,7 +11,7 @@ import re
 from base64 import b64encode
 from collections import deque
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from enum import Enum
 from ipaddress import IPv4Address
@@ -313,10 +313,10 @@ class TestDatetimeAndTimezoneFormatting:
         result = _dump_list(state)
         assert result["values"]["td"] == 30.0
 
-    def test_zoneinfo_becomes_null(self):
+    def test_zoneinfo_becomes_key_string(self):
         state = _make_state(values={"tz": ZoneInfo("America/New_York")})
         result = _dump_list(state)
-        assert result["values"]["tz"] is None
+        assert result["values"]["tz"] == "America/New_York"
 
 
 class TestPythonModeRetainsRawValues:
@@ -512,3 +512,104 @@ class TestFallbackEncoderBranches:
         state = _make_state(values={"legacy": LegacyModel()})
         result = _dump_list(state)
         assert result["values"]["legacy"] == {"field": "value"}
+
+
+class TestPathologicalValues:
+    """Edge cases that previously caused 500s or wrong output."""
+
+    def test_decimal_nan_becomes_null(self):
+        state = _make_state(values={"d": Decimal("NaN")})
+        result = _dump_list(state)
+        assert result["values"]["d"] is None
+
+    def test_decimal_infinity_becomes_null(self):
+        state = _make_state(values={"d": Decimal("Infinity")})
+        result = _dump_list(state)
+        assert result["values"]["d"] is None
+
+    def test_decimal_negative_infinity_becomes_null(self):
+        state = _make_state(values={"d": Decimal("-Infinity")})
+        result = _dump_list(state)
+        assert result["values"]["d"] is None
+
+    def test_decimal_snan_becomes_null(self):
+        state = _make_state(values={"d": Decimal("sNaN")})
+        result = _dump_list(state)
+        assert result["values"]["d"] is None
+
+    def test_pydantic_model_class_becomes_null(self):
+        class Model(BaseModel):
+            x: int = 1
+
+        state = _make_state(values={"cls": Model})
+        result = _dump_list(state)
+        assert result["values"]["cls"] is None
+
+    def test_dataclass_class_becomes_null(self):
+        @dataclass
+        class DC:
+            x: int = 1
+
+        state = _make_state(values={"cls": DC})
+        result = _dump_list(state)
+        assert result["values"]["cls"] is None
+
+    def test_dict_method_requiring_argument_becomes_null(self):
+        class NeedsArg:
+            def dict(self, x):
+                return x
+
+        state = _make_state(values={"bad": NeedsArg()})
+        result = _dump_list(state)
+        assert result["values"]["bad"] is None
+
+    def test_model_dump_that_raises_becomes_null(self):
+        class RaisesDump:
+            def model_dump(self):
+                raise RuntimeError("boom")
+
+        state = _make_state(values={"bad": RaisesDump()})
+        result = _dump_list(state)
+        assert result["values"]["bad"] is None
+
+    def test_circular_dict_serializes_with_null_backref(self):
+        d = {}
+        d["self"] = d
+        state = _make_state(values={"cycle": d})
+        result = _dump_list(state)
+        assert result["values"]["cycle"]["self"] is None
+
+    def test_circular_list_serializes_with_null_backref(self):
+        lst = []
+        lst.append(lst)
+        state = _make_state(values={"cycle": lst})
+        result = _dump_list(state)
+        assert result["values"]["cycle"][0] is None
+
+    def test_memoryview_value_becomes_base64(self):
+        state = _make_state(values={"blob": memoryview(b"\xff\xfe")})
+        result = _dump_list(state)
+        assert result["values"]["blob"] == "//4="
+
+    def test_memoryview_dict_key_becomes_base64(self):
+        state = _make_state(values={"data": {memoryview(b"\xff\xfe"): "x"}})
+        result = _dump_list(state)
+        assert result["values"]["data"] == {"//4=": "x"}
+
+    def test_zoneinfo_value_becomes_key_string(self):
+        state = _make_state(values={"tz": ZoneInfo("America/New_York")})
+        result = _dump_list(state)
+        assert result["values"]["tz"] == "America/New_York"
+
+    def test_timezone_utc_value_becomes_tzname(self):
+        state = _make_state(values={"tz": UTC})
+        result = _dump_list(state)
+        assert result["values"]["tz"] == "UTC"
+
+    def test_enum_with_bytes_value_as_key_becomes_base64(self):
+        class BinEnum(Enum):
+            RED = b"\xff"
+
+        state = _make_state(values={"data": {BinEnum.RED: "x"}})
+        result = _dump_list(state)
+        assert result["values"]["data"] == {"/w==": "x"}

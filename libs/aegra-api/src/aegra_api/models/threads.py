@@ -140,17 +140,17 @@ def _json_key(key: Any) -> str:
     """Render an arbitrary dict key as a JSON object key string.
 
     The fallback encoder never fires for dict keys, so keys that are not
-    already strings must be converted explicitly. bytes/bytearray encode
-    as standard Base64; other types mirror OPT_NON_STR_KEYS output.
+    already strings must be converted explicitly. bytes/bytearray/memoryview
+    encode as standard Base64; other types mirror OPT_NON_STR_KEYS output.
     """
     if isinstance(key, str):
         return key
-    if isinstance(key, (bytes, bytearray)):
-        return b64encode(key).decode("ascii")
+    if isinstance(key, (bytes, bytearray, memoryview)):
+        return b64encode(bytes(key)).decode("ascii")
     if isinstance(key, bool):
         return "true" if key else "false"
     if isinstance(key, Enum):
-        return str(key.value)
+        return _json_key(key.value)
     if isinstance(key, (datetime, date, time)):
         return key.isoformat()
     if isinstance(key, UUID):
@@ -160,53 +160,69 @@ def _json_key(key: Any) -> str:
     return str(key)
 
 
-def _to_jsonable(value: Any) -> Any:
+def _to_jsonable(value: Any, _seen: frozenset[int] = frozenset()) -> Any:
     """Recursively convert arbitrary thread state to a JSON-compatible value.
 
-    Handles bytes/bytearray as standard Base64, dict keys via _json_key,
-    Pydantic models via model_dump(), v1/LangChain objects via dict(),
-    NamedTuples via _asdict(), dataclasses via asdict(), set/frozenset/deque
-    as arrays, and other supported types. Unknown objects become null so the
-    endpoints never 500 on arbitrary checkpointed state.
+    Handles bytes/bytearray/memoryview as standard Base64, dict keys via
+    _json_key, Pydantic models via model_dump(), v1/LangChain objects via
+    dict(), NamedTuples via _asdict(), dataclasses via asdict(),
+    set/frozenset/deque as arrays, and other supported types. Unknown objects
+    and self-referential cycles become null so the endpoints never 500 on
+    arbitrary checkpointed state.
     """
     if value is None or isinstance(value, (str, int, bool)):
         return value
     if isinstance(value, float):
         return value if isfinite(value) else None
-    if isinstance(value, (bytes, bytearray)):
-        return b64encode(value).decode("ascii")
+    if isinstance(value, (bytes, bytearray, memoryview)):
+        return b64encode(bytes(value)).decode("ascii")
     if isinstance(value, dict):
-        return {_json_key(k): _to_jsonable(v) for k, v in value.items()}
+        if id(value) in _seen:
+            return None
+        seen = _seen | {id(value)}
+        return {_json_key(k): _to_jsonable(v, seen) for k, v in value.items()}
     # NamedTuple is a tuple subclass; convert via _asdict before the generic
     # container branch, otherwise it would serialize as an array.
     if isinstance(value, tuple) and hasattr(value, "_asdict"):
-        return _to_jsonable(value._asdict())
+        return _to_jsonable(value._asdict(), _seen)
     if isinstance(value, (list, tuple, set, frozenset, deque)):
-        return [_to_jsonable(item) for item in value]
-    if hasattr(value, "model_dump") and callable(value.model_dump):
-        return _to_jsonable(value.model_dump())
-    if hasattr(value, "dict") and callable(value.dict):
-        return _to_jsonable(value.dict())
+        if id(value) in _seen:
+            return None
+        seen = _seen | {id(value)}
+        return [_to_jsonable(item, seen) for item in value]
+    # Duck-typed model_dump/dict/_asdict: guard against class objects and
+    # callables that raise, so a bad object never escapes as a 500.
+    if not isinstance(value, type):
+        for attr in ("model_dump", "dict", "_asdict"):
+            method = getattr(value, attr, None)
+            if callable(method):
+                try:
+                    converted = method()
+                except Exception:  # noqa: BLE001
+                    return None
+                return _to_jsonable(converted, _seen)
     if isinstance(value, BaseException):
         return {"error": type(value).__name__, "message": str(value)}
-    if isinstance(value, (timezone, ZoneInfo)):
+    if isinstance(value, ZoneInfo):
+        return value.key
+    if isinstance(value, timezone):
         return value.tzname(None)
     if isinstance(value, (datetime, date, time)):
         return value.isoformat()
     if isinstance(value, timedelta):
         return value.total_seconds()
     if isinstance(value, Decimal):
-        return int(value) if value.as_tuple().exponent >= 0 else float(value)
+        return None if not value.is_finite() else int(value) if value.as_tuple().exponent >= 0 else float(value)
     if isinstance(value, UUID):
         return str(value)
     if isinstance(value, Enum):
-        return _to_jsonable(value.value)
+        return _to_jsonable(value.value, _seen)
     if isinstance(value, (IPv4Address, IPv4Interface, IPv4Network, IPv6Address, IPv6Interface, IPv6Network, Path)):
         return str(value)
     if isinstance(value, Pattern):
         return value.pattern
     if is_dataclass(value) and not isinstance(value, type):
-        return _to_jsonable(asdict(value))
+        return _to_jsonable(asdict(value), _seen)
     return None
 
 

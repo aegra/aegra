@@ -80,8 +80,9 @@ def is_docker_installed() -> bool:
 def is_docker_running() -> bool:
     """Check if a container runtime is available.
 
-    For Docker, checks if the daemon is responding. Podman is daemonless
-    and is always considered running if installed.
+    For Docker, checks if the daemon is responding.
+    For Podman, checks if the runtime is ready via ``podman info``
+    (the VM must be running on macOS/Windows).
     """
     if shutil.which("podman"):
         try:
@@ -270,25 +271,37 @@ def is_postgres_container_running(compose_file: Path | None = None) -> bool:
     except FileNotFoundError:
         return False
 
-    cmd = list(compose_cmd)
-
-    if compose_file:
-        cmd.extend(["-f", str(compose_file)])
-
-    cmd.extend(["ps", "--services", "--filter", "status=running"])
-
-    try:
-        result = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=10,
-        )
-        if result.returncode == 0:
-            running_services = result.stdout.strip().split("\n")
-            return "postgres" in running_services
-    except (subprocess.TimeoutExpired, FileNotFoundError):
-        pass
+    if compose_cmd == ["docker", "compose"]:
+        cmd = list(compose_cmd)
+        if compose_file:
+            cmd.extend(["-f", str(compose_file)])
+        cmd.extend(["ps", "--services", "--filter", "status=running"])
+        try:
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+            if result.returncode == 0:
+                return "postgres" in result.stdout.strip().split("\n")
+        except (subprocess.TimeoutExpired, FileNotFoundError):
+            pass
+    else:
+        try:
+            runtime = get_container_command()
+        except FileNotFoundError:
+            return False
+        cmd = [
+            runtime,
+            "ps",
+            "-q",
+            "--filter",
+            "label=com.docker.compose.service=postgres",
+            "--filter",
+            "status=running",
+        ]
+        try:
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+            if result.returncode == 0 and result.stdout.strip():
+                return True
+        except (subprocess.TimeoutExpired, FileNotFoundError):
+            pass
 
     return False
 
@@ -348,13 +361,14 @@ def start_postgres_container(compose_file: Path | None = None) -> bool:
         return False
 
     if not _supports_wait_flag(compose_cmd):
-        return _wait_for_postgres_ready(compose_file)
+        return _wait_for_postgres_ready(compose_cmd, compose_file)
 
     console.print("[green]PostgreSQL container started successfully![/green]")
     return True
 
 
 def _wait_for_postgres_ready(
+    compose_cmd: list[str],
     compose_file: Path | None = None,
     timeout_seconds: int = 30,
 ) -> bool:
@@ -365,11 +379,6 @@ def _wait_for_postgres_ready(
     Used when the compose tool doesn't support --wait.
     """
     import time
-
-    try:
-        compose_cmd = get_compose_command()
-    except FileNotFoundError:
-        return False
 
     check_cmd = list(compose_cmd)
     if compose_file:
@@ -445,12 +454,20 @@ def ensure_postgres_running(compose_file: Path | None = None) -> bool:
     # Step 2: Check if container runtime is ready
     if not is_docker_running():
         if shutil.which("podman") and not shutil.which("docker"):
-            console.print(
-                "\n[bold red]Podman is not ready.[/bold red]\n\n"
-                "Start your Podman machine:\n"
-                "  [cyan]podman machine start[/cyan]\n\n"
-                "[dim]Then run 'aegra dev' again.[/dim]"
-            )
+            system = platform.system().lower()
+            if system == "linux":
+                console.print(
+                    "\n[bold red]Podman is not working.[/bold red]\n\n"
+                    "Try running [cyan]podman info[/cyan] to diagnose the issue.\n\n"
+                    "[dim]Then run 'aegra dev' again.[/dim]"
+                )
+            else:
+                console.print(
+                    "\n[bold red]Podman is not ready.[/bold red]\n\n"
+                    "Start your Podman machine:\n"
+                    "  [cyan]podman machine start[/cyan]\n\n"
+                    "[dim]Then run 'aegra dev' again.[/dim]"
+                )
             return False
 
         console.print("\n[yellow]Docker is not running.[/yellow]")

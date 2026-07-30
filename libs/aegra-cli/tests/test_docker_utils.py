@@ -367,6 +367,38 @@ class TestIsPostgresContainerRunning:
             assert "-f" in call_args
             assert str(compose_file) in call_args
 
+    def test_returns_true_with_podman_compose_when_postgres_running(self) -> None:
+        """Test that podman-compose uses container runtime labels instead of --services."""
+        with (
+            patch("aegra_cli.utils.docker.get_compose_command") as mock_compose,
+            patch("aegra_cli.utils.docker.get_container_command") as mock_runtime,
+            patch("aegra_cli.utils.docker.subprocess.run") as mock_run,
+        ):
+            mock_compose.return_value = ["podman-compose"]
+            mock_runtime.return_value = "podman"
+            mock_run.return_value.returncode = 0
+            mock_run.return_value.stdout = "abc123\n"
+
+            assert is_postgres_container_running() is True
+
+            call_args = mock_run.call_args[0][0]
+            assert call_args[0] == "podman"
+            assert "label=com.docker.compose.service=postgres" in " ".join(call_args)
+
+    def test_returns_false_with_podman_compose_when_no_postgres(self) -> None:
+        """Test that podman-compose path returns False when no matching container."""
+        with (
+            patch("aegra_cli.utils.docker.get_compose_command") as mock_compose,
+            patch("aegra_cli.utils.docker.get_container_command") as mock_runtime,
+            patch("aegra_cli.utils.docker.subprocess.run") as mock_run,
+        ):
+            mock_compose.return_value = ["podman-compose"]
+            mock_runtime.return_value = "podman"
+            mock_run.return_value.returncode = 0
+            mock_run.return_value.stdout = ""
+
+            assert is_postgres_container_running() is False
+
 
 class TestFindComposeFile:
     """Tests for find_compose_file function."""
@@ -491,10 +523,8 @@ class TestDevCommandWithDockerCheck:
                 assert result.exit_code == 1
                 assert "Docker is not running" in result.output
 
-    def test_dev_fails_with_podman_guidance_when_podman_not_ready(
-        self, cli_runner, tmp_path
-    ) -> None:
-        """Test that dev shows Podman-specific guidance when only Podman is installed."""
+    def test_dev_fails_with_podman_vm_guidance_on_macos(self, cli_runner, tmp_path) -> None:
+        """Test that dev shows 'podman machine start' on macOS when Podman VM is down."""
         from pathlib import Path
 
         from aegra_cli.cli import cli
@@ -506,16 +536,44 @@ class TestDevCommandWithDockerCheck:
                 patch("aegra_cli.utils.docker.is_container_runtime_installed") as mock_installed,
                 patch("aegra_cli.utils.docker.is_docker_running") as mock_running,
                 patch("aegra_cli.utils.docker.shutil.which") as mock_which,
+                patch("aegra_cli.utils.docker.platform.system") as mock_system,
             ):
                 mock_installed.return_value = True
                 mock_running.return_value = False
                 mock_which.side_effect = lambda cmd: "/usr/bin/podman" if cmd == "podman" else None
+                mock_system.return_value = "Darwin"
 
                 result = cli_runner.invoke(cli, ["dev"])
 
                 assert result.exit_code == 1
                 assert "Podman is not ready" in result.output
                 assert "podman machine start" in result.output
+
+    def test_dev_fails_with_podman_diagnostic_guidance_on_linux(self, cli_runner, tmp_path) -> None:
+        """Test that dev shows diagnostic guidance on Linux when Podman fails."""
+        from pathlib import Path
+
+        from aegra_cli.cli import cli
+
+        with cli_runner.isolated_filesystem(temp_dir=tmp_path):
+            Path("aegra.json").write_text('{"graphs": {}}')
+
+            with (
+                patch("aegra_cli.utils.docker.is_container_runtime_installed") as mock_installed,
+                patch("aegra_cli.utils.docker.is_docker_running") as mock_running,
+                patch("aegra_cli.utils.docker.shutil.which") as mock_which,
+                patch("aegra_cli.utils.docker.platform.system") as mock_system,
+            ):
+                mock_installed.return_value = True
+                mock_running.return_value = False
+                mock_which.side_effect = lambda cmd: "/usr/bin/podman" if cmd == "podman" else None
+                mock_system.return_value = "Linux"
+
+                result = cli_runner.invoke(cli, ["dev"])
+
+                assert result.exit_code == 1
+                assert "Podman is not working" in result.output
+                assert "podman info" in result.output
 
 
 @pytest.fixture

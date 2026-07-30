@@ -24,7 +24,7 @@ from aegra_cli.templates import (
     get_dockerfile,
     slugify,
 )
-from aegra_cli.utils.docker import ensure_postgres_running
+from aegra_cli.utils.docker import ensure_postgres_running, get_compose_command
 
 console = Console()
 
@@ -642,7 +642,16 @@ def up(compose_file: Path | None, build: bool, services: tuple[str, ...]):
         )
     )
 
-    cmd = ["docker", "compose", "-f", str(compose_file)]
+    try:
+        compose_cmd = get_compose_command()
+    except FileNotFoundError:
+        console.print(
+            "[bold red]Error:[/bold red] No compose tool found.\n"
+            "Install Docker Desktop, podman-compose, or docker-compose."
+        )
+        sys.exit(1)
+
+    cmd = [*compose_cmd, "-f", str(compose_file)]
 
     cmd.append("up")
     cmd.append("-d")
@@ -664,19 +673,18 @@ def up(compose_file: Path | None, build: bool, services: tuple[str, ...]):
         if result.returncode == 0:
             console.print("\n[bold green]Services started successfully![/bold green]")
             console.print()
-            console.print(
-                "[dim]View logs:    docker compose -f " + str(compose_file) + " logs -f[/dim]"
-            )
+            compose_str = " ".join(compose_cmd)
+            console.print(f"[dim]View logs:    {compose_str} -f {compose_file} logs -f[/dim]")
             console.print("[dim]Stop:         aegra down[/dim]")
         else:
             console.print(
-                f"\n[bold red]Error:[/bold red] Docker Compose exited with code {result.returncode}"
+                f"\n[bold red]Error:[/bold red] Compose exited with code {result.returncode}"
             )
         sys.exit(result.returncode)
     except FileNotFoundError:
         console.print(
-            "[bold red]Error:[/bold red] docker is not installed or not in PATH.\n"
-            "Please install Docker Desktop or Docker Engine."
+            "[bold red]Error:[/bold red] Compose tool not found in PATH.\n"
+            "Install Docker Desktop, podman-compose, or docker-compose."
         )
         sys.exit(1)
 
@@ -736,7 +744,16 @@ def down(compose_file: Path | None, volumes: bool):
 
     console.print(f"\n[cyan]Stopping:[/cyan] {target_compose}")
 
-    cmd = ["docker", "compose", "-f", str(target_compose), "down"]
+    try:
+        compose_cmd = get_compose_command()
+    except FileNotFoundError:
+        console.print(
+            "[bold red]Error:[/bold red] No compose tool found.\n"
+            "Install Docker Desktop, podman-compose, or docker-compose."
+        )
+        sys.exit(1)
+
+    cmd = [*compose_cmd, "-f", str(target_compose), "down"]
 
     if volumes:
         cmd.append("-v")
@@ -753,8 +770,8 @@ def down(compose_file: Path | None, volumes: bool):
             sys.exit(1)
     except FileNotFoundError:
         console.print(
-            "[bold red]Error:[/bold red] docker is not installed or not in PATH.\n"
-            "Please install Docker Desktop or Docker Engine."
+            "[bold red]Error:[/bold red] Compose tool not found in PATH.\n"
+            "Install Docker Desktop, podman-compose, or docker-compose."
         )
         sys.exit(1)
 

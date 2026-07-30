@@ -442,8 +442,17 @@ def ensure_postgres_running(compose_file: Path | None = None) -> bool:
         )
         return False
 
-    # Step 2: Check if Docker daemon is running
+    # Step 2: Check if container runtime is ready
     if not is_docker_running():
+        if shutil.which("podman") and not shutil.which("docker"):
+            console.print(
+                "\n[bold red]Podman is not ready.[/bold red]\n\n"
+                "Start your Podman machine:\n"
+                "  [cyan]podman machine start[/cyan]\n\n"
+                "[dim]Then run 'aegra dev' again.[/dim]"
+            )
+            return False
+
         console.print("\n[yellow]Docker is not running.[/yellow]")
 
         # Try to start Docker automatically

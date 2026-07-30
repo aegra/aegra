@@ -479,15 +479,43 @@ class TestDevCommandWithDockerCheck:
                 patch("aegra_cli.utils.docker.is_container_runtime_installed") as mock_installed,
                 patch("aegra_cli.utils.docker.is_docker_running") as mock_running,
                 patch("aegra_cli.utils.docker.try_start_docker") as mock_try_start,
+                patch("aegra_cli.utils.docker.shutil.which") as mock_which,
             ):
                 mock_installed.return_value = True
                 mock_running.return_value = False
                 mock_try_start.return_value = False
+                mock_which.side_effect = lambda cmd: "/usr/bin/docker" if cmd == "docker" else None
 
                 result = cli_runner.invoke(cli, ["dev"])
 
                 assert result.exit_code == 1
                 assert "Docker is not running" in result.output
+
+    def test_dev_fails_with_podman_guidance_when_podman_not_ready(
+        self, cli_runner, tmp_path
+    ) -> None:
+        """Test that dev shows Podman-specific guidance when only Podman is installed."""
+        from pathlib import Path
+
+        from aegra_cli.cli import cli
+
+        with cli_runner.isolated_filesystem(temp_dir=tmp_path):
+            Path("aegra.json").write_text('{"graphs": {}}')
+
+            with (
+                patch("aegra_cli.utils.docker.is_container_runtime_installed") as mock_installed,
+                patch("aegra_cli.utils.docker.is_docker_running") as mock_running,
+                patch("aegra_cli.utils.docker.shutil.which") as mock_which,
+            ):
+                mock_installed.return_value = True
+                mock_running.return_value = False
+                mock_which.side_effect = lambda cmd: "/usr/bin/podman" if cmd == "podman" else None
+
+                result = cli_runner.invoke(cli, ["dev"])
+
+                assert result.exit_code == 1
+                assert "Podman is not ready" in result.output
+                assert "podman machine start" in result.output
 
 
 @pytest.fixture

@@ -368,36 +368,89 @@ class TestIsPostgresContainerRunning:
             assert str(compose_file) in call_args
 
     def test_returns_true_with_podman_compose_when_postgres_running(self) -> None:
-        """Test that podman-compose uses container runtime labels instead of --services."""
+        """Test that podman-compose derives runtime from compose_cmd and uses labels."""
         with (
             patch("aegra_cli.utils.docker.get_compose_command") as mock_compose,
-            patch("aegra_cli.utils.docker.get_container_command") as mock_runtime,
             patch("aegra_cli.utils.docker.subprocess.run") as mock_run,
+            patch("aegra_cli.utils.docker.Path.cwd") as mock_cwd,
         ):
             mock_compose.return_value = ["podman-compose"]
-            mock_runtime.return_value = "podman"
             mock_run.return_value.returncode = 0
             mock_run.return_value.stdout = "abc123\n"
+            mock_cwd.return_value = Path("/home/user/myproject")
 
             assert is_postgres_container_running() is True
 
             call_args = mock_run.call_args[0][0]
             assert call_args[0] == "podman"
-            assert "label=com.docker.compose.service=postgres" in " ".join(call_args)
+            cmd_str = " ".join(call_args)
+            assert "label=com.docker.compose.service=postgres" in cmd_str
+            assert "label=com.docker.compose.project=myproject" in cmd_str
 
     def test_returns_false_with_podman_compose_when_no_postgres(self) -> None:
         """Test that podman-compose path returns False when no matching container."""
         with (
             patch("aegra_cli.utils.docker.get_compose_command") as mock_compose,
-            patch("aegra_cli.utils.docker.get_container_command") as mock_runtime,
+            patch("aegra_cli.utils.docker.subprocess.run") as mock_run,
+            patch("aegra_cli.utils.docker.Path.cwd") as mock_cwd,
+        ):
+            mock_compose.return_value = ["podman-compose"]
+            mock_run.return_value.returncode = 0
+            mock_run.return_value.stdout = ""
+            mock_cwd.return_value = Path("/home/user/myproject")
+
+            assert is_postgres_container_running() is False
+
+    def test_runtime_derived_from_compose_cmd_not_container_command(self) -> None:
+        """Regression: when both runtimes are installed but Docker daemon is down,
+        runtime must come from compose_cmd, not get_container_command()."""
+        with (
+            patch("aegra_cli.utils.docker.get_compose_command") as mock_compose,
+            patch("aegra_cli.utils.docker.subprocess.run") as mock_run,
+            patch("aegra_cli.utils.docker.Path.cwd") as mock_cwd,
+        ):
+            mock_compose.return_value = ["podman-compose"]
+            mock_run.return_value.returncode = 0
+            mock_run.return_value.stdout = "abc123\n"
+            mock_cwd.return_value = Path("/home/user/aegra")
+
+            assert is_postgres_container_running() is True
+
+            call_args = mock_run.call_args[0][0]
+            assert call_args[0] == "podman"
+
+    def test_docker_compose_v1_derives_docker_runtime(self) -> None:
+        """Test that docker-compose v1 derives 'docker' as the runtime."""
+        with (
+            patch("aegra_cli.utils.docker.get_compose_command") as mock_compose,
+            patch("aegra_cli.utils.docker.subprocess.run") as mock_run,
+            patch("aegra_cli.utils.docker.Path.cwd") as mock_cwd,
+        ):
+            mock_compose.return_value = ["docker-compose"]
+            mock_run.return_value.returncode = 0
+            mock_run.return_value.stdout = "abc123\n"
+            mock_cwd.return_value = Path("/home/user/aegra")
+
+            assert is_postgres_container_running() is True
+
+            call_args = mock_run.call_args[0][0]
+            assert call_args[0] == "docker"
+
+    def test_project_scoped_from_compose_file_parent(self) -> None:
+        """Test that project label uses compose file's parent directory name."""
+        with (
+            patch("aegra_cli.utils.docker.get_compose_command") as mock_compose,
             patch("aegra_cli.utils.docker.subprocess.run") as mock_run,
         ):
             mock_compose.return_value = ["podman-compose"]
-            mock_runtime.return_value = "podman"
             mock_run.return_value.returncode = 0
-            mock_run.return_value.stdout = ""
+            mock_run.return_value.stdout = "abc123\n"
 
-            assert is_postgres_container_running() is False
+            compose_file = Path("/opt/apps/MyApp/docker-compose.yml")
+            assert is_postgres_container_running(compose_file) is True
+
+            cmd_str = " ".join(mock_run.call_args[0][0])
+            assert "label=com.docker.compose.project=myapp" in cmd_str
 
 
 class TestFindComposeFile:

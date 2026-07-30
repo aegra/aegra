@@ -283,16 +283,16 @@ def is_postgres_container_running(compose_file: Path | None = None) -> bool:
         except (subprocess.TimeoutExpired, FileNotFoundError):
             pass
     else:
-        try:
-            runtime = get_container_command()
-        except FileNotFoundError:
-            return False
+        runtime = compose_cmd[0].split("-")[0]
+        project = (compose_file.parent.name if compose_file else Path.cwd().name).lower()
         cmd = [
             runtime,
             "ps",
             "-q",
             "--filter",
             "label=com.docker.compose.service=postgres",
+            "--filter",
+            f"label=com.docker.compose.project={project}",
             "--filter",
             "status=running",
         ]

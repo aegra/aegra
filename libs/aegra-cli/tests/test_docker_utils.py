@@ -48,6 +48,8 @@ class TestGetComposeCommand:
                     mock_result.returncode = 0
                 elif cmd == ["docker", "info"]:
                     mock_result.returncode = 1
+                elif cmd == ["podman", "info"]:
+                    mock_result.returncode = 0
                 else:
                     mock_result.returncode = 1
                 return mock_result
@@ -65,12 +67,41 @@ class TestGetComposeCommand:
             patch("aegra_cli.utils.docker.subprocess.run") as mock_run,
             patch("aegra_cli.utils.docker.shutil.which") as mock_which,
         ):
-            mock_run.return_value.returncode = 1
+
+            def run_side_effect(cmd, **kwargs):
+                mock_result = MagicMock()
+                if cmd == ["podman", "info"]:
+                    mock_result.returncode = 0
+                else:
+                    mock_result.returncode = 1
+                return mock_result
+
+            mock_run.side_effect = run_side_effect
             mock_which.side_effect = lambda cmd: (
                 "/usr/bin/podman-compose" if cmd == "podman-compose" else None
             )
             result = get_compose_command()
             assert result == ["podman-compose"]
+
+    def test_skips_podman_compose_when_podman_runtime_unavailable(self) -> None:
+        """Test that podman-compose is skipped when Podman runtime isn't available."""
+        with (
+            patch("aegra_cli.utils.docker.subprocess.run") as mock_run,
+            patch("aegra_cli.utils.docker.shutil.which") as mock_which,
+        ):
+
+            def run_side_effect(cmd, **kwargs):
+                mock_result = MagicMock()
+                mock_result.returncode = 1
+                return mock_result
+
+            mock_run.side_effect = run_side_effect
+            mock_which.side_effect = lambda cmd: {
+                "podman-compose": "/usr/bin/podman-compose",
+                "docker-compose": "/usr/bin/docker-compose",
+            }.get(cmd)
+            result = get_compose_command()
+            assert result == ["docker-compose"]
 
     def test_returns_docker_compose_v1_as_last_fallback(self) -> None:
         """Test fallback to standalone docker-compose v1."""
@@ -104,7 +135,15 @@ class TestGetComposeCommand:
             patch("aegra_cli.utils.docker.subprocess.run") as mock_run,
             patch("aegra_cli.utils.docker.shutil.which") as mock_which,
         ):
-            mock_run.side_effect = sp.TimeoutExpired("docker", 10)
+
+            def run_side_effect(cmd, **kwargs):
+                if cmd == ["podman", "info"]:
+                    mock_result = MagicMock()
+                    mock_result.returncode = 0
+                    return mock_result
+                raise sp.TimeoutExpired("docker", 10)
+
+            mock_run.side_effect = run_side_effect
             mock_which.side_effect = lambda cmd: (
                 "/usr/bin/podman-compose" if cmd == "podman-compose" else None
             )
@@ -451,6 +490,25 @@ class TestIsPostgresContainerRunning:
 
             cmd_str = " ".join(mock_run.call_args[0][0])
             assert "label=com.docker.compose.project=myapp" in cmd_str
+
+    def test_project_from_compose_project_name_env(self) -> None:
+        """Test that COMPOSE_PROJECT_NAME env var takes precedence over directory name."""
+        with (
+            patch("aegra_cli.utils.docker.get_compose_command") as mock_compose,
+            patch("aegra_cli.utils.docker.subprocess.run") as mock_run,
+            patch("aegra_cli.utils.docker.Path.cwd") as mock_cwd,
+            patch.dict("os.environ", {"COMPOSE_PROJECT_NAME": "custom-project"}),
+        ):
+            mock_compose.return_value = ["podman-compose"]
+            mock_run.return_value.returncode = 0
+            mock_run.return_value.stdout = "abc123\n"
+            mock_cwd.return_value = Path("/home/user/myproject")
+
+            assert is_postgres_container_running() is True
+
+            cmd_str = " ".join(mock_run.call_args[0][0])
+            assert "label=com.docker.compose.project=custom-project" in cmd_str
+            assert "myproject" not in cmd_str
 
 
 class TestFindComposeFile:

@@ -4,6 +4,7 @@ This module provides helpers to detect Docker installation, check if Docker is r
 and manage PostgreSQL containers for local development.
 """
 
+import os
 import platform
 import shutil
 import subprocess
@@ -41,7 +42,16 @@ def get_compose_command() -> list[str]:
         pass
 
     if shutil.which("podman-compose"):
-        return ["podman-compose"]
+        try:
+            podman_info = subprocess.run(
+                ["podman", "info"],
+                capture_output=True,
+                timeout=10,
+            )
+            if podman_info.returncode == 0:
+                return ["podman-compose"]
+        except (subprocess.TimeoutExpired, FileNotFoundError):
+            pass
 
     if shutil.which("docker-compose"):
         return ["docker-compose"]
@@ -284,7 +294,9 @@ def is_postgres_container_running(compose_file: Path | None = None) -> bool:
             pass
     else:
         runtime = compose_cmd[0].split("-")[0]
-        project = (compose_file.parent.name if compose_file else Path.cwd().name).lower()
+        project = os.environ.get("COMPOSE_PROJECT_NAME") or (
+            compose_file.parent.name if compose_file else Path.cwd().name
+        ).lower()
         cmd = [
             runtime,
             "ps",

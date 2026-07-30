@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -22,12 +22,42 @@ from aegra_cli.utils.docker import (
 class TestGetComposeCommand:
     """Tests for get_compose_command function."""
 
-    def test_returns_docker_compose_when_plugin_available(self) -> None:
-        """Test that docker compose v2 plugin is preferred."""
+    def test_returns_docker_compose_when_plugin_and_daemon_available(self) -> None:
+        """Test that docker compose v2 plugin is preferred when daemon is running."""
         with patch("aegra_cli.utils.docker.subprocess.run") as mock_run:
             mock_run.return_value.returncode = 0
             result = get_compose_command()
             assert result == ["docker", "compose"]
+            assert mock_run.call_count == 2
+            mock_run.assert_any_call(
+                ["docker", "compose", "version"], capture_output=True, timeout=10
+            )
+            mock_run.assert_any_call(["docker", "info"], capture_output=True, timeout=10)
+
+    def test_falls_back_when_docker_daemon_not_running(self) -> None:
+        """Test fallback to podman-compose when Docker CLI exists but daemon is down."""
+
+        with (
+            patch("aegra_cli.utils.docker.subprocess.run") as mock_run,
+            patch("aegra_cli.utils.docker.shutil.which") as mock_which,
+        ):
+
+            def run_side_effect(cmd, **kwargs):
+                mock_result = MagicMock()
+                if cmd == ["docker", "compose", "version"]:
+                    mock_result.returncode = 0
+                elif cmd == ["docker", "info"]:
+                    mock_result.returncode = 1
+                else:
+                    mock_result.returncode = 1
+                return mock_result
+
+            mock_run.side_effect = run_side_effect
+            mock_which.side_effect = lambda cmd: (
+                "/usr/bin/podman-compose" if cmd == "podman-compose" else None
+            )
+            result = get_compose_command()
+            assert result == ["podman-compose"]
 
     def test_returns_podman_compose_when_docker_plugin_unavailable(self) -> None:
         """Test fallback to podman-compose when docker compose plugin fails."""
@@ -168,10 +198,31 @@ class TestIsDockerRunning:
             )
 
     def test_returns_true_when_podman_available(self) -> None:
-        """Test that function returns True when podman is installed (daemonless)."""
-        with patch("aegra_cli.utils.docker.shutil.which") as mock_which:
+        """Test that function returns True when podman info succeeds."""
+        with (
+            patch("aegra_cli.utils.docker.shutil.which") as mock_which,
+            patch("aegra_cli.utils.docker.subprocess.run") as mock_run,
+        ):
             mock_which.return_value = "/usr/bin/podman"
+            mock_run.return_value.returncode = 0
             assert is_docker_running() is True
+            mock_run.assert_called_once_with(
+                ["podman", "info"],
+                capture_output=True,
+                timeout=10,
+            )
+
+    def test_returns_false_when_podman_not_ready(self) -> None:
+        """Test that function returns False when podman info fails (e.g., VM not running)."""
+        with (
+            patch("aegra_cli.utils.docker.shutil.which") as mock_which,
+            patch("aegra_cli.utils.docker.is_docker_installed") as mock_installed,
+            patch("aegra_cli.utils.docker.subprocess.run") as mock_run,
+        ):
+            mock_which.return_value = "/usr/bin/podman"
+            mock_installed.return_value = False
+            mock_run.return_value.returncode = 1
+            assert is_docker_running() is False
 
     def test_returns_false_when_docker_not_installed(self) -> None:
         """Test that function returns False when neither docker nor podman is installed."""

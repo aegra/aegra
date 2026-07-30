@@ -30,7 +30,13 @@ def get_compose_command() -> list[str]:
             timeout=10,
         )
         if result.returncode == 0:
-            return ["docker", "compose"]
+            daemon = subprocess.run(
+                ["docker", "info"],
+                capture_output=True,
+                timeout=10,
+            )
+            if daemon.returncode == 0:
+                return ["docker", "compose"]
     except (subprocess.TimeoutExpired, FileNotFoundError):
         pass
 
@@ -78,7 +84,16 @@ def is_docker_running() -> bool:
     and is always considered running if installed.
     """
     if shutil.which("podman"):
-        return True
+        try:
+            result = subprocess.run(
+                ["podman", "info"],
+                capture_output=True,
+                timeout=10,
+            )
+            if result.returncode == 0:
+                return True
+        except (subprocess.TimeoutExpired, FileNotFoundError):
+            pass
 
     if not is_docker_installed():
         return False
@@ -345,17 +360,33 @@ def _wait_for_postgres_ready(
 ) -> bool:
     """Poll PostgreSQL container until it accepts connections.
 
+    Uses pg_isready via compose exec for a true readiness check,
+    rather than just checking container status.
     Used when the compose tool doesn't support --wait.
     """
     import time
+
+    try:
+        compose_cmd = get_compose_command()
+    except FileNotFoundError:
+        return False
+
+    check_cmd = list(compose_cmd)
+    if compose_file:
+        check_cmd.extend(["-f", str(compose_file)])
+    check_cmd.extend(["exec", "-T", "postgres", "pg_isready", "-U", "postgres"])
 
     console.print("[dim]Waiting for PostgreSQL to be ready...[/dim]")
     start_time = time.time()
 
     while time.time() - start_time < timeout_seconds:
-        if is_postgres_container_running(compose_file):
-            console.print("[green]PostgreSQL container started successfully![/green]")
-            return True
+        try:
+            result = subprocess.run(check_cmd, capture_output=True, timeout=10)
+            if result.returncode == 0:
+                console.print("[green]PostgreSQL container started successfully![/green]")
+                return True
+        except (subprocess.TimeoutExpired, FileNotFoundError):
+            pass
         time.sleep(1)
 
     console.print(f"[red]PostgreSQL did not become ready within {timeout_seconds}s[/red]")

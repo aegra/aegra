@@ -28,6 +28,19 @@ from aegra_cli.utils.docker import ensure_postgres_running, get_compose_command
 
 console = Console()
 
+
+def _resolve_compose_command() -> list[str]:
+    """Resolve the compose command or exit with an error."""
+    try:
+        return get_compose_command()
+    except FileNotFoundError:
+        console.print(
+            "[bold red]Error:[/bold red] No compose tool found.\n"
+            "Install Docker Desktop, podman-compose, or docker-compose."
+        )
+        sys.exit(1)
+
+
 # Default values for server options (single source of truth)
 _DEFAULT_DEV_HOST = "127.0.0.1"
 _DEFAULT_SERVE_HOST = "0.0.0.0"  # noqa: S104  # nosec B104 - intentional for Docker
@@ -607,9 +620,8 @@ def serve(ctx: click.Context, host: str, port: int, app: str, config_file: Path 
 )
 @click.argument("services", nargs=-1)
 def up(compose_file: Path | None, build: bool, services: tuple[str, ...]):
-    """Start services with Docker Compose.
+    """Start services with the detected compose tool.
 
-    Uses docker-compose.yml which contains both postgres and the API service.
     Auto-generates Docker files if they don't exist.
 
     Examples:
@@ -642,14 +654,7 @@ def up(compose_file: Path | None, build: bool, services: tuple[str, ...]):
         )
     )
 
-    try:
-        compose_cmd = get_compose_command()
-    except FileNotFoundError:
-        console.print(
-            "[bold red]Error:[/bold red] No compose tool found.\n"
-            "Install Docker Desktop, podman-compose, or docker-compose."
-        )
-        sys.exit(1)
+    compose_cmd = _resolve_compose_command()
 
     cmd = [*compose_cmd, "-f", str(compose_file)]
 
@@ -706,9 +711,7 @@ def up(compose_file: Path | None, build: bool, services: tuple[str, ...]):
     help="Remove named volumes declared in the compose file.",
 )
 def down(compose_file: Path | None, volumes: bool):
-    """Stop services with Docker Compose.
-
-    Runs 'docker compose down' to stop and remove containers.
+    """Stop services with the detected compose tool.
 
     Examples:
 
@@ -744,14 +747,7 @@ def down(compose_file: Path | None, volumes: bool):
 
     console.print(f"\n[cyan]Stopping:[/cyan] {target_compose}")
 
-    try:
-        compose_cmd = get_compose_command()
-    except FileNotFoundError:
-        console.print(
-            "[bold red]Error:[/bold red] No compose tool found.\n"
-            "Install Docker Desktop, podman-compose, or docker-compose."
-        )
-        sys.exit(1)
+    compose_cmd = _resolve_compose_command()
 
     cmd = [*compose_cmd, "-f", str(target_compose), "down"]
 

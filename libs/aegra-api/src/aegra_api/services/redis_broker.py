@@ -22,6 +22,7 @@ from redis import RedisError
 from aegra_api.core.active_runs import active_runs
 from aegra_api.core.redis_manager import redis_manager
 from aegra_api.core.serializers import GeneralSerializer
+from aegra_api.models.enums import RunCancellationAction
 from aegra_api.services.base_broker import BaseBrokerManager, BaseRunBroker
 from aegra_api.settings import settings
 from aegra_api.utils import generate_event_id
@@ -146,7 +147,7 @@ class RedisRunBroker(BaseRunBroker):
         pipe.expire(self._cache_key, _REPLAY_TTL_SECONDS)
         pipe.incr(self._counter_key)
         pipe.expire(self._counter_key, _REPLAY_TTL_SECONDS)
-        await pipe.execute()  # type: ignore[invalid-await]
+        await pipe.execute()
 
     async def _publish_event(self, message: str) -> None:
         """Broadcast the event to live subscribers."""
@@ -375,7 +376,7 @@ class RedisBrokerManager(BaseBrokerManager):
             self._listener_task = None
         logger.debug("Redis broker manager stopped")
 
-    async def request_cancel(self, run_id: str, action: str = "cancel") -> None:
+    async def request_cancel(self, run_id: str, action: RunCancellationAction = "cancel") -> None:
         """Broadcast a cancel command via Redis pub/sub."""
         message = json.dumps({"run_id": run_id, "action": action})
         try:
@@ -392,7 +393,7 @@ class RedisBrokerManager(BaseBrokerManager):
         """Read the current event sequence counter from Redis (O(1) GET)."""
         try:
             client = redis_manager.get_client()
-            value = await client.get(f"{self._counter_prefix}{run_id}")  # type: ignore[invalid-await]
+            value = await client.get(f"{self._counter_prefix}{run_id}")
             if value is not None:
                 return int(value)
         except (RedisError, ValueError) as e:
@@ -409,8 +410,8 @@ class RedisBrokerManager(BaseBrokerManager):
         counter_key = f"{self._counter_prefix}{run_id}"
         try:
             client = redis_manager.get_client()
-            seq = await client.incr(counter_key)  # type: ignore[invalid-await]
-            await client.expire(counter_key, _REPLAY_TTL_SECONDS)  # type: ignore[invalid-await]
+            seq = await client.incr(counter_key)
+            await client.expire(counter_key, _REPLAY_TTL_SECONDS)
             return generate_event_id(run_id, int(seq))
         except RedisError as e:
             logger.warning(f"Failed to allocate event_id for run {run_id}: {e}")

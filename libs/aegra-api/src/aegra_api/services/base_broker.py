@@ -4,6 +4,8 @@ from abc import ABC, abstractmethod
 from collections.abc import AsyncIterator
 from typing import Any
 
+from aegra_api.models.enums import RunCancellationAction
+
 
 class BaseRunBroker(ABC):
     """Abstract base class for a run-specific event broker.
@@ -75,7 +77,7 @@ class BaseBrokerManager(ABC):
         """Stop background tasks and release resources"""
 
     @abstractmethod
-    async def request_cancel(self, run_id: str, action: str = "cancel") -> None:
+    async def request_cancel(self, run_id: str, action: RunCancellationAction = "cancel") -> None:
         """Request cancellation of a run.
 
         In single-instance mode, cancels the local asyncio task directly.

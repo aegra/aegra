@@ -21,6 +21,7 @@ from aegra_api.core.orm import Thread as ThreadORM
 from aegra_api.core.orm import _get_session_maker, get_session
 from aegra_api.core.sse import create_end_event, get_sse_headers, make_sse_response, sse_to_bytes
 from aegra_api.models import Run, RunCreate, RunStatus, User
+from aegra_api.models.enums import RunCancellationAction
 from aegra_api.models.errors import CONFLICT, NOT_FOUND, SSE_RESPONSE
 from aegra_api.services.broker import broker_manager
 from aegra_api.services.run_preparation import _prepare_run
@@ -44,7 +45,7 @@ DEFAULT_STREAM_MODES = ["values"]
 async def _request_run_interruption(
     session: AsyncSession,
     run_orm: RunORM,
-    action: str,
+    action: RunCancellationAction,
 ) -> None:
     """Interrupt a run without overwriting a terminal or live-owned run."""
     if run_orm.status in TERMINAL_STATES:
@@ -54,7 +55,12 @@ async def _request_run_interruption(
     has_live_local_task = task is not None and not task.done()
     reconciled = False
     if not has_live_local_task:
-        reconciled = await interrupt_unowned_run(session, run_orm.run_id, run_orm.thread_id)
+        reconciled = await interrupt_unowned_run(
+            session,
+            run_orm.run_id,
+            run_orm.thread_id,
+            user_id=run_orm.user_id,
+        )
 
     if reconciled:
         return
@@ -455,7 +461,7 @@ async def cancel_run_endpoint(
     thread_id: str,
     run_id: str,
     wait: int = Query(0, ge=0, le=1, description="Set to 1 to wait for the run task to settle before returning."),
-    action: str = Query(
+    action: RunCancellationAction = Query(
         "cancel",
         pattern="^(cancel|interrupt)$",
         description="Cancellation strategy: 'cancel' for hard cancel, 'interrupt' for cooperative interrupt.",

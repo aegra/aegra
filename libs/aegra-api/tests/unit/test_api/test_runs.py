@@ -291,7 +291,7 @@ class TestRunsEndpoints:
                 mock_session,
             )
 
-            mock_reconcile.assert_awaited_once_with(mock_session, run_id, thread_id)
+            mock_reconcile.assert_awaited_once_with(mock_session, run_id, thread_id, user_id=mock_user.identity)
             mock_interrupt.assert_called_once_with(run_id)
             mock_session.execute.assert_not_awaited()
             mock_session.commit.assert_not_awaited()

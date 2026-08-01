@@ -3,7 +3,7 @@
   "info": {
     "title": "Aegra",
     "description": "Production-ready Agent Protocol server",
-    "version": "0.9.25"
+    "version": "0.9.26"
   },
   "paths": {
     "/info": {
@@ -2295,8 +2295,11 @@
             "in": "query",
             "required": false,
             "schema": {
+              "enum": [
+                "cancel",
+                "interrupt"
+              ],
               "type": "string",
-              "pattern": "^(cancel|interrupt)$",
               "description": "Cancellation strategy: 'cancel' for hard cancel, 'interrupt' for cooperative interrupt.",
               "default": "cancel",
               "title": "Action"

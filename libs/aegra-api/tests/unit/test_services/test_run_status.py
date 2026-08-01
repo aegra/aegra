@@ -4,7 +4,13 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from aegra_api.services.run_status import _safe_serialize, interrupt_unowned_run, set_thread_status, update_run_status
+from aegra_api.services.run_status import (
+    _safe_serialize,
+    interrupt_unowned_run,
+    set_thread_status,
+    set_thread_status_if_no_active_runs,
+    update_run_status,
+)
 
 
 def _make_mock_session() -> AsyncMock:
@@ -99,6 +105,36 @@ class TestSetThreadStatus:
             await set_thread_status(session, "thread-missing", "idle")
 
 
+class TestSetThreadStatusIfNoActiveRuns:
+    @pytest.mark.asyncio
+    async def test_updates_owned_threads_without_committing(self) -> None:
+        session = _make_mock_session()
+
+        await set_thread_status_if_no_active_runs(
+            session,
+            ["thread-1"],
+            "idle",
+            user_id="user-1",
+        )
+
+        session.execute.assert_awaited_once()
+        statement = session.execute.await_args.args[0]
+        compiled = statement.compile()
+        sql = str(compiled)
+        assert "thread.user_id" in sql
+        assert "runs.user_id" in sql
+        assert list(compiled.params.values()).count("user-1") == 2
+        session.commit.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_skips_database_when_thread_ids_are_empty(self) -> None:
+        session = _make_mock_session()
+
+        await set_thread_status_if_no_active_runs(session, [], "idle", user_id="user-1")
+
+        session.execute.assert_not_awaited()
+
+
 class TestInterruptUnownedRun:
     @pytest.mark.asyncio
     async def test_reconciles_run_and_thread_in_one_transaction(self) -> None:
@@ -111,10 +147,14 @@ class TestInterruptUnownedRun:
             "aegra_api.services.run_status.set_thread_status_if_no_active_runs",
             new_callable=AsyncMock,
         ) as mock_set_thread:
-            interrupted = await interrupt_unowned_run(session, "run-1", "thread-1")
+            interrupted = await interrupt_unowned_run(session, "run-1", "thread-1", user_id="user-1")
 
         assert interrupted is True
-        mock_set_thread.assert_awaited_once_with(session, ["thread-1"], "idle")
+        statement = session.execute.await_args.args[0]
+        compiled = statement.compile()
+        assert "runs.user_id" in str(compiled)
+        assert "user-1" in compiled.params.values()
+        mock_set_thread.assert_awaited_once_with(session, ["thread-1"], "idle", user_id="user-1")
         session.commit.assert_awaited_once()
 
     @pytest.mark.asyncio
@@ -128,7 +168,7 @@ class TestInterruptUnownedRun:
             "aegra_api.services.run_status.set_thread_status_if_no_active_runs",
             new_callable=AsyncMock,
         ) as mock_set_thread:
-            interrupted = await interrupt_unowned_run(session, "run-1", "thread-1")
+            interrupted = await interrupt_unowned_run(session, "run-1", "thread-1", user_id="user-1")
 
         assert interrupted is False
         mock_set_thread.assert_not_awaited()

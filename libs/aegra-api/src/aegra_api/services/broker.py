@@ -12,6 +12,7 @@ from typing import Any
 import structlog
 
 from aegra_api.core.active_runs import active_runs
+from aegra_api.models.enums import RunCancellationAction
 from aegra_api.services.base_broker import BaseBrokerManager, BaseRunBroker
 from aegra_api.settings import settings
 from aegra_api.utils import generate_event_id
@@ -145,7 +146,7 @@ class BrokerManager(BaseBrokerManager):
             with contextlib.suppress(asyncio.CancelledError):
                 await self._cleanup_task
 
-    async def request_cancel(self, run_id: str, action: str = "cancel") -> None:
+    async def request_cancel(self, run_id: str, action: RunCancellationAction = "cancel") -> None:
         """Cancel a run locally by cancelling its asyncio task."""
         task = active_runs.get(run_id)
         if task is None or task.done():

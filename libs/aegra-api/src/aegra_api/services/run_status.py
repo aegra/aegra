@@ -77,6 +77,8 @@ async def set_thread_status_if_no_active_runs(
     session: AsyncSession,
     thread_ids: Collection[str],
     status: str,
+    *,
+    user_id: str,
 ) -> None:
     """Update threads that no longer have a pending or running run.
 
@@ -91,6 +93,7 @@ async def set_thread_status_if_no_active_runs(
         select(RunORM.run_id)
         .where(
             RunORM.thread_id == ThreadORM.thread_id,
+            RunORM.user_id == user_id,
             RunORM.status.in_(ACTIVE_RUN_STATES),
         )
         .correlate(ThreadORM)
@@ -99,6 +102,7 @@ async def set_thread_status_if_no_active_runs(
         update(ThreadORM)
         .where(
             ThreadORM.thread_id.in_(thread_ids),
+            ThreadORM.user_id == user_id,
             ~active_run_exists,
         )
         .values(status=validated, updated_at=datetime.now(UTC))
@@ -109,6 +113,8 @@ async def interrupt_unowned_run(
     session: AsyncSession,
     run_id: str,
     thread_id: str,
+    *,
+    user_id: str,
 ) -> bool:
     """Interrupt an active run only when it has no live database owner.
 
@@ -123,6 +129,7 @@ async def interrupt_unowned_run(
             .where(
                 RunORM.run_id == run_id,
                 RunORM.thread_id == thread_id,
+                RunORM.user_id == user_id,
                 RunORM.status.in_(ACTIVE_RUN_STATES),
                 or_(
                     RunORM.claimed_by.is_(None),
@@ -141,7 +148,7 @@ async def interrupt_unowned_run(
     if result.scalar_one_or_none() is None:
         return False
 
-    await set_thread_status_if_no_active_runs(session, [thread_id], "idle")
+    await set_thread_status_if_no_active_runs(session, [thread_id], "idle", user_id=user_id)
     await session.commit()
     logger.info("Interrupted unowned run", run_id=run_id, thread_id=thread_id)
     return True

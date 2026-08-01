@@ -158,16 +158,22 @@ class TestMarkPermanentlyFailed:
         """A run deleted between retry check and update must not count as failed."""
         session = AsyncMock()
         mock_result = MagicMock()
-        mock_result.fetchall.return_value = [("run-1", "thread-1")]
+        mock_result.fetchall.return_value = [("run-1", "thread-1", "user-1")]
         session.execute = AsyncMock(return_value=mock_result)
         session.commit = AsyncMock()
         maker = _make_session_maker(session)
 
-        with patch("aegra_api.services.lease_reaper._get_session_maker", return_value=maker):
+        with (
+            patch("aegra_api.services.lease_reaper._get_session_maker", return_value=maker),
+            patch(
+                "aegra_api.services.lease_reaper.set_thread_status_if_no_active_runs",
+                new_callable=AsyncMock,
+            ) as mock_set_thread,
+        ):
             failed = await LeaseReaper._mark_permanently_failed(["run-1", "run-gone"])
 
         assert failed == ["run-1"]
-        assert session.execute.await_count == 2
+        mock_set_thread.assert_awaited_once_with(session, {"thread-1"}, "error", user_id="user-1")
         session.commit.assert_awaited_once()
 
 

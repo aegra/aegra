@@ -221,12 +221,15 @@ class LeaseReaper:
                     lease_expires_at=None,
                     updated_at=datetime.now(UTC),
                 )
-                .returning(RunORM.run_id, RunORM.thread_id)
+                .returning(RunORM.run_id, RunORM.thread_id, RunORM.user_id)
             )
             failed_runs = result.fetchall()
             failed_ids = [row[0] for row in failed_runs]
-            thread_ids = {row[1] for row in failed_runs}
-            await set_thread_status_if_no_active_runs(session, thread_ids, "error")
+            thread_ids_by_user: dict[str, set[str]] = {}
+            for _, thread_id, user_id in failed_runs:
+                thread_ids_by_user.setdefault(user_id, set()).add(thread_id)
+            for user_id, thread_ids in thread_ids_by_user.items():
+                await set_thread_status_if_no_active_runs(session, thread_ids, "error", user_id=user_id)
             await session.commit()
             return failed_ids
 

@@ -270,13 +270,19 @@ class TestRunsEndpoints:
             updated_at=datetime.now(UTC),
         )
 
-        # scalar called twice: first to find for update, second to return
-        mock_session.scalar.side_effect = [run_orm, run_orm]
+        mock_session.scalar.return_value = run_orm
 
-        with patch(
-            "aegra_api.api.runs.streaming_service.interrupt_run",
-            new_callable=AsyncMock,
-        ) as mock_interrupt:
+        with (
+            patch(
+                "aegra_api.api.runs.interrupt_unowned_run",
+                new_callable=AsyncMock,
+                return_value=False,
+            ) as mock_reconcile,
+            patch(
+                "aegra_api.api.runs.streaming_service.interrupt_run",
+                new_callable=AsyncMock,
+            ) as mock_interrupt,
+        ):
             result = await update_run(
                 thread_id,
                 run_id,
@@ -285,10 +291,46 @@ class TestRunsEndpoints:
                 mock_session,
             )
 
+            mock_reconcile.assert_awaited_once_with(mock_session, run_id, thread_id)
             mock_interrupt.assert_called_once_with(run_id)
-            mock_session.execute.assert_called_once()  # Update statement
-            mock_session.commit.assert_called_once()
+            mock_session.execute.assert_not_awaited()
+            mock_session.commit.assert_not_awaited()
             assert result.run_id == run_id
+
+    @pytest.mark.asyncio
+    async def test_update_run_does_not_overwrite_terminal_status(
+        self,
+        mock_user: User,
+        mock_session: AsyncMock,
+    ) -> None:
+        """A late interrupt request must leave a completed run unchanged."""
+        run_orm = RunORM(
+            run_id="run-123",
+            thread_id="test-thread",
+            assistant_id="agent",
+            user_id=mock_user.identity,
+            status="success",
+            input={},
+            created_at=datetime.now(UTC),
+            updated_at=datetime.now(UTC),
+        )
+        mock_session.scalar.return_value = run_orm
+
+        with (
+            patch("aegra_api.api.runs.interrupt_unowned_run", new_callable=AsyncMock) as mock_reconcile,
+            patch("aegra_api.api.runs.streaming_service.interrupt_run", new_callable=AsyncMock) as mock_interrupt,
+        ):
+            result = await update_run(
+                "test-thread",
+                "run-123",
+                RunStatus(run_id="run-123", status="interrupted"),
+                mock_user,
+                mock_session,
+            )
+
+        assert result.status == "success"
+        mock_reconcile.assert_not_awaited()
+        mock_interrupt.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_update_run_not_found(self, mock_user: User, mock_session: AsyncMock) -> None:

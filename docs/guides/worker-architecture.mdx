@@ -186,7 +186,11 @@ sequenceDiagram
 
 ## Crash recovery
 
-Every instance runs a `LeaseReaper` background task that scans for runs with expired leases. When a worker crashes (OOM, kill signal, network partition), its heartbeat stops and the lease expires. The reaper resets the run to `pending` and re-enqueues it. The new worker resumes from the last checkpoint.
+Every instance runs a `LeaseReaper` background task that scans for runs with expired leases.
+When a worker crashes (OOM, kill signal, network partition), its heartbeat stops and the lease expires.
+The reaper resets the run to `pending` and re-enqueues it.
+The new worker resumes from the last checkpoint.
+Once retries are exhausted, the reaper marks the run `error`, clears ownership, and marks the thread `error` in the same transaction when no other run is active.
 
 <a href="https://mermaid.live/view#pako:eNptk09PwkAQxb_K2FOJiCbeGjVpocIBpRZJLyZm3Y6wge7W_aMkxO_uLK2CQE9N9r3fezPtbgKuSgwiCAx-OJQcB4LNNateJNBTM20FFzWTFooYmIFC6SVqiI_Ps6E_z5Sxc43Tp_GxIkdWk5dU7VuoJCSdE8JGUwpzokayVyN5kY2iiC_u7rJhBP0VExVoJyFcITN4K9XX-fWV6ezpijiCdI3cWQSatV70er0DzAgp8g2ZhRDXFmUJW1rnN-9RkVd9UgUP6-fxdAThZPJwuRSrVeeUZkc0VtXmGORjxz4EcF0LjQZIa333X22ztbbhNB2n_WcoRmmeEpJZZ25pbCnkHOLHQdMXboDmD9tC2ZC8DSSCe-Voqiaq9As7OxEyywbx8x--pj0Qvguc4LpJODDlEeTZjJZBwFdRQqjxAiX9WW63uyJphMk4m2St33-VJGpdezJfIuYfjkqCxK_9zO25N-VoXIXwrlUFfIF8WSsh7QHk_yTGcY7GBF0IKtQVEyVdgU1gF1htL0PJ9DL4_v4BvGz9cA==" target="_blank" rel="noopener">View fullscreen ↗</a>
 
@@ -223,9 +227,12 @@ The reaper runs on every instance (default every 15 seconds). This is safe — t
 
 ## Cross-instance cancellation
 
-Cancel requests can arrive at any instance, but the run may be executing on a different one. Aegra uses Redis pub/sub to propagate cancellation across instances.
-
-<a href="https://mermaid.live/view#pako:eNplkc1qwzAQhF9l0SmG_oQeBQ1YTkgDhrp2cstFsRZXSSy7khwoxu_edUWbBOs6386MdntWNgoZB-bwq0NT4lLLysp6b4BeK63XpW6l8ZCAdJCcNRo_FeNR3BjnJVlAPAXyEchRaTfVsvUoZo3zlcXiI50S4s5ewMx2xmhTgf9EODaHaG_CUPK4WMQcsvdiC8_lSJ8JbjqPCg7fkIoocDFxOXE7kW6KN5BIf-ZkysPMFcrWHHbZMt6ugNJ951718Wht15JlwHLCBIckpNXonKwQLJaoL3-MCIyX7vQUImbRVblpgkYBXv53PFZIOLzM59CHfA43BQb2AKxGW0ut6Ig9o33Uv-dU0p7YMPwA02SZhQ==" target="_blank" rel="noopener">View fullscreen ↗</a>
+Cancel requests can arrive at any instance, but the run may be executing on a different one.
+The API first tries an ownership-safe database update that succeeds only when the run is active and has no owner or an expired lease.
+That path interrupts the run, clears its lease, and marks the thread idle in one transaction when no other run is active.
+When the run has a live owner, the API leaves the database state unchanged and uses Redis pub/sub to ask that worker to cancel its task and finalize the run.
+Requests for runs that are already terminal are no-ops, so a late cancellation cannot overwrite a successful or failed result.
+The response contains the currently persisted state; set `wait=1` to wait for a live worker to finalize the run before returning.
 
 ```mermaid
 sequenceDiagram
@@ -236,12 +243,19 @@ sequenceDiagram
     participant B as Instance B (running the job)
 
     C->>A: POST /cancel (routed by LB)
-    A->>R: PUBLISH aegra:run:cancel
-    A->>PG: UPDATE status=interrupted
-    R->>B: Cancel message received
-    B->>B: task.cancel()
-    B->>R: PUBLISH end event
-    A->>C: 200 {status: interrupted}
+    A->>PG: UPDATE interrupted WHERE unowned or lease expired
+    alt no live owner
+        PG-->>A: run updated and lease cleared
+        A->>PG: UPDATE thread=idle if no active runs
+    else live owner
+        PG-->>A: no row updated
+        A->>R: PUBLISH aegra:run:cancel
+        R->>B: Cancel message received
+        B->>B: task.cancel()
+        B->>PG: Finalize run and thread
+        B->>R: PUBLISH end event
+    end
+    A->>C: 200 with persisted run state
 ```
 
 ## Dev vs production mode

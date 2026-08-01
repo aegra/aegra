@@ -158,7 +158,7 @@ class TestMarkPermanentlyFailed:
         """A run deleted between retry check and update must not count as failed."""
         session = AsyncMock()
         mock_result = MagicMock()
-        mock_result.fetchall.return_value = [("run-1",)]
+        mock_result.fetchall.return_value = [("run-1", "thread-1")]
         session.execute = AsyncMock(return_value=mock_result)
         session.commit = AsyncMock()
         maker = _make_session_maker(session)
@@ -167,6 +167,7 @@ class TestMarkPermanentlyFailed:
             failed = await LeaseReaper._mark_permanently_failed(["run-1", "run-gone"])
 
         assert failed == ["run-1"]
+        assert session.execute.await_count == 2
         session.commit.assert_awaited_once()
 
 

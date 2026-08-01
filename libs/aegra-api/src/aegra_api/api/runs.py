@@ -3,14 +3,13 @@
 import asyncio
 import contextlib
 from collections.abc import AsyncGenerator, MutableMapping
-from datetime import UTC, datetime
 from typing import Any
 
 import structlog
 from fastapi import APIRouter, Depends, Header, HTTPException, Query
 from fastapi.responses import StreamingResponse
 from redis import RedisError
-from sqlalchemy import delete, select, update
+from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sse_starlette import EventSourceResponse
 
@@ -25,6 +24,7 @@ from aegra_api.models import Run, RunCreate, RunStatus, User
 from aegra_api.models.errors import CONFLICT, NOT_FOUND, SSE_RESPONSE
 from aegra_api.services.broker import broker_manager
 from aegra_api.services.run_preparation import _prepare_run
+from aegra_api.services.run_status import interrupt_unowned_run
 from aegra_api.services.run_waiters import TERMINAL_STATES, encode_output, heartbeat_wait_body
 from aegra_api.services.streaming_service import streaming_service
 from aegra_api.settings import settings
@@ -39,6 +39,34 @@ logger = structlog.getLogger(__name__)
 
 # Default stream modes for background run execution
 DEFAULT_STREAM_MODES = ["values"]
+
+
+async def _request_run_interruption(
+    session: AsyncSession,
+    run_orm: RunORM,
+    action: str,
+) -> None:
+    """Interrupt a run without overwriting a terminal or live-owned run."""
+    if run_orm.status in TERMINAL_STATES:
+        return
+
+    task = active_runs.get(run_orm.run_id)
+    has_live_local_task = task is not None and not task.done()
+    reconciled = False
+    if not has_live_local_task:
+        reconciled = await interrupt_unowned_run(session, run_orm.run_id, run_orm.thread_id)
+
+    if reconciled:
+        return
+
+    await session.refresh(run_orm)
+    if run_orm.status in TERMINAL_STATES:
+        return
+
+    if action == "interrupt":
+        await streaming_service.interrupt_run(run_orm.run_id)
+    else:
+        await streaming_service.cancel_run(run_orm.run_id)
 
 
 async def _apply_create_run_auth(user: User, thread_id: str, request: RunCreate) -> None:
@@ -244,22 +272,9 @@ async def update_run(
 
     if validated_status == "interrupted":
         logger.info(f"[update_run] cancelling/interrupting run_id={run_id} user={user.identity} thread_id={thread_id}")
-        # Handle interruption - use interrupt_run for cooperative interruption
-        await streaming_service.interrupt_run(run_id)
-        logger.info(f"[update_run] set DB status=interrupted run_id={run_id}")
-        await session.execute(
-            update(RunORM)
-            .where(RunORM.run_id == str(run_id))
-            .values(status="interrupted", updated_at=datetime.now(UTC))
-        )
-        await session.commit()
-        logger.info(f"[update_run] commit done (interrupted) run_id={run_id}")
+        await _request_run_interruption(session, run_orm, "interrupt")
 
     # Return final run state
-    run_orm = await session.scalar(select(RunORM).where(RunORM.run_id == run_id))
-    if not run_orm:
-        raise HTTPException(404, f"Run '{run_id}' not found")
-    # Refresh to ensure we have the latest data after our own update
     await session.refresh(run_orm)
     return Run.model_validate(run_orm)
 
@@ -466,32 +481,12 @@ async def cancel_run_endpoint(
     if not run_orm:
         raise HTTPException(404, f"Run '{run_id}' not found")
 
-    if action == "interrupt":
-        logger.info(f"[cancel_run] interrupt run_id={run_id} user={user.identity} thread_id={thread_id}")
-        await streaming_service.interrupt_run(run_id)
-        # Persist status as interrupted
-        await session.execute(
-            update(RunORM)
-            .where(RunORM.run_id == str(run_id))
-            .values(status="interrupted", updated_at=datetime.now(UTC))
-        )
-        await session.commit()
-    else:
-        logger.info(f"[cancel_run] cancel run_id={run_id} user={user.identity} thread_id={thread_id}")
-        await streaming_service.cancel_run(run_id)
-        # Persist status as interrupted
-        await session.execute(
-            update(RunORM)
-            .where(RunORM.run_id == str(run_id))
-            .values(status="interrupted", updated_at=datetime.now(UTC))
-        )
-        await session.commit()
+    logger.info(f"[cancel_run] request {action} run_id={run_id} user={user.identity} thread_id={thread_id}")
+    await _request_run_interruption(session, run_orm, action)
 
     # Optionally wait for the run to settle
     if wait:
         # Poll DB until the run reaches a terminal state (or 10s timeout).
-        # This is simpler and more reliable than pub/sub for cancel-with-wait
-        # since the cancel has already been issued and the status update committed.
         for _ in range(20):
             await asyncio.sleep(0.5)
             session.expire_all()  # sync method, clears cache
@@ -499,16 +494,7 @@ async def cancel_run_endpoint(
             if fresh and fresh.status in TERMINAL_STATES:
                 break
 
-    # Reload and return updated Run (do NOT delete here; deletion is a separate endpoint)
-    run_orm = await session.scalar(
-        select(RunORM).where(
-            RunORM.run_id == run_id,
-            RunORM.thread_id == thread_id,
-            RunORM.user_id == user.identity,
-        )
-    )
-    if not run_orm:
-        raise HTTPException(404, f"Run '{run_id}' not found after cancellation")
+    await session.refresh(run_orm)
     return Run.model_validate(run_orm)
 
 

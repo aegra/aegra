@@ -4,7 +4,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from aegra_api.services.run_status import _safe_serialize, set_thread_status, update_run_status
+from aegra_api.services.run_status import _safe_serialize, interrupt_unowned_run, set_thread_status, update_run_status
 
 
 def _make_mock_session() -> AsyncMock:
@@ -97,6 +97,42 @@ class TestSetThreadStatus:
 
         with pytest.raises(ValueError, match="Thread 'thread-missing' not found"):
             await set_thread_status(session, "thread-missing", "idle")
+
+
+class TestInterruptUnownedRun:
+    @pytest.mark.asyncio
+    async def test_reconciles_run_and_thread_in_one_transaction(self) -> None:
+        session = _make_mock_session()
+        result = MagicMock()
+        result.scalar_one_or_none.return_value = "run-1"
+        session.execute = AsyncMock(return_value=result)
+
+        with patch(
+            "aegra_api.services.run_status.set_thread_status_if_no_active_runs",
+            new_callable=AsyncMock,
+        ) as mock_set_thread:
+            interrupted = await interrupt_unowned_run(session, "run-1", "thread-1")
+
+        assert interrupted is True
+        mock_set_thread.assert_awaited_once_with(session, ["thread-1"], "idle")
+        session.commit.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_does_not_commit_when_live_owner_wins_race(self) -> None:
+        session = _make_mock_session()
+        result = MagicMock()
+        result.scalar_one_or_none.return_value = None
+        session.execute = AsyncMock(return_value=result)
+
+        with patch(
+            "aegra_api.services.run_status.set_thread_status_if_no_active_runs",
+            new_callable=AsyncMock,
+        ) as mock_set_thread:
+            interrupted = await interrupt_unowned_run(session, "run-1", "thread-1")
+
+        assert interrupted is False
+        mock_set_thread.assert_not_awaited()
+        session.commit.assert_not_awaited()
 
 
 class TestSafeSerialize:

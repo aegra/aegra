@@ -18,6 +18,7 @@ from aegra_api.core.orm import Run as RunORM
 from aegra_api.core.orm import _get_session_maker
 from aegra_api.core.redis_manager import redis_manager
 from aegra_api.observability.metrics import REAPER_RECOVERED_RUNS
+from aegra_api.services.run_status import set_thread_status_if_no_active_runs
 from aegra_api.settings import settings
 
 logger = structlog.getLogger(__name__)
@@ -203,21 +204,29 @@ class LeaseReaper:
 
     @staticmethod
     async def _mark_permanently_failed(run_ids: list[str]) -> list[str]:
-        """Mark runs as error with max retries exceeded message. Returns IDs actually updated."""
+        """Mark exhausted runs and their now-inactive threads as failed."""
         maker = _get_session_maker()
         async with maker() as session:
             result = await session.execute(
                 update(RunORM)
-                .where(RunORM.run_id.in_(run_ids))
+                .where(
+                    RunORM.run_id.in_(run_ids),
+                    RunORM.status == "pending",
+                    RunORM.claimed_by.is_(None),
+                )
                 .values(
                     status="error",
                     error_message="Max retries exceeded after repeated worker failures",
                     claimed_by=None,
                     lease_expires_at=None,
+                    updated_at=datetime.now(UTC),
                 )
-                .returning(RunORM.run_id)
+                .returning(RunORM.run_id, RunORM.thread_id)
             )
-            failed_ids = [row[0] for row in result.fetchall()]
+            failed_runs = result.fetchall()
+            failed_ids = [row[0] for row in failed_runs]
+            thread_ids = {row[1] for row in failed_runs}
+            await set_thread_status_if_no_active_runs(session, thread_ids, "error")
             await session.commit()
             return failed_ids
 

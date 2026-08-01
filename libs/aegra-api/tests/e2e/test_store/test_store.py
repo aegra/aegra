@@ -1,4 +1,5 @@
 import pytest
+from langgraph_sdk.errors import PermissionDeniedError
 
 from tests.e2e._utils import elog, get_e2e_client
 
@@ -51,10 +52,11 @@ async def test_org_prefix_without_org_membership_is_forbidden():
     """
     client = get_e2e_client()
 
-    with pytest.raises(Exception) as exc_info:  # noqa: B017 - SDK doesn't expose specific exception type
+    with pytest.raises(PermissionDeniedError) as exc_info:
         await client.store.put_item(["orgs", "shared-prompts"], key="greeting", value={"text": "hi"})
     elog("store.put_item orgs prefix rejected", str(exc_info.value))
-    assert "403" in str(exc_info.value) or "organization" in str(exc_info.value).lower()
+    # Names the attribute the scope needs, so the message stays actionable.
+    assert "org_id" in str(exc_info.value)
 
 
 @pytest.mark.e2e

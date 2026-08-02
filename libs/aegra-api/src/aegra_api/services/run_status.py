@@ -113,6 +113,8 @@ async def interrupt_unowned_run(
 
     The ownership predicate is checked in the UPDATE so a worker that renews
     or claims the run concurrently cannot be overwritten by the API process.
+    If a live worker merely missed its lease, the caller asks it to stop through
+    the broker, and guarded finalization rejects any late worker write.
     """
     now = datetime.now(UTC)
     result = cast(

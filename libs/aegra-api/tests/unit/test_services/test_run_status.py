@@ -11,7 +11,6 @@ from aegra_api.services.run_status import (
     set_thread_status,
     set_thread_status_if_no_active_runs,
     start_run,
-    update_run_status,
 )
 
 
@@ -30,61 +29,6 @@ def _make_mock_session_maker(session: AsyncMock) -> MagicMock:
     ctx.__aexit__ = AsyncMock(return_value=False)
     maker = MagicMock(return_value=ctx)
     return maker
-
-
-class TestUpdateRunStatus:
-    @pytest.mark.asyncio
-    async def test_updates_db_with_status(self) -> None:
-        session = _make_mock_session()
-        maker = _make_mock_session_maker(session)
-
-        with patch("aegra_api.services.run_status._get_session_maker", return_value=maker):
-            await update_run_status("run-1", "running", user_id="user-1")
-
-        session.execute.assert_awaited_once()
-        statement = session.execute.await_args.args[0]
-        compiled = statement.compile()
-        assert "runs.user_id" in str(compiled)
-        assert "user-1" in compiled.params.values()
-        session.commit.assert_awaited_once()
-
-    @pytest.mark.asyncio
-    async def test_includes_output_when_provided(self) -> None:
-        session = _make_mock_session()
-        maker = _make_mock_session_maker(session)
-
-        with (
-            patch("aegra_api.services.run_status._get_session_maker", return_value=maker),
-            patch("aegra_api.services.run_status._safe_serialize", return_value={"key": "val"}) as mock_ser,
-        ):
-            await update_run_status("run-1", "success", user_id="user-1", output={"key": "val"})
-
-        mock_ser.assert_called_once_with({"key": "val"}, "run-1")
-        session.execute.assert_awaited_once()
-
-    @pytest.mark.asyncio
-    async def test_includes_error_when_provided(self) -> None:
-        session = _make_mock_session()
-        maker = _make_mock_session_maker(session)
-
-        with patch("aegra_api.services.run_status._get_session_maker", return_value=maker):
-            await update_run_status("run-1", "error", user_id="user-1", error="something broke")
-
-        session.execute.assert_awaited_once()
-        session.commit.assert_awaited_once()
-
-    @pytest.mark.asyncio
-    async def test_omits_output_and_error_when_not_provided(self) -> None:
-        session = _make_mock_session()
-        maker = _make_mock_session_maker(session)
-
-        with (
-            patch("aegra_api.services.run_status._get_session_maker", return_value=maker),
-            patch("aegra_api.services.run_status._safe_serialize") as mock_ser,
-        ):
-            await update_run_status("run-1", "running", user_id="user-1")
-
-        mock_ser.assert_not_called()
 
 
 class TestStartRun:
@@ -151,6 +95,61 @@ class TestFinalizeRun:
         assert "user-1" in compiled.params.values()
         mock_set_thread.assert_awaited_once_with(session, ["thread-1"], "idle", user_id="user-1")
         session.commit.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_serializes_output_and_records_error_when_provided(self) -> None:
+        session = _make_mock_session()
+        result = MagicMock()
+        result.scalar_one_or_none.return_value = "run-1"
+        session.execute = AsyncMock(return_value=result)
+
+        with (
+            patch("aegra_api.services.run_status._get_session_maker", return_value=_make_mock_session_maker(session)),
+            patch("aegra_api.services.run_status._safe_serialize", return_value={"key": "val"}) as mock_ser,
+            patch(
+                "aegra_api.services.run_status.set_thread_status_if_no_active_runs",
+                new_callable=AsyncMock,
+            ),
+        ):
+            finalized = await finalize_run(
+                "run-1",
+                "thread-1",
+                user_id="user-1",
+                status="error",
+                thread_status="error",
+                output={"key": "val"},
+                error="something broke",
+            )
+
+        assert finalized is True
+        mock_ser.assert_called_once_with({"key": "val"}, "run-1")
+        params = session.execute.await_args.args[0].compile().params
+        assert params["error_message"] == "something broke"
+
+    @pytest.mark.asyncio
+    async def test_omits_output_serialization_when_not_provided(self) -> None:
+        session = _make_mock_session()
+        result = MagicMock()
+        result.scalar_one_or_none.return_value = "run-1"
+        session.execute = AsyncMock(return_value=result)
+
+        with (
+            patch("aegra_api.services.run_status._get_session_maker", return_value=_make_mock_session_maker(session)),
+            patch("aegra_api.services.run_status._safe_serialize") as mock_ser,
+            patch(
+                "aegra_api.services.run_status.set_thread_status_if_no_active_runs",
+                new_callable=AsyncMock,
+            ),
+        ):
+            await finalize_run(
+                "run-1",
+                "thread-1",
+                user_id="user-1",
+                status="success",
+                thread_status="idle",
+            )
+
+        mock_ser.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_skips_run_that_is_already_terminal(self) -> None:

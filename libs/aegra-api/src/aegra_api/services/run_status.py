@@ -25,43 +25,6 @@ _serializer = GeneralSerializer()
 ACTIVE_RUN_STATES = ("pending", "running")
 
 
-async def update_run_status(
-    run_id: str,
-    status: str,
-    *,
-    user_id: str,
-    output: Any = None,
-    error: str | None = None,
-) -> None:
-    """Persist a run's status to the database.
-
-    Opens a short-lived session to avoid holding a connection during
-    long-running graph execution.
-    """
-    validated = validate_run_status(status)
-    maker = _get_session_maker()
-    async with maker() as session:
-        values: dict[str, Any] = {
-            "status": validated,
-            "updated_at": datetime.now(UTC),
-        }
-        if output is not None:
-            values["output"] = _safe_serialize(output, run_id)
-        if error is not None:
-            values["error_message"] = error
-
-        logger.info("Updating run status", run_id=run_id, status=validated)
-        await session.execute(
-            update(RunORM)
-            .where(
-                RunORM.run_id == run_id,
-                RunORM.user_id == user_id,
-            )
-            .values(**values)
-        )
-        await session.commit()
-
-
 async def start_run(run_id: str, *, user_id: str) -> bool:
     """Move an active run to running without reviving a terminal run."""
     maker = _get_session_maker()
@@ -193,7 +156,6 @@ async def finalize_run(
     thread_status: str,
     output: Any = None,
     error: str | None = None,
-    allowed_current_statuses: Collection[str] = ACTIVE_RUN_STATES,
 ) -> bool:
     """Conditionally update run and thread status in one transaction.
 
@@ -219,7 +181,7 @@ async def finalize_run(
             .where(
                 RunORM.run_id == run_id,
                 RunORM.user_id == user_id,
-                RunORM.status.in_(allowed_current_statuses),
+                RunORM.status.in_(ACTIVE_RUN_STATES),
             )
             .values(**run_values)
             .returning(RunORM.run_id)

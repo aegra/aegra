@@ -694,6 +694,44 @@ class TestExecuteAndRelease:
         assert not semaphore.locked()
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("failure_source", ["identity", "finalize"])
+    async def test_cleanup_failure_preserves_cancellation(self, failure_source: str) -> None:
+        run_id = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+        thread_id = "tttttttt-tttt-tttt-tttt-tttttttttttt"
+        semaphore = asyncio.Semaphore(1)
+        await semaphore.acquire()
+        executor = WorkerExecutor()
+        executor._execute_with_lease = AsyncMock(side_effect=asyncio.CancelledError)  # type: ignore[method-assign]
+        explicit_run_cancellations.add(run_id)
+
+        with (
+            patch(f"{MODULE}.settings") as mock_settings,
+            patch(
+                f"{MODULE}._get_run_identity",
+                new_callable=AsyncMock,
+                return_value=(thread_id, "user-1"),
+                side_effect=RuntimeError("database unavailable") if failure_source == "identity" else None,
+            ),
+            patch(
+                f"{MODULE}.finalize_run",
+                new_callable=AsyncMock,
+                side_effect=RuntimeError("database unavailable") if failure_source == "finalize" else None,
+            ),
+            patch(f"{MODULE}.logger.exception") as mock_log_exception,
+        ):
+            mock_settings.worker.BG_JOB_TIMEOUT_SECS = 60
+            with pytest.raises(asyncio.CancelledError):
+                await executor._execute_and_release(run_id, "worker-0", semaphore)
+
+        mock_log_exception.assert_called_once_with(
+            "Failed to persist explicit run cancellation",
+            run_id=run_id,
+        )
+        assert run_id not in explicit_run_cancellations
+        assert run_id not in active_runs
+        assert not semaphore.locked()
+
+    @pytest.mark.asyncio
     async def test_repeated_external_cancel_waits_for_database_reconciliation(self) -> None:
         run_id = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
         thread_id = "tttttttt-tttt-tttt-tttt-tttttttttttt"

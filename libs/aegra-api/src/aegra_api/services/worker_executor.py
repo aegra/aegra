@@ -54,19 +54,22 @@ async def _cleanup_cancelled_execution(run_id: str, execution_task: asyncio.Task
     if run_id not in explicit_run_cancellations:
         return
 
-    identity = await _get_run_identity(run_id)
-    if identity is None:
-        return
+    try:
+        identity = await _get_run_identity(run_id)
+        if identity is None:
+            return
 
-    thread_id, user_id = identity
-    await finalize_run(
-        run_id,
-        thread_id,
-        user_id=user_id,
-        status="interrupted",
-        thread_status="idle",
-        output={},
-    )
+        thread_id, user_id = identity
+        await finalize_run(
+            run_id,
+            thread_id,
+            user_id=user_id,
+            status="interrupted",
+            thread_status="idle",
+            output={},
+        )
+    except Exception:
+        logger.exception("Failed to persist explicit run cancellation", run_id=run_id)
 
 
 async def _await_cancellation_cleanup(cleanup_task: asyncio.Task[None]) -> None:

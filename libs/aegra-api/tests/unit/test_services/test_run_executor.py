@@ -38,12 +38,12 @@ class TestExecuteRunSuccess:
         mock_service = MagicMock()
         mock_service.get_graph = MagicMock(return_value=mock_graph)
 
-        mock_update = AsyncMock()
-        mock_finalize = AsyncMock()
+        mock_start = AsyncMock(return_value=True)
+        mock_finalize = AsyncMock(return_value=True)
 
         with (
             patch("aegra_api.services.run_executor.get_langgraph_service", return_value=mock_service),
-            patch("aegra_api.services.run_executor.update_run_status", mock_update),
+            patch("aegra_api.services.run_executor.start_run", mock_start),
             patch("aegra_api.services.run_executor.finalize_run", mock_finalize),
             patch("aegra_api.services.run_executor.streaming_service") as mock_streaming,
             patch("aegra_api.services.run_executor.stream_graph_events", return_value=_empty_async_gen()),
@@ -61,9 +61,7 @@ class TestExecuteRunSuccess:
 
             await execute_run(_make_job())
 
-        # update_run_status called once for "running"
-        assert mock_update.await_count == 1
-        assert mock_update.await_args_list[0].args == ("run-1", "running")
+        mock_start.assert_awaited_once_with("run-1")
 
         # finalize_run called once for success
         mock_finalize.assert_awaited_once()
@@ -75,11 +73,11 @@ class TestExecuteRunSuccess:
 class TestExecuteRunCancelledError:
     @pytest.mark.asyncio
     async def test_cancelled_error_sets_interrupted_and_signals(self) -> None:
-        mock_update = AsyncMock()
-        mock_finalize = AsyncMock()
+        mock_start = AsyncMock(return_value=True)
+        mock_finalize = AsyncMock(return_value=True)
 
         with (
-            patch("aegra_api.services.run_executor.update_run_status", mock_update),
+            patch("aegra_api.services.run_executor.start_run", mock_start),
             patch("aegra_api.services.run_executor.finalize_run", mock_finalize),
             patch("aegra_api.services.run_executor.streaming_service") as mock_streaming,
             patch("aegra_api.services.run_executor._signal_run_done", new_callable=AsyncMock),
@@ -97,9 +95,7 @@ class TestExecuteRunCancelledError:
             with pytest.raises(asyncio.CancelledError):
                 await execute_run(_make_job())
 
-        # update_run_status called once for "running"
-        assert mock_update.await_count == 1
-        assert mock_update.await_args_list[0].args == ("run-1", "running")
+        mock_start.assert_awaited_once_with("run-1")
         # finalize_run called for "interrupted"
         mock_finalize.assert_awaited_once()
         assert mock_finalize.await_args.kwargs["status"] == "interrupted"
@@ -109,11 +105,11 @@ class TestExecuteRunCancelledError:
 class TestExecuteRunException:
     @pytest.mark.asyncio
     async def test_exception_sets_error_and_signals(self) -> None:
-        mock_update = AsyncMock()
-        mock_finalize = AsyncMock()
+        mock_start = AsyncMock(return_value=True)
+        mock_finalize = AsyncMock(return_value=True)
 
         with (
-            patch("aegra_api.services.run_executor.update_run_status", mock_update),
+            patch("aegra_api.services.run_executor.start_run", mock_start),
             patch("aegra_api.services.run_executor.finalize_run", mock_finalize),
             patch("aegra_api.services.run_executor.streaming_service") as mock_streaming,
             patch("aegra_api.services.run_executor._signal_run_done", new_callable=AsyncMock),
@@ -130,9 +126,7 @@ class TestExecuteRunException:
 
             await execute_run(_make_job())
 
-        # update_run_status called once for "running"
-        assert mock_update.await_count == 1
-        assert mock_update.await_args_list[0].args == ("run-1", "running")
+        mock_start.assert_awaited_once_with("run-1")
         # finalize_run called for "error"
         mock_finalize.assert_awaited_once()
         assert mock_finalize.await_args.kwargs["status"] == "error"
@@ -280,13 +274,13 @@ class TestLeaseLossCancellation:
     async def test_lease_loss_cancel_skips_finalize_and_signal(self) -> None:
         """Regression: when cancellation is due to lease loss (not user action),
         execute_run must NOT finalize the run, send SSE events, signal done,
-        or clean up the broker — another worker will re-execute it."""
-        mock_update = AsyncMock()
+        or clean up the broker - another worker will re-execute it."""
+        mock_start = AsyncMock(return_value=True)
         mock_finalize = AsyncMock()
         mock_signal_done = AsyncMock()
 
         with (
-            patch("aegra_api.services.run_executor.update_run_status", mock_update),
+            patch("aegra_api.services.run_executor.start_run", mock_start),
             patch("aegra_api.services.run_executor.finalize_run", mock_finalize),
             patch("aegra_api.services.run_executor.streaming_service") as mock_streaming,
             patch("aegra_api.services.run_executor._signal_run_done", mock_signal_done),
@@ -321,12 +315,12 @@ class TestLeaseLossCancellation:
     @pytest.mark.asyncio
     async def test_user_cancel_still_finalizes(self) -> None:
         """Normal (user-initiated) cancellation must still finalize and signal."""
-        mock_update = AsyncMock()
-        mock_finalize = AsyncMock()
+        mock_start = AsyncMock(return_value=True)
+        mock_finalize = AsyncMock(return_value=True)
         mock_signal_done = AsyncMock()
 
         with (
-            patch("aegra_api.services.run_executor.update_run_status", mock_update),
+            patch("aegra_api.services.run_executor.start_run", mock_start),
             patch("aegra_api.services.run_executor.finalize_run", mock_finalize),
             patch("aegra_api.services.run_executor.streaming_service") as mock_streaming,
             patch("aegra_api.services.run_executor._signal_run_done", mock_signal_done),
@@ -351,3 +345,42 @@ class TestLeaseLossCancellation:
         # Done-key and cleanup MUST happen on normal cancel
         mock_signal_done.assert_awaited_once_with("run-1")
         mock_streaming.cleanup_run.assert_awaited_once_with("run-1")
+
+
+class TestTerminalStateRaces:
+    @pytest.mark.asyncio
+    async def test_terminal_run_does_not_start_graph_execution(self) -> None:
+        with (
+            patch("aegra_api.services.run_executor.start_run", new_callable=AsyncMock, return_value=False),
+            patch("aegra_api.services.run_executor._stream_graph", new_callable=AsyncMock) as mock_stream,
+            patch("aegra_api.services.run_executor.finalize_run", new_callable=AsyncMock) as mock_finalize,
+            patch("aegra_api.services.run_executor.streaming_service") as mock_streaming,
+            patch("aegra_api.services.run_executor._signal_run_done", new_callable=AsyncMock),
+        ):
+            mock_streaming.cleanup_run = AsyncMock()
+
+            from aegra_api.services.run_executor import execute_run
+
+            await execute_run(_make_job())
+
+        mock_stream.assert_not_awaited()
+        mock_finalize.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_lost_finalization_race_does_not_signal_success(self) -> None:
+        graph_result = MagicMock(has_interrupt=False, data={"late": True})
+        with (
+            patch("aegra_api.services.run_executor.start_run", new_callable=AsyncMock, return_value=True),
+            patch("aegra_api.services.run_executor._stream_graph", new_callable=AsyncMock, return_value=graph_result),
+            patch("aegra_api.services.run_executor.finalize_run", new_callable=AsyncMock, return_value=False),
+            patch("aegra_api.services.run_executor._signal_end_event", new_callable=AsyncMock) as mock_signal_end,
+            patch("aegra_api.services.run_executor.streaming_service") as mock_streaming,
+            patch("aegra_api.services.run_executor._signal_run_done", new_callable=AsyncMock),
+        ):
+            mock_streaming.cleanup_run = AsyncMock()
+
+            from aegra_api.services.run_executor import execute_run
+
+            await execute_run(_make_job())
+
+        mock_signal_end.assert_not_awaited()

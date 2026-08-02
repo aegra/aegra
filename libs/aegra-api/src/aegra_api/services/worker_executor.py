@@ -22,7 +22,7 @@ from redis import RedisError
 from redis import TimeoutError as RedisTimeoutError
 from sqlalchemy import select, update
 
-from aegra_api.core.active_runs import active_runs
+from aegra_api.core.active_runs import active_runs, explicit_run_cancellations
 from aegra_api.core.orm import Run as RunORM
 from aegra_api.core.orm import _get_session_maker
 from aegra_api.core.redis_manager import redis_manager
@@ -30,7 +30,7 @@ from aegra_api.models.run_job import RunJob
 from aegra_api.observability.span_enrichment import merge_run_metadata, set_trace_context
 from aegra_api.services.base_executor import BaseExecutor
 from aegra_api.services.run_executor import _lease_loss_cancellations, execute_run
-from aegra_api.services.run_status import finalize_run, update_run_status
+from aegra_api.services.run_status import ACTIVE_RUN_STATES, finalize_run, update_run_status
 from aegra_api.settings import settings
 
 logger = structlog.getLogger(__name__)
@@ -229,6 +229,7 @@ class WorkerExecutor(BaseExecutor):
                     status="error",
                     thread_status="error",
                     error="Job exceeded maximum execution time",
+                    allowed_current_statuses=(*ACTIVE_RUN_STATES, "interrupted"),
                 )
             else:
                 # Fallback: update run status only (thread_id lookup failed)
@@ -236,10 +237,21 @@ class WorkerExecutor(BaseExecutor):
             await _release_lease(run_id, worker_name)
         except asyncio.CancelledError:
             logger.info("Job task cancelled", worker=worker_name, run_id=run_id)
+            if run_id in explicit_run_cancellations:
+                thread_id = await _get_thread_id_for_run(run_id)
+                if thread_id is not None:
+                    await finalize_run(
+                        run_id,
+                        thread_id,
+                        status="interrupted",
+                        thread_status="idle",
+                        output={},
+                    )
             raise
         except Exception:
             logger.exception("Unexpected error in job execution", run_id=run_id)
         finally:
+            explicit_run_cancellations.discard(run_id)
             active_runs.pop(run_id, None)
             semaphore.release()
 

@@ -230,8 +230,11 @@ The reaper runs on every instance (default every 15 seconds). This is safe — t
 Cancel requests can arrive at any instance, but the run may be executing on a different one.
 The API first tries an ownership-safe database update that succeeds only when the run is active and has no owner or an expired lease.
 That path interrupts the run, clears its lease, and marks the thread idle in one transaction when no other run is active.
+The API still broadcasts a best-effort cancellation after this transaction because an expired worker may be delayed rather than dead.
+It emits the terminal stream event itself so connected clients always receive a definitive end event.
 When the run has a live owner, the API leaves the database state unchanged and uses Redis pub/sub to ask that worker to cancel its task and finalize the run.
 Requests for runs that are already terminal are no-ops, so a late cancellation cannot overwrite a successful or failed result.
+Worker finalization is also conditional on the run remaining active, which prevents a delayed worker from overwriting a terminal state committed by the API.
 The response contains the currently persisted state; set `wait=1` to wait for a live worker to finalize the run before returning.
 
 ```mermaid
@@ -247,6 +250,8 @@ sequenceDiagram
     alt no live owner
         PG-->>A: run updated and lease cleared
         A->>PG: UPDATE thread=idle if no active runs
+        A->>R: PUBLISH cancel without end event
+        A->>R: PUBLISH end event
     else live owner
         PG-->>A: no row updated
         A->>R: PUBLISH aegra:run:cancel

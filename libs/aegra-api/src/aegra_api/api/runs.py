@@ -51,18 +51,27 @@ async def _request_run_interruption(
     if run_orm.status in TERMINAL_STATES:
         return
 
-    task = active_runs.get(run_orm.run_id)
-    has_live_local_task = task is not None and not task.done()
-    reconciled = False
-    if not has_live_local_task:
-        reconciled = await interrupt_unowned_run(
-            session,
-            run_orm.run_id,
-            run_orm.thread_id,
-            user_id=run_orm.user_id,
-        )
+    reconciled = await interrupt_unowned_run(
+        session,
+        run_orm.run_id,
+        run_orm.thread_id,
+        user_id=run_orm.user_id,
+    )
 
     if reconciled:
+        # A delayed worker may still be running after its lease expires. Tell
+        # it to stop, but keep terminal signaling here so the SSE stream is
+        # closed even when no executor currently owns the run.
+        if action == "interrupt":
+            await streaming_service.interrupt_run(run_orm.run_id, emit_end_event=False)
+        else:
+            await streaming_service.cancel_run(run_orm.run_id, emit_end_event=False)
+        try:
+            await streaming_service.signal_run_cancelled(run_orm.run_id)
+        except (RedisError, OSError):
+            # Database reconciliation has already committed. A broker outage
+            # must not turn the successful interruption into an API error.
+            logger.exception("Failed to signal reconciled run interruption", run_id=run_orm.run_id)
         return
 
     await session.refresh(run_orm)

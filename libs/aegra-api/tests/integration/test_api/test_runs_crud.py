@@ -338,11 +338,13 @@ class TestCancelRun:
             ),
         ):
             mock_streaming.cancel_run = AsyncMock()
+            mock_streaming.signal_run_cancelled = AsyncMock()
 
             resp = client.post("/threads/test-thread-123/runs/test-run-123/cancel")
 
             assert resp.status_code == 200
-            mock_streaming.cancel_run.assert_not_awaited()
+            mock_streaming.cancel_run.assert_awaited_once_with("test-run-123", emit_end_event=False)
+            mock_streaming.signal_run_cancelled.assert_awaited_once_with("test-run-123")
 
 
 class TestDeleteRun:

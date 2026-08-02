@@ -54,6 +54,27 @@ async def update_run_status(
         await session.commit()
 
 
+async def start_run(run_id: str) -> bool:
+    """Move an active run to running without reviving a terminal run."""
+    maker = _get_session_maker()
+    async with maker() as session:
+        result = await session.execute(
+            update(RunORM)
+            .where(
+                RunORM.run_id == run_id,
+                RunORM.status.in_(ACTIVE_RUN_STATES),
+            )
+            .values(status="running", updated_at=datetime.now(UTC))
+            .returning(RunORM.run_id)
+        )
+        started = result.scalar_one_or_none() is not None
+        if started:
+            await session.commit()
+        else:
+            await session.rollback()
+        return started
+
+
 async def set_thread_status(session: AsyncSession, thread_id: str, status: str) -> None:
     """Update a thread's status column.
 
@@ -162,11 +183,12 @@ async def finalize_run(
     thread_status: str,
     output: Any = None,
     error: str | None = None,
-) -> None:
-    """Update run status + thread status in a single transaction.
+    allowed_current_statuses: Collection[str] = ACTIVE_RUN_STATES,
+) -> bool:
+    """Conditionally update run and thread status in one transaction.
 
-    Batches two UPDATE statements into one DB round-trip instead of
-    opening separate sessions for update_run_status and set_thread_status.
+    Returns false when another actor has already made the run terminal. This
+    prevents an expired worker from overwriting a reconciled cancellation.
     """
     validated_run = validate_run_status(status)
     validated_thread = validate_thread_status(thread_status)
@@ -182,15 +204,31 @@ async def finalize_run(
         run_values["error_message"] = error
 
     async with maker() as session:
-        await session.execute(update(RunORM).where(RunORM.run_id == run_id).values(**run_values))
-        await session.execute(
-            update(ThreadORM)
-            .where(ThreadORM.thread_id == thread_id)
-            .values(status=validated_thread, updated_at=datetime.now(UTC))
+        result = await session.execute(
+            update(RunORM)
+            .where(
+                RunORM.run_id == run_id,
+                RunORM.status.in_(allowed_current_statuses),
+            )
+            .values(**run_values)
+            .returning(RunORM.user_id)
+        )
+        user_id = result.scalar_one_or_none()
+        if user_id is None:
+            await session.rollback()
+            logger.info("Skipped finalizing terminal run", run_id=run_id, status=validated_run)
+            return False
+
+        await set_thread_status_if_no_active_runs(
+            session,
+            [thread_id],
+            validated_thread,
+            user_id=user_id,
         )
         await session.commit()
 
     logger.info("Finalized run", run_id=run_id, status=validated_run, thread_status=validated_thread)
+    return True
 
 
 def _safe_serialize(output: Any, run_id: str) -> Any:

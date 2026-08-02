@@ -6,8 +6,17 @@ from uuid import uuid4
 
 import pytest
 from fastapi import HTTPException
+from redis import RedisError
 
-from aegra_api.api.runs import _apply_create_run_auth, create_run, get_run, join_run, list_runs, update_run
+from aegra_api.api.runs import (
+    _apply_create_run_auth,
+    _request_run_interruption,
+    create_run,
+    get_run,
+    join_run,
+    list_runs,
+    update_run,
+)
 from aegra_api.core.orm import Assistant as AssistantORM
 from aegra_api.core.orm import Run as RunORM
 from aegra_api.core.orm import Thread as ThreadORM
@@ -331,6 +340,78 @@ class TestRunsEndpoints:
         assert result.status == "success"
         mock_reconcile.assert_not_awaited()
         mock_interrupt.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_interruption_reconciles_registered_task_before_it_starts(
+        self,
+        mock_session: AsyncMock,
+    ) -> None:
+        run_orm = RunORM(
+            run_id="run-123",
+            thread_id="test-thread",
+            assistant_id="agent",
+            user_id="test-user",
+            status="pending",
+            input={},
+            created_at=datetime.now(UTC),
+            updated_at=datetime.now(UTC),
+        )
+        registered_task = MagicMock()
+        registered_task.done.return_value = False
+
+        with (
+            patch.dict("aegra_api.api.runs.active_runs", {run_orm.run_id: registered_task}, clear=True),
+            patch(
+                "aegra_api.api.runs.interrupt_unowned_run",
+                new_callable=AsyncMock,
+                return_value=True,
+            ) as mock_reconcile,
+            patch(
+                "aegra_api.api.runs.streaming_service.cancel_run",
+                new_callable=AsyncMock,
+            ) as mock_cancel,
+            patch(
+                "aegra_api.api.runs.streaming_service.signal_run_cancelled",
+                new_callable=AsyncMock,
+            ) as mock_signal,
+        ):
+            await _request_run_interruption(mock_session, run_orm, "cancel")
+
+        mock_reconcile.assert_awaited_once_with(
+            mock_session,
+            run_orm.run_id,
+            run_orm.thread_id,
+            user_id=run_orm.user_id,
+        )
+        mock_cancel.assert_awaited_once_with(run_orm.run_id, emit_end_event=False)
+        mock_signal.assert_awaited_once_with(run_orm.run_id)
+
+    @pytest.mark.asyncio
+    async def test_reconciled_interruption_survives_terminal_signal_outage(
+        self,
+        mock_session: AsyncMock,
+    ) -> None:
+        run_orm = RunORM(
+            run_id="run-123",
+            thread_id="test-thread",
+            assistant_id="agent",
+            user_id="test-user",
+            status="pending",
+            input={},
+            created_at=datetime.now(UTC),
+            updated_at=datetime.now(UTC),
+        )
+
+        with (
+            patch("aegra_api.api.runs.interrupt_unowned_run", new_callable=AsyncMock, return_value=True),
+            patch("aegra_api.api.runs.streaming_service.cancel_run", new_callable=AsyncMock),
+            patch(
+                "aegra_api.api.runs.streaming_service.signal_run_cancelled",
+                new_callable=AsyncMock,
+                side_effect=RedisError("unavailable"),
+            ),
+        ):
+            await _request_run_interruption(mock_session, run_orm, "cancel")
 
     @pytest.mark.asyncio
     async def test_update_run_not_found(self, mock_user: User, mock_session: AsyncMock) -> None:

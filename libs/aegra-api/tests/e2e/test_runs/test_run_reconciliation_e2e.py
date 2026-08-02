@@ -5,6 +5,7 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from typing import Any, Literal
+from unittest.mock import patch
 from uuid import uuid4
 
 import httpx
@@ -15,6 +16,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from aegra_api.core.orm import Assistant as AssistantORM
 from aegra_api.core.orm import Run as RunORM
 from aegra_api.core.orm import Thread as ThreadORM
+from aegra_api.services.run_status import finalize_run
 from aegra_api.settings import settings
 from tests.e2e._utils import elog
 
@@ -134,6 +136,24 @@ async def _read_state(thread_id: str, run_id: str) -> tuple[RunORM, ThreadORM]:
         await engine.dispose()
 
 
+async def _wait_for_end_event(
+    thread_id: str,
+    run_id: str,
+    stream_started: asyncio.Event,
+) -> str:
+    timeout = httpx.Timeout(10.0, read=None)
+    async with (
+        httpx.AsyncClient(base_url=settings.app.SERVER_URL, timeout=timeout) as client,
+        client.stream("GET", f"/threads/{thread_id}/runs/{run_id}/stream") as response,
+    ):
+        response.raise_for_status()
+        stream_started.set()
+        async for line in response.aiter_lines():
+            if line.strip() == "event: end":
+                return "end"
+    return "closed"
+
+
 @pytest.mark.e2e
 @pytest.mark.prod_only
 @pytest.mark.parametrize("endpoint", ["cancel", "patch"])
@@ -161,6 +181,63 @@ async def test_stale_owner_interruption_reconciles_run_thread_and_lease(
         assert run.status == "interrupted"
         assert run.claimed_by is None
         assert run.lease_expires_at is None
+        assert thread.status == "idle"
+
+
+@pytest.mark.e2e
+@pytest.mark.prod_only
+async def test_stale_owner_interruption_closes_existing_stream() -> None:
+    expired = datetime.now(UTC) - timedelta(minutes=1)
+    async with _seed_run(
+        run_status="running",
+        thread_status="busy",
+        claimed_by="delayed-worker",
+        lease_expires_at=expired,
+    ) as (thread_id, run_id):
+        stream_started = asyncio.Event()
+        stream_task = asyncio.create_task(_wait_for_end_event(thread_id, run_id, stream_started))
+        await asyncio.wait_for(stream_started.wait(), timeout=5.0)
+        await asyncio.sleep(0.25)
+
+        async with httpx.AsyncClient(base_url=settings.app.SERVER_URL, timeout=10.0) as client:
+            response = await client.post(f"/threads/{thread_id}/runs/{run_id}/cancel")
+
+        response.raise_for_status()
+        assert await asyncio.wait_for(stream_task, timeout=5.0) == "end"
+
+
+@pytest.mark.e2e
+@pytest.mark.prod_only
+async def test_stale_worker_cannot_overwrite_reconciled_interruption() -> None:
+    expired = datetime.now(UTC) - timedelta(minutes=1)
+    async with _seed_run(
+        run_status="running",
+        thread_status="busy",
+        claimed_by="delayed-worker",
+        lease_expires_at=expired,
+    ) as (thread_id, run_id):
+        async with httpx.AsyncClient(base_url=settings.app.SERVER_URL, timeout=10.0) as client:
+            response = await client.post(f"/threads/{thread_id}/runs/{run_id}/cancel")
+        response.raise_for_status()
+
+        engine = create_async_engine(settings.db.database_url)
+        maker = async_sessionmaker(engine, expire_on_commit=False)
+        try:
+            with patch("aegra_api.services.run_status._get_session_maker", return_value=maker):
+                finalized = await finalize_run(
+                    run_id,
+                    thread_id,
+                    status="success",
+                    thread_status="idle",
+                    output={"late": True},
+                )
+        finally:
+            await engine.dispose()
+
+        run, thread = await _read_state(thread_id, run_id)
+        assert finalized is False
+        assert run.status == "interrupted"
+        assert run.output is None
         assert thread.status == "idle"
 
 

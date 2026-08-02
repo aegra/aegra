@@ -146,7 +146,13 @@ class BrokerManager(BaseBrokerManager):
             with contextlib.suppress(asyncio.CancelledError):
                 await self._cleanup_task
 
-    async def request_cancel(self, run_id: str, action: RunCancellationAction = "cancel") -> None:
+    async def request_cancel(
+        self,
+        run_id: str,
+        action: RunCancellationAction = "cancel",
+        *,
+        emit_end_event: bool = True,
+    ) -> None:
         """Cancel a run locally by cancelling its asyncio task."""
         task = active_runs.get(run_id)
         if task is None or task.done():
@@ -156,7 +162,7 @@ class BrokerManager(BaseBrokerManager):
         task.cancel()
 
         broker = self.get_or_create_broker(run_id)
-        if not broker.is_finished():
+        if emit_end_event and not broker.is_finished():
             event_id = await self.allocate_event_id(run_id)
             await broker.put(event_id, ("end", {"status": "interrupted"}))
             self.cleanup_broker(run_id)

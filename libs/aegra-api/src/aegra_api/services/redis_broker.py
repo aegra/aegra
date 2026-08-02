@@ -19,7 +19,7 @@ from typing import Any
 import structlog
 from redis import RedisError
 
-from aegra_api.core.active_runs import active_runs
+from aegra_api.core.active_runs import active_runs, explicit_run_cancellations
 from aegra_api.core.redis_manager import redis_manager
 from aegra_api.core.serializers import GeneralSerializer
 from aegra_api.models.enums import RunCancellationAction
@@ -376,18 +376,30 @@ class RedisBrokerManager(BaseBrokerManager):
             self._listener_task = None
         logger.debug("Redis broker manager stopped")
 
-    async def request_cancel(self, run_id: str, action: RunCancellationAction = "cancel") -> None:
+    async def request_cancel(
+        self,
+        run_id: str,
+        action: RunCancellationAction = "cancel",
+        *,
+        emit_end_event: bool = True,
+    ) -> None:
         """Broadcast a cancel command via Redis pub/sub."""
-        message = json.dumps({"run_id": run_id, "action": action})
+        message = json.dumps(
+            {
+                "run_id": run_id,
+                "action": action,
+                "emit_end_event": emit_end_event,
+            }
+        )
         try:
             client = redis_manager.get_client()
             await client.publish(self._cancel_channel, message)
             logger.info(f"Published {action} command for run {run_id}")
         except RedisError as e:
             logger.error(f"Failed to publish {action} for run {run_id}: {e}")
-            # Fall back to local execution — if the task is on this instance,
+            # Fall back to local execution - if the task is on this instance,
             # we can still cancel it even if Redis publish fails.
-            await self._execute_cancel(run_id)
+            await self._execute_cancel(run_id, emit_end_event=emit_end_event)
 
     async def get_event_sequence(self, run_id: str) -> int:
         """Read the current event sequence counter from Redis (O(1) GET)."""
@@ -455,27 +467,31 @@ class RedisBrokerManager(BaseBrokerManager):
 
                 try:
                     data = json.loads(message["data"])
-                    await self._execute_cancel(data["run_id"])
-                except (json.JSONDecodeError, KeyError) as e:
+                    emit_end_event = data.get("emit_end_event", True)
+                    if not isinstance(emit_end_event, bool):
+                        raise ValueError("emit_end_event must be a boolean")
+                    await self._execute_cancel(data["run_id"], emit_end_event=emit_end_event)
+                except (json.JSONDecodeError, KeyError, ValueError) as e:
                     logger.warning(f"Invalid cancel message: {e}")
         finally:
             await pubsub.unsubscribe(self._cancel_channel)
             await pubsub.aclose()
 
-    async def _execute_cancel(self, run_id: str) -> None:
+    async def _execute_cancel(self, run_id: str, *, emit_end_event: bool = True) -> None:
         """Cancel a locally-owned task and signal the broker."""
         task = active_runs.get(run_id)
         if task is None or task.done():
             return
 
         logger.info(f"Cancelling run {run_id} (local task found)")
+        explicit_run_cancellations.add(run_id)
         task.cancel()
 
         broker = self.get_or_create_broker(run_id)
-        if not broker.is_finished():
+        if emit_end_event and not broker.is_finished():
             event_id = await self.allocate_event_id(run_id)
             await broker.put(event_id, ("end", {"status": "interrupted"}))
-            # Do NOT call cleanup_broker here — execute_run's finally block
+            # Do NOT call cleanup_broker here - execute_run's finally block
             # owns cleanup.  Leaving the finished broker in _brokers lets
             # signal_run_cancelled see is_finished() → True and skip the
             # duplicate end event.

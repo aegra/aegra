@@ -470,7 +470,12 @@ async def stream_run(
 async def cancel_run_endpoint(
     thread_id: str,
     run_id: str,
-    wait: int = Query(0, ge=0, le=1, description="Set to 1 to wait for the run task to settle before returning."),
+    wait: int = Query(
+        0,
+        ge=0,
+        le=1,
+        description="Set to 1 to wait up to 10 seconds for the run task to settle before returning.",
+    ),
     action: RunCancellationAction = Query(
         "cancel",
         description="Cancellation strategy: 'cancel' for hard cancel, 'interrupt' for cooperative interrupt.",
@@ -482,10 +487,11 @@ async def cancel_run_endpoint(
 
     Use `action=cancel` to hard-cancel the run immediately, or
     `action=interrupt` to cooperatively interrupt (the graph can handle the
-    interrupt and save partial state). Set `wait=1` to block until the
-    background task has settled before returning the updated run. Without
-    `wait=1`, a live-owned run is cancelled asynchronously, so the response
-    may still report `pending` or `running`.
+    interrupt and save partial state). Set `wait=1` to wait up to 10 seconds
+    for the background task to settle before returning the updated run. The
+    response may still report `pending` or `running` if the timeout expires.
+    Without `wait=1`, a live-owned run is cancelled asynchronously, so the
+    response may still report `pending` or `running`.
     """
     logger.info(f"[cancel_run] fetch run run_id={run_id} thread_id={thread_id} user={user.identity}")
     run_orm = await session.scalar(

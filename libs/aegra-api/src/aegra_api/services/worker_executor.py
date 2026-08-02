@@ -45,6 +45,41 @@ def _is_valid_run_id(value: str) -> bool:
     return bool(_RUN_ID_PATTERN.match(value))
 
 
+async def _cleanup_cancelled_execution(run_id: str, execution_task: asyncio.Task[None]) -> None:
+    """Stop execution and persist an explicit cancellation when applicable."""
+    if not execution_task.done():
+        execution_task.cancel()
+    await asyncio.gather(execution_task, return_exceptions=True)
+
+    if run_id not in explicit_run_cancellations:
+        return
+
+    identity = await _get_run_identity(run_id)
+    if identity is None:
+        return
+
+    thread_id, user_id = identity
+    await finalize_run(
+        run_id,
+        thread_id,
+        user_id=user_id,
+        status="interrupted",
+        thread_status="idle",
+        output={},
+    )
+
+
+async def _await_cancellation_cleanup(cleanup_task: asyncio.Task[None]) -> None:
+    """Let cleanup finish even if the owning task is cancelled repeatedly."""
+    while not cleanup_task.done():
+        try:
+            await asyncio.shield(cleanup_task)
+        except asyncio.CancelledError:
+            if cleanup_task.cancelled():
+                raise
+    await cleanup_task
+
+
 class WorkerExecutor(BaseExecutor):
     """Dispatches runs via Redis List; workers consume with BLPOP + semaphore."""
 
@@ -239,22 +274,8 @@ class WorkerExecutor(BaseExecutor):
                 await _release_lease(run_id, worker_name)
         except asyncio.CancelledError:
             logger.info("Job task cancelled", worker=worker_name, run_id=run_id)
-            if not execution_task.done():
-                execution_task.cancel()
-            await asyncio.gather(execution_task, return_exceptions=True)
-
-            if run_id in explicit_run_cancellations:
-                identity = await _get_run_identity(run_id)
-                if identity is not None:
-                    thread_id, user_id = identity
-                    await finalize_run(
-                        run_id,
-                        thread_id,
-                        user_id=user_id,
-                        status="interrupted",
-                        thread_status="idle",
-                        output={},
-                    )
+            cleanup_task = asyncio.create_task(_cleanup_cancelled_execution(run_id, execution_task))
+            await _await_cancellation_cleanup(cleanup_task)
             raise
         except Exception:
             logger.exception("Unexpected error in job execution", run_id=run_id)

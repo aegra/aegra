@@ -250,7 +250,10 @@ class TestInterruptUnownedRun:
         assert interrupted is True
         statement = session.execute.await_args.args[0]
         compiled = statement.compile()
-        assert "runs.user_id" in str(compiled)
+        sql = str(compiled)
+        assert "runs.user_id" in sql
+        assert "runs.claimed_by IS NULL" in sql
+        assert "runs.lease_expires_at <" in sql
         assert "user-1" in compiled.params.values()
         mock_set_thread.assert_awaited_once_with(session, ["thread-1"], "idle", user_id="user-1")
         session.commit.assert_awaited_once()

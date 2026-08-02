@@ -107,6 +107,35 @@ class TestRecoverCrashedRuns:
         assert exhausted == []
         session.commit.assert_awaited_once()
 
+    @pytest.mark.asyncio
+    async def test_skips_run_when_guarded_transition_loses_race(self) -> None:
+        session = AsyncMock()
+        locked = MagicMock()
+        locked.fetchall.return_value = [
+            ("run-1", "thread-1", "user-1", {"_retry_count": 1}),
+        ]
+        unchanged = MagicMock()
+        unchanged.scalar_one_or_none.return_value = None
+        session.execute = AsyncMock(side_effect=[locked, unchanged])
+        session.commit = AsyncMock()
+        maker = _make_session_maker(session)
+
+        with (
+            patch("aegra_api.services.lease_reaper._get_session_maker", return_value=maker),
+            patch("aegra_api.services.lease_reaper.settings") as mock_settings,
+            patch(
+                "aegra_api.services.lease_reaper.set_thread_status_if_no_active_runs",
+                new_callable=AsyncMock,
+            ) as mock_set_thread,
+        ):
+            mock_settings.worker.BG_JOB_MAX_RETRIES = 1
+            retryable, exhausted = await LeaseReaper._recover_crashed_runs(["run-1"])
+
+        assert retryable == []
+        assert exhausted == []
+        mock_set_thread.assert_not_awaited()
+        session.commit.assert_awaited_once()
+
 
 class TestReenqueue:
     @pytest.mark.asyncio

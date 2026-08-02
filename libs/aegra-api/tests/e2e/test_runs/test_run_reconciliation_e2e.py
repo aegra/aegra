@@ -331,9 +331,9 @@ async def test_retry_exhaustion_marks_run_and_thread_error() -> None:
         execution_params={"_retry_count": settings.worker.BG_JOB_MAX_RETRIES},
     ) as (thread_id, run_id):
         deadline = asyncio.get_running_loop().time() + settings.worker.REAPER_INTERVAL_SECONDS * 2 + 5
-        while asyncio.get_running_loop().time() < deadline:
+        while True:
             run, thread = await _read_state(thread_id, run_id)
-            if run.status == "error":
+            if run.status == "error" or asyncio.get_running_loop().time() >= deadline:
                 break
             await asyncio.sleep(0.5)
 

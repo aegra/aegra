@@ -84,7 +84,10 @@ class TestRunsEndpoints:
             patch("aegra_api.services.run_preparation.update_thread_metadata", new_callable=AsyncMock),
             patch("aegra_api.services.run_preparation.set_thread_status", new_callable=AsyncMock),
             patch("aegra_api.services.run_preparation.uuid4", return_value=run_id),
-            patch("aegra_api.api.runs.asyncio.create_task") as mock_create_task,
+            patch(
+                "aegra_api.services.run_preparation.executor.submit",
+                new_callable=AsyncMock,
+            ) as mock_submit,
             patch("aegra_api.api.runs.active_runs", {}),
         ):
             mock_lg_service.return_value.list_graphs.return_value = ["test-graph"]
@@ -105,8 +108,8 @@ class TestRunsEndpoints:
             mock_session.add.assert_called_once()
             mock_session.commit.assert_called_once()
 
-            # Verify background task creation
-            mock_create_task.assert_called_once()
+            # Verify background execution submission
+            mock_submit.assert_awaited_once()
 
     @pytest.mark.asyncio
     async def test_create_run_assistant_not_found(
@@ -383,6 +386,40 @@ class TestRunsEndpoints:
         mock_signal.assert_awaited_once_with(run_orm.run_id)
 
     @pytest.mark.asyncio
+    async def test_reconciled_interrupt_uses_cooperative_stop(
+        self,
+        mock_session: AsyncMock,
+    ) -> None:
+        run_orm = RunORM(
+            run_id="run-123",
+            thread_id="test-thread",
+            assistant_id="agent",
+            user_id="test-user",
+            status="pending",
+            input={},
+            created_at=datetime.now(UTC),
+            updated_at=datetime.now(UTC),
+        )
+
+        with (
+            patch("aegra_api.api.runs.interrupt_unowned_run", new_callable=AsyncMock, return_value=True),
+            patch("aegra_api.api.runs.streaming_service.cancel_run", new_callable=AsyncMock) as mock_cancel,
+            patch(
+                "aegra_api.api.runs.streaming_service.interrupt_run",
+                new_callable=AsyncMock,
+            ) as mock_interrupt,
+            patch(
+                "aegra_api.api.runs.streaming_service.signal_run_cancelled",
+                new_callable=AsyncMock,
+            ) as mock_signal,
+        ):
+            await _request_run_interruption(mock_session, run_orm, "interrupt")
+
+        mock_interrupt.assert_awaited_once_with(run_orm.run_id, emit_end_event=False)
+        mock_cancel.assert_not_awaited()
+        mock_signal.assert_awaited_once_with(run_orm.run_id)
+
+    @pytest.mark.asyncio
     async def test_reconciled_interruption_survives_terminal_signal_outage(
         self,
         mock_session: AsyncMock,
@@ -400,14 +437,20 @@ class TestRunsEndpoints:
 
         with (
             patch("aegra_api.api.runs.interrupt_unowned_run", new_callable=AsyncMock, return_value=True),
-            patch("aegra_api.api.runs.streaming_service.cancel_run", new_callable=AsyncMock),
+            patch(
+                "aegra_api.api.runs.streaming_service.cancel_run",
+                new_callable=AsyncMock,
+            ) as mock_cancel,
             patch(
                 "aegra_api.api.runs.streaming_service.signal_run_cancelled",
                 new_callable=AsyncMock,
                 side_effect=RedisError("unavailable"),
-            ),
+            ) as mock_signal,
         ):
             await _request_run_interruption(mock_session, run_orm, "cancel")
+
+        mock_cancel.assert_awaited_once_with(run_orm.run_id, emit_end_event=False)
+        mock_signal.assert_awaited_once_with(run_orm.run_id)
 
     @pytest.mark.asyncio
     async def test_update_run_not_found(self, mock_user: User, mock_session: AsyncMock) -> None:

@@ -3,7 +3,7 @@
   "info": {
     "title": "Aegra",
     "description": "Production-ready Agent Protocol server",
-    "version": "0.9.26"
+    "version": "0.10.0"
   },
   "paths": {
     "/info": {
@@ -1876,7 +1876,7 @@
           "Thread Runs"
         ],
         "summary": "Update Run",
-        "description": "Update a run's status.\n\nPrimarily used to interrupt a running execution. Set `status` to\n`\"interrupted\"` to cooperatively stop the run.",
+        "description": "Update a run's status.\n\nPrimarily used to interrupt a running execution. Set `status` to\n`\"interrupted\"` to cooperatively stop the run. When a live worker owns\nthe run, interruption is asynchronous and the response may still report\n`pending` or `running`. Poll or stream the run until it becomes terminal.",
         "operationId": "update_run_threads__thread_id__runs__run_id__patch",
         "parameters": [
           {
@@ -2255,7 +2255,7 @@
           "Thread Runs"
         ],
         "summary": "Cancel Run Endpoint",
-        "description": "Cancel or interrupt a running execution.\n\nUse `action=cancel` to hard-cancel the run immediately, or\n`action=interrupt` to cooperatively interrupt (the graph can handle the\ninterrupt and save partial state). Set `wait=1` to block until the\nbackground task has fully settled before returning the updated run.",
+        "description": "Cancel or interrupt a running execution.\n\nUse `action=cancel` to hard-cancel the run immediately, or\n`action=interrupt` to cooperatively interrupt (the graph can handle the\ninterrupt and save partial state). Set `wait=1` to block until the\nbackground task has settled before returning the updated run. Without\n`wait=1`, a live-owned run is cancelled asynchronously, so the response\nmay still report `pending` or `running`.",
         "operationId": "cancel_run_endpoint_threads__thread_id__runs__run_id__cancel_post",
         "parameters": [
           {

@@ -342,7 +342,7 @@ class TestRunsEndpoints:
         mock_interrupt.assert_not_awaited()
 
     @pytest.mark.asyncio
-    async def test_interruption_reconciles_registered_task_before_it_starts(
+    async def test_interruption_reconciles_unowned_run_before_it_starts(
         self,
         mock_session: AsyncMock,
     ) -> None:
@@ -356,11 +356,7 @@ class TestRunsEndpoints:
             created_at=datetime.now(UTC),
             updated_at=datetime.now(UTC),
         )
-        registered_task = MagicMock()
-        registered_task.done.return_value = False
-
         with (
-            patch.dict("aegra_api.api.runs.active_runs", {run_orm.run_id: registered_task}, clear=True),
             patch(
                 "aegra_api.api.runs.interrupt_unowned_run",
                 new_callable=AsyncMock,

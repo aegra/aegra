@@ -222,6 +222,10 @@ await client.runs.cancel(
 )
 ```
 
+Cancellation is asynchronous while a live worker owns the run.
+The cancel response may therefore still show `pending` or `running`; poll, join, or stream the run until it reaches a terminal status.
+Use the REST endpoint with `wait=1` when the caller needs the request to wait briefly for the worker to settle.
+
 ## SSE reconnection
 
 Aegra stores streaming events in a replay buffer (Redis Lists when `REDIS_BROKER_ENABLED=true`, in-memory list in dev mode) for replay. If your connection drops:

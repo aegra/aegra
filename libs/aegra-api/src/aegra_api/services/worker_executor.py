@@ -29,8 +29,8 @@ from aegra_api.core.redis_manager import redis_manager
 from aegra_api.models.run_job import RunJob
 from aegra_api.observability.span_enrichment import merge_run_metadata, set_trace_context
 from aegra_api.services.base_executor import BaseExecutor
-from aegra_api.services.run_executor import _lease_loss_cancellations, execute_run
-from aegra_api.services.run_status import ACTIVE_RUN_STATES, finalize_run, update_run_status
+from aegra_api.services.run_executor import _lease_loss_cancellations, _timeout_cancellations, execute_run
+from aegra_api.services.run_status import finalize_run
 from aegra_api.settings import settings
 
 logger = structlog.getLogger(__name__)
@@ -206,43 +206,51 @@ class WorkerExecutor(BaseExecutor):
         current_task = asyncio.current_task()
         if current_task is not None:
             active_runs[run_id] = current_task
+        execution_task = asyncio.create_task(self._execute_with_lease(run_id, worker_name))
         try:
-            await asyncio.wait_for(
-                self._execute_with_lease(run_id, worker_name),
+            done, _ = await asyncio.wait(
+                {execution_task},
                 timeout=settings.worker.BG_JOB_TIMEOUT_SECS,
             )
-        except TimeoutError:
-            logger.error(
-                "Job exceeded timeout, killing",
-                worker=worker_name,
-                run_id=run_id,
-                timeout_secs=settings.worker.BG_JOB_TIMEOUT_SECS,
-            )
-            # Look up thread_id so we can set thread status to "error" too.
-            # When wait_for fires, execute_run's CancelledError handler runs first
-            # and sets thread_status="idle" — we must correct that to "error".
-            thread_id = await _get_thread_id_for_run(run_id)
-            if thread_id is not None:
-                await finalize_run(
-                    run_id,
-                    thread_id,
-                    status="error",
-                    thread_status="error",
-                    error="Job exceeded maximum execution time",
-                    allowed_current_statuses=(*ACTIVE_RUN_STATES, "interrupted"),
-                )
+            if execution_task in done:
+                await execution_task
             else:
-                # Fallback: update run status only (thread_id lookup failed)
-                await update_run_status(run_id, "error", error="Job exceeded maximum execution time")
-            await _release_lease(run_id, worker_name)
-        except asyncio.CancelledError:
-            logger.info("Job task cancelled", worker=worker_name, run_id=run_id)
-            if run_id in explicit_run_cancellations:
-                thread_id = await _get_thread_id_for_run(run_id)
-                if thread_id is not None:
+                logger.error(
+                    "Job exceeded timeout, killing",
+                    worker=worker_name,
+                    run_id=run_id,
+                    timeout_secs=settings.worker.BG_JOB_TIMEOUT_SECS,
+                )
+                _timeout_cancellations.add(run_id)
+                execution_task.cancel()
+                await asyncio.gather(execution_task, return_exceptions=True)
+
+                identity = await _get_run_identity(run_id)
+                if identity is not None:
+                    thread_id, user_id = identity
                     await finalize_run(
                         run_id,
                         thread_id,
+                        user_id=user_id,
+                        status="error",
+                        thread_status="error",
+                        error="Job exceeded maximum execution time",
+                    )
+                await _release_lease(run_id, worker_name)
+        except asyncio.CancelledError:
+            logger.info("Job task cancelled", worker=worker_name, run_id=run_id)
+            if not execution_task.done():
+                execution_task.cancel()
+            await asyncio.gather(execution_task, return_exceptions=True)
+
+            if run_id in explicit_run_cancellations:
+                identity = await _get_run_identity(run_id)
+                if identity is not None:
+                    thread_id, user_id = identity
+                    await finalize_run(
+                        run_id,
+                        thread_id,
+                        user_id=user_id,
                         status="interrupted",
                         thread_status="idle",
                         output={},
@@ -251,6 +259,7 @@ class WorkerExecutor(BaseExecutor):
         except Exception:
             logger.exception("Unexpected error in job execution", run_id=run_id)
         finally:
+            _timeout_cancellations.discard(run_id)
             explicit_run_cancellations.discard(run_id)
             active_runs.pop(run_id, None)
             semaphore.release()
@@ -344,11 +353,15 @@ class WorkerExecutor(BaseExecutor):
 # ------------------------------------------------------------------
 
 
-async def _get_thread_id_for_run(run_id: str) -> str | None:
-    """Look up the thread_id for a run. Returns None if the row is missing."""
+async def _get_run_identity(run_id: str) -> tuple[str, str] | None:
+    """Look up the thread and tenant identity for a run."""
     maker = _get_session_maker()
     async with maker() as session:
-        return await session.scalar(select(RunORM.thread_id).where(RunORM.run_id == run_id))
+        result = await session.execute(select(RunORM.thread_id, RunORM.user_id).where(RunORM.run_id == run_id))
+        row = result.one_or_none()
+        if row is None:
+            return None
+        return row.thread_id, row.user_id
 
 
 # ------------------------------------------------------------------

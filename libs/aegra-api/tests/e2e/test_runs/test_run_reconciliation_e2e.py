@@ -17,6 +17,7 @@ from aegra_api.core.orm import Assistant as AssistantORM
 from aegra_api.core.orm import Run as RunORM
 from aegra_api.core.orm import Thread as ThreadORM
 from aegra_api.services.run_status import finalize_run
+from aegra_api.services.worker_executor import WorkerExecutor
 from aegra_api.settings import settings
 from tests.e2e._utils import elog
 
@@ -227,6 +228,7 @@ async def test_stale_worker_cannot_overwrite_reconciled_interruption() -> None:
                 finalized = await finalize_run(
                     run_id,
                     thread_id,
+                    user_id="anonymous",
                     status="success",
                     thread_status="idle",
                     output={"late": True},
@@ -238,6 +240,36 @@ async def test_stale_worker_cannot_overwrite_reconciled_interruption() -> None:
         assert finalized is False
         assert run.status == "interrupted"
         assert run.output is None
+        assert thread.status == "idle"
+
+
+@pytest.mark.e2e
+@pytest.mark.prod_only
+async def test_worker_timeout_cannot_overwrite_reconciled_interruption() -> None:
+    async with _seed_run(run_status="interrupted", thread_status="idle") as (thread_id, run_id):
+        engine = create_async_engine(settings.db.database_url)
+        maker = async_sessionmaker(engine, expire_on_commit=False)
+        executor = WorkerExecutor()
+        semaphore = asyncio.Semaphore(1)
+        await semaphore.acquire()
+
+        async def slow_execution(_run_id: str, _worker_name: str) -> None:
+            await asyncio.sleep(60)
+
+        try:
+            with (
+                patch.object(executor, "_execute_with_lease", side_effect=slow_execution),
+                patch("aegra_api.services.worker_executor.settings") as mock_settings,
+                patch("aegra_api.services.worker_executor._get_session_maker", return_value=maker),
+                patch("aegra_api.services.run_status._get_session_maker", return_value=maker),
+            ):
+                mock_settings.worker.BG_JOB_TIMEOUT_SECS = 0.01
+                await executor._execute_and_release(run_id, "delayed-worker", semaphore)
+        finally:
+            await engine.dispose()
+
+        run, thread = await _read_state(thread_id, run_id)
+        assert run.status == "interrupted"
         assert thread.status == "idle"
 
 

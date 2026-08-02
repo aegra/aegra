@@ -28,5 +28,4 @@ MultitaskStrategy = Literal[
     "enqueue",
 ]
 
-# Run cancellation action enum
 RunCancellationAction = Literal["cancel", "interrupt"]

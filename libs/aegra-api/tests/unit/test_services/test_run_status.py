@@ -39,9 +39,13 @@ class TestUpdateRunStatus:
         maker = _make_mock_session_maker(session)
 
         with patch("aegra_api.services.run_status._get_session_maker", return_value=maker):
-            await update_run_status("run-1", "running")
+            await update_run_status("run-1", "running", user_id="user-1")
 
         session.execute.assert_awaited_once()
+        statement = session.execute.await_args.args[0]
+        compiled = statement.compile()
+        assert "runs.user_id" in str(compiled)
+        assert "user-1" in compiled.params.values()
         session.commit.assert_awaited_once()
 
     @pytest.mark.asyncio
@@ -53,7 +57,7 @@ class TestUpdateRunStatus:
             patch("aegra_api.services.run_status._get_session_maker", return_value=maker),
             patch("aegra_api.services.run_status._safe_serialize", return_value={"key": "val"}) as mock_ser,
         ):
-            await update_run_status("run-1", "success", output={"key": "val"})
+            await update_run_status("run-1", "success", user_id="user-1", output={"key": "val"})
 
         mock_ser.assert_called_once_with({"key": "val"}, "run-1")
         session.execute.assert_awaited_once()
@@ -64,7 +68,7 @@ class TestUpdateRunStatus:
         maker = _make_mock_session_maker(session)
 
         with patch("aegra_api.services.run_status._get_session_maker", return_value=maker):
-            await update_run_status("run-1", "error", error="something broke")
+            await update_run_status("run-1", "error", user_id="user-1", error="something broke")
 
         session.execute.assert_awaited_once()
         session.commit.assert_awaited_once()
@@ -78,7 +82,7 @@ class TestUpdateRunStatus:
             patch("aegra_api.services.run_status._get_session_maker", return_value=maker),
             patch("aegra_api.services.run_status._safe_serialize") as mock_ser,
         ):
-            await update_run_status("run-1", "running")
+            await update_run_status("run-1", "running", user_id="user-1")
 
         mock_ser.assert_not_called()
 
@@ -92,9 +96,13 @@ class TestStartRun:
         session.execute = AsyncMock(return_value=result)
 
         with patch("aegra_api.services.run_status._get_session_maker", return_value=_make_mock_session_maker(session)):
-            started = await start_run("run-1")
+            started = await start_run("run-1", user_id="user-1")
 
         assert started is True
+        statement = session.execute.await_args.args[0]
+        compiled = statement.compile()
+        assert "runs.user_id" in str(compiled)
+        assert "user-1" in compiled.params.values()
         session.commit.assert_awaited_once()
         session.rollback.assert_not_awaited()
 
@@ -106,7 +114,7 @@ class TestStartRun:
         session.execute = AsyncMock(return_value=result)
 
         with patch("aegra_api.services.run_status._get_session_maker", return_value=_make_mock_session_maker(session)):
-            started = await start_run("run-1")
+            started = await start_run("run-1", user_id="user-1")
 
         assert started is False
         session.commit.assert_not_awaited()
@@ -118,7 +126,7 @@ class TestFinalizeRun:
     async def test_finalizes_only_an_active_run(self) -> None:
         session = _make_mock_session()
         result = MagicMock()
-        result.scalar_one_or_none.return_value = "user-1"
+        result.scalar_one_or_none.return_value = "run-1"
         session.execute = AsyncMock(return_value=result)
 
         with (
@@ -128,9 +136,19 @@ class TestFinalizeRun:
                 new_callable=AsyncMock,
             ) as mock_set_thread,
         ):
-            finalized = await finalize_run("run-1", "thread-1", status="success", thread_status="idle")
+            finalized = await finalize_run(
+                "run-1",
+                "thread-1",
+                user_id="user-1",
+                status="success",
+                thread_status="idle",
+            )
 
         assert finalized is True
+        statement = session.execute.await_args.args[0]
+        compiled = statement.compile()
+        assert "runs.user_id" in str(compiled)
+        assert "user-1" in compiled.params.values()
         mock_set_thread.assert_awaited_once_with(session, ["thread-1"], "idle", user_id="user-1")
         session.commit.assert_awaited_once()
 
@@ -148,7 +166,13 @@ class TestFinalizeRun:
                 new_callable=AsyncMock,
             ) as mock_set_thread,
         ):
-            finalized = await finalize_run("run-1", "thread-1", status="success", thread_status="idle")
+            finalized = await finalize_run(
+                "run-1",
+                "thread-1",
+                user_id="user-1",
+                status="success",
+                thread_status="idle",
+            )
 
         assert finalized is False
         mock_set_thread.assert_not_awaited()

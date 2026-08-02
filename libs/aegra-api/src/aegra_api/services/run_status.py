@@ -29,6 +29,7 @@ async def update_run_status(
     run_id: str,
     status: str,
     *,
+    user_id: str,
     output: Any = None,
     error: str | None = None,
 ) -> None:
@@ -50,11 +51,18 @@ async def update_run_status(
             values["error_message"] = error
 
         logger.info("Updating run status", run_id=run_id, status=validated)
-        await session.execute(update(RunORM).where(RunORM.run_id == run_id).values(**values))
+        await session.execute(
+            update(RunORM)
+            .where(
+                RunORM.run_id == run_id,
+                RunORM.user_id == user_id,
+            )
+            .values(**values)
+        )
         await session.commit()
 
 
-async def start_run(run_id: str) -> bool:
+async def start_run(run_id: str, *, user_id: str) -> bool:
     """Move an active run to running without reviving a terminal run."""
     maker = _get_session_maker()
     async with maker() as session:
@@ -62,6 +70,7 @@ async def start_run(run_id: str) -> bool:
             update(RunORM)
             .where(
                 RunORM.run_id == run_id,
+                RunORM.user_id == user_id,
                 RunORM.status.in_(ACTIVE_RUN_STATES),
             )
             .values(status="running", updated_at=datetime.now(UTC))
@@ -179,6 +188,7 @@ async def finalize_run(
     run_id: str,
     thread_id: str,
     *,
+    user_id: str,
     status: str,
     thread_status: str,
     output: Any = None,
@@ -208,13 +218,13 @@ async def finalize_run(
             update(RunORM)
             .where(
                 RunORM.run_id == run_id,
+                RunORM.user_id == user_id,
                 RunORM.status.in_(allowed_current_statuses),
             )
             .values(**run_values)
-            .returning(RunORM.user_id)
+            .returning(RunORM.run_id)
         )
-        user_id = result.scalar_one_or_none()
-        if user_id is None:
+        if result.scalar_one_or_none() is None:
             await session.rollback()
             logger.info("Skipped finalizing terminal run", run_id=run_id, status=validated_run)
             return False

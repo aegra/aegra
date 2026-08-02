@@ -55,36 +55,57 @@ class TestFindRecoverable:
         assert stuck == []
 
 
-class TestResetToPending:
+class TestRecoverCrashedRuns:
     @pytest.mark.asyncio
-    async def test_returns_actually_reset_ids(self) -> None:
+    async def test_classifies_and_transitions_under_one_transaction(self) -> None:
         session = AsyncMock()
-        mock_result = MagicMock()
-        # Only run-1 was actually reset (run-2 may have been claimed by another worker)
-        mock_result.fetchall.return_value = [("run-1",)]
-        session.execute = AsyncMock(return_value=mock_result)
+        locked = MagicMock()
+        locked.fetchall.return_value = [
+            ("run-1", "thread-1", "user-1", {"_retry_count": 0}),
+            ("run-2", "thread-2", "user-2", {"_retry_count": 1}),
+        ]
+        updated_run_1 = MagicMock()
+        updated_run_1.scalar_one_or_none.return_value = "run-1"
+        updated_run_2 = MagicMock()
+        updated_run_2.scalar_one_or_none.return_value = "run-2"
+        session.execute = AsyncMock(side_effect=[locked, updated_run_1, updated_run_2])
         session.commit = AsyncMock()
         maker = _make_session_maker(session)
 
-        with patch("aegra_api.services.lease_reaper._get_session_maker", return_value=maker):
-            result = await LeaseReaper._reset_to_pending(["run-1", "run-2"])
+        with (
+            patch("aegra_api.services.lease_reaper._get_session_maker", return_value=maker),
+            patch("aegra_api.services.lease_reaper.settings") as mock_settings,
+            patch(
+                "aegra_api.services.lease_reaper.set_thread_status_if_no_active_runs",
+                new_callable=AsyncMock,
+            ) as mock_set_thread,
+        ):
+            mock_settings.worker.BG_JOB_MAX_RETRIES = 1
+            retryable, exhausted = await LeaseReaper._recover_crashed_runs(["run-1", "run-2"])
 
-        assert result == ["run-1"]
+        assert retryable == ["run-1"]
+        assert exhausted == ["run-2"]
+        for call in session.execute.await_args_list[1:]:
+            compiled = call.args[0].compile()
+            assert "runs.user_id" in str(compiled)
+        mock_set_thread.assert_awaited_once_with(session, {"thread-2"}, "error", user_id="user-2")
         session.commit.assert_awaited_once()
 
     @pytest.mark.asyncio
-    async def test_returns_empty_when_none_reset(self) -> None:
+    async def test_returns_empty_when_rows_are_no_longer_expired(self) -> None:
         session = AsyncMock()
-        mock_result = MagicMock()
-        mock_result.fetchall.return_value = []
-        session.execute = AsyncMock(return_value=mock_result)
+        locked = MagicMock()
+        locked.fetchall.return_value = []
+        session.execute = AsyncMock(return_value=locked)
         session.commit = AsyncMock()
         maker = _make_session_maker(session)
 
         with patch("aegra_api.services.lease_reaper._get_session_maker", return_value=maker):
-            result = await LeaseReaper._reset_to_pending(["run-1"])
+            retryable, exhausted = await LeaseReaper._recover_crashed_runs(["run-1"])
 
-        assert result == []
+        assert retryable == []
+        assert exhausted == []
+        session.commit.assert_awaited_once()
 
 
 class TestReenqueue:
@@ -152,35 +173,9 @@ class TestReenqueue:
         assert pushed == []
 
 
-class TestMarkPermanentlyFailed:
-    @pytest.mark.asyncio
-    async def test_returns_only_ids_actually_updated(self) -> None:
-        """A run deleted between retry check and update must not count as failed."""
-        session = AsyncMock()
-        mock_result = MagicMock()
-        mock_result.fetchall.return_value = [("run-1", "thread-1", "user-1")]
-        session.execute = AsyncMock(return_value=mock_result)
-        session.commit = AsyncMock()
-        maker = _make_session_maker(session)
-
-        with (
-            patch("aegra_api.services.lease_reaper._get_session_maker", return_value=maker),
-            patch(
-                "aegra_api.services.lease_reaper.set_thread_status_if_no_active_runs",
-                new_callable=AsyncMock,
-            ) as mock_set_thread,
-        ):
-            failed = await LeaseReaper._mark_permanently_failed(["run-1", "run-gone"])
-
-        assert failed == ["run-1"]
-        mock_set_thread.assert_awaited_once_with(session, {"thread-1"}, "error", user_id="user-1")
-        session.commit.assert_awaited_once()
-
-
 class TestReap:
     @pytest.mark.asyncio
-    async def test_crashed_runs_reset_before_retry_check(self) -> None:
-        """Reset claims ownership atomically, then retry check runs on claimed set only."""
+    async def test_crashed_runs_are_classified_before_becoming_claimable(self) -> None:
         reaper = LeaseReaper()
 
         with (
@@ -188,24 +183,14 @@ class TestReap:
                 LeaseReaper, "_find_recoverable", new_callable=AsyncMock, return_value=(["run-1", "run-2"], [])
             ),
             patch.object(
-                LeaseReaper, "_reset_to_pending", new_callable=AsyncMock, return_value=["run-1", "run-2"]
-            ) as mock_reset,
-            patch.object(
-                LeaseReaper, "_check_retry_limits", new_callable=AsyncMock, return_value=(["run-1"], ["run-2"])
-            ) as mock_retry,
+                LeaseReaper, "_recover_crashed_runs", new_callable=AsyncMock, return_value=(["run-1"], ["run-2"])
+            ) as mock_recover,
             patch.object(LeaseReaper, "_reenqueue", new_callable=AsyncMock, return_value=["run-1"]) as mock_reenqueue,
-            patch.object(
-                LeaseReaper, "_mark_permanently_failed", new_callable=AsyncMock, return_value=["run-2"]
-            ) as mock_fail,
         ):
             await reaper._reap()
 
-        # Reset called with ALL crashed (atomic ownership claim)
-        mock_reset.assert_awaited_once_with(["run-1", "run-2"])
-        # Retry check only runs on actually_reset set
-        mock_retry.assert_awaited_once_with(["run-1", "run-2"])
+        mock_recover.assert_awaited_once_with(["run-1", "run-2"])
         mock_reenqueue.assert_awaited_once_with(["run-1"])
-        mock_fail.assert_awaited_once_with(["run-2"])
 
     @pytest.mark.asyncio
     async def test_stuck_pending_reenqueued_without_retry_charge(self) -> None:
@@ -214,12 +199,12 @@ class TestReap:
 
         with (
             patch.object(LeaseReaper, "_find_recoverable", new_callable=AsyncMock, return_value=([], ["run-3"])),
-            patch.object(LeaseReaper, "_check_retry_limits", new_callable=AsyncMock) as mock_retry,
+            patch.object(LeaseReaper, "_recover_crashed_runs", new_callable=AsyncMock) as mock_recover,
             patch.object(LeaseReaper, "_reenqueue", new_callable=AsyncMock, return_value=["run-3"]) as mock_reenqueue,
         ):
             await reaper._reap()
 
-        mock_retry.assert_not_awaited()
+        mock_recover.assert_not_awaited()
         mock_reenqueue.assert_awaited_once_with(["run-3"])
 
     @pytest.mark.asyncio
@@ -228,12 +213,12 @@ class TestReap:
 
         with (
             patch.object(LeaseReaper, "_find_recoverable", new_callable=AsyncMock, return_value=([], [])),
-            patch.object(LeaseReaper, "_reset_to_pending", new_callable=AsyncMock) as mock_reset,
+            patch.object(LeaseReaper, "_recover_crashed_runs", new_callable=AsyncMock) as mock_recover,
             patch.object(LeaseReaper, "_reenqueue", new_callable=AsyncMock) as mock_reenqueue,
         ):
             await reaper._reap()
 
-        mock_reset.assert_not_awaited()
+        mock_recover.assert_not_awaited()
         mock_reenqueue.assert_not_awaited()
 
 
@@ -249,12 +234,10 @@ class TestReapMetrics:
             patch.object(
                 LeaseReaper, "_find_recoverable", new_callable=AsyncMock, return_value=(["run-1", "run-2"], [])
             ),
-            patch.object(LeaseReaper, "_reset_to_pending", new_callable=AsyncMock, return_value=["run-1", "run-2"]),
             patch.object(
-                LeaseReaper, "_check_retry_limits", new_callable=AsyncMock, return_value=(["run-1"], ["run-2"])
+                LeaseReaper, "_recover_crashed_runs", new_callable=AsyncMock, return_value=(["run-1"], ["run-2"])
             ),
             patch.object(LeaseReaper, "_reenqueue", new_callable=AsyncMock, return_value=["run-1"]),
-            patch.object(LeaseReaper, "_mark_permanently_failed", new_callable=AsyncMock, return_value=["run-2"]),
         ):
             await reaper._reap()
 
@@ -295,12 +278,13 @@ class TestReapMetrics:
 
         with (
             patch.object(LeaseReaper, "_find_recoverable", new_callable=AsyncMock, return_value=(["run-1"], [])),
-            patch.object(LeaseReaper, "_reset_to_pending", new_callable=AsyncMock, return_value=[]),
-            patch.object(LeaseReaper, "_check_retry_limits", new_callable=AsyncMock) as mock_retry,
+            patch.object(
+                LeaseReaper, "_recover_crashed_runs", new_callable=AsyncMock, return_value=([], [])
+            ) as mock_recover,
         ):
             await reaper._reap()
 
-        mock_retry.assert_not_awaited()
+        mock_recover.assert_awaited_once_with(["run-1"])
         assert _recovered_count("crashed_retried") == before
 
     @pytest.mark.asyncio
@@ -327,9 +311,8 @@ class TestReapMetrics:
             patch.object(
                 LeaseReaper, "_find_recoverable", new_callable=AsyncMock, return_value=(["run-1", "run-2"], [])
             ),
-            patch.object(LeaseReaper, "_reset_to_pending", new_callable=AsyncMock, return_value=["run-1", "run-2"]),
             patch.object(
-                LeaseReaper, "_check_retry_limits", new_callable=AsyncMock, return_value=(["run-1", "run-2"], [])
+                LeaseReaper, "_recover_crashed_runs", new_callable=AsyncMock, return_value=(["run-1", "run-2"], [])
             ),
             patch.object(LeaseReaper, "_reenqueue", new_callable=AsyncMock, return_value=["run-1"]),
         ):
@@ -338,16 +321,13 @@ class TestReapMetrics:
         assert _recovered_count("crashed_retried") == before + 1
 
     @pytest.mark.asyncio
-    async def test_crashed_exhausted_counts_only_rows_actually_updated(self) -> None:
-        """A run deleted before the failed-update lands must not count as exhausted."""
+    async def test_crashed_exhausted_counts_only_rows_atomically_failed(self) -> None:
         reaper = LeaseReaper()
         before = _recovered_count("crashed_exhausted")
 
         with (
             patch.object(LeaseReaper, "_find_recoverable", new_callable=AsyncMock, return_value=(["run-1"], [])),
-            patch.object(LeaseReaper, "_reset_to_pending", new_callable=AsyncMock, return_value=["run-1"]),
-            patch.object(LeaseReaper, "_check_retry_limits", new_callable=AsyncMock, return_value=([], ["run-1"])),
-            patch.object(LeaseReaper, "_mark_permanently_failed", new_callable=AsyncMock, return_value=[]),
+            patch.object(LeaseReaper, "_recover_crashed_runs", new_callable=AsyncMock, return_value=([], [])),
         ):
             await reaper._reap()
 

@@ -8,7 +8,5 @@ import asyncio
 
 active_runs: dict[str, asyncio.Task[None]] = {}
 
-# Run IDs whose worker wrapper was cancelled by an explicit API request.
-# Worker shutdown cancellation deliberately does not add entries here, so a
-# graceful shutdown still leaves leased runs for crash recovery.
+# Explicit API cancellations are marked so worker shutdown remains recoverable.
 explicit_run_cancellations: set[str] = set()

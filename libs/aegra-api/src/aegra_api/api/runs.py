@@ -59,9 +59,8 @@ async def _request_run_interruption(
     )
 
     if reconciled:
-        # A delayed worker may still be running after its lease expires. Tell
-        # it to stop, but keep terminal signaling here so the SSE stream is
-        # closed even when no executor currently owns the run.
+        # A delayed worker can outlive an expired lease, so request a stop.
+        # Signaling stays here to close streams when no executor owns the run.
         if action == "interrupt":
             await streaming_service.interrupt_run(run_orm.run_id, emit_end_event=False)
         else:
@@ -268,7 +267,9 @@ async def update_run(
     """Update a run's status.
 
     Primarily used to interrupt a running execution. Set `status` to
-    `"interrupted"` to cooperatively stop the run.
+    `"interrupted"` to cooperatively stop the run. When a live worker owns
+    the run, interruption is asynchronous and the response may still report
+    `pending` or `running`. Poll or stream the run until it becomes terminal.
     """
     logger.info(f"[update_run] fetch for update run_id={run_id} thread_id={thread_id} user={user.identity}")
     run_orm = await session.scalar(
@@ -472,7 +473,6 @@ async def cancel_run_endpoint(
     wait: int = Query(0, ge=0, le=1, description="Set to 1 to wait for the run task to settle before returning."),
     action: RunCancellationAction = Query(
         "cancel",
-        pattern="^(cancel|interrupt)$",
         description="Cancellation strategy: 'cancel' for hard cancel, 'interrupt' for cooperative interrupt.",
     ),
     user: User = Depends(get_current_user),
@@ -483,7 +483,9 @@ async def cancel_run_endpoint(
     Use `action=cancel` to hard-cancel the run immediately, or
     `action=interrupt` to cooperatively interrupt (the graph can handle the
     interrupt and save partial state). Set `wait=1` to block until the
-    background task has fully settled before returning the updated run.
+    background task has settled before returning the updated run. Without
+    `wait=1`, a live-owned run is cancelled asynchronously, so the response
+    may still report `pending` or `running`.
     """
     logger.info(f"[cancel_run] fetch run run_id={run_id} thread_id={thread_id} user={user.identity}")
     run_orm = await session.scalar(

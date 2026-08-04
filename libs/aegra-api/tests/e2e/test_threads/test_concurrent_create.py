@@ -53,9 +53,19 @@ async def test_concurrent_thread_create_never_500s(warm_client: httpx.AsyncClien
     """Concurrent do_nothing creates all resolve to one canonical thread."""
     for round_number in range(ROUNDS):
         thread_id = f"concurrent-create-{uuid.uuid4()}"
-        payload = {"thread_id": thread_id, "if_exists": "do_nothing"}
+        # Distinct markers per request. With identical payloads, a response
+        # assembled from the caller's own input would pass for the stored row.
+        markers = [f"round-{round_number}-request-{i}" for i in range(CONCURRENCY)]
+        payloads = [
+            {
+                "thread_id": thread_id,
+                "if_exists": "do_nothing",
+                "metadata": {"request_marker": marker},
+            }
+            for marker in markers
+        ]
 
-        responses = await _burst(warm_client, "/threads", [payload] * CONCURRENCY)
+        responses = await _burst(warm_client, "/threads", payloads)
 
         statuses = sorted({r.status_code for r in responses})
         failed = [r for r in responses if r.status_code != 200]
@@ -71,6 +81,12 @@ async def test_concurrent_thread_create_never_500s(warm_client: httpx.AsyncClien
             )
         assert statuses == [200], f"round {round_number + 1} returned {statuses}"
         assert {r.json()["thread_id"] for r in responses} == {thread_id}
+
+        # do_nothing owes every caller the one stored thread, so all of them must
+        # carry the winner's marker rather than the one they each submitted.
+        returned = {r.json()["metadata"]["request_marker"] for r in responses}
+        assert len(returned) == 1, f"round {round_number + 1} returned {len(returned)} rows: {returned}"
+        assert returned <= set(markers)
 
 
 @pytest.mark.e2e

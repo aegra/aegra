@@ -11,6 +11,7 @@ from uuid import uuid4
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import select
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from aegra_api.core.active_runs import active_runs
@@ -182,19 +183,6 @@ async def create_thread(
 
     thread_id = request.thread_id or str(uuid4())
 
-    if request.thread_id:
-        existing_stmt = select(ThreadORM).where(
-            ThreadORM.thread_id == thread_id,
-            ThreadORM.user_id == user.identity,
-        )
-        existing = await session.scalar(existing_stmt)
-
-        if existing:
-            if request.if_exists == "do_nothing":
-                return _serialize_thread(existing)
-            else:
-                raise HTTPException(409, f"Thread '{thread_id}' already exists")
-
     metadata = request.metadata or {}
     # Always enforce owner from authenticated user
     metadata["owner"] = user.identity
@@ -203,21 +191,43 @@ async def create_thread(
     metadata.setdefault("graph_id", None)
     metadata.setdefault("thread_name", "")
 
-    thread_orm = ThreadORM(
-        thread_id=thread_id,
-        status="idle",
-        metadata_json=metadata,
-        user_id=user.identity,
+    # Insert first and let the primary key arbitrate. A SELECT-then-INSERT lets
+    # two concurrent requests for the same thread_id both miss the SELECT and
+    # then collide on thread_pkey, and the loser's UniqueViolationError escapes
+    # as a 500 instead of honouring if_exists.
+    insert_stmt = (
+        pg_insert(ThreadORM)
+        .values(
+            thread_id=thread_id,
+            status="idle",
+            metadata_json=metadata,
+            user_id=user.identity,
+        )
+        .on_conflict_do_nothing(index_elements=["thread_id"])
+        .returning(ThreadORM)
     )
-
-    session.add(thread_orm)
+    created = (await session.scalars(insert_stmt)).first()
     await session.commit()
 
-    with contextlib.suppress(Exception):
-        await session.refresh(thread_orm)
+    if created is not None:
+        # Pass metadata explicitly in case the returned row is a partial mock
+        return _serialize_thread(created, default_metadata=metadata)
 
-    # Pass metadata explicitly in case refresh failed (tests/mocks)
-    return _serialize_thread(thread_orm, default_metadata=metadata)
+    # Nothing inserted, so the ID is taken. This read stays scoped to the caller
+    # while thread_pkey is global, so an incumbent owned by someone else is
+    # deliberately not found here and falls through to the conflict below rather
+    # than being adopted.
+    existing = await session.scalar(
+        select(ThreadORM).where(
+            ThreadORM.thread_id == thread_id,
+            ThreadORM.user_id == user.identity,
+        )
+    )
+
+    if existing is not None and request.if_exists == "do_nothing":
+        return _serialize_thread(existing)
+
+    raise HTTPException(409, f"Thread '{thread_id}' already exists")
 
 
 @router.get("/threads", response_model=ThreadList)

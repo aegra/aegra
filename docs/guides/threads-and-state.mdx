@@ -136,6 +136,31 @@ threads = await client.threads.search(
 )
 ```
 
+### Response projection (`select` / `extract`)
+
+Chat UIs can request latest state (or just specific paths) in the same search call:
+
+```python
+# Include latest checkpoint values (avoids 1+N get_state calls)
+threads = await client.threads.search(
+    select=["thread_id", "status", "metadata", "values"],
+)
+
+# Or pull only the fields you need for a sidebar title/preview
+threads = await client.threads.search(
+    select=["thread_id"],
+    extract={
+        "title": "values.messages[0].content",
+        "last_msg": "values.messages[-1].content",
+    },
+)
+# -> [{"thread_id": "...", "extracted": {"title": "...", "last_msg": "..."}}]
+```
+
+`extract` accepts at most **10** paths. Unknown `select` fields or malformed `extract` paths return **HTTP 422**.
+
+When `select` / `extract` are omitted, the response shape is unchanged (thin thread metadata only).
+
 ## Listing threads
 
 ```python

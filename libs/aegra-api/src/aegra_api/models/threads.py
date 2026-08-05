@@ -64,6 +64,22 @@ class ThreadList(BaseModel):
     total: int
 
 
+THREAD_SEARCH_SELECT_WHITELIST: frozenset[str] = frozenset(
+    {
+        "thread_id",
+        "status",
+        "created_at",
+        "updated_at",
+        "metadata",
+        "user_id",
+        "config",
+        "values",
+        "interrupts",
+    }
+)
+CHECKPOINT_SELECT_FIELDS: frozenset[str] = frozenset({"values", "interrupts", "config"})
+
+
 class ThreadSearchRequest(BaseModel):
     """Request model for thread search"""
 
@@ -84,6 +100,22 @@ class ThreadSearchRequest(BaseModel):
         None,
         description="Sort direction (SDK-compatible). Defaults to 'desc' when sort_by is set.",
     )
+    select: list[str] | None = Field(
+        None,
+        description=(
+            "Optional response field projection. When omitted, returns the default thin "
+            "thread shape. Allowed: thread_id, status, created_at, updated_at, metadata, "
+            "user_id, config, values, interrupts."
+        ),
+    )
+    extract: dict[str, str] | None = Field(
+        None,
+        description=(
+            "Optional JSON-path projections (max 10). Keys are response aliases; values are "
+            "paths starting with values., metadata., or config. "
+            "Resolved values appear under 'extracted' on each result. Unknown/malformed paths → 422."
+        ),
+    )
 
     @field_validator("status")
     @classmethod
@@ -92,6 +124,51 @@ class ThreadSearchRequest(BaseModel):
         if v is not None:
             return validate_thread_status(v)
         return v
+
+    @field_validator("select")
+    @classmethod
+    def validate_select(cls, v: list[str] | None) -> list[str] | None:
+        if v is None:
+            return v
+        if not v:
+            raise ValueError("select must be a non-empty list when provided")
+        unknown = sorted({field for field in v if field not in THREAD_SEARCH_SELECT_WHITELIST})
+        if unknown:
+            allowed = ", ".join(sorted(THREAD_SEARCH_SELECT_WHITELIST))
+            raise ValueError(f"unknown select fields: {unknown}; allowed: {allowed}")
+        # Preserve order, drop duplicates
+        seen: set[str] = set()
+        deduped: list[str] = []
+        for field in v:
+            if field not in seen:
+                seen.add(field)
+                deduped.append(field)
+        return deduped
+
+    @field_validator("extract")
+    @classmethod
+    def validate_extract(cls, v: dict[str, str] | None) -> dict[str, str] | None:
+        if v is None:
+            return v
+        from aegra_api.utils.json_path import validate_extract_paths
+
+        validate_extract_paths(v)
+        return v
+
+
+class ThreadSearchItem(Thread):
+    """Documented shape for projected ``POST /threads/search`` results.
+
+    Used for OpenAPI/SDK typing of optional ``values`` / ``interrupts`` /
+    ``config`` / ``extracted`` fields. Not used as a validating
+    ``response_model`` because sparse ``select`` projections may omit
+    inherited required Thread fields.
+    """
+
+    values: dict[str, Any] | None = Field(None, description="Latest checkpoint channel values")
+    interrupts: list[dict[str, Any]] | None = Field(None, description="Pending interrupts from latest state")
+    config: dict[str, Any] | None = Field(None, description="Latest runnable config from checkpoint")
+    extracted: dict[str, Any] | None = Field(None, description="Values resolved from extract paths")
 
 
 class ThreadSearchResponse(BaseModel):

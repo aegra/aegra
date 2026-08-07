@@ -101,11 +101,23 @@ def version():
 
 
 def find_config_file() -> Path | None:
-    """Find aegra.json or langgraph.json in current directory.
+    """Find the manifest via AEGRA_CONFIG, else aegra.json/langgraph.json in cwd.
 
     Returns:
         Path to config file if found, None otherwise
     """
+    # A pre-set AEGRA_CONFIG is a deliberate choice (docker-compose, systemd unit,
+    # CI matrix). Discovery must not silently outrank it.
+    env_config = os.environ.get("AEGRA_CONFIG", "").strip()
+    if env_config:
+        resolved = Path(env_config).expanduser()
+        if resolved.exists():
+            return resolved.resolve()
+        console.print(
+            f"[bold yellow]Warning:[/bold yellow] AEGRA_CONFIG points to {resolved}, "
+            "which does not exist. Falling back to auto-discovery."
+        )
+
     # Check for aegra.json first
     aegra_config = Path.cwd() / "aegra.json"
     if aegra_config.exists():

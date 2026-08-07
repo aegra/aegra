@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 from unittest.mock import MagicMock, patch
 
+import pytest
 from click.testing import CliRunner
 
 from aegra_cli.cli import (
@@ -796,6 +797,60 @@ class TestConfigDiscovery:
         """Test that find_config_file returns None when no config found."""
         with cli_runner.isolated_filesystem(temp_dir=tmp_path):
             result = find_config_file()
+            assert result is None
+
+    def test_find_config_file_honors_aegra_config_env(
+        self, cli_runner: CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A pre-set AEGRA_CONFIG wins over a discoverable aegra.json in cwd."""
+        external = tmp_path / "custom" / "staging.json"
+        external.parent.mkdir(parents=True)
+        external.write_text('{"graphs": {}}')
+
+        with cli_runner.isolated_filesystem(temp_dir=tmp_path):
+            Path("aegra.json").write_text('{"graphs": {}}')
+            monkeypatch.setenv("AEGRA_CONFIG", str(external))
+
+            result = find_config_file()
+
+        assert result is not None
+        assert result == external.resolve()
+
+    def test_find_config_file_falls_back_when_env_path_missing(
+        self, cli_runner: CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A stale AEGRA_CONFIG must not mask a usable local manifest."""
+        with cli_runner.isolated_filesystem(temp_dir=tmp_path):
+            Path("aegra.json").write_text('{"graphs": {}}')
+            monkeypatch.setenv("AEGRA_CONFIG", str(tmp_path / "gone.json"))
+
+            result = find_config_file()
+
+            assert result is not None
+            assert result.name == "aegra.json"
+
+    def test_find_config_file_ignores_blank_env(
+        self, cli_runner: CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An empty or whitespace AEGRA_CONFIG is treated as unset, not as cwd."""
+        with cli_runner.isolated_filesystem(temp_dir=tmp_path):
+            Path("aegra.json").write_text('{"graphs": {}}')
+            monkeypatch.setenv("AEGRA_CONFIG", "   ")
+
+            result = find_config_file()
+
+            assert result is not None
+            assert result.name == "aegra.json"
+
+    def test_find_config_file_env_does_not_leak_into_discovery(
+        self, cli_runner: CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """With AEGRA_CONFIG unset, discovery is unchanged."""
+        with cli_runner.isolated_filesystem(temp_dir=tmp_path):
+            monkeypatch.delenv("AEGRA_CONFIG", raising=False)
+
+            result = find_config_file()
+
             assert result is None
 
     def test_dev_fails_without_config(self, cli_runner: CliRunner, tmp_path: Path) -> None:

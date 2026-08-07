@@ -2,36 +2,19 @@
 
 from datetime import UTC, datetime
 from typing import Any, Literal
-from urllib.parse import urlparse
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from aegra_api.models.webhooks import WebhookField
 from aegra_api.settings import settings
 
 # Field length caps. Keep these conservative; cron metadata is small by nature.
 _SCHEDULE_MAX_LEN = 256
 _TIMEZONE_MAX_LEN = 64
-_WEBHOOK_MAX_LEN = 2048
 _STREAM_MODE_MAX_LEN = 64
 _STR_FIELD_MAX_LEN = 256
 
 OnRunCompleted = Literal["delete", "keep"]
-
-
-def _validate_webhook_url(value: str | None) -> str | None:
-    """Reject malformed or non-http(s) webhook URLs at the API boundary.
-
-    The cron record stores ``webhook`` verbatim. When a future runtime wires
-    webhook delivery this is the SSRF entry point, so we constrain it now.
-    """
-    if value is None:
-        return None
-    parsed = urlparse(value)
-    if parsed.scheme not in ("http", "https"):
-        raise ValueError("webhook must use http or https scheme")
-    if not parsed.netloc:
-        raise ValueError("webhook must include a host")
-    return value
 
 
 def _validate_payload_size(model: BaseModel) -> None:
@@ -53,7 +36,7 @@ class CronCreate(BaseModel):
     context: dict[str, Any] | None = None
     interrupt_before: Literal["*"] | list[str] | None = None
     interrupt_after: Literal["*"] | list[str] | None = None
-    webhook: str | None = Field(None, max_length=_WEBHOOK_MAX_LEN)
+    webhook: WebhookField = None
     on_run_completed: OnRunCompleted | None = None
     multitask_strategy: str | None = Field(None, max_length=_STR_FIELD_MAX_LEN)
     end_time: datetime | None = None
@@ -67,7 +50,6 @@ class CronCreate(BaseModel):
 
     @model_validator(mode="after")
     def _check(self) -> "CronCreate":
-        self.webhook = _validate_webhook_url(self.webhook)
         if isinstance(self.stream_mode, str) and len(self.stream_mode) > _STREAM_MODE_MAX_LEN:
             raise ValueError("stream_mode is too long")
         if self.end_time is not None:
@@ -108,7 +90,7 @@ class CronUpdate(BaseModel):
     metadata: dict[str, Any] | None = None
     config: dict[str, Any] | None = None
     context: dict[str, Any] | None = None
-    webhook: str | None = Field(None, max_length=_WEBHOOK_MAX_LEN)
+    webhook: WebhookField = None
     interrupt_before: Literal["*"] | list[str] | None = None
     interrupt_after: Literal["*"] | list[str] | None = None
     on_run_completed: OnRunCompleted | None = None
@@ -122,7 +104,6 @@ class CronUpdate(BaseModel):
 
     @model_validator(mode="after")
     def _check(self) -> "CronUpdate":
-        self.webhook = _validate_webhook_url(self.webhook)
         if isinstance(self.stream_mode, str) and len(self.stream_mode) > _STREAM_MODE_MAX_LEN:
             raise ValueError("stream_mode is too long")
         if self.end_time is not None:

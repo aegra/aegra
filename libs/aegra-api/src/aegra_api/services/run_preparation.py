@@ -252,7 +252,12 @@ async def _prepare_run(
 
     # Build the RunJob before persisting so we can store execution_params
     job = RunJob(
-        identity=RunIdentity(run_id=run_id, thread_id=thread_id, graph_id=assistant.graph_id),
+        identity=RunIdentity(
+            run_id=run_id,
+            thread_id=thread_id,
+            graph_id=assistant.graph_id,
+            assistant_id=resolved_assistant_id,
+        ),
         user=user,
         execution=RunExecution(
             input_data=request.input,  # preserve None so LangGraph resumes from checkpoint
@@ -262,6 +267,7 @@ async def _prepare_run(
             checkpoint=request.checkpoint,
             command=request.command,
             event_streaming_v2=event_streaming_v2,
+            webhook=request.webhook,
         ),
         behavior=RunBehavior(
             interrupt_before=request.interrupt_before,

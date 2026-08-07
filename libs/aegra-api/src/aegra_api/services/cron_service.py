@@ -6,7 +6,6 @@ to the existing run preparation pipeline.
 
 from datetime import UTC, datetime, timedelta
 from typing import Any, cast
-from urllib.parse import urlparse, urlunparse
 from uuid import uuid4
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -27,6 +26,7 @@ from aegra_api.models.crons import (
     CronUpdate,
     OnRunCompleted,
 )
+from aegra_api.models.webhooks import redact
 from aegra_api.services.langgraph_service import LangGraphService, get_langgraph_service
 from aegra_api.settings import settings
 from aegra_api.utils.assistants import resolve_assistant_id
@@ -55,8 +55,10 @@ def _build_payload(request: CronCreate | CronUpdate) -> dict[str, Any]:
         "timezone",
     ):
         value = getattr(request, field, None)
-        if value is not None:
-            payload[field] = value
+        if value is None:
+            continue
+        # webhook is a WebhookConfig; store its JSONB wire form (bare URL or dict).
+        payload[field] = value.to_payload() if field == "webhook" else value
     return payload
 
 
@@ -123,33 +125,14 @@ def _compute_next_run(
     return result.astimezone(UTC)
 
 
-def _mask_webhook_credentials(url: str) -> str:
-    """Strip userinfo from a webhook URL before surfacing it back to clients.
-
-    Webhooks like ``https://user:token@host/path`` leak the credential on
-    every read of the cron. We retain the host/path so callers can still
-    audit destination, but the secret never round-trips.
-    """
-    try:
-        parsed = urlparse(url)
-    except ValueError:
-        return url
-    if not parsed.hostname:
-        return url
-    netloc = parsed.hostname
-    if parsed.port is not None:
-        netloc = f"{netloc}:{parsed.port}"
-    return urlunparse(parsed._replace(netloc=netloc))
-
-
 def _redact_payload(payload: dict[str, Any] | None) -> dict[str, Any]:
-    """Return a copy of *payload* with webhook credentials masked."""
+    """Return a copy of *payload* with webhook credentials (userinfo, secret, headers) masked."""
     if not payload:
         return {}
     masked = dict(payload)
     webhook = masked.get("webhook")
-    if isinstance(webhook, str) and webhook:
-        masked["webhook"] = _mask_webhook_credentials(webhook)
+    if webhook:
+        masked["webhook"] = redact(webhook)
     return masked
 
 

@@ -659,3 +659,48 @@ class TestTimezoneField:
         call_args = mock_cron_service.create_cron.call_args
         request_obj = call_args.args[0]
         assert request_obj.timezone is None
+
+
+class TestCronWebhookConfig:
+    """Webhook accepts a bare URL (SDK-compatible) or a rich object; rejects bad URLs."""
+
+    def test_accepts_bare_url_string(self, client, mock_cron_service: AsyncMock) -> None:
+        mock_cron_service.create_cron.return_value = AsyncMock()
+        resp = client.post(
+            "/runs/crons",
+            json={
+                "assistant_id": "asst-001",
+                "schedule": "*/5 * * * *",
+                "webhook": "https://hooks.example.com/x",
+            },
+        )
+        assert resp.status_code == 200
+
+    def test_accepts_rich_object(self, client, mock_cron_service: AsyncMock) -> None:
+        mock_cron_service.create_cron.return_value = AsyncMock()
+        resp = client.post(
+            "/runs/crons",
+            json={
+                "assistant_id": "asst-001",
+                "schedule": "*/5 * * * *",
+                "webhook": {
+                    "url": "https://hooks.example.com/x",
+                    "method": "POST",
+                    "headers": {"Authorization": "Bearer t"},
+                    "params": {"source": "cron"},
+                    "secret": "whsec_abc",
+                },
+            },
+        )
+        assert resp.status_code == 200
+
+    def test_rejects_non_http_webhook(self, client, mock_cron_service: AsyncMock) -> None:
+        resp = client.post(
+            "/runs/crons",
+            json={
+                "assistant_id": "asst-001",
+                "schedule": "*/5 * * * *",
+                "webhook": "ftp://bad.example.com/x",
+            },
+        )
+        assert resp.status_code == 422

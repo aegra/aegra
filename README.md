@@ -103,6 +103,7 @@ async for chunk in client.runs.stream(
 - **[Agent Protocol](https://github.com/langchain-ai/agent-protocol) compliant** - Works with Agent Chat UI, LangGraph Studio, CopilotKit
 - **[Worker architecture](https://docs.aegra.dev/guides/worker-architecture)** - Redis job queue with 30 concurrent runs per instance, lease-based crash recovery, and horizontal scaling across multiple instances
 - **[Scheduled cron jobs](https://docs.aegra.dev/guides/cron)** - Trigger runs on a schedule with standard 5-field or seconds-level 6-field expressions, IANA timezone support, and multi-instance safe `SKIP LOCKED` claim
+- **[Webhook callbacks](https://docs.aegra.dev/guides/cron#webhook-callbacks)** - POST a signed (Standard Webhooks HMAC) callback when a run completes — bare URL or a rich object with method, headers, query params, and body — set per run or per cron
 - **[Human-in-the-loop](https://docs.aegra.dev/guides/human-in-the-loop)** - Approval gates and user intervention points
 - **[Streaming](https://docs.aegra.dev/guides/streaming)** - Real-time SSE streaming with cross-instance pub/sub and automatic reconnection with event replay. Supports both the legacy run-scoped stream and **Agent Protocol v2** thread-scoped streaming (content-block events, per-subgraph lifecycle, HITL resume) for the latest LangGraph SDKs and `useStream()`
 - **[Persistent state](https://docs.aegra.dev/guides/threads-and-state)** - PostgreSQL checkpoints via LangGraph

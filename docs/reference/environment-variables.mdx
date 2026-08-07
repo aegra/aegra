@@ -169,6 +169,20 @@ Set `CRON_ENABLED=false` to disable scheduling without removing cron records. Jo
 Cron firing is **at-least-once**: if a worker crashes after claiming a cron but before the run setup commits, the claim eventually expires (after `CRON_CLAIM_DURATION_SECONDS`) and another tick re-fires the cron. Make agent runs idempotent if duplicate firings are unacceptable.
 </Note>
 
+## Webhook delivery
+
+Best-effort HTTP callback POSTed when a run completes (configured per run or per cron). See the [cron webhook section](/guides/cron#webhook-callbacks).
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `WEBHOOK_ENABLED` | `true` | Master switch for outbound webhook delivery |
+| `WEBHOOK_TIMEOUT_SECONDS` | `15` | Per-attempt HTTP timeout |
+| `WEBHOOK_MAX_ATTEMPTS` | `3` | Total delivery attempts (`1` = no retry) |
+| `WEBHOOK_BACKOFF_BASE_SECONDS` | `1` | Exponential backoff base (delay = base × 2^(attempt−1)) |
+| `WEBHOOK_BLOCK_PRIVATE_IPS` | `false` | Also refuse loopback/private-range hosts. Link-local/metadata (169.254.169.254) is **always** refused regardless of this flag |
+
+Delivery never fails or delays a run: exhausted retries are logged and dropped. Every delivery is SSRF-guarded: the target host is resolved and link-local/metadata/multicast/reserved addresses are always refused; enable `WEBHOOK_BLOCK_PRIVATE_IPS` to also refuse loopback and RFC1918 private ranges. Requests are signed with [Standard Webhooks](https://www.standardwebhooks.com) HMAC headers when the webhook has a `secret`.
+
 ## Prometheus metrics
 
 | Variable | Default | Description |

@@ -96,6 +96,65 @@ run = await client.crons.create_for_thread(
 print(f"Cron ID: {run['cron_id']}")
 ```
 
+## Webhook callbacks
+
+Attach a `webhook` to a cron (or to any run) and Aegra POSTs a callback when each
+fired run reaches a terminal state (`success`, `error`, or `interrupted`). The
+webhook is forwarded from the cron onto every run it fires.
+
+`webhook` accepts either a bare URL string (LangGraph SDK-compatible) or a rich
+object:
+
+```python
+run = await client.crons.create(
+    assistant_id="agent",
+    schedule="0 9 * * *",
+    input={"messages": [{"role": "user", "content": "Daily report"}]},
+    webhook={
+        "url": "https://hooks.example.com/aegra",
+        "method": "POST",                       # POST (default) | PUT | PATCH
+        "headers": {"Authorization": "Bearer <token>"},
+        "params": {"source": "cron"},           # appended to the query string
+        "body": {"env": "prod"},                # merged over the run payload
+        "secret": "whsec_...",                  # enables HMAC signing
+    },
+)
+```
+
+| Field | Type | Description |
+|---|---|---|
+| `url` | `string` | Callback URL. Must be `http`/`https` with a host. Required. |
+| `method` | `string` | `POST` (default), `PUT`, or `PATCH`. |
+| `headers` | `object` | Extra request headers (e.g. auth). Masked on read. |
+| `params` | `object` | Query-string parameters. |
+| `body` | `object` | Fields merged over the run payload in the request body. |
+| `secret` | `string` | HMAC key; when set, [Standard Webhooks](https://www.standardwebhooks.com) signature headers are added. Masked on read. |
+
+**Delivery payload** matches the LangGraph Platform webhook Run object:
+`run_id`, `thread_id`, `assistant_id`, `status`, `metadata`, `multitask_strategy`,
+`values` (final thread state), `kwargs` (`input`/`config`/`context`), `error`
+(`{ "message": ... }` or `null`), `created_at`, `updated_at`, `run_ended_at`, and
+`webhook_sent_at` — with your `body` merged on top.
+
+**Signing.** When `secret` is set, each request carries `webhook-id`,
+`webhook-timestamp`, and `webhook-signature` (`v1,<base64 HMAC-SHA256>`) per the
+Standard Webhooks spec. Verify with any Standard Webhooks library.
+
+<Note>
+Delivery is **best-effort**: failures are retried with exponential backoff
+(`WEBHOOK_MAX_ATTEMPTS`, default 3) and then logged — a webhook never fails or
+delays the run. Because cron firing is at-least-once, a receiver may occasionally
+see duplicate deliveries for one occurrence; dedupe on `webhook-id` (the run id)
+and make handlers idempotent.
+</Note>
+
+<Warning>
+Webhook `headers` and `secret` are stored in plaintext (same posture as other
+secrets) and masked only on API reads. Delivery is SSRF-guarded: link-local /
+cloud-metadata (`169.254.169.254`) targets are always refused, and
+`WEBHOOK_BLOCK_PRIVATE_IPS=true` additionally refuses loopback and private ranges.
+</Warning>
+
 ## Cron expression format
 
 Aegra uses [croniter](https://github.com/kiorky/croniter) for schedule parsing.

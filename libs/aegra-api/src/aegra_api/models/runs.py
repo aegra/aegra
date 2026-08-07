@@ -12,6 +12,7 @@ from pydantic import (
     model_validator,
 )
 
+from aegra_api.models.webhooks import WebhookField
 from aegra_api.utils.status_compat import validate_run_status
 
 # Constraints for ``RunCreate.metadata`` keys/values, enforced at request
@@ -76,6 +77,9 @@ class RunCreate(BaseModel):
         False,
         description="Whether to include subgraph events in streaming. When True, includes events from all subgraphs. When False (default when None), excludes subgraph events. Defaults to False for backwards compatibility.",
     )
+
+    # Accepts a bare URL string (SDK contract) or a rich webhook object.
+    webhook: WebhookField = Field(None, description="URL or webhook object POSTed when the run completes.")
 
     # Request metadata (top-level in payload).  Reaches OTEL trace
     # attributes as ``langfuse.trace.metadata.<key>`` (and the

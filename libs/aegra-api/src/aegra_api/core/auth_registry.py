@@ -82,6 +82,64 @@ ROUTE_AUTH_MAP: Final[dict[tuple[str, str], tuple[str, str]]] = {
     ("POST", "/threads/{thread_id}/commands"): ("threads", "create_run"),
 }
 
+# Routes that authorize themselves inside the handler body.
+#
+# These own their dispatch for a reason: their `value` is the live request model,
+# and a handler may inject metadata by mutating it in place (see
+# examples/jwt_mock_auth_example.py, which sets value["metadata"]["team_id"]).
+# Dispatching from the route registration would run the handler against a
+# throwaway dict and silently drop that injection, so the enforcer stands down
+# and lets the route call handle_event itself.
+#
+# Everything else in ROUTE_AUTH_MAP is dispatched by the enforcer.
+SELF_DISPATCHING: Final[frozenset[tuple[str, str]]] = frozenset(
+    {
+        ("POST", "/assistants"),
+        ("GET", "/assistants"),
+        ("POST", "/assistants/search"),
+        ("POST", "/assistants/count"),
+        ("GET", "/assistants/{assistant_id}"),
+        ("PATCH", "/assistants/{assistant_id}"),
+        ("DELETE", "/assistants/{assistant_id}"),
+        ("POST", "/assistants/{assistant_id}/latest"),
+        ("POST", "/assistants/{assistant_id}/versions"),
+        ("GET", "/assistants/{assistant_id}/schemas"),
+        ("GET", "/assistants/{assistant_id}/graph"),
+        ("GET", "/assistants/{assistant_id}/subgraphs"),
+        ("POST", "/threads"),
+        ("GET", "/threads"),
+        ("POST", "/threads/search"),
+        ("GET", "/threads/{thread_id}"),
+        ("PATCH", "/threads/{thread_id}"),
+        ("DELETE", "/threads/{thread_id}"),
+        ("POST", "/threads/{thread_id}/runs"),
+        ("POST", "/threads/{thread_id}/runs/stream"),
+        ("POST", "/threads/{thread_id}/runs/wait"),
+        ("GET", "/threads/{thread_id}/runs/{run_id}"),
+        ("DELETE", "/threads/{thread_id}/runs/{run_id}"),
+        ("POST", "/runs"),
+        ("POST", "/runs/stream"),
+        ("POST", "/runs/wait"),
+        ("POST", "/runs/crons"),
+        ("POST", "/threads/{thread_id}/runs/crons"),
+        ("PATCH", "/runs/crons/{cron_id}"),
+        ("DELETE", "/runs/crons/{cron_id}"),
+        ("POST", "/runs/crons/search"),
+        ("POST", "/runs/crons/count"),
+        ("PUT", "/store/items"),
+        ("GET", "/store/items"),
+        ("DELETE", "/store/items"),
+        ("POST", "/store/items/search"),
+        ("POST", "/store/namespaces"),
+    }
+)
+
+
+def is_self_dispatching(method: str, path: str) -> bool:
+    """Whether the route body authorizes itself, so the enforcer must stand down."""
+    return (method.upper(), path) in SELF_DISPATCHING
+
+
 # Routes that intentionally carry no @auth.on dispatch. Anything not here and
 # not in ROUTE_AUTH_MAP fails the coverage test.
 EXEMPT_PATHS: Final[frozenset[str]] = frozenset(

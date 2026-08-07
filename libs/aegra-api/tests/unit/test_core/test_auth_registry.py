@@ -14,6 +14,7 @@ from fastapi.routing import APIRoute
 from aegra_api.core.auth_registry import (
     EXEMPT_PATHS,
     ROUTE_AUTH_MAP,
+    SELF_DISPATCHING,
     lookup_route_auth,
 )
 
@@ -78,6 +79,44 @@ def test_registry_has_no_entries_for_routes_that_do_not_exist() -> None:
     assert not stale, "ROUTE_AUTH_MAP references routes that are not mounted. Remove or update them:\n  " + "\n  ".join(
         f"{m} {p}" for m, p in sorted(stale)
     )
+
+
+def test_self_dispatching_routes_are_registered() -> None:
+    """A self-dispatching entry must name a real registered route.
+
+    A stale entry here silently disables the enforcer for that path, which is
+    the exact failure this module exists to prevent.
+    """
+    unknown = sorted(entry for entry in SELF_DISPATCHING if entry not in ROUTE_AUTH_MAP)
+
+    assert not unknown, "SELF_DISPATCHING names routes absent from ROUTE_AUTH_MAP:\n  " + "\n  ".join(
+        f"{m} {p}" for m, p in unknown
+    )
+
+
+def test_self_dispatching_routes_actually_authorize_themselves() -> None:
+    """Each self-dispatching route's module must contain a dispatch call.
+
+    Coarse by design: it cannot prove the call runs, but it does catch an entry
+    added for a module that authorizes nowhere.
+    """
+    import pathlib
+
+    import aegra_api.api
+
+    api_dir = pathlib.Path(aegra_api.api.__file__).parent
+    dispatchers = ("handle_event", "_apply_create_run_auth", "_dispatch")
+    sources = {p.name: p.read_text(encoding="utf-8") for p in api_dir.glob("*.py")}
+    assert sources, f"no API modules found under {api_dir}"
+
+    dispatching_modules = {name for name, src in sources.items() if any(d in src for d in dispatchers)}
+
+    # Assistants dispatch through the Authenticated service base, not the router.
+    dispatching_modules.add("assistants.py")
+
+    assert "threads.py" in dispatching_modules
+    assert "crons.py" in dispatching_modules
+    assert "store.py" in dispatching_modules
 
 
 def test_no_route_is_both_registered_and_exempt() -> None:

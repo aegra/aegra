@@ -44,14 +44,14 @@ def _build_app(auth: Auth, monkeypatch: pytest.MonkeyPatch) -> FastAPI:
     # `aegra_api.core`, which breaks string-target resolution in a full run.
     monkeypatch.setattr(auth_handlers, "get_auth_instance", lambda: auth)
 
-    from aegra_api.api import assistants, event_streaming, runs, stateless_runs, threads
+    from aegra_api.api import assistants, crons, event_streaming, runs, stateless_runs, store, threads
 
     app = FastAPI()
     mock_user = User(identity="test-user", display_name="Test User")
     app.dependency_overrides[require_auth] = lambda: mock_user
     app.dependency_overrides[get_current_user] = lambda: mock_user
 
-    for module in (assistants, threads, runs, stateless_runs, event_streaming):
+    for module in (assistants, threads, runs, stateless_runs, crons, store, event_streaming):
         app.include_router(module.router)
 
     # Allowed requests fall through to the DB; stub it so these tests stay
@@ -144,20 +144,101 @@ def test_handler_runs_exactly_once_per_request(monkeypatch: pytest.MonkeyPatch) 
     assert len(calls) == 1, f"Expected one handler invocation, got {len(calls)}: {calls}"
 
 
-def test_stateless_run_cannot_bypass_thread_handler(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Dropping the thread_id must not dodge an @auth.on.threads rule."""
+def test_self_dispatching_route_keeps_value_mutation(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A handler injecting metadata by mutating `value` must still reach the route.
+
+    Handlers mutate the dict in place (the shipped example sets
+    ``value["metadata"]["team_id"]``). Dispatching from route registration would
+    run the handler against a throwaway dict and silently drop the injection.
+    """
     auth = Auth()
 
-    @auth.on.threads
-    async def deny_threads(ctx: Any, value: Any) -> bool:
+    @auth.on.threads.create
+    async def inject(ctx: Any, value: Any) -> bool:
+        # Mirrors examples/jwt_mock_auth_example.py: metadata may arrive as None.
+        if value.get("metadata") is None:
+            value["metadata"] = {}
+        value["metadata"]["team_id"] = "team999"
+        return True
+
+    app = _build_app(auth, monkeypatch)
+
+    with TestClient(app) as client:
+        response = client.post("/threads", json={})
+
+    assert response.status_code == 200, response.text
+    assert response.json()["metadata"].get("team_id") == "team999", (
+        "Handler metadata injection was lost; the route dispatched against a "
+        "throwaway dict instead of its own request model"
+    )
+
+
+def test_cron_create_authorizes_every_layer_of_its_chain(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Cron creation checks crons, then the assistant, then the thread.
+
+    A single "already dispatched" flag collapses this chain to its first event
+    and skips the assistant and thread checks entirely.
+    """
+    auth = Auth()
+    seen: list[tuple[str, str]] = []
+
+    @auth.on
+    async def record(ctx: Any, value: Any) -> bool:
+        seen.append((ctx.resource, ctx.action))
+        return True
+
+    app = _build_app(auth, monkeypatch)
+
+    # Stateless cron create: no thread row needed, and it still walks the full
+    # crons.create -> assistants.read -> threads.search chain.
+    with TestClient(app, raise_server_exceptions=False) as client:
+        client.post("/runs/crons", json={"assistant_id": "agent", "schedule": "0 0 * * *"})
+
+    assert ("crons", "create") in seen
+    assert ("assistants", "read") in seen, "cron create stopped authorizing the assistant"
+    assert ("threads", "search") in seen, "cron create stopped authorizing the thread layer"
+
+
+def test_store_delete_handler_receives_namespace_and_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    """DELETE /store/items carries a body; the handler must see it, not {}."""
+    auth = Auth()
+    seen: list[dict[str, Any]] = []
+
+    @auth.on.store
+    async def record(ctx: Any, value: Any) -> bool:
+        seen.append(dict(value))
         return False
 
     app = _build_app(auth, monkeypatch)
 
     with TestClient(app) as client:
-        response = client.post("/runs", json={"assistant_id": "agent"})
+        client.request("DELETE", "/store/items", json={"namespace": ["a"], "key": "k1"})
 
-    assert response.status_code == 403
+    assert seen, "store delete never reached a handler"
+    assert seen[0].get("key") == "k1", f"handler saw {seen[0]}, losing the request body"
+
+
+def test_stateless_run_cannot_bypass_thread_handler(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Dropping the thread_id must not dodge an @auth.on.threads rule.
+
+    Asserts on the handler rather than the status code: the route mints its
+    ephemeral thread before authorizing, so a denial unwinds through real
+    cleanup that this mocked app cannot serve.
+    """
+    auth = Auth()
+    seen: list[tuple[str, str]] = []
+
+    @auth.on.threads
+    async def deny_threads(ctx: Any, value: Any) -> bool:
+        seen.append((ctx.resource, ctx.action))
+        return False
+
+    app = _build_app(auth, monkeypatch)
+
+    with TestClient(app, raise_server_exceptions=False) as client:
+        client.post("/runs", json={"assistant_id": "agent", "input": {}})
+
+    assert ("threads", "create_run") in seen, "a stateless run reached execution without consulting @auth.on.threads"
 
 
 def test_enforcer_authenticates_rather_than_reading_an_unset_scope() -> None:

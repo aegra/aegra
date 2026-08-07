@@ -4,15 +4,17 @@ Routes used to opt *in* to authorization by calling ``handle_event`` in their
 body. Forgetting the call produced no error and no failing test — the handler
 just never ran. This module inverts that: dispatch is attached at route
 registration from :mod:`aegra_api.core.auth_registry`, so a route opts *out*
-only by being listed as exempt.
+only by being listed exempt.
 
-Routes that already call ``handle_event`` themselves stay correct: the request
-is marked once dispatched, and the second call is skipped rather than running a
-user's handler twice.
+Exactly one layer authorizes each event. A route listed in ``SELF_DISPATCHING``
+keeps its in-body call and gets no enforcer, because its ``value`` is the live
+request model and handlers may inject metadata by mutating it in place. Every
+other registered route is dispatched from here.
 """
 
 from __future__ import annotations
 
+import json
 from contextvars import ContextVar
 from typing import Any
 
@@ -23,38 +25,31 @@ from fastapi.routing import APIRoute
 
 from aegra_api.core.auth_deps import require_auth
 from aegra_api.core.auth_handlers import build_auth_context, handle_event
-from aegra_api.core.auth_registry import lookup_route_auth
+from aegra_api.core.auth_registry import is_self_dispatching, lookup_route_auth
 from aegra_api.models.auth import User
 
 logger = structlog.getLogger(__name__)
 
-# Route bodies do not receive the Request, so the "already dispatched" signal
-# travels in a ContextVar rather than request.state. Each request runs in its own
-# context, so this cannot leak between concurrent requests.
-_dispatched: ContextVar[bool] = ContextVar("aegra_auth_dispatched", default=False)
-_filters: ContextVar[dict[str, Any] | None] = ContextVar("aegra_auth_filters", default=None)
+# Records which (resource, action) pairs the enforcer authorized, for assertions
+# in tests. Never a single flag: one request legitimately authorizes several
+# events — creating a cron dispatches crons.create, then assistants.read, then
+# threads.read — so a boolean would misrepresent the chain.
+_dispatched: ContextVar[frozenset[tuple[str, str]]] = ContextVar("aegra_auth_dispatched", default=frozenset())
 
 
-def mark_dispatched(filters: dict[str, Any] | None) -> None:
-    """Record that authorization already ran for this request."""
-    _dispatched.set(True)
-    _filters.set(filters)
+def mark_dispatched(resource: str, action: str) -> None:
+    """Record that ``(resource, action)`` was authorized for this request."""
+    _dispatched.set(_dispatched.get() | {(resource, action)})
 
 
-def was_dispatched() -> bool:
-    """Whether authorization already ran for this request."""
+def dispatched_events() -> frozenset[tuple[str, str]]:
+    """Events the enforcer authorized for this request."""
     return _dispatched.get()
 
 
 def reset_dispatch_state() -> None:
-    """Clear the per-request dispatch flags (used by tests)."""
-    _dispatched.set(False)
-    _filters.set(None)
-
-
-def get_auth_filters() -> dict[str, Any] | None:
-    """Filters returned by the ``@auth.on`` handler for this request, if any."""
-    return _filters.get()
+    """Clear the per-request dispatch record (used by tests)."""
+    _dispatched.set(frozenset())
 
 
 async def _read_json_body(request: Request) -> dict[str, Any]:
@@ -64,11 +59,11 @@ async def _read_json_body(request: Request) -> dict[str, Any]:
     A non-dict or unparseable body authorizes as an empty value rather than
     failing the request — malformed input is the route's error to report.
     """
-    if request.method in ("GET", "HEAD", "DELETE"):
+    if request.method in ("GET", "HEAD"):
         return {}
     try:
         body = await request.json()
-    except Exception:
+    except (json.JSONDecodeError, UnicodeDecodeError):
         return {}
     return body if isinstance(body, dict) else {}
 
@@ -85,8 +80,8 @@ def build_auth_enforcer(resource: str, action: str):
     ) -> None:
         value: dict[str, Any] = {**request.path_params, **await _read_json_body(request)}
         ctx = build_auth_context(user, resource, action)
-        filters = await handle_event(ctx, value)
-        mark_dispatched(filters)
+        await handle_event(ctx, value)
+        mark_dispatched(resource, action)
 
     return enforce
 
@@ -123,6 +118,11 @@ def _wire_route(route: APIRoute) -> int:
         mapping = lookup_route_auth(method, route.path)
         if mapping is None:
             continue
+        # The route body authorizes itself against the live request model.
+        # Wiring the enforcer here too would run the handler twice and drop any
+        # metadata the handler injects by mutating `value`.
+        if is_self_dispatching(method, route.path):
+            return 0
         resource, action = mapping
         dependency = Depends(build_auth_enforcer(resource, action))
         # Prepend so authorization runs before the route's own dependencies.

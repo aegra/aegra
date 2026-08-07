@@ -105,15 +105,6 @@ async def handle_event(
         # This allows the request to proceed normally
         return None
 
-    # Local import: auth_enforcement imports handle_event from this module, so a
-    # module-level import here is a cycle (confirmed by ImportError).
-    from aegra_api.core.auth_enforcement import get_auth_filters, was_dispatched
-
-    # Route registration already dispatched this request's handler. Running the
-    # in-body call too would invoke a user's handler twice per request.
-    if was_dispatched():
-        return get_auth_filters()
-
     auth = get_auth_instance()
     if auth is None:
         # No auth configured, allow by default

@@ -178,6 +178,15 @@ Stateless runs create an ephemeral thread, so they authorize as
 A filter dict returned from a `threads` handler is applied to thread queries,
 including by-id reads and deletes, not only to search.
 
+Your handler runs **once per event**. A request that legitimately touches
+several resources still checks each one: creating a cron authorizes
+`crons.create`, then `assistants.read`, then the thread, so you can deny at any
+layer.
+
+Handlers may also inject data by mutating `value` in place. Setting
+`value["metadata"]["team_id"]` in an `@auth.on.threads.create` handler stores
+that metadata on the new thread.
+
 <Note>
 Route-to-handler mapping lives in `core/auth_registry.py`. A route that is not
 registered there fails the test suite, so a new endpoint cannot silently skip

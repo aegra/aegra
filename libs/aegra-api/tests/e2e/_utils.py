@@ -23,11 +23,10 @@ async def await_terminal_run(
     run_id: str,
     *,
     timeout: float = 15.0,
-) -> dict:
+) -> dict[str, Any]:
     """Poll a run until it settles.
 
-    Cancelling a run a live worker owns is asynchronous: the worker finalizes it,
-    so the state right after the cancel call is not guaranteed to be terminal.
+    Cancelling a live-owned run is asynchronous: the worker finalizes it.
     """
     deadline = asyncio.get_running_loop().time() + timeout
     run = await client.runs.get(thread_id, run_id)

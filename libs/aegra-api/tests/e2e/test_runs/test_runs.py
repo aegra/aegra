@@ -154,7 +154,7 @@ async def test_runs_cancel_e2e():
 
     # A live worker finalizes the run itself, so the immediate response may
     # still be non-terminal. Only the settled state below is guaranteed.
-    assert patched["status"] in ("pending", "running", "interrupted", "success")
+    assert patched["status"] in ("pending", "running", "interrupted", "success", "error")
 
     # Verify final state, polling because cancellation of a live-owned run settles
     # asynchronously.

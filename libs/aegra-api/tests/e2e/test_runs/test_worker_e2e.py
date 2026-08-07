@@ -130,6 +130,7 @@ async def test_worker_cancel_via_redis() -> None:
 
     # The worker owns this run, so it finalizes asynchronously after the cancel.
     final_run = await await_terminal_run(client, thread["thread_id"], run["run_id"])
+    check_and_skip_if_geo_blocked(final_run)
     elog("Final run state", final_run)
     assert final_run["status"] == "interrupted", f"Expected interrupted, got {final_run['status']}"
 

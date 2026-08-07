@@ -15,6 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from aegra_api.core.active_runs import active_runs
 from aegra_api.core.auth_deps import auth_dependency, get_current_user
+from aegra_api.core.auth_filters import build_metadata_filter
 from aegra_api.core.auth_handlers import build_auth_context, handle_event
 from aegra_api.core.orm import Run as RunORM
 from aegra_api.core.orm import Thread as ThreadORM
@@ -233,13 +234,10 @@ async def list_threads(
     value = {}
     filters = await handle_event(ctx, value)
 
-    # Build query with filters if provided
     stmt = select(ThreadORM).where(ThreadORM.user_id == user.identity)
-    if filters:
-        # Apply filters from authorization handler
-        # For now, we'll apply user_id filter which is already there
-        # Additional filters can be added here based on handler response
-        pass
+    auth_filter = build_metadata_filter(ThreadORM.metadata_json, filters)
+    if auth_filter is not None:
+        stmt = stmt.where(auth_filter)
     result = await session.scalars(stmt)
     rows = result.all()
 
@@ -262,9 +260,14 @@ async def get_thread(
     # Authorization check
     ctx = build_auth_context(user, "threads", "read")
     value = {"thread_id": thread_id}
-    await handle_event(ctx, value)
+    filters = await handle_event(ctx, value)
 
     stmt = select(ThreadORM).where(ThreadORM.thread_id == thread_id, ThreadORM.user_id == user.identity)
+    # A by-id lookup must honor the same filter as search, or a handler that
+    # scopes listings still leaks the row to anyone who knows the id.
+    auth_filter = build_metadata_filter(ThreadORM.metadata_json, filters)
+    if auth_filter is not None:
+        stmt = stmt.where(auth_filter)
     thread = await session.scalar(stmt)
     if not thread:
         raise HTTPException(404, f"Thread '{thread_id}' not found")
@@ -823,9 +826,14 @@ async def delete_thread(
     # Authorization check
     ctx = build_auth_context(user, "threads", "delete")
     value = {"thread_id": thread_id}
-    await handle_event(ctx, value)
+    filters = await handle_event(ctx, value)
 
     stmt = select(ThreadORM).where(ThreadORM.thread_id == thread_id, ThreadORM.user_id == user.identity)
+    # Deleting by id must respect the handler filter too, or a scoped handler
+    # blocks listing a thread while still allowing its deletion.
+    auth_filter = build_metadata_filter(ThreadORM.metadata_json, filters)
+    if auth_filter is not None:
+        stmt = stmt.where(auth_filter)
     thread = await session.scalar(stmt)
     if not thread:
         raise HTTPException(404, f"Thread '{thread_id}' not found")
@@ -870,16 +878,12 @@ async def search_threads(
     value = request.model_dump()
     filters = await handle_event(ctx, value)
 
-    # Merge handler filters with request metadata
-    # Note: ThreadSearchRequest doesn't have a filters field,
-    # so we merge authorization filters into metadata if needed
-    if filters and "metadata" in filters:
-        # If filters contain metadata, merge with request metadata
-        handler_meta = filters["metadata"]
-        if isinstance(handler_meta, dict):
-            request.metadata = {**(request.metadata or {}), **handler_meta}
-        # Other filter types can be handled here if needed
     stmt = select(ThreadORM).where(ThreadORM.user_id == user.identity)
+    # Compile the handler filter rather than merging only its "metadata" key:
+    # the flat shape and the $eq/$contains/$or/$and operators were dropped here.
+    auth_filter = build_metadata_filter(ThreadORM.metadata_json, filters)
+    if auth_filter is not None:
+        stmt = stmt.where(auth_filter)
 
     if request.status:
         stmt = stmt.where(ThreadORM.status == request.status)

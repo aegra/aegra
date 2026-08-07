@@ -108,15 +108,18 @@ def find_config_file() -> Path | None:
     """
     # A pre-set AEGRA_CONFIG is a deliberate choice (docker-compose, systemd unit,
     # CI matrix). Discovery must not silently outrank it.
+    #
+    # Only honored when it resolves inside the current directory, so a stale
+    # AEGRA_CONFIG exported in a shell cannot make `aegra dev` silently boot a
+    # different project from the one you are standing in. Point elsewhere with -c.
     env_config = os.environ.get("AEGRA_CONFIG", "").strip()
     if env_config:
         resolved = Path(env_config).expanduser()
-        if resolved.exists():
-            return resolved.resolve()
-        console.print(
-            f"[bold yellow]Warning:[/bold yellow] AEGRA_CONFIG points to {resolved}, "
-            "which does not exist. Falling back to auto-discovery."
-        )
+        if not resolved.is_absolute():
+            resolved = Path.cwd() / resolved
+        resolved = resolved.resolve()
+        if resolved.is_relative_to(Path.cwd().resolve()) and resolved.is_file():
+            return resolved
 
     # Check for aegra.json first
     aegra_config = Path.cwd() / "aegra.json"

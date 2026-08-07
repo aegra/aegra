@@ -803,7 +803,25 @@ class TestConfigDiscovery:
         self, cli_runner: CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """A pre-set AEGRA_CONFIG wins over a discoverable aegra.json in cwd."""
-        external = tmp_path / "custom" / "staging.json"
+        with cli_runner.isolated_filesystem(temp_dir=tmp_path):
+            Path("aegra.json").write_text('{"graphs": {}}')
+            Path("staging.json").write_text('{"graphs": {}}')
+            monkeypatch.setenv("AEGRA_CONFIG", "staging.json")
+
+            result = find_config_file()
+
+            assert result is not None
+            assert result.name == "staging.json"
+
+    def test_find_config_file_ignores_env_pointing_outside_cwd(
+        self, cli_runner: CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A stale AEGRA_CONFIG must not boot an unrelated project.
+
+        Exporting AEGRA_CONFIG in a shell used to leak into every later `aegra
+        dev`, silently running a different project than the one you stand in.
+        """
+        external = tmp_path / "elsewhere" / "other.json"
         external.parent.mkdir(parents=True)
         external.write_text('{"graphs": {}}')
 
@@ -813,8 +831,8 @@ class TestConfigDiscovery:
 
             result = find_config_file()
 
-        assert result is not None
-        assert result == external.resolve()
+            assert result is not None
+            assert result.name == "aegra.json"
 
     def test_find_config_file_falls_back_when_env_path_missing(
         self, cli_runner: CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -822,12 +840,29 @@ class TestConfigDiscovery:
         """A stale AEGRA_CONFIG must not mask a usable local manifest."""
         with cli_runner.isolated_filesystem(temp_dir=tmp_path):
             Path("aegra.json").write_text('{"graphs": {}}')
-            monkeypatch.setenv("AEGRA_CONFIG", str(tmp_path / "gone.json"))
+            monkeypatch.setenv("AEGRA_CONFIG", "gone.json")
 
             result = find_config_file()
 
             assert result is not None
             assert result.name == "aegra.json"
+
+    def test_find_config_file_env_cannot_conjure_config_in_empty_dir(
+        self, cli_runner: CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An ambient AEGRA_CONFIG must not make an empty directory look configured.
+
+        `aegra dev` must still fail fast here instead of starting a server for
+        whatever project the env var happened to name.
+        """
+        external = tmp_path / "elsewhere" / "other.json"
+        external.parent.mkdir(parents=True)
+        external.write_text('{"graphs": {}}')
+
+        with cli_runner.isolated_filesystem(temp_dir=tmp_path):
+            monkeypatch.setenv("AEGRA_CONFIG", str(external))
+
+            assert find_config_file() is None
 
     def test_find_config_file_ignores_blank_env(
         self, cli_runner: CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

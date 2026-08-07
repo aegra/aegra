@@ -1,9 +1,13 @@
+import asyncio
 import json
+from typing import Any
 
 import httpx
 import pytest
 
 from aegra_api.settings import settings
+
+TERMINAL_RUN_STATES = ("success", "error", "interrupted", "timeout")
 
 try:
     from langgraph_sdk import get_client
@@ -11,6 +15,28 @@ except Exception as e:
     raise RuntimeError(
         "langgraph-sdk is required for E2E tests. Install via extras 'e2e' or add to your environment."
     ) from e
+
+
+async def await_terminal_run(
+    client: Any,
+    thread_id: str,
+    run_id: str,
+    *,
+    timeout: float = 15.0,
+) -> dict:
+    """Poll a run until it settles.
+
+    Cancelling a run a live worker owns is asynchronous: the worker finalizes it,
+    so the state right after the cancel call is not guaranteed to be terminal.
+    """
+    deadline = asyncio.get_running_loop().time() + timeout
+    run = await client.runs.get(thread_id, run_id)
+    while run["status"] not in TERMINAL_RUN_STATES:
+        if asyncio.get_running_loop().time() >= deadline:
+            raise AssertionError(f"Run {run_id} did not settle within {timeout}s, last status={run['status']!r}")
+        await asyncio.sleep(0.25)
+        run = await client.runs.get(thread_id, run_id)
+    return run
 
 
 def elog(title: str, payload):

@@ -6,6 +6,16 @@ on:
   # Allow manual trigger
   workflow_dispatch:
 
+# Workflow-level so the pytest steps inherit them too. Tests that assert on
+# reconciliation read the database directly via settings.db.database_url; without
+# these they fall back to the postgres/postgres defaults and fail to connect.
+env:
+  POSTGRES_USER: "user"
+  POSTGRES_PASSWORD: "password"
+  POSTGRES_HOST: "localhost"
+  POSTGRES_PORT: "5432"
+  POSTGRES_DB: "aegra"
+
 jobs:
   e2e-dev-mode:
     name: E2E (Dev Mode — LocalExecutor)

@@ -3,7 +3,7 @@ import pytest
 from aegra_api.settings import settings
 
 # Match import style used by other e2e tests when run as top-level modules
-from tests.e2e._utils import check_and_skip_if_geo_blocked, elog, get_e2e_client
+from tests.e2e._utils import await_terminal_run, check_and_skip_if_geo_blocked, elog, get_e2e_client
 
 
 @pytest.mark.e2e
@@ -152,10 +152,13 @@ async def test_runs_cancel_e2e():
     # It might have failed in background
     check_and_skip_if_geo_blocked(patched)
 
-    assert patched["status"] in ("interrupted", "success")
+    # A live worker finalizes the run itself, so the immediate response may
+    # still be non-terminal. Only the settled state below is guaranteed.
+    assert patched["status"] in ("pending", "running", "interrupted", "success")
 
-    # Verify final state
-    got = await client.runs.get(thread_id, run_id)
+    # Verify final state, polling because cancellation of a live-owned run settles
+    # asynchronously.
+    got = await await_terminal_run(client, thread_id, run_id)
     elog("Runs.get(post-cancel)", got)
     assert got["status"] in ("interrupted", "error", "success")
 

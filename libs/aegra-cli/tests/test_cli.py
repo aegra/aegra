@@ -834,6 +834,8 @@ class TestConfigDiscovery:
     def test_dev_fails_without_config(self, cli_runner: CliRunner, tmp_path: Path) -> None:
         """Test that dev command fails when no config file is found."""
         with cli_runner.isolated_filesystem(temp_dir=tmp_path):
+            # Prior tests may leave AEGRA_CONFIG pointing at another tmp config (#492).
+            os.environ.pop("AEGRA_CONFIG", None)
             result = cli_runner.invoke(cli, ["dev", "--no-db-check"])
 
             assert result.exit_code == 1
@@ -1072,6 +1074,8 @@ class TestServeCommand:
     def test_serve_fails_without_config(self, cli_runner: CliRunner, tmp_path: Path) -> None:
         """Test that serve fails when no config file is found."""
         with cli_runner.isolated_filesystem(temp_dir=tmp_path):
+            # Prior tests may leave AEGRA_CONFIG pointing at another tmp config (#492).
+            os.environ.pop("AEGRA_CONFIG", None)
             result = cli_runner.invoke(cli, ["serve"])
             assert result.exit_code == 1
             assert "Could not find aegra.json" in result.output

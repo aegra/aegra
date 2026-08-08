@@ -101,22 +101,42 @@ def version():
 
 
 def find_config_file() -> Path | None:
-    """Find aegra.json or langgraph.json in current directory.
+    """Resolve config: AEGRA_CONFIG env, then ./aegra.json, then ./langgraph.json.
 
-    Returns:
-        Path to config file if found, None otherwise
+    Matches ``aegra_api.config._resolve_config_path`` so the CLI wrappers do not
+    disagree with the library (#492).
     """
+    if env_path := os.environ.get("AEGRA_CONFIG"):
+        candidate = Path(env_path)
+        if candidate.is_file():
+            return candidate.resolve()
+        console.print(
+            f"[yellow]Warning:[/yellow] AEGRA_CONFIG={env_path!r} not found, "
+            "falling back to config discovery"
+        )
+
     # Check for aegra.json first
     aegra_config = Path.cwd() / "aegra.json"
     if aegra_config.exists():
-        return aegra_config
+        return aegra_config.resolve()
 
     # Fallback to langgraph.json
     langgraph_config = Path.cwd() / "langgraph.json"
     if langgraph_config.exists():
-        return langgraph_config
+        return langgraph_config.resolve()
 
     return None
+
+
+def _load_dotenv_before_config_discovery() -> None:
+    """Load cwd ``.env`` so its AEGRA_CONFIG can win before auto-discovery (#492).
+
+    Skipped when the variable is already set in the process environment (shell
+    export takes precedence over ``.env``, matching ``load_env_file``).
+    """
+    if "AEGRA_CONFIG" in os.environ:
+        return
+    load_env_file(Path.cwd() / ".env")
 
 
 def get_project_slug(config_path: Path | None) -> str:
@@ -283,11 +303,13 @@ def dev(
         raise click.UsageError("--debug-host requires --debug-port to be set")
 
     # Discover or validate config file
+    # Precedence: -c/--config > AEGRA_CONFIG (shell or .env) > ./aegra.json > ./langgraph.json
     if config_file is not None:
         # User specified a config file explicitly
         resolved_config = config_file.resolve()
     else:
-        # Auto-discover config file in current directory
+        # Allow project .env to set AEGRA_CONFIG before cwd auto-discovery (#492)
+        _load_dotenv_before_config_discovery()
         resolved_config = find_config_file()
 
     if resolved_config is None:
@@ -300,7 +322,8 @@ def dev(
 
     console.print(f"[dim]Using config: {resolved_config}[/dim]")
 
-    # Set AEGRA_CONFIG env var so aegra-api resolves paths relative to config location
+    # Export the resolved absolute path so aegra-api resolves manifest-relative paths
+    # from the config file's directory (and so a relative AEGRA_CONFIG is normalized).
     os.environ["AEGRA_CONFIG"] = str(resolved_config)
 
     # Load environment variables from .env file
@@ -524,10 +547,11 @@ def serve(ctx: click.Context, host: str, port: int, app: str, config_file: Path 
         aegra serve --host 0.0.0.0 --port 8080
 
     """
-    # Discover or validate config file
+    # Discover or validate config file (same precedence as `dev`; see #492)
     if config_file is not None:
         resolved_config = config_file.resolve()
     else:
+        _load_dotenv_before_config_discovery()
         resolved_config = find_config_file()
 
     if resolved_config is None:
@@ -538,7 +562,8 @@ def serve(ctx: click.Context, host: str, port: int, app: str, config_file: Path 
         )
         sys.exit(1)
 
-    # Set AEGRA_CONFIG env var
+    # Export resolved absolute path (normalize relative AEGRA_CONFIG; do not
+    # discover ./aegra.json first and clobber a user-selected manifest).
     os.environ["AEGRA_CONFIG"] = str(resolved_config)
 
     # Load .env file from config directory (same logic as dev command)

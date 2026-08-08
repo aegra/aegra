@@ -161,3 +161,83 @@ def test_assistant_routes_are_all_covered() -> None:
     assert assistant_routes, "Expected assistant routes to be mounted"
     for method, path in assistant_routes:
         assert lookup_route_auth(method, path) is not None, f"{method} {path} has no auth identity"
+
+
+# Expected (resource, action) for every route, pinned to AUTH_DISPATCH_SPEC.md.
+# This is the drift guard: any change to a mapping fails here and forces a
+# reviewer to confirm it against the spec, rather than a mapping silently
+# shifting. Entries that diverge from the Agent Protocol carry a NOTE.
+_SPEC_TUPLES: dict[tuple[str, str], tuple[str, str]] = {
+    # assistants
+    ("POST", "/assistants"): ("assistants", "create"),
+    ("GET", "/assistants"): ("assistants", "search"),
+    ("POST", "/assistants/search"): ("assistants", "search"),
+    ("POST", "/assistants/count"): ("assistants", "search"),
+    ("GET", "/assistants/{assistant_id}"): ("assistants", "read"),
+    ("PATCH", "/assistants/{assistant_id}"): ("assistants", "update"),
+    ("DELETE", "/assistants/{assistant_id}"): ("assistants", "delete"),
+    ("POST", "/assistants/{assistant_id}/latest"): ("assistants", "update"),
+    ("POST", "/assistants/{assistant_id}/versions"): ("assistants", "read"),
+    ("GET", "/assistants/{assistant_id}/schemas"): ("assistants", "read"),
+    ("GET", "/assistants/{assistant_id}/graph"): ("assistants", "read"),
+    ("GET", "/assistants/{assistant_id}/subgraphs"): ("assistants", "read"),
+    # threads
+    ("POST", "/threads"): ("threads", "create"),
+    ("GET", "/threads"): ("threads", "search"),
+    ("POST", "/threads/search"): ("threads", "search"),
+    ("GET", "/threads/{thread_id}"): ("threads", "read"),
+    ("PATCH", "/threads/{thread_id}"): ("threads", "update"),
+    ("DELETE", "/threads/{thread_id}"): ("threads", "delete"),
+    ("GET", "/threads/{thread_id}/state"): ("threads", "read"),
+    ("POST", "/threads/{thread_id}/state"): ("threads", "update"),
+    ("GET", "/threads/{thread_id}/state/{checkpoint_id}"): ("threads", "read"),
+    # POST checkpoint is a read that carries its config in the body (not a write).
+    ("POST", "/threads/{thread_id}/state/checkpoint"): ("threads", "read"),
+    ("GET", "/threads/{thread_id}/history"): ("threads", "read"),
+    ("POST", "/threads/{thread_id}/history"): ("threads", "read"),
+    # runs — NOTE: non-portable `runs.*`; protocol uses `threads.*`. Retire in 0.10.0.
+    ("POST", "/threads/{thread_id}/runs"): ("threads", "create_run"),
+    ("POST", "/threads/{thread_id}/runs/stream"): ("threads", "create_run"),
+    ("POST", "/threads/{thread_id}/runs/wait"): ("threads", "create_run"),
+    ("GET", "/threads/{thread_id}/runs"): ("runs", "search"),
+    ("GET", "/threads/{thread_id}/runs/{run_id}"): ("runs", "read"),
+    ("PATCH", "/threads/{thread_id}/runs/{run_id}"): ("runs", "update"),
+    ("GET", "/threads/{thread_id}/runs/{run_id}/join"): ("runs", "read"),
+    ("GET", "/threads/{thread_id}/runs/{run_id}/stream"): ("runs", "read"),
+    ("POST", "/threads/{thread_id}/runs/{run_id}/cancel"): ("runs", "update"),
+    ("DELETE", "/threads/{thread_id}/runs/{run_id}"): ("runs", "delete"),
+    # stateless runs
+    ("POST", "/runs"): ("threads", "create_run"),
+    ("POST", "/runs/stream"): ("threads", "create_run"),
+    ("POST", "/runs/wait"): ("threads", "create_run"),
+    # crons
+    ("POST", "/runs/crons"): ("crons", "create"),
+    ("POST", "/threads/{thread_id}/runs/crons"): ("crons", "create"),
+    ("PATCH", "/runs/crons/{cron_id}"): ("crons", "update"),
+    ("DELETE", "/runs/crons/{cron_id}"): ("crons", "delete"),
+    ("POST", "/runs/crons/search"): ("crons", "search"),
+    ("POST", "/runs/crons/count"): ("crons", "search"),
+    # store — NOTE: /store/namespaces should be `list_namespaces`. Rename in 0.10.0.
+    ("PUT", "/store/items"): ("store", "put"),
+    ("GET", "/store/items"): ("store", "get"),
+    ("DELETE", "/store/items"): ("store", "delete"),
+    ("POST", "/store/items/search"): ("store", "search"),
+    ("POST", "/store/namespaces"): ("store", "search"),
+    # v2 event streaming
+    ("POST", "/threads/{thread_id}/stream/events"): ("threads", "read"),
+    ("POST", "/threads/{thread_id}/commands"): ("threads", "create_run"),
+}
+
+
+def test_registry_matches_spec_snapshot_exactly() -> None:
+    """Every mapping is pinned to the spec; a silent action/resource shift fails here.
+
+    The coverage tests prove a route *has* an identity. This proves it has the
+    *right* one. Changing a tuple must update this snapshot too, which is the
+    prompt to re-check it against AUTH_DISPATCH_SPEC.md.
+    """
+    assert ROUTE_AUTH_MAP == _SPEC_TUPLES, (
+        "ROUTE_AUTH_MAP drifted from the spec snapshot. Diff the two and, if the "
+        "change is intentional, update _SPEC_TUPLES after confirming against "
+        "aegra-context/AUTH_DISPATCH_SPEC.md."
+    )

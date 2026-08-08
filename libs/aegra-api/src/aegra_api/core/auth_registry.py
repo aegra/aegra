@@ -48,6 +48,13 @@ ROUTE_AUTH_MAP: Final[dict[tuple[str, str], tuple[str, str]]] = {
     ("GET", "/threads/{thread_id}/history"): ("threads", "read"),
     ("POST", "/threads/{thread_id}/history"): ("threads", "read"),
     # --- runs ---------------------------------------------------------------
+    # NON-PORTABLE resource names below. The Agent Protocol has no `runs`
+    # resource; run operations authorize under `threads` (verified against
+    # langgraph-api 0.12.1 grpc/ops/runs.py, which sets resource = "threads").
+    # A handler written to the protocol docs as `@auth.on.threads.read` will NOT
+    # fire on these routes. This mirrors the names already shipped on main; do
+    # not extend them. Retire to `threads.*` in the 0.10.0 breaking sweep —
+    # tracked in aegra-context/AUTH_DISPATCH_SPEC.md (§2, Decision #1).
     ("POST", "/threads/{thread_id}/runs"): ("threads", "create_run"),
     ("POST", "/threads/{thread_id}/runs/stream"): ("threads", "create_run"),
     ("POST", "/threads/{thread_id}/runs/wait"): ("threads", "create_run"),
@@ -76,6 +83,9 @@ ROUTE_AUTH_MAP: Final[dict[tuple[str, str], tuple[str, str]]] = {
     ("GET", "/store/items"): ("store", "get"),
     ("DELETE", "/store/items"): ("store", "delete"),
     ("POST", "/store/items/search"): ("store", "search"),
+    # NON-PORTABLE: the protocol names this action `list_namespaces`, not
+    # `search` (langgraph-api 0.12.1 api/store.py). Rename in the 0.10.0 sweep;
+    # tracked in aegra-context/AUTH_DISPATCH_SPEC.md (§4.6).
     ("POST", "/store/namespaces"): ("store", "search"),
     # --- protocol v2 event streaming ---------------------------------------
     ("POST", "/threads/{thread_id}/stream/events"): ("threads", "read"),

@@ -195,17 +195,17 @@ _SPEC_TUPLES: dict[tuple[str, str], tuple[str, str]] = {
     ("POST", "/threads/{thread_id}/state/checkpoint"): ("threads", "read"),
     ("GET", "/threads/{thread_id}/history"): ("threads", "read"),
     ("POST", "/threads/{thread_id}/history"): ("threads", "read"),
-    # runs — NOTE: non-portable `runs.*`; protocol uses `threads.*`. Retire in 0.10.0.
+    # runs — authorize under `threads` per the protocol; the SDK has no `runs`.
     ("POST", "/threads/{thread_id}/runs"): ("threads", "create_run"),
     ("POST", "/threads/{thread_id}/runs/stream"): ("threads", "create_run"),
     ("POST", "/threads/{thread_id}/runs/wait"): ("threads", "create_run"),
-    ("GET", "/threads/{thread_id}/runs"): ("runs", "search"),
-    ("GET", "/threads/{thread_id}/runs/{run_id}"): ("runs", "read"),
-    ("PATCH", "/threads/{thread_id}/runs/{run_id}"): ("runs", "update"),
-    ("GET", "/threads/{thread_id}/runs/{run_id}/join"): ("runs", "read"),
-    ("GET", "/threads/{thread_id}/runs/{run_id}/stream"): ("runs", "read"),
-    ("POST", "/threads/{thread_id}/runs/{run_id}/cancel"): ("runs", "update"),
-    ("DELETE", "/threads/{thread_id}/runs/{run_id}"): ("runs", "delete"),
+    ("GET", "/threads/{thread_id}/runs"): ("threads", "search"),
+    ("GET", "/threads/{thread_id}/runs/{run_id}"): ("threads", "read"),
+    ("PATCH", "/threads/{thread_id}/runs/{run_id}"): ("threads", "update"),
+    ("GET", "/threads/{thread_id}/runs/{run_id}/join"): ("threads", "read"),
+    ("GET", "/threads/{thread_id}/runs/{run_id}/stream"): ("threads", "read"),
+    ("POST", "/threads/{thread_id}/runs/{run_id}/cancel"): ("threads", "update"),
+    ("DELETE", "/threads/{thread_id}/runs/{run_id}"): ("threads", "delete"),
     # stateless runs
     ("POST", "/runs"): ("threads", "create_run"),
     ("POST", "/runs/stream"): ("threads", "create_run"),
@@ -217,16 +217,31 @@ _SPEC_TUPLES: dict[tuple[str, str], tuple[str, str]] = {
     ("DELETE", "/runs/crons/{cron_id}"): ("crons", "delete"),
     ("POST", "/runs/crons/search"): ("crons", "search"),
     ("POST", "/runs/crons/count"): ("crons", "search"),
-    # store — NOTE: /store/namespaces should be `list_namespaces`. Rename in 0.10.0.
+    # store
     ("PUT", "/store/items"): ("store", "put"),
     ("GET", "/store/items"): ("store", "get"),
     ("DELETE", "/store/items"): ("store", "delete"),
     ("POST", "/store/items/search"): ("store", "search"),
-    ("POST", "/store/namespaces"): ("store", "search"),
+    ("POST", "/store/namespaces"): ("store", "list_namespaces"),
     # v2 event streaming
     ("POST", "/threads/{thread_id}/stream/events"): ("threads", "read"),
     ("POST", "/threads/{thread_id}/commands"): ("threads", "create_run"),
 }
+
+
+def test_no_route_uses_the_non_protocol_runs_resource() -> None:
+    """The Agent Protocol has no `runs` resource; run ops authorize under threads.
+
+    The SDK's @auth.on cannot even bind `runs`, so any `runs.*` here would be
+    unreachable by user handlers — a silent auth bypass.
+    """
+    runs_resource = sorted((m, p) for (m, p), (res, _) in ROUTE_AUTH_MAP.items() if res == "runs")
+    assert not runs_resource, f"routes authorize under non-protocol `runs`: {runs_resource}"
+
+
+def test_store_namespaces_uses_list_namespaces_action() -> None:
+    """Namespaces authorize as `list_namespaces`, the action the SDK exposes."""
+    assert lookup_route_auth("POST", "/store/namespaces") == ("store", "list_namespaces")
 
 
 def test_registry_matches_spec_snapshot_exactly() -> None:

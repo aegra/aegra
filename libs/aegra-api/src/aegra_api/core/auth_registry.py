@@ -48,23 +48,20 @@ ROUTE_AUTH_MAP: Final[dict[tuple[str, str], tuple[str, str]]] = {
     ("GET", "/threads/{thread_id}/history"): ("threads", "read"),
     ("POST", "/threads/{thread_id}/history"): ("threads", "read"),
     # --- runs ---------------------------------------------------------------
-    # NON-PORTABLE resource names below. The Agent Protocol has no `runs`
-    # resource; run operations authorize under `threads` (verified against
-    # langgraph-api 0.12.1 grpc/ops/runs.py, which sets resource = "threads").
-    # A handler written to the protocol docs as `@auth.on.threads.read` will NOT
-    # fire on these routes. This mirrors the names already shipped on main; do
-    # not extend them. Retire to `threads.*` in the 0.10.0 breaking sweep —
-    # tracked in aegra-context/AUTH_DISPATCH_SPEC.md (§2, Decision #1).
+    # Run operations authorize under `threads` per the Agent Protocol (verified
+    # against langgraph-api 0.12.1 grpc/ops/runs.py, resource = "threads"). The
+    # SDK's @auth.on has no `runs` resource, so no user handler could ever have
+    # bound to the old `runs.*` names — this alignment is non-breaking.
     ("POST", "/threads/{thread_id}/runs"): ("threads", "create_run"),
     ("POST", "/threads/{thread_id}/runs/stream"): ("threads", "create_run"),
     ("POST", "/threads/{thread_id}/runs/wait"): ("threads", "create_run"),
-    ("GET", "/threads/{thread_id}/runs"): ("runs", "search"),
-    ("GET", "/threads/{thread_id}/runs/{run_id}"): ("runs", "read"),
-    ("PATCH", "/threads/{thread_id}/runs/{run_id}"): ("runs", "update"),
-    ("GET", "/threads/{thread_id}/runs/{run_id}/join"): ("runs", "read"),
-    ("GET", "/threads/{thread_id}/runs/{run_id}/stream"): ("runs", "read"),
-    ("POST", "/threads/{thread_id}/runs/{run_id}/cancel"): ("runs", "update"),
-    ("DELETE", "/threads/{thread_id}/runs/{run_id}"): ("runs", "delete"),
+    ("GET", "/threads/{thread_id}/runs"): ("threads", "search"),
+    ("GET", "/threads/{thread_id}/runs/{run_id}"): ("threads", "read"),
+    ("PATCH", "/threads/{thread_id}/runs/{run_id}"): ("threads", "update"),
+    ("GET", "/threads/{thread_id}/runs/{run_id}/join"): ("threads", "read"),
+    ("GET", "/threads/{thread_id}/runs/{run_id}/stream"): ("threads", "read"),
+    ("POST", "/threads/{thread_id}/runs/{run_id}/cancel"): ("threads", "update"),
+    ("DELETE", "/threads/{thread_id}/runs/{run_id}"): ("threads", "delete"),
     # --- stateless runs -----------------------------------------------------
     # These mint an ephemeral thread, so they authorize as a thread create_run
     # exactly like their threaded counterparts.
@@ -83,10 +80,10 @@ ROUTE_AUTH_MAP: Final[dict[tuple[str, str], tuple[str, str]]] = {
     ("GET", "/store/items"): ("store", "get"),
     ("DELETE", "/store/items"): ("store", "delete"),
     ("POST", "/store/items/search"): ("store", "search"),
-    # NON-PORTABLE: the protocol names this action `list_namespaces`, not
-    # `search` (langgraph-api 0.12.1 api/store.py). Rename in the 0.10.0 sweep;
-    # tracked in aegra-context/AUTH_DISPATCH_SPEC.md (§4.6).
-    ("POST", "/store/namespaces"): ("store", "search"),
+    # Protocol action is `list_namespaces`, which the SDK's @auth.on.store
+    # already exposes (langgraph-api 0.12.1 api/store.py). The old `store.search`
+    # here was a bug, not an API anyone could bind to for namespaces.
+    ("POST", "/store/namespaces"): ("store", "list_namespaces"),
     # --- protocol v2 event streaming ---------------------------------------
     ("POST", "/threads/{thread_id}/stream/events"): ("threads", "read"),
     ("POST", "/threads/{thread_id}/commands"): ("threads", "create_run"),

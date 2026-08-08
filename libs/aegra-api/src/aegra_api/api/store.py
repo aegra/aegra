@@ -201,8 +201,9 @@ async def list_namespaces(
     Returns the namespace paths that contain items. Filter by prefix, suffix,
     or maximum depth.
     """
-    # Authorization check
-    ctx = build_auth_context(user, "store", "search")
+    # Authorization: the protocol action for namespaces is `list_namespaces`,
+    # which @auth.on.store.list_namespaces covers.
+    ctx = build_auth_context(user, "store", "list_namespaces")
     value = request.model_dump()
     filters = await handle_event(ctx, value)
 

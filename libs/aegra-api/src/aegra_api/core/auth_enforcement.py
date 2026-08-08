@@ -15,6 +15,7 @@ other registered route is dispatched from here.
 from __future__ import annotations
 
 import json
+from collections.abc import Awaitable, Callable
 from contextvars import ContextVar
 from typing import Any
 
@@ -68,7 +69,7 @@ async def _read_json_body(request: Request) -> dict[str, Any]:
     return body if isinstance(body, dict) else {}
 
 
-def build_auth_enforcer(resource: str, action: str):
+def build_auth_enforcer(resource: str, action: str) -> Callable[..., Awaitable[None]]:
     """Build the dependency that dispatches ``@auth.on`` for one route."""
 
     # Depends on require_auth, not get_current_user: this dependency is prepended
@@ -78,7 +79,9 @@ def build_auth_enforcer(resource: str, action: str):
         request: Request,
         user: User = Depends(require_auth),
     ) -> None:
-        value: dict[str, Any] = {**request.path_params, **await _read_json_body(request)}
+        # Path params win over the body: the route operates on the URL-selected
+        # resource, so a crafted body must not swap the id a handler authorizes.
+        value: dict[str, Any] = {**await _read_json_body(request), **request.path_params}
         ctx = build_auth_context(user, resource, action)
         await handle_event(ctx, value)
         mark_dispatched(resource, action)
@@ -114,6 +117,11 @@ def apply_auth_enforcement(app: Any) -> int:
 
 def _wire_route(route: APIRoute) -> int:
     """Attach the enforcer to a single route for each registered method."""
+    # Idempotent: a second pass over the same route object (double router
+    # include, create_app run twice in tests) must not prepend a second enforcer,
+    # which would dispatch the handler twice.
+    if getattr(route, "_aegra_auth_wired", False):
+        return 0
     for method in sorted(route.methods or set()):
         mapping = lookup_route_auth(method, route.path)
         if mapping is None:
@@ -122,6 +130,7 @@ def _wire_route(route: APIRoute) -> int:
         # Wiring the enforcer here too would run the handler twice and drop any
         # metadata the handler injects by mutating `value`.
         if is_self_dispatching(method, route.path):
+            route._aegra_auth_wired = True  # type: ignore[attr-defined]
             return 0
         resource, action = mapping
         dependency = Depends(build_auth_enforcer(resource, action))
@@ -133,5 +142,6 @@ def _wire_route(route: APIRoute) -> int:
             0,
             get_parameterless_sub_dependant(depends=dependency, path=route.path_format),
         )
+        route._aegra_auth_wired = True  # type: ignore[attr-defined]
         return 1
     return 0

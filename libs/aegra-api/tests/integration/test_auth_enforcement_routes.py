@@ -124,6 +124,53 @@ def test_thread_read_handler_reaches_state_and_history(monkeypatch: pytest.Monke
     assert seen == [("threads", "read")] * 3
 
 
+def test_path_param_wins_over_crafted_body(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The URL's thread_id must reach the handler, not a conflicting body value.
+
+    The route operates on the URL-selected resource, so a handler authorizing on
+    value["thread_id"] must see the URL id — otherwise a crafted body could get a
+    different object authorized than the one acted on.
+    """
+    auth = Auth()
+    seen_thread_ids: list[Any] = []
+
+    @auth.on.threads
+    async def record(ctx: Any, value: Any) -> bool:
+        seen_thread_ids.append(value.get("thread_id"))
+        return True
+
+    app = _build_app(auth, monkeypatch)
+
+    with TestClient(app) as client:
+        # POST state on thread url-1, but body claims thread_id = evil.
+        client.post(
+            "/threads/url-1/state",
+            json={"values": {}, "thread_id": "evil"},
+        )
+
+    assert seen_thread_ids, "handler never fired"
+    assert set(seen_thread_ids) == {"url-1"}, f"handler saw {seen_thread_ids}; a body value overrode the URL thread_id"
+
+
+def test_enforcement_is_idempotent(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Applying enforcement twice must not dispatch the handler twice."""
+    auth = Auth()
+    calls: list[str] = []
+
+    @auth.on.threads
+    async def record(ctx: Any, value: Any) -> bool:
+        calls.append(ctx.action)
+        return True
+
+    app = _build_app(auth, monkeypatch)
+    apply_auth_enforcement(app)  # second pass over the same routes
+
+    with TestClient(app) as client:
+        client.get("/threads/t-1/state")
+
+    assert len(calls) == 1, f"double-wiring dispatched {len(calls)} times: {calls}"
+
+
 def test_handler_runs_exactly_once_per_request(monkeypatch: pytest.MonkeyPatch) -> None:
     """Routes that already call handle_event must not dispatch a second time."""
     auth = Auth()

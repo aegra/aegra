@@ -768,6 +768,7 @@ class TestConfigDiscovery:
         """Test that find_config_file finds aegra.json in current directory."""
         with cli_runner.isolated_filesystem(temp_dir=tmp_path):
             Path("aegra.json").write_text('{"graphs": {}}')
+            os.environ.pop("AEGRA_CONFIG", None)
 
             result = find_config_file()
             assert result is not None
@@ -777,6 +778,7 @@ class TestConfigDiscovery:
         """Test that find_config_file finds langgraph.json as fallback."""
         with cli_runner.isolated_filesystem(temp_dir=tmp_path):
             Path("langgraph.json").write_text('{"graphs": {}}')
+            os.environ.pop("AEGRA_CONFIG", None)
 
             result = find_config_file()
             assert result is not None
@@ -787,6 +789,7 @@ class TestConfigDiscovery:
         with cli_runner.isolated_filesystem(temp_dir=tmp_path):
             Path("aegra.json").write_text('{"graphs": {}}')
             Path("langgraph.json").write_text('{"graphs": {}}')
+            os.environ.pop("AEGRA_CONFIG", None)
 
             result = find_config_file()
             assert result is not None
@@ -795,8 +798,38 @@ class TestConfigDiscovery:
     def test_find_config_file_not_found(self, cli_runner: CliRunner, tmp_path: Path) -> None:
         """Test that find_config_file returns None when no config found."""
         with cli_runner.isolated_filesystem(temp_dir=tmp_path):
+            os.environ.pop("AEGRA_CONFIG", None)
             result = find_config_file()
             assert result is None
+
+    def test_find_config_file_honors_aegra_config_env(
+        self, cli_runner: CliRunner, tmp_path: Path
+    ) -> None:
+        """AEGRA_CONFIG must win over a cwd aegra.json (#492)."""
+        with cli_runner.isolated_filesystem(temp_dir=tmp_path):
+            Path("aegra.json").write_text('{"name": "default"}')
+            Path("aegra.custom.json").write_text('{"name": "custom"}')
+            os.environ["AEGRA_CONFIG"] = "aegra.custom.json"
+            try:
+                result = find_config_file()
+                assert result is not None
+                assert result.name == "aegra.custom.json"
+            finally:
+                os.environ.pop("AEGRA_CONFIG", None)
+
+    def test_find_config_file_warns_when_env_missing(
+        self, cli_runner: CliRunner, tmp_path: Path
+    ) -> None:
+        """Missing AEGRA_CONFIG path falls back to discovery with a warning."""
+        with cli_runner.isolated_filesystem(temp_dir=tmp_path):
+            Path("aegra.json").write_text('{"graphs": {}}')
+            os.environ["AEGRA_CONFIG"] = "does-not-exist.json"
+            try:
+                result = find_config_file()
+                assert result is not None
+                assert result.name == "aegra.json"
+            finally:
+                os.environ.pop("AEGRA_CONFIG", None)
 
     def test_dev_fails_without_config(self, cli_runner: CliRunner, tmp_path: Path) -> None:
         """Test that dev command fails when no config file is found."""

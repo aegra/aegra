@@ -11,6 +11,7 @@ from langgraph.types import StateSnapshot
 from psycopg import Error as PsycopgError
 from sqlalchemy.dialects import postgresql
 
+from aegra_api.api import threads as threads_module
 from aegra_api.core.orm import get_session as core_get_session
 from tests.fixtures.clients import create_test_app, make_client
 from tests.fixtures.database import (
@@ -394,7 +395,7 @@ class TestDeleteThread:
         checkpointer = AsyncMock()
         db = MagicMock()
         db.get_checkpointer.return_value = checkpointer
-        monkeypatch.setattr("aegra_api.api.threads.db_manager", db)
+        monkeypatch.setattr(threads_module, "db_manager", db)
         return checkpointer
 
     def test_delete_thread_not_found(self):

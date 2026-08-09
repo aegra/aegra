@@ -8,6 +8,7 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from langgraph.types import StateSnapshot
+from psycopg import Error as PsycopgError
 from sqlalchemy.dialects import postgresql
 
 from aegra_api.core.orm import get_session as core_get_session
@@ -387,6 +388,15 @@ class TestGetThread:
 class TestDeleteThread:
     """Test DELETE /threads/{thread_id} endpoint"""
 
+    @pytest.fixture
+    def mock_checkpointer(self, monkeypatch: pytest.MonkeyPatch) -> AsyncMock:
+        """Stub the checkpointer — db_manager is never initialized in tests."""
+        checkpointer = AsyncMock()
+        db = MagicMock()
+        db.get_checkpointer.return_value = checkpointer
+        monkeypatch.setattr("aegra_api.api.threads.db_manager", db)
+        return checkpointer
+
     def test_delete_thread_not_found(self):
         """Test deleting a non-existent thread"""
         app = create_test_app(include_runs=False, include_threads=True)
@@ -401,7 +411,22 @@ class TestDeleteThread:
         resp = client.delete("/threads/nonexistent")
         assert resp.status_code == 404
 
-    def test_delete_thread_no_active_runs(self):
+    def test_delete_thread_not_found_skips_checkpointer(self, mock_checkpointer: AsyncMock) -> None:
+        """The 404 path never touches the checkpoint backend."""
+        app = create_test_app(include_runs=False, include_threads=True)
+
+        class Session(DummySessionBase):
+            async def scalar(self, _stmt: object) -> None:
+                return None
+
+        app.dependency_overrides[core_get_session] = override_get_session_dep(Session)
+        client = make_client(app)
+
+        resp = client.delete("/threads/nonexistent")
+        assert resp.status_code == 404
+        mock_checkpointer.adelete_thread.assert_not_called()
+
+    def test_delete_thread_no_active_runs(self, mock_checkpointer: AsyncMock) -> None:
         """Test deleting a thread with no active runs"""
         app = create_test_app(include_runs=False, include_threads=True)
 
@@ -430,6 +455,60 @@ class TestDeleteThread:
         resp = client.delete("/threads/test-123")
         assert resp.status_code == 200
         assert resp.json()["status"] == "deleted"
+
+    def test_delete_thread_deletes_backend_checkpoints(self, mock_checkpointer: AsyncMock) -> None:
+        """Deleting a thread also deletes its checkpoint history."""
+        app = create_test_app(include_runs=False, include_threads=True)
+
+        thread = _thread_row("test-123")
+
+        class Session(DummySessionBase):
+            async def scalar(self, _stmt: object) -> object:
+                return thread
+
+            async def delete(self, obj: object) -> None:
+                pass
+
+        app.dependency_overrides[core_get_session] = override_get_session_dep(Session)
+        client = make_client(app)
+
+        resp = client.delete("/threads/test-123")
+        assert resp.status_code == 200
+        mock_checkpointer.adelete_thread.assert_awaited_once_with("test-123")
+
+    def test_delete_thread_returns_500_and_keeps_row_when_checkpoint_delete_fails(
+        self, mock_checkpointer: AsyncMock
+    ) -> None:
+        """Checkpoint-delete failure propagates; the thread row is not committed.
+
+        Deleting the row anyway would orphan the checkpoints — the exact bug
+        this endpoint change fixes. A 500 leaves the delete retryable.
+        """
+        app = create_test_app(include_runs=False, include_threads=True)
+
+        thread = _thread_row("test-123")
+        deleted: list[object] = []
+        committed: list[bool] = []
+
+        class Session(DummySessionBase):
+            async def scalar(self, _stmt: object) -> object:
+                return thread
+
+            async def delete(self, obj: object) -> None:
+                deleted.append(obj)
+
+            async def commit(self) -> None:
+                committed.append(True)
+
+        mock_checkpointer.adelete_thread.side_effect = PsycopgError("checkpoint backend down")
+
+        app.dependency_overrides[core_get_session] = override_get_session_dep(Session)
+        client = TestClient(app, raise_server_exceptions=False)
+
+        resp = client.delete("/threads/test-123")
+        assert resp.status_code == 500
+        assert deleted == []
+        assert committed == []
 
 
 class TestSearchThreads:

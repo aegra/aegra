@@ -3,7 +3,7 @@
   "info": {
     "title": "Aegra",
     "description": "Production-ready Agent Protocol server",
-    "version": "0.10.2"
+    "version": "0.10.3"
   },
   "paths": {
     "/info": {
@@ -952,7 +952,7 @@
           "Threads"
         ],
         "summary": "Delete Thread",
-        "description": "Delete a thread by its ID.\n\nPermanently removes the thread and its metadata. Any active runs on the\nthread are automatically cancelled before deletion. Checkpoint history\nstored in the graph backend is not affected.",
+        "description": "Delete a thread by its ID.\n\nPermanently removes the thread, its metadata, and its checkpoint history\nstored in the graph backend. Any active runs on the thread are\nautomatically cancelled before deletion.",
         "operationId": "delete_thread_threads__thread_id__delete",
         "parameters": [
           {

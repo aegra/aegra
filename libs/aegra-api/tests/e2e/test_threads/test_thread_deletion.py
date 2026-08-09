@@ -1,6 +1,31 @@
-import pytest
+import json
 
+import pytest
+from sqlalchemy import text
+from sqlalchemy.ext.asyncio import create_async_engine
+
+from aegra_api.settings import settings
 from tests.e2e._utils import elog, get_e2e_client
+
+_CHECKPOINT_TABLES = ("checkpoints", "checkpoint_blobs", "checkpoint_writes")
+
+
+async def _count_checkpoint_rows(thread_id: str) -> dict[str, int]:
+    """Count LangGraph checkpoint rows for a thread (tables have no ORM models)."""
+    engine = create_async_engine(settings.db.database_url)
+    try:
+        counts: dict[str, int] = {}
+        async with engine.connect() as conn:
+            for table in _CHECKPOINT_TABLES:
+                # Table names come from the fixed tuple above; only the value is user data.
+                result = await conn.execute(
+                    text(f"SELECT count(*) FROM {table} WHERE thread_id = :tid"),  # noqa: S608
+                    {"tid": thread_id},
+                )
+                counts[table] = int(result.scalar_one())
+        return counts
+    finally:
+        await engine.dispose()
 
 
 @pytest.mark.e2e
@@ -191,3 +216,37 @@ async def test_thread_deletion_multiple_runs():
     except Exception:
         # Expected - thread should be gone
         pass
+
+
+@pytest.mark.e2e
+@pytest.mark.asyncio
+async def test_thread_deletion_removes_checkpoints() -> None:
+    """DELETE /threads/{id} also removes LangGraph checkpoint rows.
+
+    Regression for the orphaned-checkpoints bug (#288 phase 1): thread
+    deletion used to leave rows in checkpoints/checkpoint_blobs/
+    checkpoint_writes forever.
+    """
+    client = get_e2e_client()
+
+    # stress_test graph: hermetic, no LLM key needed, always writes checkpoints
+    assistant = await client.assistants.create(graph_id="stress_test", if_exists="do_nothing")
+    thread = await client.threads.create()
+    thread_id = thread["thread_id"]
+
+    run = await client.runs.create(
+        thread_id=thread_id,
+        assistant_id=assistant["assistant_id"],
+        input={"messages": [{"role": "user", "content": json.dumps({"delay": 0.1, "steps": 1})}]},
+    )
+    await client.runs.join(thread_id, run["run_id"])
+
+    before = await _count_checkpoint_rows(thread_id)
+    elog("Checkpoint rows before deletion", {"thread_id": thread_id, **before})
+    assert before["checkpoints"] > 0, "completed run should have written checkpoint rows"
+
+    await client.threads.delete(thread_id)
+
+    after = await _count_checkpoint_rows(thread_id)
+    elog("Checkpoint rows after deletion", {"thread_id": thread_id, **after})
+    assert after == dict.fromkeys(_CHECKPOINT_TABLES, 0)

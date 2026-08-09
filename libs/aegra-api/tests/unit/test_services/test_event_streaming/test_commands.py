@@ -45,7 +45,12 @@ class TestRunStart:
             {
                 "id": 1,
                 "method": "run.start",
-                "params": {"assistant_id": "agent", "input": {"x": 1}, "config": {"c": 2}},
+                "params": {
+                    "assistant_id": "agent",
+                    "input": {"x": 1},
+                    "config": {"c": 2},
+                    "context": {"tenant_id": "acme"},
+                },
             },
             user,
         )
@@ -53,6 +58,7 @@ class TestRunStart:
         assert request.assistant_id == "agent"
         assert request.input == {"x": 1}
         assert request.config == {"c": 2}
+        assert request.context == {"tenant_id": "acme"}
         # v2 runs are flagged for the native v3 stream path.
         assert prepared_run.call_args.kwargs["event_streaming_v2"] is True
 

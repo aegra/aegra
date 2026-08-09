@@ -17,6 +17,7 @@ from aegra_api.api import event_streaming as es_module
 from aegra_api.core.auth_deps import get_current_user, require_auth
 from aegra_api.models.auth import User
 from aegra_api.models.event_streaming import EventStreamRequest
+from aegra_api.models.runs import RunCreate
 from aegra_api.services.broker import broker_manager
 from aegra_api.services.event_streaming import capabilities as caps
 from aegra_api.services.event_streaming import commands as cmd_module
@@ -82,7 +83,10 @@ def _v2_enabled(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
 
 class TestCommandRoute:
     def test_run_start_returns_success_envelope(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        captured_requests: list[RunCreate] = []
+
         async def fake_prepare(*_args: Any, **_kwargs: Any) -> tuple[str, object, object]:
+            captured_requests.append(_args[2])
             return "run-1", object(), object()
 
         monkeypatch.setattr(cmd_module, "_prepare_run", fake_prepare)
@@ -90,7 +94,15 @@ class TestCommandRoute:
 
         resp = client.post(
             "/threads/t1/commands",
-            json={"id": 1, "method": "run.start", "params": {"assistant_id": "agent", "input": {"messages": []}}},
+            json={
+                "id": 1,
+                "method": "run.start",
+                "params": {
+                    "assistant_id": "agent",
+                    "input": {"messages": []},
+                    "context": {"tenant_id": "acme"},
+                },
+            },
         )
         assert resp.status_code == 200
         assert resp.json() == {
@@ -99,6 +111,7 @@ class TestCommandRoute:
             "result": {"run_id": "run-1"},
             "meta": {"applied_through_seq": 0},
         }
+        assert captured_requests[0].context == {"tenant_id": "acme"}
 
     def test_unknown_command_returns_error_envelope_on_200(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Protocol errors ride HTTP 200 so envelope-parsing clients see the code."""

@@ -121,6 +121,7 @@ async def _run_start(
         input=input_data,
         command=command,
         config=params.get("config") or {},
+        context=params.get("context") or {},
         metadata=params.get("metadata"),
         interrupt_before=params.get("interrupt_before"),
         interrupt_after=params.get("interrupt_after"),

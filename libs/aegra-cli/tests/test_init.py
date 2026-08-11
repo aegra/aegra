@@ -5,7 +5,9 @@ from __future__ import annotations
 import json
 import sys
 from pathlib import Path
+from types import ModuleType
 from typing import TYPE_CHECKING
+from unittest.mock import Mock
 
 from click.testing import CliRunner
 
@@ -117,6 +119,46 @@ class TestTemplateRegistry:
         content = render_env_example({"slug": "test_app"})
         assert "test_app" in content
         assert "POSTGRES_USER" in content
+
+    def test_generated_model_loader_supports_atlas_cloud(
+        self: TestTemplateRegistry, monkeypatch: MonkeyPatch
+    ) -> None:
+        init_chat_model = Mock()
+        chat_openai = Mock()
+
+        langchain = ModuleType("langchain")
+        langchain.__path__ = []  # type: ignore[attr-defined]
+        chat_models = ModuleType("langchain.chat_models")
+        chat_models.init_chat_model = init_chat_model  # type: ignore[attr-defined]
+        langchain_core = ModuleType("langchain_core")
+        langchain_core.__path__ = []  # type: ignore[attr-defined]
+        language_models = ModuleType("langchain_core.language_models")
+        language_models.BaseChatModel = object  # type: ignore[attr-defined]
+        langchain_openai = ModuleType("langchain_openai")
+        langchain_openai.ChatOpenAI = chat_openai  # type: ignore[attr-defined]
+
+        monkeypatch.setitem(sys.modules, "langchain", langchain)
+        monkeypatch.setitem(sys.modules, "langchain.chat_models", chat_models)
+        monkeypatch.setitem(sys.modules, "langchain_core", langchain_core)
+        monkeypatch.setitem(sys.modules, "langchain_core.language_models", language_models)
+        monkeypatch.setitem(sys.modules, "langchain_openai", langchain_openai)
+        monkeypatch.setenv("ATLASCLOUD_API_KEY", "test-atlas-key")
+
+        content = render_shared_template_file(
+            "utils.py.template", {"project_name": "Atlas Agent", "slug": "atlas_agent"}
+        )
+        namespace: dict[str, object] = {}
+        exec(compile(content, "generated_utils.py", "exec"), namespace)  # noqa: S102
+        load_chat_model = namespace["load_chat_model"]
+
+        load_chat_model("atlascloud/qwen/qwen3.8-max")  # type: ignore[operator]
+
+        chat_openai.assert_called_once_with(
+            model="qwen/qwen3.8-max",
+            api_key="test-atlas-key",
+            base_url="https://api.atlascloud.ai/v1",
+        )
+        init_chat_model.assert_not_called()
 
     def test_load_shared_gitignore(self: TestTemplateRegistry) -> None:
         content = load_shared_file("gitignore")
@@ -459,7 +501,13 @@ class TestInitFileContents:
         assert result.exit_code == 0
 
         content = (project_dir / ".env.example").read_text()
-        for var in ["POSTGRES_USER", "POSTGRES_PASSWORD", "AUTH_TYPE", "OPENAI_API_KEY"]:
+        for var in [
+            "POSTGRES_USER",
+            "POSTGRES_PASSWORD",
+            "AUTH_TYPE",
+            "OPENAI_API_KEY",
+            "ATLASCLOUD_API_KEY",
+        ]:
             assert var in content
 
     def test_env_example_uses_slug(

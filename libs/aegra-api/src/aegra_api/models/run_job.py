@@ -10,7 +10,7 @@ frozen=True for immutability. Serialization uses model_dump/model_validate
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -43,6 +43,7 @@ class RunExecution(BaseModel):
     command: dict[str, Any] | None = None
     # When true, stream via the native v3 protocol producer for Agent Protocol v2.
     event_streaming_v2: bool = False
+    durability: Literal["sync"] | None = None
 
 
 class RunBehavior(BaseModel):

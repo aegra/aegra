@@ -363,6 +363,7 @@ async def _prepare_run(
             checkpoint=request.checkpoint,
             command=request.command,
             event_streaming_v2=event_streaming_v2,
+            durability=request.durability,
         ),
         behavior=RunBehavior(
             interrupt_before=request.interrupt_before,

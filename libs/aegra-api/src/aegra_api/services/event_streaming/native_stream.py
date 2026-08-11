@@ -16,7 +16,7 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator
 from functools import lru_cache
-from typing import Any
+from typing import Any, Literal
 
 
 @lru_cache(maxsize=1)
@@ -62,6 +62,7 @@ async def stream_native_v3_events(
     input_data: Any,
     config: dict[str, Any],
     context: dict[str, Any] | None = None,
+    durability: Literal["sync"] | None = None,
 ) -> AsyncIterator[tuple[str, dict[str, Any]]]:
     """Yield ``(method, protocol_event)`` pairs from a native v3 run.
 
@@ -70,7 +71,12 @@ async def stream_native_v3_events(
     event we can't reconstruct is dropped rather than forwarded malformed.
     """
     run_stream = await graph.astream_events(
-        input_data, config, version="v3", context=context, transformers=_extra_transformers()
+        input_data,
+        config,
+        version="v3",
+        context=context,
+        transformers=_extra_transformers(),
+        **({"durability": durability} if durability is not None else {}),
     )
     async with run_stream as stream:
         async for event in stream:

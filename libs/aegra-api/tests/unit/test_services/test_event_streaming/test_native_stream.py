@@ -85,12 +85,18 @@ class TestStreamNativeV3Events:
 
         # v3 is requested with version="v3"
         assert graph.calls[0]["version"] == "v3"
+        assert "durability" not in graph.calls[0]
         # values forwarded as-is
         assert out[0][0] == "values"
         assert out[0][1]["params"]["data"] == {"messages": []}
         # messages: tuple unwrapped so params.data is the event dict
         assert out[1][0] == "messages"
         assert out[1][1]["params"]["data"] == {"event": "message-start", "id": "m1"}
+
+        sync_graph = _FakeGraph([])
+        async for _ in stream_native_v3_events(graph=sync_graph, input_data={}, config={}, durability="sync"):
+            pass
+        assert sync_graph.calls[0]["durability"] == "sync"
 
     async def test_skips_non_event_dicts(self) -> None:
         graph = _FakeGraph([{"not": "an event"}, _event("values", {"a": 1})])

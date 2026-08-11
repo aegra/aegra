@@ -4,6 +4,9 @@ Tests message accumulation, interrupt filtering, subgraph handling,
 and event processing logic.
 """
 
+from collections.abc import AsyncIterator
+from typing import Any
+
 import pytest
 from langchain_core.messages import (
     AIMessage,
@@ -662,9 +665,11 @@ class TestStreamGraphEvents:
         from aegra_api.services.graph_streaming import stream_graph_events
 
         mock_graph = MagicMock()
+        call_kwargs = {}
 
         # Mock astream to yield tuples
-        async def mock_stream(*args, **kwargs):
+        async def mock_stream(*args: Any, **kwargs: Any) -> AsyncIterator[tuple[list[str], str, dict[str, str]]]:
+            call_kwargs.update(kwargs)
             yield (["sub"], "values", {"foo": "bar"})
 
         mock_graph.astream = mock_stream
@@ -687,6 +692,12 @@ class TestStreamGraphEvents:
         # Verify subgraph event
         assert events[1][0] == "values|sub"
         assert events[1][1] == {"foo": "bar"}
+        assert "durability" not in call_kwargs
+        async for _ in stream_graph_events(
+            mock_graph, {}, config, stream_mode=["values"], subgraphs=True, durability="sync"
+        ):
+            pass
+        assert call_kwargs["durability"] == "sync"
 
     @pytest.mark.asyncio
     async def test_stream_events_context_filtering(self):

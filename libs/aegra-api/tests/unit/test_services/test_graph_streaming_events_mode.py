@@ -198,12 +198,14 @@ class TestEventsMode:
             {"messages": []},
             config,
             stream_mode=["events"],
+            durability="sync",
         ):
             pass
 
         assert graph.astream_events_kwargs is not None
         assert graph.astream_events_kwargs["interrupt_before"] == ["agent"]
         assert graph.astream_events_kwargs["interrupt_after"] == ["tools"]
+        assert graph.astream_events_kwargs["durability"] == "sync"
 
     @pytest.mark.asyncio
     async def test_preserves_all_nodes_interrupt_sentinel(self) -> None:

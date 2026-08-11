@@ -3,7 +3,7 @@
   "info": {
     "title": "Aegra",
     "description": "Production-ready Agent Protocol server",
-    "version": "0.10.0"
+    "version": "0.10.1"
   },
   "paths": {
     "/info": {
@@ -1589,6 +1589,27 @@
               "type": "string",
               "title": "Thread Id"
             }
+          },
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 255,
+                  "pattern": "^[\\x21-\\x7E]+$"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Stable visible-ASCII key for safely replaying a threaded run creation request.",
+              "title": "Idempotency-Key"
+            },
+            "description": "Stable visible-ASCII key for safely replaying a threaded run creation request."
           }
         ],
         "requestBody": {
@@ -4744,6 +4765,19 @@
             ],
             "title": "Multitask Strategy",
             "description": "Strategy for handling concurrent runs on same thread: 'reject', 'interrupt', 'rollback', or 'enqueue'."
+          },
+          "durability": {
+            "anyOf": [
+              {
+                "type": "string",
+                "const": "sync"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Durability",
+            "description": "Checkpoint durability mode"
           },
           "command": {
             "anyOf": [

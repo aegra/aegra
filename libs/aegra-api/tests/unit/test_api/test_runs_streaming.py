@@ -67,6 +67,7 @@ class TestRunsStreamingEndpoints:
             assistant_id="test-assistant",
             input={"message": "stream me"},
             stream_mode=["events"],
+            multitask_strategy="interrupt",
         )
 
         with (
@@ -83,6 +84,10 @@ class TestRunsStreamingEndpoints:
                 "aegra_api.services.run_preparation.executor.submit",
                 new_callable=AsyncMock,
             ) as mock_submit,
+            patch(
+                "aegra_api.services.run_preparation.streaming_service.interrupt_run",
+                new_callable=AsyncMock,
+            ) as mock_interrupt,
             patch("aegra_api.api.runs.active_runs", {}),
             patch("aegra_api.api.runs.streaming_service.stream_run_execution") as mock_stream_exec,
             patch("aegra_api.api.runs._get_session_maker", return_value=_make_session_maker(mock_session)),
@@ -114,6 +119,7 @@ class TestRunsStreamingEndpoints:
 
             # Verify background execution submission
             mock_submit.assert_awaited_once()
+            mock_interrupt.assert_not_awaited()
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
@@ -272,6 +278,7 @@ class TestRunsStreamingEndpoints:
         assert ctx.resource == "threads"
         assert ctx.action == "create_run"
         assert value["thread_id"] == thread_id
+        assert "openswe_background_admission" not in mock_prepare.await_args.kwargs
 
     @pytest.mark.asyncio
     async def test_create_and_stream_run_auth_handler_denies_with_403(

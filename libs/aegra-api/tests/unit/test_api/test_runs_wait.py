@@ -416,6 +416,7 @@ class TestWaitForRunAuthHandlers:
         assert ctx.resource == "threads"
         assert ctx.action == "create_run"
         assert value["thread_id"] == thread_id
+        assert "openswe_background_admission" not in mock_prepare.await_args.kwargs
 
     @pytest.mark.asyncio
     async def test_wait_for_run_auth_handler_denies_with_403(self) -> None:

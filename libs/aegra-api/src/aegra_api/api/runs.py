@@ -138,6 +138,7 @@ async def create_run(
         user,
         initial_status="pending",
         idempotency_key=idempotency_key,
+        openswe_background_admission=True,
     )
 
     return run

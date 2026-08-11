@@ -865,33 +865,32 @@ class TestDequeue:
         executor._poll_postgres.assert_not_awaited()
 
     @pytest.mark.asyncio
-    async def test_returns_none_when_blpop_returns_none(self) -> None:
+    async def test_idle_blpop_polls_pending_postgres_rows(self) -> None:
         blpop = AsyncMock(return_value=None)
         executor = self._make_executor_with_blpop(blpop)
 
         with patch(f"{MODULE}.redis_manager.get_client", return_value=self._client):
             result = await executor._dequeue()
 
-        assert result is None
-        executor._poll_postgres.assert_not_awaited()
+        assert result == "from-postgres"
+        executor._poll_postgres.assert_awaited_once_with(idempotent_only=True)
 
     @pytest.mark.asyncio
-    async def test_idle_socket_timeout_returns_none_without_fallback(self) -> None:
-        """A blocking BLPOP that hits the socket timeout raises redis TimeoutError
-        (a RedisError subclass). That is a normal idle expiry, not a connectivity
-        failure: it must return None silently, never poll Postgres (GH #bug)."""
+    async def test_idle_socket_timeout_polls_only_idempotent_rows(self) -> None:
         blpop = AsyncMock(side_effect=RedisTimeoutError("Timeout reading from redis:6379"))
         executor = self._make_executor_with_blpop(blpop)
 
         with (
             patch(f"{MODULE}.redis_manager.get_client", return_value=self._client),
+            patch(f"{MODULE}.asyncio.sleep", new_callable=AsyncMock) as mock_sleep,
             patch(f"{MODULE}.logger.warning") as mock_warning,
         ):
             result = await executor._dequeue()
 
-        assert result is None
-        executor._poll_postgres.assert_not_awaited()
+        assert result == "from-postgres"
+        executor._poll_postgres.assert_awaited_once_with(idempotent_only=True)
         mock_warning.assert_not_called()
+        mock_sleep.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_connection_error_falls_back_to_postgres(self) -> None:
@@ -908,5 +907,5 @@ class TestDequeue:
             result = await executor._dequeue()
 
         assert result == "from-postgres"
-        executor._poll_postgres.assert_awaited_once()
+        executor._poll_postgres.assert_awaited_once_with()
         mock_warning.assert_called_once()

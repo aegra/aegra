@@ -130,6 +130,20 @@ class TestCreateRun:
         # Should get validation error (422) for missing input/command
         assert resp.status_code == 422
 
+    def test_rejects_invalid_idempotency_key_headers(self) -> None:
+        """The retry key is bounded visible ASCII before handler execution."""
+        app = create_test_app(include_runs=True, include_threads=False)
+        override_session_dependency(app, BasicSession)
+        client = make_client(app)
+
+        for key in ("", "contains space", "x" * 256):
+            response = client.post(
+                "/threads/test-thread-123/runs",
+                headers={"Idempotency-Key": key},
+                json={"assistant_id": "asst-123", "input": {}},
+            )
+            assert response.status_code == 422
+
 
 class TestGetRun:
     """Test GET /threads/{thread_id}/runs/{run_id}"""

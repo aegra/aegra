@@ -20,7 +20,7 @@ import structlog
 from asgi_correlation_id import correlation_id
 from redis import RedisError
 from redis import TimeoutError as RedisTimeoutError
-from sqlalchemy import select, update
+from sqlalchemy import func, select, update
 
 from aegra_api.core.active_runs import active_runs, explicit_run_cancellations
 from aegra_api.core.orm import Run as RunORM
@@ -298,12 +298,12 @@ class WorkerExecutor(BaseExecutor):
             client = redis_manager.get_client()
             result = await client.blpop(settings.worker.WORKER_QUEUE_KEY, timeout=5)  # type: ignore[arg-type]
             if result is None:
-                return None
+                return await self._poll_postgres(idempotent_only=True)
             return result[1]
         except RedisTimeoutError:
             # Idle expiry: a blocking BLPOP hit the socket timeout with no jobs.
-            # Normal when the queue is empty, not a connectivity failure — re-loop.
-            return None
+            # Recover only retry-keyed runs that may have missed Redis enqueue.
+            return await self._poll_postgres(idempotent_only=True)
         except RedisError as exc:
             logger.warning("Redis BLPOP failed, falling back to Postgres poll", error=str(exc))
             await asyncio.sleep(settings.worker.POSTGRES_POLL_INTERVAL_SECONDS)
@@ -359,16 +359,19 @@ class WorkerExecutor(BaseExecutor):
             )
 
     @staticmethod
-    async def _poll_postgres() -> str | None:
+    async def _poll_postgres(*, idempotent_only: bool = False) -> str | None:
         """Pick the oldest pending, unclaimed run from Postgres."""
         maker = _get_session_maker()
         async with maker() as session:
-            run_id = await session.scalar(
+            statement = (
                 select(RunORM.run_id)
                 .where(RunORM.status == "pending", RunORM.claimed_by.is_(None))
                 .order_by(RunORM.created_at.asc())
                 .limit(1)
             )
+            if idempotent_only:
+                statement = statement.where(func.jsonb_exists(RunORM.execution_params, "idempotency_fingerprint"))
+            run_id = await session.scalar(statement)
             return run_id
 
 

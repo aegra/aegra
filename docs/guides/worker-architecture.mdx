@@ -52,6 +52,14 @@ The happy path of a single run, step by step:
 
 Behind the scenes, the **Lease Reaper** scans PostgreSQL every 15 seconds for runs with expired leases (crashed workers) and re-enqueues them. Workers also send **OpenTelemetry traces** to Langfuse, Phoenix, or any OTLP collector.
 
+## Retry-safe background admission
+
+`POST /threads/{thread_id}/runs` accepts an optional `Idempotency-Key` header for callers that may retry an ambiguous HTTP response. The key is scoped to the authenticated user and thread. Repeating the same key and request returns the original run without submitting it twice; reusing the key with a different request returns `409 Conflict`. This contract applies only to threaded background creation, not stream, wait, or stateless creation transports.
+
+Set `multitask_strategy` to `"interrupt"` when a new run must replace an active run on the same thread. Aegra terminalizes a pending predecessor or waits for a running predecessor to acknowledge interruption before it admits the successor. If quiescence cannot be proved within the bounded wait, creation fails with `409 Conflict` and no successor is persisted. Other strategy names retain their existing compatibility behavior and do not gain admission semantics here.
+
+For strongest checkpoint recovery, set `durability` to `"sync"`. Aegra persists the setting with the queued job and forwards it through both legacy and Agent Protocol v2 execution paths. Omitting the field preserves LangGraph's existing default.
+
 ## Horizontal scaling
 
 Every instance is stateless — add more instances behind a load balancer to increase capacity. All instances share the same Redis and PostgreSQL backends.

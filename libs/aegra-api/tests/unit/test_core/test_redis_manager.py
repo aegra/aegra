@@ -39,9 +39,7 @@ class TestRedisManager:
         manager._pool = None
 
     @pytest.mark.asyncio
-    async def test_initialize_configures_retry_and_health_checks(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    async def test_initialize_configures_retry_and_health_checks(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Pooled connections must survive server-side idle disconnects (#505).
 
         Every connection — including the one created by initialize()'s own
@@ -75,9 +73,7 @@ class TestRedisManager:
         manager._pool = None
 
     @pytest.mark.asyncio
-    async def test_real_pool_connections_carry_retry(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    async def test_real_pool_connections_carry_retry(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """End-to-end through the real ConnectionPool: connections built from
         the pool's kwargs must have retries (asyncio default is 0)."""
         from aegra_api.settings import settings

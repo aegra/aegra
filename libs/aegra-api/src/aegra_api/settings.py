@@ -341,15 +341,11 @@ class RedisSettings(EnvBase):
     REDIS_URL: str = "redis://localhost:6379/0"
     REDIS_CHANNEL_PREFIX: str = "aegra:run:"
     REDIS_MAX_CONNECTIONS: int = 250
-    # Ping pooled connections idle longer than this (seconds) before reuse,
-    # reconnecting dead ones transparently. Redis servers commonly close idle
-    # clients (e.g. ElastiCache `timeout`); without health checks the first
-    # command after a quiet period writes into a dead socket. 0 disables.
+    # PING pooled connections idle longer than this (seconds) before reuse, so
+    # server-side idle disconnects don't surface as ConnectionError. 0 disables.
     REDIS_HEALTH_CHECK_INTERVAL: int = 30
-    # Command retry attempts on ConnectionError/TimeoutError (exponential
-    # backoff, 50ms..1s). The first failed attempt discards the dead
-    # connection; the retry runs on a fresh one. Matches the sync redis-py
-    # client, which retries connection errors by default.
+    # Retries after the initial attempt (up to 4 calls total) on connection and
+    # timeout errors, with exponential backoff 50ms..1s.
     REDIS_RETRY_ATTEMPTS: int = 3
 
 

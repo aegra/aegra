@@ -30,18 +30,10 @@ class RedisManager:
         if self._client is not None:
             return
 
-        # Retry + health checks make pooled connections survive server-side
-        # idle disconnects (e.g. ElastiCache/Valkey `timeout`), failovers and
-        # network resets: a dead connection is discarded and the command is
-        # re-run on a fresh one instead of surfacing ConnectionError out of
-        # run submission. redis-py's *sync* client retries this way by
-        # default; the asyncio client defaults to Retry(NoBackoff(), 0), so
-        # it must be configured explicitly (see #505).
-        #
-        # Retrying RPUSH (non-idempotent) is safe here: the job queue is
-        # at-least-once by contract — workers dedup via lease acquisition
-        # and replay de-duplication, so a duplicated run_id costs one empty
-        # BLPOP.
+        # Survive server-side idle disconnects/failovers: retry discards the dead
+        # pooled connection and re-runs on a fresh one — asyncio redis-py defaults
+        # to zero retries, unlike the sync client (#505). RPUSH replay is safe:
+        # the queue is at-least-once and workers dedup via lease acquisition.
         self._pool = aioredis.ConnectionPool.from_url(
             settings.redis.REDIS_URL,
             max_connections=settings.redis.REDIS_MAX_CONNECTIONS,

@@ -3,7 +3,9 @@
 from unittest.mock import AsyncMock, patch
 
 import pytest
+import redis.asyncio as aioredis
 from redis.asyncio.retry import Retry
+from redis.backoff import ExponentialBackoff
 from redis.exceptions import ConnectionError as RedisConnectionError
 
 from aegra_api.core.redis_manager import RedisManager
@@ -37,14 +39,20 @@ class TestRedisManager:
         manager._pool = None
 
     @pytest.mark.asyncio
-    async def test_initialize_configures_retry_and_health_checks(self) -> None:
+    async def test_initialize_configures_retry_and_health_checks(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         """Pooled connections must survive server-side idle disconnects (#505).
 
         Every connection — including the one created by initialize()'s own
         PING — must carry a retry that covers ConnectionError, plus a
-        health-check interval. Passing them to from_url() guarantees this
-        for existing and future connections alike.
+        health-check interval. Non-default settings prove the values come
+        from RedisSettings rather than literals.
         """
+        from aegra_api.settings import settings
+
+        monkeypatch.setattr(settings.redis, "REDIS_HEALTH_CHECK_INTERVAL", 45)
+        monkeypatch.setattr(settings.redis, "REDIS_RETRY_ATTEMPTS", 5)
         manager = RedisManager()
         mock_client = AsyncMock()
 
@@ -55,10 +63,11 @@ class TestRedisManager:
             await manager.initialize()
 
             kwargs = mock_pool_cls.from_url.call_args.kwargs
-            assert kwargs["health_check_interval"] == 30
+            assert kwargs["health_check_interval"] == 45
             retry = kwargs["retry"]
             assert isinstance(retry, Retry)
-            assert retry.get_retries() == 3
+            assert retry.get_retries() == 5
+            assert isinstance(retry._backoff, ExponentialBackoff)
             assert any(issubclass(RedisConnectionError, e) for e in retry._supported_errors)
             assert RedisConnectionError in kwargs["retry_on_error"]
 
@@ -66,17 +75,21 @@ class TestRedisManager:
         manager._pool = None
 
     @pytest.mark.asyncio
-    async def test_real_pool_connections_carry_retry(self) -> None:
+    async def test_real_pool_connections_carry_retry(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         """End-to-end through the real ConnectionPool: connections built from
         the pool's kwargs must have retries (asyncio default is 0)."""
-        import redis.asyncio as aioredis
+        from aegra_api.settings import settings
 
+        monkeypatch.setattr(settings.redis, "REDIS_HEALTH_CHECK_INTERVAL", 45)
+        monkeypatch.setattr(settings.redis, "REDIS_RETRY_ATTEMPTS", 5)
         manager = RedisManager()
         mock_client = AsyncMock()
         real_from_url = aioredis.ConnectionPool.from_url
-        captured: dict = {}
+        captured: dict[str, aioredis.ConnectionPool] = {}
 
-        def capture_from_url(url, **kwargs):
+        def capture_from_url(url: str, **kwargs: object) -> aioredis.ConnectionPool:
             captured["pool"] = real_from_url("redis://localhost:1/0", **kwargs)
             return captured["pool"]
 
@@ -90,8 +103,8 @@ class TestRedisManager:
             await manager.initialize()
 
         conn = captured["pool"].make_connection()
-        assert conn.retry.get_retries() == 3
-        assert conn.health_check_interval == 30
+        assert conn.retry.get_retries() == 5
+        assert conn.health_check_interval == 45
 
         manager._client = None
         manager._pool = None

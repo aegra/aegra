@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import uuid
 from collections.abc import Iterator
+from functools import partial
 from typing import Any
 
 import pytest
@@ -14,9 +16,11 @@ from fastapi.testclient import TestClient
 from aegra_api.api import event_streaming as es_module
 from aegra_api.core.auth_deps import get_current_user, require_auth
 from aegra_api.models.auth import User
+from aegra_api.models.event_streaming import EventStreamRequest
 from aegra_api.services.broker import broker_manager
 from aegra_api.services.event_streaming import capabilities as caps
 from aegra_api.services.event_streaming import commands as cmd_module
+from aegra_api.services.event_streaming.session import ThreadEventSession
 
 _USER = "test-user"
 
@@ -175,3 +179,51 @@ class TestStreamRoute:
         assert "content-block-delta" in body
         assert "event: lifecycle" in body
         assert "completed" in body
+
+    async def test_stream_emits_dual_sdk_interrupt_fields(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        run_id = f"run-{uuid.uuid4().hex[:8]}"
+        interrupt_value = {"question": "Approve?"}
+
+        async def seed() -> None:
+            broker = broker_manager.get_or_create_broker(run_id)
+            event = {
+                "type": "event",
+                "method": "updates",
+                "params": {
+                    "namespace": [],
+                    "data": {"__interrupt__": [{"id": "int-1", "value": interrupt_value}]},
+                },
+            }
+            await broker.put(f"{run_id}_event_1", ("updates", event))
+            await broker.put(f"{run_id}_event_2", ("end", {"status": "interrupted"}))
+
+        await seed()
+        monkeypatch.setattr(
+            es_module,
+            "ThreadEventSession",
+            partial(ThreadEventSession, idle_grace_seconds=0.01),
+        )
+        monkeypatch.setattr(
+            es_module,
+            "_get_session_maker",
+            lambda: lambda: _Session(owner=_USER, run_ids=[run_id]),
+        )
+        response = await es_module.stream_thread_events(
+            "t1",
+            EventStreamRequest(channels=["input"], namespaces=None, depth=None, since=None),
+            User(identity=_USER),
+        )
+        chunks: list[str] = []
+        async for chunk in response.body_iterator:
+            assert isinstance(chunk, (bytes, str))
+            chunks.append(chunk.decode() if isinstance(chunk, bytes) else chunk)
+        body = "".join(chunks)
+
+        input_frame = next(frame for frame in body.split("\n\n") if frame.startswith("event: input.requested"))
+        data_line = next(line for line in input_frame.splitlines() if line.startswith("data: "))
+        envelope = json.loads(data_line.removeprefix("data: "))
+        assert envelope["params"]["data"] == {
+            "interrupt_id": "int-1",
+            "value": interrupt_value,
+            "payload": interrupt_value,
+        }

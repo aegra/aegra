@@ -2,7 +2,7 @@
 
 import json
 from pathlib import Path
-from typing import TypedDict
+from typing import Any, TypedDict
 
 import structlog
 
@@ -50,6 +50,7 @@ class StoreIndexConfig(TypedDict, total=False):
     - bedrock:amazon.titan-embed-text-v2:0 (1024 dims)
     - cohere:embed-english-v3.0 (1024 dims)
     """
+    embed_kwargs: dict[str, Any] | None
     fields: list[str] | None
     """JSON fields to embed. Defaults to ["$"] (entire document).
     Examples:

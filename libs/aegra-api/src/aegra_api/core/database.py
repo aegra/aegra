@@ -1,6 +1,11 @@
 """Database manager with LangGraph integration"""
 
+import importlib
+import importlib.util
+from pathlib import Path
+
 import structlog
+from langchain.embeddings import init_embeddings
 from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 from langgraph.store.postgres.aio import AsyncPostgresStore
 from psycopg.rows import dict_row
@@ -11,6 +16,27 @@ from aegra_api.config import load_store_config
 from aegra_api.settings import settings
 
 logger = structlog.get_logger(__name__)
+
+
+# 1. BÊ NGUYÊN LOGIC CỦA AEGRA SANG ĐỂ LOAD HÀM EMBED
+def _load_embed_object(import_path: str):
+    """Load object based on Aegra's native app_loader logic."""
+    path, name = import_path.rsplit(":", 1)
+    path_obj = Path(path)
+
+    # Logic nhận diện native từ Aegra
+    is_file_path = path_obj.suffix == ".py" or path.startswith("./") or path.startswith("../")
+
+    if is_file_path:
+        spec = importlib.util.spec_from_file_location("custom_embed_module", str(path_obj))
+        if spec is None or spec.loader is None:
+            raise ImportError(f"Cannot load spec from {path_obj}")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+    else:
+        module = importlib.import_module(path)
+
+    return getattr(module, name)
 
 
 class DatabaseManager:
@@ -73,8 +99,35 @@ class DatabaseManager:
         await self._checkpointer.setup()  # Ensure tables exist
 
         # Load store configuration for semantic search (if configured)
+        # 2. LOGIC KHỞI TẠO STORE CỦA DATABASE MANAGER
         store_config = load_store_config()
         index_config = store_config.get("index") if store_config else None
+
+        if index_config and isinstance(index_config.get("embed"), str):
+            index_config = dict(index_config)
+            embed_spec = index_config.pop("embed")
+            embed_kwargs = index_config.pop("embed_kwargs", None) or {}
+
+            # Nếu chuỗi có chứa ":" và không thuộc danh sách Provider mặc định
+            if ":" in embed_spec and embed_spec.split(":")[0] not in [
+                "openai",
+                "google_genai",
+                "cohere",
+                "bedrock",
+                "azure_ai",
+                "azure_openai",
+                "google_vertexai",
+                "huggingface",
+                "mistralai",
+                "ollama",
+            ]:
+                # Dùng logic chuẩn của Aegra để load hàm
+                index_config["embed"] = _load_embed_object(embed_spec)
+
+            elif embed_kwargs:
+                index_config["embed"] = init_embeddings(embed_spec, **embed_kwargs)
+            else:
+                index_config["embed"] = embed_spec
 
         self._store = AsyncPostgresStore(conn=self.lg_pool, index=index_config)
         await self._store.setup()  # Ensure tables exist

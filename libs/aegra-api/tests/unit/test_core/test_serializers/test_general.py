@@ -1,6 +1,12 @@
 """Unit tests for serializers"""
 
-from collections import namedtuple
+from collections import deque, namedtuple
+from dataclasses import dataclass
+from datetime import date, datetime, timezone
+from decimal import Decimal
+from enum import Enum
+from pathlib import Path
+from uuid import UUID
 
 import pytest
 from langchain_core.messages import ToolMessage
@@ -28,6 +34,16 @@ class PydanticV1Style:
 
     def dict(self):
         return {"name": self.name, "value": self.value}
+
+
+class Color(Enum):
+    RED = "red"
+
+
+@dataclass
+class AgentState:
+    todos: list[str]
+    count: int
 
 
 class InterruptMock:
@@ -195,6 +211,39 @@ class TestGeneralSerializer:
 
         assert isinstance(result, str)
         assert "CustomObject" in result
+
+    def test_serialize_common_types_structurally(self):
+        identifier = UUID("7d247e59-3c1e-4c5e-8f32-ec4e9d0c12ab")
+        value = {
+            "state": AgentState(todos=["review"], count=1),
+            "bytes": b"\xff\x00",
+            "enum": Color.RED,
+            "deque": deque([1, AgentState(todos=[], count=0)]),
+            "datetime": datetime(2026, 1, 1, 12, 30, tzinfo=timezone.utc),  # noqa: UP017
+            "date": date(2026, 1, 2),
+            "uuid": identifier,
+            "decimal": Decimal("1.50"),
+            "path": Path("/tmp/state.json"),
+        }
+
+        result = self.serializer.serialize(value)
+
+        assert result == {
+            "state": {"todos": ["review"], "count": 1},
+            "bytes": "/wA=",
+            "enum": "red",
+            "deque": [1, {"todos": [], "count": 0}],
+            "datetime": "2026-01-01T12:30:00+00:00",
+            "date": "2026-01-02",
+            "uuid": str(identifier),
+            "decimal": "1.50",
+            "path": str(Path("/tmp/state.json")),
+        }
+
+    def test_serialize_exception_preserves_type_and_message(self):
+        result = self.serializer.serialize(ValueError("boom"))
+
+        assert result == {"type": "ValueError", "message": "boom"}
 
     def test_serialize_command_structurally(self):
         """A LangGraph Command (returned by state-updating tools like

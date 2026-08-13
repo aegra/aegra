@@ -2,7 +2,14 @@
 
 import dataclasses
 import inspect
+from base64 import b64encode
+from collections import deque
+from datetime import date, datetime
+from decimal import Decimal
+from enum import Enum
+from pathlib import PurePath
 from typing import Any
+from uuid import UUID
 
 from aegra_api.core.serializers.base import SerializationError, Serializer
 
@@ -41,19 +48,32 @@ class GeneralSerializer(Serializer):
         # Command (from tools like write_todos) is a dataclass with no model_dump/
         # .dict()/_asdict; it would otherwise hit str() and reach consumers as an
         # unparseable repr. Emit all fields to match orjson's native output on Platform.
-        elif obj.__class__.__name__ == "Command" and dataclasses.is_dataclass(obj):
+        elif dataclasses.is_dataclass(obj):
             return {field.name: self._serialize_object(getattr(obj, field.name)) for field in dataclasses.fields(obj)}
 
         # Handle NamedTuples (like PregelTask) - they have _asdict() method
         elif hasattr(obj, "_asdict") and callable(obj._asdict):
             return {k: self._serialize_object(v) for k, v in obj._asdict().items()}
 
+        # Handle common scalar types that JSON does not encode natively.
+        elif isinstance(obj, bytes):
+            return b64encode(obj).decode("ascii")
+        elif isinstance(obj, Enum):
+            return self._serialize_object(obj.value)
+        elif isinstance(obj, (datetime, date)):
+            return obj.isoformat()
+        elif isinstance(obj, (UUID, Decimal, PurePath)):
+            return str(obj)
+        elif isinstance(obj, Exception):
+            return {"type": obj.__class__.__name__, "message": str(obj)}
+
         # Handle sets and frozensets
         elif isinstance(obj, (set, frozenset)):
             return list(obj)
 
+        # Handle deques like other JSON array containers.
         # Handle tuples and lists recursively
-        elif isinstance(obj, (tuple, list)):
+        elif isinstance(obj, (deque, tuple, list)):
             return [self._serialize_object(item) for item in obj]
 
         # Handle dictionaries recursively

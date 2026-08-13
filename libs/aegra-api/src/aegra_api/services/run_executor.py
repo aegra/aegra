@@ -181,9 +181,26 @@ async def _stream_graph(job: RunJob) -> _GraphResult:
         with_auth_ctx(job.user, job.user.permissions),  # type: ignore[arg-type]
     ):
         if job.execution.event_streaming_v2:
-            await _stream_native_v2(job, graph, execution_input, run_config, result)
+            await _stream_native_v2(
+                job,
+                graph,
+                execution_input,
+                run_config,
+                result,
+                interrupt_before=_normalize_interrupt_value(job.behavior.interrupt_before),
+                interrupt_after=_normalize_interrupt_value(job.behavior.interrupt_after),
+            )
         else:
-            await _stream_legacy(job, graph, execution_input, run_config, stream_modes, result)
+            await _stream_legacy(
+                job,
+                graph,
+                execution_input,
+                run_config,
+                stream_modes,
+                result,
+                interrupt_before=_normalize_interrupt_value(job.behavior.interrupt_before),
+                interrupt_after=_normalize_interrupt_value(job.behavior.interrupt_after),
+            )
 
     return result
 
@@ -195,6 +212,9 @@ async def _stream_legacy(
     run_config: dict[str, Any],
     stream_modes: list[str],
     result: _GraphResult,
+    *,
+    interrupt_before: str | list[str] | None = None,
+    interrupt_after: str | list[str] | None = None,
 ) -> None:
     """Stream via the v1 producer (legacy SSE endpoints)."""
     run_id = job.identity.run_id
@@ -203,6 +223,8 @@ async def _stream_legacy(
         input_data=execution_input,
         config=run_config,
         stream_mode=stream_modes,
+        interrupt_before=interrupt_before,
+        interrupt_after=interrupt_after,
         context=job.execution.context,
         subgraphs=job.behavior.subgraphs,
         on_checkpoint=lambda _: None,
@@ -223,6 +245,9 @@ async def _stream_native_v2(
     execution_input: Any,
     run_config: dict[str, Any],
     result: _GraphResult,
+    *,
+    interrupt_before: str | list[str] | None = None,
+    interrupt_after: str | list[str] | None = None,
 ) -> None:
     """Stream via the native v3 protocol producer (Agent Protocol v2).
 
@@ -235,6 +260,8 @@ async def _stream_native_v2(
         graph=graph,
         input_data=execution_input,
         config=run_config,
+        interrupt_before=interrupt_before,
+        interrupt_after=interrupt_after,
         context=job.execution.context,
     ):
         event_id = await broker_manager.allocate_event_id(run_id)
@@ -259,13 +286,14 @@ def _build_run_config(job: RunJob) -> dict[str, Any]:
         additional_config=job.execution.config,
         checkpoint=job.execution.checkpoint,
     )
-    if job.behavior.interrupt_before is not None:
-        items = job.behavior.interrupt_before
-        config["interrupt_before"] = items if isinstance(items, list) else [items]
-    if job.behavior.interrupt_after is not None:
-        items = job.behavior.interrupt_after
-        config["interrupt_after"] = items if isinstance(items, list) else [items]
     return config
+
+
+def _normalize_interrupt_value(value: str | list[str] | None) -> str | list[str] | None:
+    """Convert the public all-nodes list sentinel to LangGraph's string sentinel."""
+    if value == ["*"]:
+        return "*"
+    return value
 
 
 def _resolve_input(job: RunJob) -> Any:

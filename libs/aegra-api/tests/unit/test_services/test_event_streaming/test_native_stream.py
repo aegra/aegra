@@ -96,11 +96,18 @@ class TestStreamNativeV3Events:
         graph = _FakeGraph([])
         config = {
             "c": 2,
-            "interrupt_before": ["prepare"],
-            "interrupt_after": ["finish"],
         }
 
-        _ = [pair async for pair in stream_native_v3_events(graph=graph, input_data={}, config=config)]
+        _ = [
+            pair
+            async for pair in stream_native_v3_events(
+                graph=graph,
+                input_data={},
+                config=config,
+                interrupt_before=["prepare"],
+                interrupt_after=["finish"],
+            )
+        ]
 
         assert graph.calls[0]["config"] == {"c": 2}
         assert graph.calls[0]["interrupt_before"] == ["prepare"]
@@ -114,7 +121,8 @@ class TestStreamNativeV3Events:
             async for pair in stream_native_v3_events(
                 graph=graph,
                 input_data={},
-                config={"interrupt_before": ["*"]},
+                config={},
+                interrupt_before="*",
             )
         ]
 

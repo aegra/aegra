@@ -39,6 +39,21 @@ jobs:
       contents: read
       pull-requests: write
 
+    services:
+      postgres:
+        image: postgres:18.0-bookworm
+        env:
+          POSTGRES_USER: user
+          POSTGRES_PASSWORD: password
+          POSTGRES_DB: aegra
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U user -d aegra"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
     steps:
       - uses: actions/checkout@v4
         with:
@@ -55,6 +70,12 @@ jobs:
       - name: Install workspace dependencies
         run: uv sync --all-packages
 
+      - name: Run database migrations
+        working-directory: libs/aegra-api
+        env:
+          DATABASE_URL: "postgresql://user:password@localhost:5432/aegra"
+        run: uv run alembic upgrade head
+
       - name: Type check with ty
         run: uv run ty check libs/aegra-api/src/ libs/aegra-cli/src/
         continue-on-error: true
@@ -66,11 +87,7 @@ jobs:
       - name: Run tests with pytest
         env:
           AEGRA_CONFIG: ""
-          POSTGRES_USER: "user"
-          POSTGRES_PASSWORD: "password"
-          POSTGRES_HOST: "localhost"
-          POSTGRES_PORT: "5432"
-          POSTGRES_DB: "aegra"
+          DATABASE_URL: "postgresql://user:password@localhost:5432/aegra"
         run: uv run --package aegra-api pytest libs/aegra-api/tests/unit libs/aegra-api/tests/integration --cov=libs/aegra-api/src --cov-report=xml --cov-report=term
 
       - name: Upload coverage to Codecov

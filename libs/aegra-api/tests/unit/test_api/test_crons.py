@@ -73,6 +73,7 @@ class TestTriggerFirstRun:
         assert result is mock_run
         mock_prepare.assert_awaited_once()
         assert mock_prepare.await_args.args[1] == "eph-thread-1"
+        assert "openswe_background_admission" not in mock_prepare.await_args.kwargs
         mock_schedule.assert_called_once_with("run-001", "eph-thread-1", mock_user.identity)
 
     @pytest.mark.asyncio

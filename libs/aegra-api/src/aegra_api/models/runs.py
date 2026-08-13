@@ -56,6 +56,7 @@ class RunCreate(BaseModel):
         None,
         description="Strategy for handling concurrent runs on same thread: 'reject', 'interrupt', 'rollback', or 'enqueue'.",
     )
+    durability: Literal["sync"] | None = Field(None, description="Checkpoint durability mode")
 
     # Human-in-the-loop fields (core HITL functionality)
     command: dict[str, Any] | None = Field(

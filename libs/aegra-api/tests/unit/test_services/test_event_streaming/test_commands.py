@@ -55,6 +55,7 @@ class TestRunStart:
         assert request.config == {"c": 2}
         # v2 runs are flagged for the native v3 stream path.
         assert prepared_run.call_args.kwargs["event_streaming_v2"] is True
+        assert "openswe_background_admission" not in prepared_run.call_args.kwargs
 
     async def test_run_start_forwards_interrupt_breakpoints(self, prepared_run: AsyncMock, user: User) -> None:
         """interrupt_before/after must reach RunCreate so v2 clients can set HITL breakpoints."""

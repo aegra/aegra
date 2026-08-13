@@ -7,7 +7,7 @@ handling message accumulation, event processing, and multiple stream modes.
 import uuid
 from collections.abc import AsyncIterator, Callable
 from contextlib import aclosing
-from typing import Any, cast
+from typing import Any, Literal, cast
 
 import structlog
 from langchain_core.messages import (
@@ -124,6 +124,7 @@ async def stream_graph_events(
     output_keys: list[str] | None = None,
     on_checkpoint: Callable[[CheckpointPayload | None], None] = lambda _: None,
     on_task_result: Callable[[TaskResultPayload], None] = lambda _: None,
+    durability: Literal["sync"] | None = None,
 ) -> AnyStream:
     """Stream events from a graph execution.
 
@@ -205,6 +206,7 @@ async def stream_graph_events(
                 stream_mode=list(stream_modes_set),
                 subgraphs=subgraphs,
                 **interrupt_kwargs,
+                **({"durability": durability} if durability is not None else {}),
             )
         ) as stream:
             async for event in stream:
@@ -292,6 +294,7 @@ async def stream_graph_events(
                 output_keys=output_keys,
                 subgraphs=subgraphs,
                 **interrupt_kwargs,
+                **({"durability": durability} if durability is not None else {}),
             )
         ) as stream:
             async for event in stream:

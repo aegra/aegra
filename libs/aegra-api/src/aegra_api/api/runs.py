@@ -3,7 +3,7 @@
 import asyncio
 import contextlib
 from collections.abc import AsyncGenerator, MutableMapping
-from typing import Any
+from typing import Annotated, Any
 
 import structlog
 from fastapi import APIRouter, Depends, Header, HTTPException, Query
@@ -107,6 +107,16 @@ async def create_run(
     request: RunCreate,
     user: User = Depends(get_current_user),
     session: AsyncSession = Depends(get_session),
+    idempotency_key: Annotated[
+        str | None,
+        Header(
+            alias="Idempotency-Key",
+            min_length=1,
+            max_length=255,
+            pattern=r"^[\x21-\x7E]+$",
+            description="Stable visible-ASCII key for safely replaying a threaded run creation request.",
+        ),
+    ] = None,
 ) -> Run:
     """Create and execute a new run.
 
@@ -121,7 +131,15 @@ async def create_run(
 
     await _apply_create_run_auth(user, thread_id, request)
 
-    _run_id, run, _job = await _prepare_run(session, thread_id, request, user, initial_status="pending")
+    _run_id, run, _job = await _prepare_run(
+        session,
+        thread_id,
+        request,
+        user,
+        initial_status="pending",
+        idempotency_key=idempotency_key,
+        openswe_background_admission=True,
+    )
 
     return run
 

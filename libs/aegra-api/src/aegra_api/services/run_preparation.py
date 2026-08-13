@@ -5,14 +5,17 @@ resume-command validation, and config/context merging logic.
 """
 
 import asyncio
+import hashlib
+import json
 from datetime import UTC, datetime
 from typing import Any
-from uuid import uuid4
+from uuid import NAMESPACE_URL, uuid4, uuid5
 
 import structlog
 from asgi_correlation_id import correlation_id
 from fastapi import HTTPException
-from sqlalchemy import or_, select, update
+from sqlalchemy import or_, select, text, update
+from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from aegra_api.core.orm import Assistant as AssistantORM
@@ -24,6 +27,7 @@ from aegra_api.models.run_job import RunBehavior, RunExecution, RunIdentity, Run
 from aegra_api.services.executor import executor
 from aegra_api.services.langgraph_service import get_langgraph_service
 from aegra_api.services.run_status import set_thread_status
+from aegra_api.services.streaming_service import streaming_service
 from aegra_api.utils.assistants import resolve_assistant_id
 from aegra_api.utils.run_utils import _merge_jsonb
 
@@ -37,6 +41,18 @@ logger = structlog.getLogger(__name__)
 # rejecting — otherwise a valid resume races to a spurious 400.
 _RESUME_SETTLE_ATTEMPTS = 10
 _RESUME_SETTLE_INTERVAL_SECONDS = 0.1
+_INTERRUPT_SETTLE_ATTEMPTS = 100
+_INTERRUPT_SETTLE_INTERVAL_SECONDS = 0.1
+_TERMINAL_RUN_STATUSES = frozenset({"success", "error", "timeout", "interrupted"})
+
+
+def _idempotent_run_id(user_id: str, thread_id: str, key: str) -> str:
+    return str(uuid5(NAMESPACE_URL, json.dumps([user_id, thread_id, key], separators=(",", ":"))))
+
+
+def _request_fingerprint(request: RunCreate) -> str:
+    payload = json.dumps(request.model_dump(mode="json"), sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    return hashlib.sha256(payload.encode()).hexdigest()
 
 
 async def _validate_resume_command(session: AsyncSession, thread_id: str, command: dict[str, Any] | None) -> None:
@@ -194,6 +210,8 @@ async def _prepare_run(
     *,
     initial_status: str,
     event_streaming_v2: bool = False,
+    idempotency_key: str | None = None,
+    openswe_background_admission: bool = False,
 ) -> tuple[str, Run, RunJob]:
     """Shared run-creation logic used by create, stream, and wait endpoints.
 
@@ -201,9 +219,29 @@ async def _prepare_run(
     builds a RunJob, submits it to the executor, and returns the triple
     ``(run_id, run_model, job)``.
     """
-    await _validate_resume_command(session, thread_id, request.command)
+    request_fingerprint = _request_fingerprint(request) if idempotency_key is not None else None
+    run_id = (
+        _idempotent_run_id(user.identity, thread_id, idempotency_key) if idempotency_key is not None else str(uuid4())
+    )
+    if openswe_background_admission and (idempotency_key is not None or request.multitask_strategy == "interrupt"):
+        await session.execute(
+            text("SELECT pg_advisory_xact_lock(hashtextextended(:scope, 0))"),
+            {"scope": f"{len(user.identity)}:{user.identity}{thread_id}"},
+        )
+    if request_fingerprint is not None:
+        existing = await session.scalar(
+            select(RunORM).where(
+                RunORM.run_id == run_id,
+                RunORM.thread_id == thread_id,
+                RunORM.user_id == user.identity,
+            )
+        )
+        if existing is not None:
+            if (existing.execution_params or {}).get("idempotency_fingerprint") != request_fingerprint:
+                raise HTTPException(409, "Idempotency-Key was already used with a different request")
+            return run_id, Run.model_validate(existing), RunJob.from_run_orm(existing)
 
-    run_id = str(uuid4())
+    await _validate_resume_command(session, thread_id, request.command)
     langgraph_service = get_langgraph_service()
     logger.info(
         "Scheduling run",
@@ -244,6 +282,69 @@ async def _prepare_run(
     if assistant.graph_id not in available_graphs:
         raise HTTPException(404, f"Graph '{assistant.graph_id}' not found for assistant")
 
+    if openswe_background_admission and request.multitask_strategy == "interrupt":
+        predecessors = (
+            await session.scalars(
+                select(RunORM).where(
+                    RunORM.thread_id == thread_id,
+                    RunORM.user_id == user.identity,
+                    RunORM.status.in_(("pending", "running")),
+                )
+            )
+        ).all()
+        running_ids: list[str] = []
+        for predecessor in predecessors:
+            status = predecessor.status
+            if status == "pending":
+                claimed = await session.scalar(
+                    update(RunORM)
+                    .where(
+                        RunORM.run_id == predecessor.run_id,
+                        RunORM.thread_id == thread_id,
+                        RunORM.user_id == user.identity,
+                        RunORM.status == "pending",
+                    )
+                    .values(status="interrupted", updated_at=datetime.now(UTC))
+                    .returning(RunORM.run_id)
+                )
+                if claimed is not None:
+                    continue
+                status = await session.scalar(
+                    select(RunORM.status).where(
+                        RunORM.run_id == predecessor.run_id,
+                        RunORM.thread_id == thread_id,
+                        RunORM.user_id == user.identity,
+                    )
+                )
+                if status not in ("running", "interrupted"):
+                    raise HTTPException(409, f"Active run '{predecessor.run_id}' completed without interruption")
+            if status == "running":
+                if not await streaming_service.interrupt_run(predecessor.run_id):
+                    raise HTTPException(409, f"Could not interrupt active run '{predecessor.run_id}'")
+                running_ids.append(predecessor.run_id)
+            elif status not in _TERMINAL_RUN_STATUSES:
+                raise HTTPException(409, f"Active run '{predecessor.run_id}' changed unexpectedly")
+        for _ in range(_INTERRUPT_SETTLE_ATTEMPTS):
+            if not running_ids:
+                break
+            states: dict[str, str] = {}
+            rows = await session.execute(
+                select(RunORM.run_id, RunORM.status).where(
+                    RunORM.run_id.in_(running_ids),
+                    RunORM.thread_id == thread_id,
+                    RunORM.user_id == user.identity,
+                )
+            )
+            for active_run_id, active_status in rows.all():
+                states[active_run_id] = active_status
+            if all(states.get(run_id) in _TERMINAL_RUN_STATUSES for run_id in running_ids):
+                if any(states.get(run_id) != "interrupted" for run_id in running_ids):
+                    raise HTTPException(409, "Active run completed without acknowledging interruption")
+                break
+            await asyncio.sleep(_INTERRUPT_SETTLE_INTERVAL_SECONDS)
+        else:
+            raise HTTPException(409, "Timed out waiting for active runs to acknowledge interruption")
+
     # Mark thread as busy and update metadata
     await update_thread_metadata(
         session, thread_id, assistant.assistant_id, assistant.graph_id, user_id=user.identity, input_data=request.input
@@ -262,6 +363,7 @@ async def _prepare_run(
             checkpoint=request.checkpoint,
             command=request.command,
             event_streaming_v2=event_streaming_v2,
+            durability=request.durability,
         ),
         behavior=RunBehavior(
             interrupt_before=request.interrupt_before,
@@ -282,6 +384,8 @@ async def _prepare_run(
         "thread_id": thread_id,
         "graph_id": assistant.graph_id,
     }
+    if request_fingerprint is not None:
+        exec_params["idempotency_fingerprint"] = request_fingerprint
 
     now = datetime.now(UTC)
     run_orm = RunORM(
@@ -299,8 +403,45 @@ async def _prepare_run(
         error_message=None,
         execution_params=exec_params,
     )
-    session.add(run_orm)
-    await session.commit()
+    if request_fingerprint is None:
+        session.add(run_orm)
+        await session.commit()
+    else:
+        inserted = await session.scalar(
+            insert(RunORM)
+            .values(
+                run_id=run_id,
+                thread_id=thread_id,
+                assistant_id=resolved_assistant_id,
+                status=initial_status,
+                input=request.input,
+                config=config,
+                context=context,
+                user_id=user.identity,
+                created_at=now,
+                updated_at=now,
+                output=None,
+                error_message=None,
+                execution_params=exec_params,
+            )
+            .on_conflict_do_nothing(index_elements=[RunORM.run_id])
+            .returning(RunORM.run_id)
+        )
+        if inserted is None:
+            await session.rollback()
+            existing = await session.scalar(
+                select(RunORM).where(
+                    RunORM.run_id == run_id,
+                    RunORM.thread_id == thread_id,
+                    RunORM.user_id == user.identity,
+                )
+            )
+            if existing is None:
+                raise RuntimeError("idempotent run disappeared after insertion conflict")
+            if (existing.execution_params or {}).get("idempotency_fingerprint") != request_fingerprint:
+                raise HTTPException(409, "Idempotency-Key was already used with a different request")
+            return run_id, Run.model_validate(existing), RunJob.from_run_orm(existing)
+        await session.commit()
 
     run = Run.model_validate(run_orm)
 

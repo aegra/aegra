@@ -35,19 +35,18 @@ class GeneralSerializer(Serializer):
 
         # Handle Pydantic v2 models (model_dump method)
         if hasattr(obj, "model_dump") and callable(obj.model_dump):
-            return obj.model_dump()
+            return self._serialize_object(obj.model_dump())
 
         # Handle LangChain objects and Pydantic v1 models (dict method)
         elif hasattr(obj, "dict") and callable(obj.dict):
-            return obj.dict()
+            return self._serialize_object(obj.dict())
 
         # Handle LangGraph Interrupt objects (they don't have .dict() method)
         elif obj.__class__.__name__ == "Interrupt" and hasattr(obj, "value") and hasattr(obj, "id"):
             return {"value": self._serialize_object(obj.value), "id": obj.id}
 
-        # Command (from tools like write_todos) is a dataclass with no model_dump/
-        # .dict()/_asdict; it would otherwise hit str() and reach consumers as an
-        # unparseable repr. Emit all fields to match orjson's native output on Platform.
+        # Dataclasses (including LangGraph Command) have no standard JSON form.
+        # Emit all fields recursively so nested values retain their structure.
         elif dataclasses.is_dataclass(obj):
             return {field.name: self._serialize_object(getattr(obj, field.name)) for field in dataclasses.fields(obj)}
 
@@ -71,8 +70,7 @@ class GeneralSerializer(Serializer):
         elif isinstance(obj, (set, frozenset)):
             return list(obj)
 
-        # Handle deques like other JSON array containers.
-        # Handle tuples and lists recursively
+        # Handle array-like containers recursively.
         elif isinstance(obj, (deque, tuple, list)):
             return [self._serialize_object(item) for item in obj]
 

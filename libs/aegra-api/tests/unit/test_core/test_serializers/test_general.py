@@ -2,7 +2,7 @@
 
 from collections import deque, namedtuple
 from dataclasses import dataclass
-from datetime import date, datetime, timezone
+from datetime import UTC, date, datetime
 from decimal import Decimal
 from enum import Enum
 from pathlib import Path
@@ -219,7 +219,7 @@ class TestGeneralSerializer:
             "bytes": b"\xff\x00",
             "enum": Color.RED,
             "deque": deque([1, AgentState(todos=[], count=0)]),
-            "datetime": datetime(2026, 1, 1, 12, 30, tzinfo=timezone.utc),  # noqa: UP017
+            "datetime": datetime(2026, 1, 1, 12, 30, tzinfo=UTC),
             "date": date(2026, 1, 2),
             "uuid": identifier,
             "decimal": Decimal("1.50"),
@@ -244,6 +244,17 @@ class TestGeneralSerializer:
         result = self.serializer.serialize(ValueError("boom"))
 
         assert result == {"type": "ValueError", "message": "boom"}
+
+    def test_serialize_model_dump_recursively_normalizes_common_types(self):
+        class DumpingModel:
+            def model_dump(self):
+                return {"payload": {"bytes": b"\xff"}}
+
+        model = DumpingModel()
+
+        result = self.serializer.serialize(model)
+
+        assert result == {"payload": {"bytes": "/w=="}}
 
     def test_serialize_command_structurally(self):
         """A LangGraph Command (returned by state-updating tools like

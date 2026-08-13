@@ -265,6 +265,68 @@ def test_store_delete_handler_receives_namespace_and_key(monkeypatch: pytest.Mon
     assert seen[0].get("key") == "k1", f"handler saw {seen[0]}, losing the request body"
 
 
+def test_run_create_authorizes_the_assistant(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Creating a run consults @auth.on.assistants for the assistant it uses.
+
+    Mirrors the cron-create chain: threads.create_run alone would let a user
+    run an assistant that a per-assistant handler rule denies to them.
+    """
+    auth = Auth()
+    seen: list[tuple[str, str, Any]] = []
+
+    @auth.on
+    async def record(ctx: Any, value: Any) -> bool:
+        seen.append((ctx.resource, ctx.action, value.get("assistant_id")))
+        return True
+
+    app = _build_app(auth, monkeypatch)
+
+    with TestClient(app, raise_server_exceptions=False) as client:
+        client.post("/threads/t-1/runs", json={"assistant_id": "agent", "input": {}})
+
+    events = [(res, act) for res, act, _ in seen]
+    assert ("threads", "create_run") in events
+    assert ("assistants", "read") in events, "run create stopped authorizing the assistant"
+    assistant_ids = [aid for res, _, aid in seen if res == "assistants"]
+    assert assistant_ids == ["agent"], f"assistant handler saw {assistant_ids}"
+
+
+def test_deny_assistant_handler_blocks_run_create(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A handler denying assistants.read must stop run creation with 403."""
+    auth = Auth()
+
+    @auth.on.assistants
+    async def deny(ctx: Any, value: Any) -> bool:
+        return False
+
+    app = _build_app(auth, monkeypatch)
+
+    with TestClient(app) as client:
+        response = client.post("/threads/t-1/runs", json={"assistant_id": "agent", "input": {}})
+
+    assert response.status_code == 403, (
+        f"got {response.status_code}; a denied assistant must block run creation before any run is prepared"
+    )
+
+
+def test_stateless_run_also_authorizes_the_assistant(monkeypatch: pytest.MonkeyPatch) -> None:
+    """POST /runs delegates to the threaded path, so the assistant check holds there too."""
+    auth = Auth()
+    seen: list[tuple[str, str]] = []
+
+    @auth.on
+    async def record(ctx: Any, value: Any) -> bool:
+        seen.append((ctx.resource, ctx.action))
+        return True
+
+    app = _build_app(auth, monkeypatch)
+
+    with TestClient(app, raise_server_exceptions=False) as client:
+        client.post("/runs", json={"assistant_id": "agent", "input": {}})
+
+    assert ("assistants", "read") in seen, "a stateless run skipped the assistant authorization"
+
+
 def test_stateless_run_cannot_bypass_thread_handler(monkeypatch: pytest.MonkeyPatch) -> None:
     """Dropping the thread_id must not dodge an @auth.on.threads rule.
 

@@ -100,6 +100,13 @@ async def _apply_create_run_auth(user: User, thread_id: str, request: RunCreate)
     if isinstance(context_overrides, dict):
         request.context = {**(request.context or {}), **context_overrides}
 
+    # Creating a run also reads its assistant, so per-assistant handler rules
+    # apply here exactly as they do in the cron-create chain.
+    await handle_event(
+        build_auth_context(user, "assistants", "read"),
+        {"assistant_id": request.assistant_id},
+    )
+
 
 @router.post("/threads/{thread_id}/runs", response_model=Run, responses={**NOT_FOUND, **CONFLICT})
 async def create_run(

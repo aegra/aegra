@@ -18,6 +18,8 @@ from collections.abc import AsyncIterator
 from functools import lru_cache
 from typing import Any
 
+from aegra_api.services.graph_streaming import _extract_interrupt_kwargs
+
 
 @lru_cache(maxsize=1)
 def _extra_transformers() -> list[Any]:
@@ -69,8 +71,14 @@ async def stream_native_v3_events(
     it. ``messages`` payloads are unwrapped to their event dict; a message
     event we can't reconstruct is dropped rather than forwarded malformed.
     """
+    config, interrupt_kwargs = _extract_interrupt_kwargs(config)
     run_stream = await graph.astream_events(
-        input_data, config, version="v3", context=context, transformers=_extra_transformers()
+        input_data,
+        config,
+        version="v3",
+        context=context,
+        transformers=_extra_transformers(),
+        **interrupt_kwargs,
     )
     async with run_stream as stream:
         async for event in stream:

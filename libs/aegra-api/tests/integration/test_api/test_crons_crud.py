@@ -349,7 +349,7 @@ class TestCreateCronExtended:
         )
         assert resp.status_code == 422
 
-    def test_missing_input_returns_422_not_500(self, client, mock_cron_service: AsyncMock) -> None:
+    def test_missing_input_returns_422_not_500(self, client: TestClient, mock_cron_service: AsyncMock) -> None:
         """Regression for #514: this body used to pass route validation and
         blow up as a 500 when the first firing built its RunCreate."""
         resp = client.post(

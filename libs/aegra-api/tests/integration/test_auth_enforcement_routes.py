@@ -26,6 +26,7 @@ from aegra_api.core.auth_enforcement import (
     build_auth_enforcer,
     reset_dispatch_state,
 )
+from aegra_api.core.database import db_manager
 from aegra_api.models.auth import User
 from tests.fixtures.session_fixtures import ThreadSession, override_session_dependency
 
@@ -268,6 +269,37 @@ def test_store_get_handler_receives_parsed_namespace(monkeypatch: pytest.MonkeyP
         client.get("/store/items", params=[("key", "k"), ("namespace", "a"), ("namespace", "b")])
 
     assert seen == [["a", "b"], ["a", "b"]], f"handler saw {seen}; both query forms must dispatch the parsed list"
+
+
+def test_store_get_normalizes_handler_returned_namespace(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A namespace the handler returns as a filter is normalized before scoping.
+
+    Handlers may redirect the lookup with {"namespace": "other.place"}; the
+    store must see the split list under the user scope, not the raw string.
+    """
+    auth = Auth()
+
+    @auth.on.store
+    async def redirect(ctx: Any, value: Any) -> dict[str, Any]:
+        return {"namespace": "other.place"}
+
+    app = _build_app(auth, monkeypatch)
+    seen: list[tuple[str, ...]] = []
+
+    class _RecordingStore:
+        async def aget(self, namespace: tuple[str, ...], key: str) -> None:
+            seen.append(namespace)
+            return None
+
+    monkeypatch.setattr(db_manager, "get_store", lambda: _RecordingStore())
+
+    with TestClient(app) as client:
+        response = client.get("/store/items", params={"key": "k", "namespace": "a.b"})
+
+    assert response.status_code == 404, response.text
+    assert seen == [("users", "test-user", "other", "place")], (
+        f"store received {seen}; the handler-returned dot-string must be normalized before scoping"
+    )
 
 
 def test_store_delete_handler_receives_namespace_and_key(monkeypatch: pytest.MonkeyPatch) -> None:

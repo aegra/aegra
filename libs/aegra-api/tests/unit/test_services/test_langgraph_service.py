@@ -7,14 +7,14 @@ from unittest.mock import Mock, mock_open, patch
 
 import pytest
 
+# Import the settings singleton directly to patch it
+from aegra_api import config as config_module
 from aegra_api.services.langgraph_service import (
     LangGraphService,
     create_run_config,
     create_thread_config,
     inject_user_context,
 )
-
-# Import the settings singleton directly to patch it
 from aegra_api.settings import settings
 
 
@@ -60,8 +60,6 @@ class TestLangGraphServiceConfig:
         # Patch through the consumer's settings reference: a sibling test
         # reloads aegra_api.settings, so the freshly imported object can differ
         # from the one aegra_api.config (which resolves AEGRA_CONFIG) holds (#512).
-        from aegra_api import config as config_module
-
         with (
             patch.object(config_module.settings.app, "AEGRA_CONFIG", env_path),
             patch("pathlib.Path.exists", return_value=True),

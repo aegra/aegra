@@ -8,6 +8,7 @@ from redis.asyncio.retry import Retry
 from redis.backoff import ExponentialBackoff
 from redis.exceptions import ConnectionError as RedisConnectionError
 
+from aegra_api.core import redis_manager as redis_manager_module
 from aegra_api.core.redis_manager import RedisManager
 
 
@@ -51,8 +52,6 @@ class TestRedisManager:
         reloads aegra_api.settings, so the freshly imported object can differ
         from the one redis_manager holds.
         """
-        from aegra_api.core import redis_manager as redis_manager_module
-
         monkeypatch.setattr(redis_manager_module.settings.redis, "REDIS_HEALTH_CHECK_INTERVAL", 45)
         monkeypatch.setattr(redis_manager_module.settings.redis, "REDIS_RETRY_ATTEMPTS", 5)
         manager = RedisManager()
@@ -80,8 +79,6 @@ class TestRedisManager:
     async def test_real_pool_connections_carry_retry(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """End-to-end through the real ConnectionPool: connections built from
         the pool's kwargs must have retries (asyncio default is 0)."""
-        from aegra_api.core import redis_manager as redis_manager_module
-
         monkeypatch.setattr(redis_manager_module.settings.redis, "REDIS_HEALTH_CHECK_INTERVAL", 45)
         monkeypatch.setattr(redis_manager_module.settings.redis, "REDIS_RETRY_ATTEMPTS", 5)
         manager = RedisManager()

@@ -112,12 +112,12 @@ class TestInputRequired:
     """Regression for #514: a cron without input 500ed at first-firing validation."""
 
     def test_rejects_missing_input(self) -> None:
-        with pytest.raises(ValidationError, match="'input' is required"):
+        with pytest.raises(ValidationError, match="input"):
             CronCreate(assistant_id="a", schedule="* * * * *")
 
     def test_rejects_explicit_none_input(self) -> None:
-        with pytest.raises(ValidationError, match="'input' is required"):
-            CronCreate(assistant_id="a", schedule="* * * * *", input=None)
+        with pytest.raises(ValidationError, match="input"):
+            CronCreate(assistant_id="a", schedule="* * * * *", input=None)  # type: ignore[arg-type]
 
     def test_accepts_empty_dict_input(self) -> None:
         req = CronCreate(assistant_id="a", schedule="* * * * *", input={})

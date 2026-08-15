@@ -1153,6 +1153,42 @@ class TestServeCommand:
                 # No --reload flag (production mode)
                 assert "--reload" not in cmd
 
+    def test_serve_forces_selector_loop_on_windows(
+        self, cli_runner: CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Windows serve must pass a psycopg-compatible loop factory (#513).
+
+        uvicorn picks the Proactor loop on win32 without --reload; the
+        LangGraph psycopg pool cannot connect on it.
+        """
+        monkeypatch.setattr("aegra_cli.cli.sys.platform", "win32")
+        with cli_runner.isolated_filesystem(temp_dir=tmp_path):
+            Path("aegra.json").write_text('{"graphs": {}}')
+
+            with patch("aegra_cli.cli.subprocess.run") as mock_run:
+                mock_run.return_value.returncode = 0
+                result = cli_runner.invoke(cli, ["serve"])
+
+                assert result.exit_code == 0
+                cmd = mock_run.call_args[0][0]
+                assert "--loop" in cmd
+                assert "aegra_api.utils.event_loop:selector_loop_factory" in cmd
+
+    def test_serve_keeps_default_loop_off_windows(
+        self, cli_runner: CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Linux/macOS keep uvicorn's auto loop (uvloop stays available)."""
+        monkeypatch.setattr("aegra_cli.cli.sys.platform", "linux")
+        with cli_runner.isolated_filesystem(temp_dir=tmp_path):
+            Path("aegra.json").write_text('{"graphs": {}}')
+
+            with patch("aegra_cli.cli.subprocess.run") as mock_run:
+                mock_run.return_value.returncode = 0
+                result = cli_runner.invoke(cli, ["serve"])
+
+                assert result.exit_code == 0
+                assert "--loop" not in mock_run.call_args[0][0]
+
     def test_serve_port_from_env_var(self, cli_runner: CliRunner, tmp_path: Path) -> None:
         """Test that serve command picks up PORT from env var when no CLI flag is passed."""
         with cli_runner.isolated_filesystem(temp_dir=tmp_path):

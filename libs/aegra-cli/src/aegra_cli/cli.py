@@ -34,6 +34,17 @@ _DEFAULT_SERVE_HOST = "0.0.0.0"  # noqa: S104  # nosec B104 - intentional for Do
 _DEFAULT_PORT = 2026
 
 
+def _windows_loop_args() -> list[str]:
+    """Extra uvicorn args forcing a psycopg-compatible event loop on Windows.
+
+    Without --reload, uvicorn's Windows default is the Proactor loop, which the
+    LangGraph psycopg pool cannot connect on (#513).
+    """
+    if sys.platform != "win32":
+        return []
+    return ["--loop", "aegra_api.utils.event_loop:selector_loop_factory"]
+
+
 def _resolve_server_option(
     ctx: click.Context,
     param_name: str,
@@ -399,6 +410,7 @@ def dev(
     cmd_uvicorn = ["-m", "uvicorn", app, "--host", host, "--port", str(port)]
     if not no_reload:
         cmd_uvicorn.append("--reload")
+    cmd_uvicorn.extend(_windows_loop_args())
 
     if debug_port is not None:
         if importlib.util.find_spec("debugpy") is None:
@@ -590,6 +602,7 @@ def serve(ctx: click.Context, host: str, port: int, app: str, config_file: Path 
         host,
         "--port",
         str(port),
+        *_windows_loop_args(),
     ]
 
     try:

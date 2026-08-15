@@ -128,7 +128,10 @@ class TestDevCommand:
                 result = cli_runner.invoke(cli, ["dev", "--no-db-check"])
 
                 assert result.exit_code == 0
-                assert "--loop" in mock_popen.call_args[0][0]
+                cmd = mock_popen.call_args[0][0]
+                assert "--loop" in cmd
+                loop_idx = cmd.index("--loop")
+                assert cmd[loop_idx + 1] == "aegra_api.utils.event_loop:selector_loop_factory"
 
     def test_dev_default_host_and_port(self, cli_runner: CliRunner, tmp_path: Path) -> None:
         """Test that dev command uses default host and port."""

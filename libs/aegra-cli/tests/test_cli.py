@@ -96,6 +96,40 @@ class TestDevCommand:
                 call_args = mock_popen.call_args[0][0]
                 assert "--reload" not in call_args
 
+    def test_dev_no_reload_forces_selector_loop_on_windows(
+        self, cli_runner: CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """dev --no-reload hits the same Proactor default as serve (#513)."""
+        monkeypatch.setattr("aegra_cli.cli.sys.platform", "win32")
+        with cli_runner.isolated_filesystem(temp_dir=tmp_path):
+            Path("aegra.json").write_text('{"graphs": {}}')
+
+            with patch("aegra_cli.cli.subprocess.Popen") as mock_popen:
+                mock_popen.return_value = create_mock_popen(0)
+                result = cli_runner.invoke(cli, ["dev", "--no-db-check", "--no-reload"])
+
+                assert result.exit_code == 0
+                cmd = mock_popen.call_args[0][0]
+                assert "--loop" in cmd
+                loop_idx = cmd.index("--loop")
+                assert cmd[loop_idx + 1] == "aegra_api.utils.event_loop:selector_loop_factory"
+
+    def test_dev_reload_also_forces_selector_loop_on_windows(
+        self, cli_runner: CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Reload mode gets the same explicit loop: it is the loop the reload
+        subprocess would pick anyway, and uniform args are easier to reason about."""
+        monkeypatch.setattr("aegra_cli.cli.sys.platform", "win32")
+        with cli_runner.isolated_filesystem(temp_dir=tmp_path):
+            Path("aegra.json").write_text('{"graphs": {}}')
+
+            with patch("aegra_cli.cli.subprocess.Popen") as mock_popen:
+                mock_popen.return_value = create_mock_popen(0)
+                result = cli_runner.invoke(cli, ["dev", "--no-db-check"])
+
+                assert result.exit_code == 0
+                assert "--loop" in mock_popen.call_args[0][0]
+
     def test_dev_default_host_and_port(self, cli_runner: CliRunner, tmp_path: Path) -> None:
         """Test that dev command uses default host and port."""
         with cli_runner.isolated_filesystem(temp_dir=tmp_path):
@@ -1183,6 +1217,24 @@ class TestServeCommand:
             Path("aegra.json").write_text('{"graphs": {}}')
 
             with patch("aegra_cli.cli.subprocess.run") as mock_run:
+                mock_run.return_value.returncode = 0
+                result = cli_runner.invoke(cli, ["serve"])
+
+                assert result.exit_code == 0
+                assert "--loop" not in mock_run.call_args[0][0]
+
+    def test_serve_skips_loop_when_api_lacks_factory(
+        self, cli_runner: CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An older aegra-api without the factory module must not break startup."""
+        monkeypatch.setattr("aegra_cli.cli.sys.platform", "win32")
+        with cli_runner.isolated_filesystem(temp_dir=tmp_path):
+            Path("aegra.json").write_text('{"graphs": {}}')
+
+            with (
+                patch("aegra_cli.cli.importlib.util.find_spec", return_value=None),
+                patch("aegra_cli.cli.subprocess.run") as mock_run,
+            ):
                 mock_run.return_value.returncode = 0
                 result = cli_runner.invoke(cli, ["serve"])
 

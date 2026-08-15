@@ -101,6 +101,7 @@ class TestCreateCron:
         resp = client.post(
             "/runs/crons",
             json={
+                "input": {"q": 1},
                 "assistant_id": "asst-001",
                 "schedule": "*/5 * * * *",
             },
@@ -117,6 +118,7 @@ class TestCreateCron:
         resp = client.post(
             "/runs/crons",
             json={
+                "input": {"q": 1},
                 "assistant_id": "asst-001",
                 "schedule": "0 * * * *",
                 "metadata": {"env": "prod"},
@@ -139,6 +141,7 @@ class TestCreateCronForThread:
         resp = client.post(
             "/threads/thread-001/runs/crons",
             json={
+                "input": {"q": 1},
                 "assistant_id": "asst-001",
                 "schedule": "*/10 * * * *",
             },
@@ -165,7 +168,7 @@ class TestUpdateCron:
 
         resp = client.patch(
             "/runs/crons/cron-001",
-            json={"schedule": "*/10 * * * *"},
+            json={"input": {"q": 1}, "schedule": "*/10 * * * *"},
         )
 
         assert resp.status_code == 200
@@ -335,7 +338,7 @@ class TestCreateCronExtended:
     def test_missing_assistant_id_returns_422(self, client, mock_cron_service: AsyncMock) -> None:
         resp = client.post(
             "/runs/crons",
-            json={"schedule": "*/5 * * * *"},
+            json={"input": {"q": 1}, "schedule": "*/5 * * * *"},
         )
         assert resp.status_code == 422
 
@@ -346,12 +349,22 @@ class TestCreateCronExtended:
         )
         assert resp.status_code == 422
 
+    def test_missing_input_returns_422_not_500(self, client, mock_cron_service: AsyncMock) -> None:
+        """Regression for #514: this body used to pass route validation and
+        blow up as a 500 when the first firing built its RunCreate."""
+        resp = client.post(
+            "/runs/crons",
+            json={"assistant_id": "asst-001", "schedule": "*/5 * * * *"},
+        )
+        assert resp.status_code == 422
+        assert "input" in resp.text
+
     def test_service_422_propagates(self, client, mock_cron_service: AsyncMock) -> None:
         mock_cron_service.create_cron.side_effect = HTTPException(422, "Invalid cron schedule: bad")
 
         resp = client.post(
             "/runs/crons",
-            json={"assistant_id": "asst-001", "schedule": "bad"},
+            json={"input": {"q": 1}, "assistant_id": "asst-001", "schedule": "bad"},
         )
         assert resp.status_code == 422
 
@@ -360,7 +373,7 @@ class TestCreateCronExtended:
 
         resp = client.post(
             "/runs/crons",
-            json={"assistant_id": "missing", "schedule": "*/5 * * * *"},
+            json={"input": {"q": 1}, "assistant_id": "missing", "schedule": "*/5 * * * *"},
         )
         assert resp.status_code == 404
 
@@ -402,7 +415,7 @@ class TestCreateCronForThreadOwnership:
             test_client = make_client(app)
             resp = test_client.post(
                 "/threads/victim-thread/runs/crons",
-                json={"assistant_id": "asst-001", "schedule": "*/5 * * * *"},
+                json={"input": {"q": 1}, "assistant_id": "asst-001", "schedule": "*/5 * * * *"},
             )
 
         assert resp.status_code == 404
@@ -433,7 +446,7 @@ class TestCreateCronForThreadOwnership:
             test_client = make_client(app)
             resp = test_client.post(
                 "/threads/ghost-thread/runs/crons",
-                json={"assistant_id": "asst-001", "schedule": "*/5 * * * *"},
+                json={"input": {"q": 1}, "assistant_id": "asst-001", "schedule": "*/5 * * * *"},
             )
 
         assert resp.status_code == 404
@@ -449,6 +462,7 @@ class TestCreateCronForThreadExtended:
         resp = client.post(
             "/threads/t-001/runs/crons",
             json={
+                "input": {"q": 1},
                 "assistant_id": "asst-001",
                 "schedule": "0 * * * *",
                 "metadata": {"team": "backend"},
@@ -479,6 +493,7 @@ class TestUpdateCronExtended:
         resp = client.patch(
             "/runs/crons/cron-001",
             json={
+                "input": {"q": 1},
                 "schedule": "0 12 * * *",
                 "enabled": False,
                 "on_run_completed": "keep",
@@ -606,6 +621,7 @@ class TestTimezoneField:
         resp = client.post(
             "/runs/crons",
             json={
+                "input": {"q": 1},
                 "assistant_id": "asst-001",
                 "schedule": "0 9 * * *",
                 "timezone": "America/New_York",
@@ -623,6 +639,7 @@ class TestTimezoneField:
         resp = client.post(
             "/threads/t-001/runs/crons",
             json={
+                "input": {"q": 1},
                 "assistant_id": "asst-001",
                 "schedule": "0 9 * * *",
                 "timezone": "Europe/London",
@@ -652,7 +669,7 @@ class TestTimezoneField:
 
         resp = client.post(
             "/runs/crons",
-            json={"assistant_id": "asst-001", "schedule": "*/5 * * * *"},
+            json={"input": {"q": 1}, "assistant_id": "asst-001", "schedule": "*/5 * * * *"},
         )
 
         assert resp.status_code == 200

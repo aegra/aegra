@@ -147,7 +147,7 @@ class TestAuthorizeCronCreate:
 
     @pytest.fixture
     def request_body(self) -> CronCreate:
-        return CronCreate(assistant_id="agent-1", schedule="*/5 * * * *")
+        return CronCreate(input={"q": 1}, assistant_id="agent-1", schedule="*/5 * * * *")
 
     @pytest.mark.asyncio
     async def test_stateless_create_fires_full_chain(self, user: User, request_body: CronCreate) -> None:

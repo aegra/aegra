@@ -27,11 +27,11 @@ class TestWebhookValidation:
     )
     def test_rejects_non_http_or_malformed_scheme(self, url: str) -> None:
         with pytest.raises(ValidationError):
-            CronCreate(assistant_id="a", schedule="* * * * *", webhook=url)
+            CronCreate(input={"q": 1}, assistant_id="a", schedule="* * * * *", webhook=url)
 
     @pytest.mark.parametrize("url", ["http://example.com/hook", "https://example.com/hook"])
     def test_accepts_http_https(self, url: str) -> None:
-        req = CronCreate(assistant_id="a", schedule="* * * * *", webhook=url)
+        req = CronCreate(input={"q": 1}, assistant_id="a", schedule="* * * * *", webhook=url)
         assert req.webhook == url
 
 
@@ -39,6 +39,7 @@ class TestEndTimeMustBeFuture:
     def test_rejects_past_end_time_on_create(self) -> None:
         with pytest.raises(ValidationError, match="future"):
             CronCreate(
+                input={"q": 1},
                 assistant_id="a",
                 schedule="* * * * *",
                 end_time=datetime.now(UTC) - timedelta(seconds=1),
@@ -46,7 +47,7 @@ class TestEndTimeMustBeFuture:
 
     def test_accepts_future_end_time_on_create(self) -> None:
         end = datetime.now(UTC) + timedelta(days=1)
-        req = CronCreate(assistant_id="a", schedule="* * * * *", end_time=end)
+        req = CronCreate(input={"q": 1}, assistant_id="a", schedule="* * * * *", end_time=end)
         assert req.end_time == end
 
     def test_rejects_past_end_time_on_update(self) -> None:
@@ -71,6 +72,7 @@ class TestOnRunCompletedLiteral:
     def test_rejects_unknown_value(self) -> None:
         with pytest.raises(ValidationError):
             CronCreate(
+                input={"q": 1},
                 assistant_id="a",
                 schedule="* * * * *",
                 on_run_completed="create_new",  # type: ignore[arg-type]
@@ -79,6 +81,7 @@ class TestOnRunCompletedLiteral:
     @pytest.mark.parametrize("value", ["delete", "keep"])
     def test_accepts_allowed_values(self, value: str) -> None:
         req = CronCreate(
+            input={"q": 1},
             assistant_id="a",
             schedule="* * * * *",
             on_run_completed=value,  # type: ignore[arg-type]
@@ -89,16 +92,33 @@ class TestOnRunCompletedLiteral:
 class TestMaxLengthGuards:
     def test_rejects_oversized_schedule(self) -> None:
         with pytest.raises(ValidationError):
-            CronCreate(assistant_id="a", schedule="*" * 1024)
+            CronCreate(input={"q": 1}, assistant_id="a", schedule="*" * 1024)
 
     def test_rejects_oversized_timezone(self) -> None:
         with pytest.raises(ValidationError):
-            CronCreate(assistant_id="a", schedule="* * * * *", timezone="X" * 256)
+            CronCreate(input={"q": 1}, assistant_id="a", schedule="* * * * *", timezone="X" * 256)
 
     def test_rejects_oversized_webhook(self) -> None:
         with pytest.raises(ValidationError):
             CronCreate(
+                input={"q": 1},
                 assistant_id="a",
                 schedule="* * * * *",
                 webhook="https://example.com/" + ("x" * 4096),
             )
+
+
+class TestInputRequired:
+    """Regression for #514: a cron without input 500ed at first-firing validation."""
+
+    def test_rejects_missing_input(self) -> None:
+        with pytest.raises(ValidationError, match="'input' is required"):
+            CronCreate(assistant_id="a", schedule="* * * * *")
+
+    def test_rejects_explicit_none_input(self) -> None:
+        with pytest.raises(ValidationError, match="'input' is required"):
+            CronCreate(assistant_id="a", schedule="* * * * *", input=None)
+
+    def test_accepts_empty_dict_input(self) -> None:
+        req = CronCreate(assistant_id="a", schedule="* * * * *", input={})
+        assert req.input == {}

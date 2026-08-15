@@ -67,6 +67,10 @@ class CronCreate(BaseModel):
 
     @model_validator(mode="after")
     def _check(self) -> "CronCreate":
+        # Every firing builds a RunCreate from this payload, and RunCreate
+        # rejects an empty one — fail at the API boundary instead (#514).
+        if self.input is None:
+            raise ValueError("Field 'input' is required: each cron firing starts a run from it")
         self.webhook = _validate_webhook_url(self.webhook)
         if isinstance(self.stream_mode, str) and len(self.stream_mode) > _STREAM_MODE_MAX_LEN:
             raise ValueError("stream_mode is too long")

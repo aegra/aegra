@@ -72,9 +72,8 @@ async def get_store_item(
 
     Returns 404 if no item exists at the given namespace and key.
     """
-    # Normalize before dispatch: handlers must see the parsed list, not the
-    # raw dot-string query form, or they judge a different namespace than
-    # the one PUT/DELETE dispatched (#515).
+    # Handlers must see the parsed list; the raw dot-string form judges a
+    # different namespace than PUT/DELETE dispatched (#515).
     ctx = build_auth_context(user, "store", "get")
     namespace_list = _normalize_namespace(namespace)
     value = {"key": key, "namespace": namespace_list}
@@ -238,9 +237,8 @@ async def list_namespaces(
 def _normalize_namespace(value: str | list[str] | None) -> list[str]:
     """Normalize namespace input to a clean list, filtering out empty parts.
 
-    Splits dots inside list items too: FastAPI may coerce a single
-    ``?namespace=a.b`` into ``["a.b"]`` depending on version, and the query
-    interface documents the dot as a separator.
+    Dots split inside list items too: FastAPI may coerce ``?namespace=a.b``
+    into ``["a.b"]`` depending on version.
     """
     if isinstance(value, str):
         value = [value]

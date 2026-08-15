@@ -4,10 +4,9 @@ import asyncio
 
 
 def selector_loop_factory() -> asyncio.AbstractEventLoop:
-    """Selector event loop, importable via ``--loop aegra_api.utils.event_loop:selector_loop_factory``.
+    """Selector event loop for uvicorn ``--loop``; works on every platform.
 
-    Windows uvicorn defaults to the Proactor loop when run without --reload,
-    and the LangGraph psycopg pool cannot connect on it (#513). The selector
-    loop works on every platform.
+    Windows uvicorn defaults to the Proactor loop without --reload, and the
+    LangGraph psycopg pool cannot connect on it (#513).
     """
     return asyncio.SelectorEventLoop()

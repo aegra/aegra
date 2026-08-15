@@ -55,9 +55,8 @@ def isolated_module_reload(tmp_path, monkeypatch):
         if mod not in original_modules:
             del sys.modules[mod]
 
-    # Then restore removed AND replaced modules: reload_main_module swaps in
-    # fresh aegra_api.config/main objects, and leaking those breaks any later
-    # test that patched globals on the originals.
+    # Restore replaced modules too: reload_main_module swaps in fresh
+    # aegra_api.config/main objects that would leak into later tests.
     for mod, module in original_modules.items():
         if sys.modules.get(mod) is not module:
             sys.modules[mod] = module

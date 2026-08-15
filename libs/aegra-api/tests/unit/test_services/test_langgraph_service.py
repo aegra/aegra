@@ -57,9 +57,8 @@ class TestLangGraphServiceConfig:
         config_data = {"graphs": {"test": "./graphs/test.py:graph"}}
         env_path = "/env/path/config.json"
 
-        # Patch through the consumer's settings reference: a sibling test
-        # reloads aegra_api.settings, so the freshly imported object can differ
-        # from the one aegra_api.config (which resolves AEGRA_CONFIG) holds (#512).
+        # A sibling test reloads aegra_api.settings, so patch the settings
+        # object aegra_api.config actually holds (#512).
         with (
             patch.object(config_module.settings.app, "AEGRA_CONFIG", env_path),
             patch("pathlib.Path.exists", return_value=True),

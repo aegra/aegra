@@ -37,9 +37,8 @@ _DEFAULT_PORT = 2026
 def _windows_loop_args() -> list[str]:
     """Extra uvicorn args forcing a psycopg-compatible event loop on Windows.
 
-    Without --reload, uvicorn's Windows default is the Proactor loop, which the
-    LangGraph psycopg pool cannot connect on (#513). Skipped when the installed
-    aegra-api predates the factory module, so startup never dies on the import.
+    The default Proactor loop breaks the LangGraph psycopg pool (#513).
+    Skipped when the installed aegra-api predates the factory module.
     """
     if sys.platform != "win32":
         return []

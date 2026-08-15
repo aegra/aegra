@@ -72,20 +72,23 @@ async def get_store_item(
 
     Returns 404 if no item exists at the given namespace and key.
     """
-    # Authorization check
+    # Normalize before dispatch: handlers must see the parsed list, not the
+    # raw dot-string query form, or they judge a different namespace than
+    # the one PUT/DELETE dispatched (#515).
     ctx = build_auth_context(user, "store", "get")
-    value = {"key": key, "namespace": namespace}
+    namespace_list = _normalize_namespace(namespace)
+    value = {"key": key, "namespace": namespace_list}
     filters = await handle_event(ctx, value)
 
     # If handler modified namespace/key, update
     if filters:
         if "namespace" in filters:
-            namespace = filters["namespace"]
+            namespace_list = _normalize_namespace(filters["namespace"])
         if "key" in filters:
             key = filters["key"]
 
     # Apply user namespace scoping
-    scoped_namespace = apply_namespace_scoping(_normalize_namespace(namespace), user)
+    scoped_namespace = apply_namespace_scoping(namespace_list, user)
 
     store = db_manager.get_store()
 
@@ -233,12 +236,17 @@ async def list_namespaces(
 
 
 def _normalize_namespace(value: str | list[str] | None) -> list[str]:
-    """Normalize namespace input to a clean list, filtering out empty parts."""
+    """Normalize namespace input to a clean list, filtering out empty parts.
+
+    Splits dots inside list items too: FastAPI may coerce a single
+    ``?namespace=a.b`` into ``["a.b"]`` depending on version, and the query
+    interface documents the dot as a separator.
+    """
     if isinstance(value, str):
-        return [part for part in value.split(".") if part]
-    if isinstance(value, list):
-        return [part for part in value if part]
-    return []
+        value = [value]
+    if not isinstance(value, list):
+        return []
+    return [part for item in value if isinstance(item, str) for part in item.split(".") if part]
 
 
 def _scope(prefix: str, scope_ids: list[str], namespace: list[str]) -> list[str]:

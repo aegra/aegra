@@ -1003,8 +1003,9 @@ class TestStopRequeuesDrainedRuns:
         await asyncio.sleep(0)  # let it start
 
         executor = WorkerExecutor()
-        executor._job_tasks = {hung_task}
-        active_runs["run-hung"] = hung_task
+        # Mapped at creation, deliberately absent from active_runs: a task
+        # cancelled before it runs must still reach the requeue.
+        executor._job_tasks = {hung_task: "run-hung"}
 
         seen_in_flag_set: list[bool] = []
 
@@ -1025,7 +1026,6 @@ class TestStopRequeuesDrainedRuns:
             # The flag was set before the cancel reached the task
             assert seen_in_flag_set == [True]
         finally:
-            active_runs.pop("run-hung", None)
             _shutdown_cancellations.discard("run-hung")
 
     @pytest.mark.asyncio
@@ -1041,9 +1041,7 @@ class TestStopRequeuesDrainedRuns:
         await asyncio.sleep(0)
 
         executor = WorkerExecutor()
-        executor._job_tasks = {hung_task, cancelled_task}
-        active_runs["run-hung"] = hung_task
-        active_runs["run-user-cancel"] = cancelled_task
+        executor._job_tasks = {hung_task: "run-hung", cancelled_task: "run-user-cancel"}
         explicit_run_cancellations.add("run-user-cancel")
 
         try:
@@ -1057,8 +1055,6 @@ class TestStopRequeuesDrainedRuns:
             mock_requeue.assert_awaited_once_with(["run-hung"])
             assert "run-user-cancel" not in _shutdown_cancellations
         finally:
-            active_runs.pop("run-hung", None)
-            active_runs.pop("run-user-cancel", None)
             explicit_run_cancellations.discard("run-user-cancel")
             _shutdown_cancellations.discard("run-hung")
 
@@ -1071,17 +1067,71 @@ class TestStopRequeuesDrainedRuns:
 
         quick_task = asyncio.create_task(_quick())
         executor = WorkerExecutor()
-        executor._job_tasks = {quick_task}
-        active_runs["run-quick"] = quick_task
+        executor._job_tasks = {quick_task: "run-quick"}
+
+        with (
+            patch(f"{MODULE}._requeue_drained_runs", new_callable=AsyncMock) as mock_requeue,
+            patch(f"{MODULE}.settings") as mock_settings,
+        ):
+            mock_settings.worker.WORKER_DRAIN_TIMEOUT = 1.0
+            await executor.stop()
+
+        mock_requeue.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_stop_cancels_worker_loops_before_requeue_push(self) -> None:
+        """A loop still blocked in BLPOP would steal the requeue push back onto
+        this dying instance, so loops must be gone before the push happens."""
+
+        async def _hang() -> None:
+            await asyncio.Event().wait()
+
+        job_task = asyncio.create_task(_hang())
+        loop_task = asyncio.create_task(_hang())
+        await asyncio.sleep(0)
+
+        events: list[str] = []
+        loop_task.add_done_callback(lambda _t: events.append("loops-stopped"))
+
+        async def _fake_requeue(run_ids: list[str]) -> None:
+            events.append("requeue")
+
+        executor = WorkerExecutor()
+        executor._job_tasks = {job_task: "run-hung"}
+        executor._worker_tasks = [loop_task]
 
         try:
             with (
-                patch(f"{MODULE}._requeue_drained_runs", new_callable=AsyncMock) as mock_requeue,
+                patch(f"{MODULE}._requeue_drained_runs", side_effect=_fake_requeue),
                 patch(f"{MODULE}.settings") as mock_settings,
             ):
-                mock_settings.worker.WORKER_DRAIN_TIMEOUT = 1.0
+                mock_settings.worker.WORKER_DRAIN_TIMEOUT = 0.05
                 await executor.stop()
 
-            mock_requeue.assert_not_awaited()
+            assert events == ["loops-stopped", "requeue"]
         finally:
-            active_runs.pop("run-quick", None)
+            _shutdown_cancellations.discard("run-hung")
+
+    @pytest.mark.asyncio
+    async def test_worker_loop_pushes_back_run_dequeued_during_shutdown(self) -> None:
+        """A loop that comes out of BLPOP after shutdown began must hand the
+        run back instead of starting untracked work."""
+        run_id = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+        executor = WorkerExecutor()
+        executor._running = True
+
+        async def _dequeue_then_shutdown() -> str:
+            executor._running = False
+            return run_id
+
+        executor._dequeue = _dequeue_then_shutdown  # type: ignore[method-assign]
+
+        with (
+            patch(f"{MODULE}._push_back", new_callable=AsyncMock) as mock_push_back,
+            patch(f"{MODULE}.settings") as mock_settings,
+        ):
+            mock_settings.worker.N_JOBS_PER_WORKER = 1
+            await executor._worker_loop("test-worker")
+
+        mock_push_back.assert_awaited_once_with(run_id)
+        assert not executor._job_tasks

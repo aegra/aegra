@@ -93,7 +93,9 @@ class WorkerExecutor(BaseExecutor):
 
     def __init__(self) -> None:
         self._worker_tasks: list[asyncio.Task[None]] = []
-        self._job_tasks: set[asyncio.Task[None]] = set()
+        # Task -> run_id, mapped at creation: a task cancelled before it ever
+        # runs has no active_runs entry, yet its run still needs the drain requeue.
+        self._job_tasks: dict[asyncio.Task[None], str] = {}
         self._running = False
         self._instance_id = f"{socket.gethostname()}-{os.getpid()}"
 
@@ -167,30 +169,32 @@ class WorkerExecutor(BaseExecutor):
         drain_timeout = settings.worker.WORKER_DRAIN_TIMEOUT
 
         # Wait for in-flight job tasks to finish
+        drained: list[str] = []
         if self._job_tasks:
             logger.info("Draining in-flight jobs", count=len(self._job_tasks))
-            _, pending = await asyncio.wait(self._job_tasks, timeout=drain_timeout)
-            drained: list[str] = []
+            _, pending = await asyncio.wait(set(self._job_tasks), timeout=drain_timeout)
             if pending:
-                # Runs outliving the drain window go back to the queue. Finalizing
-                # them here would destroy work a plain crash recovers (#474).
+                # Requeue drain survivors instead of finalizing work that a
+                # plain crash would recover (#474).
                 drained = [
                     run_id
-                    for run_id, task in active_runs.items()
+                    for task, run_id in self._job_tasks.items()
                     if task in pending and run_id not in explicit_run_cancellations
                 ]
                 _shutdown_cancellations.update(drained)
                 for task in pending:
                     task.cancel()
                 await asyncio.gather(*pending, return_exceptions=True)
-            if drained:
-                await _requeue_drained_runs(drained)
 
-        # Cancel worker loops
+        # Cancel worker loops before the requeue push: a loop still blocked in
+        # BLPOP would steal the handed-off jobs back onto this dying instance.
         for task in self._worker_tasks:
             task.cancel()
         if self._worker_tasks:
             await asyncio.gather(*self._worker_tasks, return_exceptions=True)
+
+        if drained:
+            await _requeue_drained_runs(drained)
 
         self._worker_tasks.clear()
         self._job_tasks.clear()
@@ -235,9 +239,16 @@ class WorkerExecutor(BaseExecutor):
                     semaphore.release()
                     continue
 
+                if not self._running:
+                    # Dequeued while shutdown was already underway: hand it back
+                    # rather than start untracked work on a terminating instance.
+                    await _push_back(run_id)
+                    semaphore.release()
+                    break
+
                 task = asyncio.create_task(self._execute_and_release(run_id, worker_name, semaphore))
-                self._job_tasks.add(task)
-                task.add_done_callback(self._job_tasks.discard)
+                self._job_tasks[task] = run_id
+                task.add_done_callback(lambda t: self._job_tasks.pop(t, None))
 
             except asyncio.CancelledError:
                 break
@@ -468,6 +479,16 @@ async def _acquire_and_load(run_id: str, worker_name: str) -> _LoadedRun | None:
         job = RunJob.from_run_orm(run_orm)
         trace = run_orm.execution_params.get("trace", {})
         return _LoadedRun(job=job, trace=trace)
+
+
+async def _push_back(run_id: str) -> None:
+    """Best-effort return of a dequeued-but-unstarted run to the queue."""
+    try:
+        client = redis_manager.get_client()
+        await client.rpush(settings.worker.WORKER_QUEUE_KEY, run_id)  # type: ignore[arg-type]
+    except RedisError:
+        # Row is still pending/unclaimed; the stuck-pending reaper recovers it.
+        logger.warning("Could not push back dequeued run at shutdown", run_id=run_id)
 
 
 async def _requeue_drained_runs(run_ids: list[str]) -> None:

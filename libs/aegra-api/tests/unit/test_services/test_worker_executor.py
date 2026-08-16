@@ -11,7 +11,7 @@ from redis import TimeoutError as RedisTimeoutError
 from aegra_api.core.active_runs import active_runs, explicit_run_cancellations
 from aegra_api.models.auth import User
 from aegra_api.models.run_job import RunBehavior, RunExecution, RunIdentity, RunJob
-from aegra_api.services.run_executor import _timeout_cancellations
+from aegra_api.services.run_executor import _shutdown_cancellations, _timeout_cancellations
 from aegra_api.services.worker_executor import (
     WorkerExecutor,
     _acquire_and_load,
@@ -20,6 +20,7 @@ from aegra_api.services.worker_executor import (
     _is_valid_run_id,
     _LoadedRun,
     _release_lease,
+    _requeue_drained_runs,
     _restore_trace_context,
 )
 
@@ -910,3 +911,177 @@ class TestDequeue:
         assert result == "from-postgres"
         executor._poll_postgres.assert_awaited_once()
         mock_warning.assert_called_once()
+
+
+# ------------------------------------------------------------------
+# Drain requeue (#474)
+# ------------------------------------------------------------------
+
+
+class TestRequeueDrainedRuns:
+    @pytest.mark.asyncio
+    async def test_resets_rows_and_pushes_to_queue(self) -> None:
+        session = AsyncMock()
+        result = MagicMock()
+        result.fetchall.return_value = [("run-1",), ("run-2",)]
+        session.execute = AsyncMock(return_value=result)
+        mock_client = AsyncMock()
+
+        with (
+            patch(f"{MODULE}._get_session_maker", return_value=_make_session_maker(session)),
+            patch(f"{MODULE}.redis_manager") as mock_redis,
+            patch(f"{MODULE}.settings") as mock_settings,
+        ):
+            mock_redis.get_client.return_value = mock_client
+            mock_settings.worker.WORKER_QUEUE_KEY = "aegra:jobs"
+
+            await _requeue_drained_runs(["run-1", "run-2"])
+
+        session.commit.assert_awaited_once()
+        stmt = session.execute.await_args.args[0]
+        sql = str(stmt.compile())
+        assert "UPDATE runs SET" in sql
+        assert "runs.status IN" in sql
+        assert "RETURNING runs.run_id" in sql
+        assert mock_client.rpush.await_count == 2
+        pushed = [call.args for call in mock_client.rpush.await_args_list]
+        assert pushed == [("aegra:jobs", "run-1"), ("aegra:jobs", "run-2")]
+
+    @pytest.mark.asyncio
+    async def test_redis_outage_does_not_raise_after_rows_reset(self) -> None:
+        """The DB reset commits first, so the stuck-pending reaper can recover
+        even when the queue push fails."""
+        session = AsyncMock()
+        result = MagicMock()
+        result.fetchall.return_value = [("run-1",)]
+        session.execute = AsyncMock(return_value=result)
+        mock_client = AsyncMock()
+        mock_client.rpush = AsyncMock(side_effect=RedisConnectionError("down"))
+
+        with (
+            patch(f"{MODULE}._get_session_maker", return_value=_make_session_maker(session)),
+            patch(f"{MODULE}.redis_manager") as mock_redis,
+            patch(f"{MODULE}.settings") as mock_settings,
+            patch(f"{MODULE}.logger.warning") as mock_warning,
+        ):
+            mock_redis.get_client.return_value = mock_client
+            mock_settings.worker.WORKER_QUEUE_KEY = "aegra:jobs"
+
+            await _requeue_drained_runs(["run-1"])
+
+        session.commit.assert_awaited_once()
+        mock_warning.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_no_rows_reset_skips_queue_push(self) -> None:
+        """Runs that finalized during the drain (user cancel, completion) are
+        terminal, so nothing is reset and nothing is pushed."""
+        session = AsyncMock()
+        result = MagicMock()
+        result.fetchall.return_value = []
+        session.execute = AsyncMock(return_value=result)
+
+        with (
+            patch(f"{MODULE}._get_session_maker", return_value=_make_session_maker(session)),
+            patch(f"{MODULE}.redis_manager") as mock_redis,
+        ):
+            await _requeue_drained_runs(["run-1"])
+
+        mock_redis.get_client.assert_not_called()
+
+
+class TestStopRequeuesDrainedRuns:
+    @pytest.mark.asyncio
+    async def test_stop_requeues_jobs_alive_at_drain_deadline(self) -> None:
+        """Jobs still executing when the drain window closes are cancelled with
+        shutdown provenance and handed to the requeue path, not finalized (#474)."""
+
+        async def _hang() -> None:
+            await asyncio.Event().wait()
+
+        hung_task = asyncio.create_task(_hang())
+        await asyncio.sleep(0)  # let it start
+
+        executor = WorkerExecutor()
+        executor._job_tasks = {hung_task}
+        active_runs["run-hung"] = hung_task
+
+        seen_in_flag_set: list[bool] = []
+
+        async def _fake_requeue(run_ids: list[str]) -> None:
+            seen_in_flag_set.append("run-hung" in _shutdown_cancellations)
+            assert run_ids == ["run-hung"]
+
+        try:
+            with (
+                patch(f"{MODULE}._requeue_drained_runs", side_effect=_fake_requeue) as mock_requeue,
+                patch(f"{MODULE}.settings") as mock_settings,
+            ):
+                mock_settings.worker.WORKER_DRAIN_TIMEOUT = 0.05
+                await executor.stop()
+
+            mock_requeue.assert_called_once()
+            assert hung_task.cancelled()
+            # The flag was set before the cancel reached the task
+            assert seen_in_flag_set == [True]
+        finally:
+            active_runs.pop("run-hung", None)
+            _shutdown_cancellations.discard("run-hung")
+
+    @pytest.mark.asyncio
+    async def test_stop_excludes_explicitly_cancelled_runs_from_requeue(self) -> None:
+        """A user cancel that races the shutdown stays a cancel: the run must
+        not be resurrected by the drain requeue."""
+
+        async def _hang() -> None:
+            await asyncio.Event().wait()
+
+        hung_task = asyncio.create_task(_hang())
+        cancelled_task = asyncio.create_task(_hang())
+        await asyncio.sleep(0)
+
+        executor = WorkerExecutor()
+        executor._job_tasks = {hung_task, cancelled_task}
+        active_runs["run-hung"] = hung_task
+        active_runs["run-user-cancel"] = cancelled_task
+        explicit_run_cancellations.add("run-user-cancel")
+
+        try:
+            with (
+                patch(f"{MODULE}._requeue_drained_runs", new_callable=AsyncMock) as mock_requeue,
+                patch(f"{MODULE}.settings") as mock_settings,
+            ):
+                mock_settings.worker.WORKER_DRAIN_TIMEOUT = 0.05
+                await executor.stop()
+
+            mock_requeue.assert_awaited_once_with(["run-hung"])
+            assert "run-user-cancel" not in _shutdown_cancellations
+        finally:
+            active_runs.pop("run-hung", None)
+            active_runs.pop("run-user-cancel", None)
+            explicit_run_cancellations.discard("run-user-cancel")
+            _shutdown_cancellations.discard("run-hung")
+
+    @pytest.mark.asyncio
+    async def test_stop_does_not_requeue_jobs_that_finish_in_time(self) -> None:
+        """Jobs completing inside the drain window finalize normally."""
+
+        async def _quick() -> None:
+            await asyncio.sleep(0)
+
+        quick_task = asyncio.create_task(_quick())
+        executor = WorkerExecutor()
+        executor._job_tasks = {quick_task}
+        active_runs["run-quick"] = quick_task
+
+        try:
+            with (
+                patch(f"{MODULE}._requeue_drained_runs", new_callable=AsyncMock) as mock_requeue,
+                patch(f"{MODULE}.settings") as mock_settings,
+            ):
+                mock_settings.worker.WORKER_DRAIN_TIMEOUT = 1.0
+                await executor.stop()
+
+            mock_requeue.assert_not_awaited()
+        finally:
+            active_runs.pop("run-quick", None)

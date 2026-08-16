@@ -29,7 +29,12 @@ from aegra_api.core.redis_manager import redis_manager
 from aegra_api.models.run_job import RunJob
 from aegra_api.observability.span_enrichment import merge_run_metadata, set_trace_context
 from aegra_api.services.base_executor import BaseExecutor
-from aegra_api.services.run_executor import _lease_loss_cancellations, _timeout_cancellations, execute_run
+from aegra_api.services.run_executor import (
+    _lease_loss_cancellations,
+    _shutdown_cancellations,
+    _timeout_cancellations,
+    execute_run,
+)
 from aegra_api.services.run_status import finalize_run
 from aegra_api.settings import settings
 
@@ -165,10 +170,21 @@ class WorkerExecutor(BaseExecutor):
         if self._job_tasks:
             logger.info("Draining in-flight jobs", count=len(self._job_tasks))
             _, pending = await asyncio.wait(self._job_tasks, timeout=drain_timeout)
-            for task in pending:
-                task.cancel()
+            drained: list[str] = []
             if pending:
+                # Runs outliving the drain window go back to the queue. Finalizing
+                # them here would destroy work a plain crash recovers (#474).
+                drained = [
+                    run_id
+                    for run_id, task in active_runs.items()
+                    if task in pending and run_id not in explicit_run_cancellations
+                ]
+                _shutdown_cancellations.update(drained)
+                for task in pending:
+                    task.cancel()
                 await asyncio.gather(*pending, return_exceptions=True)
+            if drained:
+                await _requeue_drained_runs(drained)
 
         # Cancel worker loops
         for task in self._worker_tasks:
@@ -284,6 +300,7 @@ class WorkerExecutor(BaseExecutor):
             logger.exception("Unexpected error in job execution", run_id=run_id)
         finally:
             _timeout_cancellations.discard(run_id)
+            _shutdown_cancellations.discard(run_id)
             explicit_run_cancellations.discard(run_id)
             active_runs.pop(run_id, None)
             semaphore.release()
@@ -451,6 +468,42 @@ async def _acquire_and_load(run_id: str, worker_name: str) -> _LoadedRun | None:
         job = RunJob.from_run_orm(run_orm)
         trace = run_orm.execution_params.get("trace", {})
         return _LoadedRun(job=job, trace=trace)
+
+
+async def _requeue_drained_runs(run_ids: list[str]) -> None:
+    """Hand runs cancelled at the drain deadline back to the queue.
+
+    Rows still 'running' were mid-execution with finalize skipped; rows still
+    'pending' were dequeued but never claimed. Both must reach another instance.
+    """
+    maker = _get_session_maker()
+    async with maker() as session:
+        result = await session.execute(
+            update(RunORM)
+            .where(RunORM.run_id.in_(run_ids), RunORM.status.in_(["running", "pending"]))
+            .values(status="pending", claimed_by=None, lease_expires_at=None)
+            .returning(RunORM.run_id)
+        )
+        reset_ids = [row[0] for row in result.fetchall()]
+        await session.commit()
+
+    if not reset_ids:
+        return
+
+    logger.info("Requeueing drained runs for another instance", count=len(reset_ids), run_ids=reset_ids)
+    pushed = 0
+    try:
+        client = redis_manager.get_client()
+        for run_id in reset_ids:
+            await client.rpush(settings.worker.WORKER_QUEUE_KEY, run_id)  # type: ignore[arg-type]
+            pushed += 1
+    except RedisError:
+        # Rows are already pending + unclaimed: the stuck-pending reaper or the
+        # Postgres poll fallback on a surviving instance picks them up.
+        logger.warning(
+            "Redis unavailable during drain requeue, reaper will recover",
+            run_ids=reset_ids[pushed:],
+        )
 
 
 async def _release_lease(run_id: str, worker_name: str) -> None:

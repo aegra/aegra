@@ -158,6 +158,8 @@ containers:
 
 PostgreSQL should be a managed service (CloudSQL, RDS, etc.) or a StatefulSet with persistent volumes. Redis should be a managed service (ElastiCache, Memorystore, etc.) or a separate Deployment.
 
+Set `terminationGracePeriodSeconds` a few seconds above `WORKER_DRAIN_TIMEOUT` (default 30). On SIGTERM the pod waits that long for in-flight runs to finish, then hands the rest back to the queue for other pods to resume from the last checkpoint. If the pod is killed before the hand-off completes, the lease reaper recovers the runs after lease expiry instead — see the [worker architecture guide](/guides/worker-architecture#graceful-shutdown).
+
 ## Database configuration
 
 Two ways to configure the database connection:

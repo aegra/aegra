@@ -36,7 +36,7 @@ from aegra_api.models import (
     ThreadUpdate,
     User,
 )
-from aegra_api.models.errors import CONFLICT, NOT_FOUND
+from aegra_api.models.errors import CONFLICT, NOT_FOUND, AgentProtocolError
 from aegra_api.services.streaming_service import streaming_service
 from aegra_api.services.thread_state_service import ThreadStateService
 from aegra_api.utils.run_utils import strip_pinned_config_keys
@@ -822,7 +822,16 @@ async def get_thread_history_get(
     return await get_thread_history_post(thread_id, req, user, session)
 
 
-@router.delete("/threads/{thread_id}", responses={**NOT_FOUND})
+@router.delete(
+    "/threads/{thread_id}",
+    responses={
+        **NOT_FOUND,
+        500: {
+            "model": AgentProtocolError,
+            "description": "Checkpoint cleanup failed; the thread is preserved and the delete can be retried",
+        },
+    },
+)
 async def delete_thread(
     thread_id: str,
     user: User = Depends(get_current_user),

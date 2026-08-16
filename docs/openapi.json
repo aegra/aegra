@@ -990,6 +990,16 @@
               }
             }
           },
+          "500": {
+            "description": "Checkpoint cleanup failed; the thread is preserved and the delete can be retried",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AgentProtocolError"
+                }
+              }
+            }
+          },
           "422": {
             "description": "Validation Error",
             "content": {

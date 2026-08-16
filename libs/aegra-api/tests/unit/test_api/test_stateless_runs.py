@@ -200,12 +200,12 @@ class TestDeleteThreadById:
         mock_maker.return_value.__aenter__ = AsyncMock(return_value=mock_session)
         mock_maker.return_value.__aexit__ = AsyncMock(return_value=False)
 
-        with (  # noqa: SIM117
+        with (
             patch("aegra_api.services.run_cleanup._get_session_maker", return_value=mock_maker),
             patch("aegra_api.services.run_cleanup.db_manager", mock_db_manager),
+            pytest.raises(PsycopgError, match="checkpoint backend down"),
         ):
-            with pytest.raises(PsycopgError, match="checkpoint backend down"):
-                await _delete_thread_by_id(thread_id, user_id)
+            await _delete_thread_by_id(thread_id, user_id)
 
         mock_session.delete.assert_not_called()
         mock_session.commit.assert_not_called()

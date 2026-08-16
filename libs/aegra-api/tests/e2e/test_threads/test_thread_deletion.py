@@ -7,7 +7,12 @@ from sqlalchemy.ext.asyncio import create_async_engine
 from aegra_api.settings import settings
 from tests.e2e._utils import elog, get_e2e_client
 
-_CHECKPOINT_TABLES = ("checkpoints", "checkpoint_blobs", "checkpoint_writes")
+# One literal query per table: table names can't be bound parameters.
+_CHECKPOINT_COUNT_QUERIES = {
+    "checkpoints": text("SELECT count(*) FROM checkpoints WHERE thread_id = :tid"),
+    "checkpoint_blobs": text("SELECT count(*) FROM checkpoint_blobs WHERE thread_id = :tid"),
+    "checkpoint_writes": text("SELECT count(*) FROM checkpoint_writes WHERE thread_id = :tid"),
+}
 
 
 async def _count_checkpoint_rows(thread_id: str) -> dict[str, int]:
@@ -16,12 +21,8 @@ async def _count_checkpoint_rows(thread_id: str) -> dict[str, int]:
     try:
         counts: dict[str, int] = {}
         async with engine.connect() as conn:
-            for table in _CHECKPOINT_TABLES:
-                # Table names come from the fixed tuple above; only the value is user data.
-                result = await conn.execute(
-                    text(f"SELECT count(*) FROM {table} WHERE thread_id = :tid"),  # noqa: S608
-                    {"tid": thread_id},
-                )
+            for table, query in _CHECKPOINT_COUNT_QUERIES.items():
+                result = await conn.execute(query, {"tid": thread_id})
                 counts[table] = int(result.scalar_one())
         return counts
     finally:
@@ -243,10 +244,12 @@ async def test_thread_deletion_removes_checkpoints() -> None:
 
     before = await _count_checkpoint_rows(thread_id)
     elog("Checkpoint rows before deletion", {"thread_id": thread_id, **before})
-    assert before["checkpoints"] > 0, "completed run should have written checkpoint rows"
+    assert all(count > 0 for count in before.values()), (
+        f"completed run should have written rows in every checkpoint table, got {before}"
+    )
 
     await client.threads.delete(thread_id)
 
     after = await _count_checkpoint_rows(thread_id)
     elog("Checkpoint rows after deletion", {"thread_id": thread_id, **after})
-    assert after == dict.fromkeys(_CHECKPOINT_TABLES, 0)
+    assert after == dict.fromkeys(_CHECKPOINT_COUNT_QUERIES, 0)

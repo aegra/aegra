@@ -508,6 +508,7 @@ class TestDeleteThread:
 
         resp = client.delete("/threads/test-123")
         assert resp.status_code == 500
+        mock_checkpointer.adelete_thread.assert_awaited_once_with("test-123")
         assert deleted == []
         assert committed == []
 

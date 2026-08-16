@@ -498,10 +498,12 @@ class TestCleanupAfterBackgroundRun:
                 "aegra_api.services.run_cleanup.delete_thread_by_id",
                 new_callable=AsyncMock,
                 side_effect=PsycopgError("checkpoint backend down"),
-            ),
+            ) as mock_delete,
         ):
             # Should not raise — PsycopgError is in the cleanup tuple
             await _cleanup_after_background_run(run_id, thread_id, user_id)
+
+        mock_delete.assert_awaited_once_with(thread_id, user_id)
 
     @pytest.mark.asyncio
     async def test_deletes_thread_when_wait_times_out(self) -> None:

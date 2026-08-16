@@ -503,6 +503,50 @@ class TestCleanupAfterBackgroundRun:
             # Should not raise — PsycopgError is in the cleanup tuple
             await _cleanup_after_background_run(run_id, thread_id, user_id)
 
+    @pytest.mark.asyncio
+    async def test_deletes_thread_when_wait_times_out(self) -> None:
+        """A run exceeding the wait cap still gets its ephemeral thread deleted."""
+        run_id = str(uuid4())
+        thread_id = str(uuid4())
+        user_id = "test-user"
+
+        with (
+            patch(
+                "aegra_api.services.run_cleanup.executor.wait_for_completion",
+                new_callable=AsyncMock,
+                side_effect=TimeoutError,
+            ),
+            patch(
+                "aegra_api.services.run_cleanup.delete_thread_by_id",
+                new_callable=AsyncMock,
+            ) as mock_delete,
+        ):
+            await _cleanup_after_background_run(run_id, thread_id, user_id)
+
+        mock_delete.assert_awaited_once_with(thread_id, user_id)
+
+    @pytest.mark.asyncio
+    async def test_deletes_thread_when_wait_fails_with_infra_error(self) -> None:
+        """A tolerated infra failure while waiting is logged, not fatal to cleanup."""
+        run_id = str(uuid4())
+        thread_id = str(uuid4())
+        user_id = "test-user"
+
+        with (
+            patch(
+                "aegra_api.services.run_cleanup.executor.wait_for_completion",
+                new_callable=AsyncMock,
+                side_effect=PsycopgError("broker connection lost"),
+            ),
+            patch(
+                "aegra_api.services.run_cleanup.delete_thread_by_id",
+                new_callable=AsyncMock,
+            ) as mock_delete,
+        ):
+            await _cleanup_after_background_run(run_id, thread_id, user_id)
+
+        mock_delete.assert_awaited_once_with(thread_id, user_id)
+
 
 class TestStatelessWaitForRun:
     """Tests for POST /runs/wait."""

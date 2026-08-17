@@ -14,6 +14,7 @@ import pytest
 from fastapi import HTTPException
 from sqlalchemy.dialects import postgresql
 
+from aegra_api.core.orm import AssistantVersion as AssistantVersionORM
 from aegra_api.models import Assistant, AssistantCreate, AssistantUpdate
 from aegra_api.models.auth import User
 from aegra_api.services.assistant_service import AssistantService, to_pydantic
@@ -316,6 +317,27 @@ class TestAssistantServiceCreate:
         assert "ON CONFLICT DO NOTHING" in compiled
         assert "ON CONFLICT (" not in compiled
         assert "RETURNING" in compiled
+
+    @pytest.mark.asyncio
+    async def test_create_assistant_commits_version_row_with_the_assistant(
+        self,
+        assistant_service: AssistantService,
+        sample_assistant_create: AssistantCreate,
+    ) -> None:
+        """Both rows land in one transaction.
+
+        Committing the assistant on its own leaves a live assistant whose version 1
+        never arrives if the process dies in between, and list_assistant_versions
+        then 404s for it.
+        """
+        insert_wins(assistant_service.session)
+
+        await assistant_service.create_assistant(sample_assistant_create)
+
+        assistant_service.session.commit.assert_awaited_once()
+        added = assistant_service.session.add.call_args.args[0]
+        assert isinstance(added, AssistantVersionORM)
+        assert added.version == 1
 
     @pytest.mark.asyncio
     async def test_create_assistant_does_not_read_before_inserting(

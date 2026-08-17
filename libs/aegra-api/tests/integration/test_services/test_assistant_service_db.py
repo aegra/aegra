@@ -119,7 +119,8 @@ class TestAssistantServiceDatabase:
         assert "RETURNING" in compiled
 
         # Only the version row goes through session.add now
-        assert all(isinstance(obj, AssistantVersionORM) for obj in assistant_service.session.added_objects)
+        assert len(assistant_service.session.added_objects) == 1
+        assert isinstance(assistant_service.session.added_objects[0], AssistantVersionORM)
 
     @pytest.mark.asyncio
     async def test_create_assistant_version_creation(self, assistant_service):

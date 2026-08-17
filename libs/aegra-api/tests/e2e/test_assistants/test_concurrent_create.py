@@ -161,7 +161,7 @@ async def test_concurrent_assistant_create_raise_yields_conflict_not_error(
     responses = await _burst(warm_client, [payload] * CONCURRENCY)
 
     statuses = [r.status_code for r in responses]
-    elog("Concurrent assistant create with if_exists=raise", {"statuses": sorted(set(statuses))})
+    elog("Concurrent assistant create with default if_exists=error", {"statuses": sorted(set(statuses))})
     assert set(statuses) <= {200, 409}, f"unexpected statuses: {sorted(set(statuses))}"
     assert statuses.count(200) == 1, f"expected exactly one winner, got {statuses.count(200)}"
 

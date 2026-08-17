@@ -203,9 +203,8 @@ class AssistantService(Authenticated):
 
         metadata = request.metadata or {}
 
-        # Insert first and let the unique indexes arbitrate. A SELECT-then-INSERT
-        # lets two concurrent creates both miss the SELECT and then collide, and the
-        # loser's UniqueViolationError escapes as a 500 instead of honouring if_exists.
+        # Insert first and let the unique indexes arbitrate: a SELECT-then-INSERT lets
+        # two creates collide, and the loser's UniqueViolationError 500s past if_exists.
         insert_stmt = (
             pg_insert(AssistantORM)
             .values(
@@ -225,12 +224,12 @@ class AssistantService(Authenticated):
             .returning(AssistantORM)
         )
         created = (await self.session.scalars(insert_stmt)).first()
-        await self.session.commit()
 
         if created is None:
             return await self._resolve_create_conflict(assistant_id, graph_id, config, request.if_exists)
 
-        # Create initial version record
+        # Version 1 commits with the assistant it describes: an assistant whose only
+        # version went missing 404s out of list_assistant_versions while it is live.
         assistant_version_orm = AssistantVersionORM(
             assistant_id=assistant_id,
             version=1,

@@ -159,8 +159,13 @@ class AssistantService(Authenticated):
     async def create_assistant(self, request: AssistantCreate) -> Assistant:
         """Create a new assistant"""
         value = request.model_dump()
+        original_metadata = dict(value.get("metadata") or {})
         await self._dispatch("create", value)
         request.metadata = _injected_metadata(request.metadata, value)
+        # Isolate what the handler itself added/changed, as opposed to
+        # whatever the client already sent — the do_nothing branch below must
+        # not let a client's own metadata overwrite an existing assistant's.
+        handler_injected = {k: v for k, v in (value.get("metadata") or {}).items() if original_metadata.get(k) != v}
 
         available_graphs = self.langgraph_service.list_graphs()
 
@@ -212,12 +217,23 @@ class AssistantService(Authenticated):
 
         if existing:
             if request.if_exists == "do_nothing":
-                merged_metadata = _injected_metadata(existing.metadata_dict, value) or {}
-                if merged_metadata != existing.metadata_dict:
-                    existing.metadata_dict = merged_metadata
-                    existing.updated_at = datetime.now(UTC)
-                    await self.session.commit()
-                    await self.session.refresh(existing)
+                if handler_injected:
+                    merged_metadata = {**(existing.metadata_dict or {}), **handler_injected}
+                    if merged_metadata != existing.metadata_dict:
+                        existing.metadata_dict = merged_metadata
+                        existing.updated_at = datetime.now(UTC)
+                        # Keep the version snapshot in sync — set_assistant_latest
+                        # copies it back onto the assistant, so a stale snapshot
+                        # would silently drop the injected fields later.
+                        version_stmt = select(AssistantVersionORM).where(
+                            AssistantVersionORM.assistant_id == existing.assistant_id,
+                            AssistantVersionORM.version == existing.version,
+                        )
+                        existing_version = await self.session.scalar(version_stmt)
+                        if existing_version is not None:
+                            existing_version.metadata_dict = merged_metadata
+                        await self.session.commit()
+                        await self.session.refresh(existing)
                 return to_pydantic(existing)
             else:  # error (default)
                 raise HTTPException(409, f"Assistant '{assistant_id}' already exists")

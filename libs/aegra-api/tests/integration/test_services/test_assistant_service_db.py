@@ -9,10 +9,12 @@ from unittest.mock import Mock
 import pytest
 from fastapi import HTTPException
 
+from aegra_api.core.auth_handlers import AuthContextWrapper
 from aegra_api.core.orm import Assistant as AssistantORM
 from aegra_api.core.orm import AssistantVersion as AssistantVersionORM
 from aegra_api.models import Assistant, AssistantCreate, AssistantUpdate
 from aegra_api.models.auth import User
+from aegra_api.services import authenticated
 from aegra_api.services.assistant_service import AssistantService
 from tests.fixtures.database import DummySessionBase
 
@@ -478,12 +480,17 @@ class TestAssistantServiceDatabase:
         assert result.name == "Large Metadata Assistant"
 
     @pytest.mark.asyncio
-    async def test_create_assistant_do_nothing_refreshes_injected_metadata(self, assistant_service, monkeypatch):
+    async def test_create_assistant_do_nothing_refreshes_injected_metadata(
+        self, assistant_service: AssistantService, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         """Regression test for #495.
 
         A create() call that resolves via if_exists="do_nothing" to a
         pre-existing row must still apply the auth handler's freshly-injected
-        metadata (e.g. created_by, team_id), not silently return the stale row.
+        metadata (e.g. created_by, team_id), and must keep the current
+        version snapshot in sync — set_assistant_latest copies that snapshot
+        back onto the assistant, so a stale one would silently drop the
+        injected fields again later.
         """
         existing = AssistantORM(
             assistant_id="existing-id",
@@ -497,11 +504,19 @@ class TestAssistantServiceDatabase:
             created_at=datetime.now(UTC),
             updated_at=datetime.now(UTC),
         )
-        assistant_service.session.scalar.return_value = existing
+        existing_version = AssistantVersionORM(
+            assistant_id="existing-id",
+            version=1,
+            graph_id="test-graph",
+            config={},
+            context={},
+            metadata_dict={},
+            name="Existing Assistant",
+            created_at=datetime.now(UTC),
+        )
+        assistant_service.session.scalar.side_effect = [existing, existing_version]
 
-        from aegra_api.services import authenticated
-
-        async def inject_handler(ctx, value):
+        async def inject_handler(ctx: AuthContextWrapper | None, value: dict[str, object]) -> None:
             value["metadata"]["created_by"] = "charlie"
             value["metadata"]["team_id"] = "team111"
             return None
@@ -520,7 +535,51 @@ class TestAssistantServiceDatabase:
         assert result.metadata.get("created_by") == "charlie"
         assert result.metadata.get("team_id") == "team111"
         assert existing.metadata_dict.get("created_by") == "charlie"
+        assert existing.metadata_dict.get("team_id") == "team111"
+        assert existing_version.metadata_dict.get("created_by") == "charlie"
+        assert existing_version.metadata_dict.get("team_id") == "team111"
         assistant_service.session.commit.assert_awaited()
+        assistant_service.session.refresh.assert_awaited_once_with(existing)
+
+    @pytest.mark.asyncio
+    async def test_create_assistant_do_nothing_does_not_apply_client_metadata(
+        self, assistant_service: AssistantService, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A do_nothing create must stay idempotent: the client's own metadata
+        on *this* request must not overwrite an existing assistant's stored
+        metadata, even though the auth handler still runs.
+        """
+        existing = AssistantORM(
+            assistant_id="existing-id",
+            name="Existing Assistant",
+            graph_id="test-graph",
+            config={},
+            context={},
+            user_id="user-123",
+            version=1,
+            metadata_dict={"owner": "original-owner"},
+            created_at=datetime.now(UTC),
+            updated_at=datetime.now(UTC),
+        )
+        assistant_service.session.scalar.return_value = existing
+
+        async def noop_handler(ctx: AuthContextWrapper | None, value: dict[str, object]) -> None:
+            return None
+
+        monkeypatch.setattr(authenticated, "handle_event", noop_handler)
+
+        request = AssistantCreate(
+            graph_id="test-graph",
+            name="New Request Name",
+            metadata={"owner": "client-supplied-owner", "extra": "junk"},
+            if_exists="do_nothing",
+        )
+
+        result = await assistant_service.create_assistant(request)
+
+        assert result.metadata == {"owner": "original-owner"}
+        assert existing.metadata_dict == {"owner": "original-owner"}
+        assistant_service.session.commit.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_assistant_special_characters(self, assistant_service):

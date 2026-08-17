@@ -686,6 +686,57 @@ class TestAssistantServiceDatabase:
         assistant_service.session.commit.assert_awaited()
 
     @pytest.mark.asyncio
+    async def test_create_assistant_do_nothing_preserves_unrelated_nested_keys(
+        self, assistant_service: AssistantService, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A shallow `{**existing, **handler_injected}` merge would replace a
+        changed nested dict wholesale, silently deleting sibling keys already
+        stored under it that this request's client payload never touched."""
+        existing = AssistantORM(
+            assistant_id="existing-id",
+            name="Existing Assistant",
+            graph_id="test-graph",
+            config={},
+            context={},
+            user_id="user-123",
+            version=1,
+            metadata_dict={"org": {"dept": "sales", "region": "us"}},
+            created_at=datetime.now(UTC),
+            updated_at=datetime.now(UTC),
+        )
+        existing_version = AssistantVersionORM(
+            assistant_id="existing-id",
+            version=1,
+            graph_id="test-graph",
+            config={},
+            context={},
+            metadata_dict={"org": {"dept": "sales", "region": "us"}},
+            name="Existing Assistant",
+            created_at=datetime.now(UTC),
+        )
+        assistant_service.session.scalar.side_effect = [existing, existing_version]
+
+        async def mutate_nested_handler(ctx: AuthContextWrapper | None, value: dict[str, object]) -> None:
+            value["metadata"]["org"]["team_id"] = "team111"
+            return None
+
+        monkeypatch.setattr(authenticated, "handle_event", mutate_nested_handler)
+
+        # Client resends only "region" — it doesn't know about "dept".
+        request = AssistantCreate(
+            graph_id="test-graph",
+            name="New Request Name",
+            metadata={"org": {"region": "us"}},
+            if_exists="do_nothing",
+        )
+
+        result = await assistant_service.create_assistant(request)
+
+        assert result.metadata["org"] == {"dept": "sales", "region": "us", "team_id": "team111"}
+        assert existing.metadata_dict["org"] == {"dept": "sales", "region": "us", "team_id": "team111"}
+        assert existing_version.metadata_dict["org"] == {"dept": "sales", "region": "us", "team_id": "team111"}
+
+    @pytest.mark.asyncio
     async def test_assistant_special_characters(self, assistant_service):
         """Test assistant creation with special characters"""
         special_name = "Assistant with émojis 🚀 and spëcial çharacters"

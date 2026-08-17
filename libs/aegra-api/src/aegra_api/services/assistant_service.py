@@ -132,6 +132,21 @@ def _escape_like(value: str) -> str:
     return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
 
 
+def _deep_merge(base: dict[str, Any], delta: dict[str, Any]) -> dict[str, Any]:
+    """Recursively merge ``delta`` onto ``base``.
+
+    A shallow merge would replace a changed nested dict wholesale, dropping
+    sibling keys already stored under it that this request never touched.
+    """
+    merged = dict(base)
+    for k, v in delta.items():
+        if isinstance(v, dict) and isinstance(merged.get(k), dict):
+            merged[k] = _deep_merge(merged[k], v)
+        else:
+            merged[k] = v
+    return merged
+
+
 def _injected_metadata(
     base: dict[str, Any] | None,
     value: dict[str, Any],
@@ -156,6 +171,14 @@ class AssistantService(Authenticated):
     def __init__(self, session: AsyncSession, user: User, langgraph_service: LangGraphService):
         super().__init__(session, user)
         self.langgraph_service = langgraph_service
+
+    async def _get_version_row(self, assistant_id: str, version: int) -> AssistantVersionORM | None:
+        """Look up one AssistantVersionORM row by (assistant_id, version)."""
+        stmt = select(AssistantVersionORM).where(
+            AssistantVersionORM.assistant_id == assistant_id,
+            AssistantVersionORM.version == version,
+        )
+        return await self.session.scalar(stmt)
 
     async def create_assistant(self, request: AssistantCreate) -> Assistant:
         """Create a new assistant"""
@@ -226,18 +249,14 @@ class AssistantService(Authenticated):
         if existing:
             if request.if_exists == "do_nothing":
                 if handler_injected:
-                    merged_metadata = {**(existing.metadata_dict or {}), **handler_injected}
+                    merged_metadata = _deep_merge(existing.metadata_dict or {}, handler_injected)
                     if merged_metadata != existing.metadata_dict:
                         existing.metadata_dict = merged_metadata
                         existing.updated_at = datetime.now(UTC)
                         # Keep the version snapshot in sync — set_assistant_latest
                         # copies it back onto the assistant, so a stale snapshot
                         # would silently drop the injected fields later.
-                        version_stmt = select(AssistantVersionORM).where(
-                            AssistantVersionORM.assistant_id == existing.assistant_id,
-                            AssistantVersionORM.version == existing.version,
-                        )
-                        existing_version = await self.session.scalar(version_stmt)
+                        existing_version = await self._get_version_row(existing.assistant_id, existing.version)
                         if existing_version is not None:
                             existing_version.metadata_dict = merged_metadata
                         await self.session.commit()
@@ -512,11 +531,7 @@ class AssistantService(Authenticated):
         if not assistant:
             raise HTTPException(404, f"Assistant '{assistant_id}' not found")
 
-        version_stmt = select(AssistantVersionORM).where(
-            AssistantVersionORM.assistant_id == assistant_id,
-            AssistantVersionORM.version == version,
-        )
-        assistant_version = await self.session.scalar(version_stmt)
+        assistant_version = await self._get_version_row(assistant_id, version)
         if not assistant_version:
             raise HTTPException(404, f"Version '{version}' for Assistant '{assistant_id}' not found")
 

@@ -54,6 +54,8 @@ asyncio.run(main())
 
 Aegra accepts the graph ID directly in `assistant_id` for cron creation and resolves it to the default assistant for that graph at request time.
 
+`input` is required: every firing starts a run built from the cron payload, so a request without `input` is rejected with a 422. Pass `input={}` for graphs that need no input.
+
 By default, each stateless cron run deletes its ephemeral thread after the run completes, including the immediate first run that is triggered when the cron is created.
 
 <Note>

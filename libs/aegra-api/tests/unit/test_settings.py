@@ -1,4 +1,4 @@
-"""Tests for AppSettings, DatabaseSettings, and WorkerSettings."""
+"""Tests for environment-backed settings models."""
 
 from urllib.parse import quote_plus
 
@@ -6,7 +6,7 @@ import pytest
 from pydantic import ValidationError
 from sqlalchemy.engine import make_url
 
-from aegra_api.settings import AppSettings, CronSettings, DatabaseSettings, WorkerSettings
+from aegra_api.settings import AppSettings, CronSettings, DatabaseSettings, RedisSettings, WorkerSettings
 
 
 class TestAppSettingsServerURL:
@@ -548,6 +548,29 @@ class TestMultiHostDatabaseURL:
         assert "h1:5432,h2:5432" in db.database_url_sync
         assert "host=" not in db.database_url_sync
         assert db.database_url_sync.startswith("postgresql://")
+
+
+class TestRedisSettingsValidation:
+    """Test that Redis resilience settings cannot enable unbounded retries."""
+
+    @pytest.mark.parametrize(
+        "setting_name",
+        ("REDIS_HEALTH_CHECK_INTERVAL", "REDIS_RETRY_ATTEMPTS"),
+    )
+    def test_rejects_negative_values(self, monkeypatch: pytest.MonkeyPatch, setting_name: str) -> None:
+        monkeypatch.setenv(setting_name, "-1")
+
+        with pytest.raises(ValidationError, match=setting_name):
+            RedisSettings(_env_file=None)
+
+    def test_accepts_zero_values(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("REDIS_HEALTH_CHECK_INTERVAL", "0")
+        monkeypatch.setenv("REDIS_RETRY_ATTEMPTS", "0")
+
+        redis = RedisSettings(_env_file=None)
+
+        assert redis.REDIS_HEALTH_CHECK_INTERVAL == 0
+        assert redis.REDIS_RETRY_ATTEMPTS == 0
 
 
 class TestWorkerSettingsLeaseValidation:

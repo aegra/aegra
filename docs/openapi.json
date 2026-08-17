@@ -3,7 +3,7 @@
   "info": {
     "title": "Aegra",
     "description": "Production-ready Agent Protocol server",
-    "version": "0.10.0"
+    "version": "0.10.2"
   },
   "paths": {
     "/info": {
@@ -3771,15 +3771,8 @@
             "title": "Schedule"
           },
           "input": {
-            "anyOf": [
-              {
-                "additionalProperties": true,
-                "type": "object"
-              },
-              {
-                "type": "null"
-              }
-            ],
+            "additionalProperties": true,
+            "type": "object",
             "title": "Input"
           },
           "metadata": {
@@ -3960,7 +3953,8 @@
         "type": "object",
         "required": [
           "assistant_id",
-          "schedule"
+          "schedule",
+          "input"
         ],
         "title": "CronCreate",
         "description": "Request body for creating a cron job (stateless or thread-bound)."

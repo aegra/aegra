@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import json
 import sys
+from collections.abc import Callable
 from pathlib import Path
 from types import ModuleType
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 from unittest.mock import Mock
 
+import pytest
 from click.testing import CliRunner
 
 import aegra_cli.commands.init  # noqa: F401 — ensure module is loaded
@@ -127,15 +129,15 @@ class TestTemplateRegistry:
         chat_openai = Mock()
 
         langchain = ModuleType("langchain")
-        langchain.__path__ = []  # type: ignore[attr-defined]
+        setattr(langchain, "__path__", [])
         chat_models = ModuleType("langchain.chat_models")
-        chat_models.init_chat_model = init_chat_model  # type: ignore[attr-defined]
+        setattr(chat_models, "init_chat_model", init_chat_model)
         langchain_core = ModuleType("langchain_core")
-        langchain_core.__path__ = []  # type: ignore[attr-defined]
+        setattr(langchain_core, "__path__", [])
         language_models = ModuleType("langchain_core.language_models")
-        language_models.BaseChatModel = object  # type: ignore[attr-defined]
+        setattr(language_models, "BaseChatModel", object)
         langchain_openai = ModuleType("langchain_openai")
-        langchain_openai.ChatOpenAI = chat_openai  # type: ignore[attr-defined]
+        setattr(langchain_openai, "ChatOpenAI", chat_openai)
 
         monkeypatch.setitem(sys.modules, "langchain", langchain)
         monkeypatch.setitem(sys.modules, "langchain.chat_models", chat_models)
@@ -148,10 +150,11 @@ class TestTemplateRegistry:
             "utils.py.template", {"project_name": "Atlas Agent", "slug": "atlas_agent"}
         )
         namespace: dict[str, object] = {}
+        # Execute repository-controlled generated source for this rendering test.
         exec(compile(content, "generated_utils.py", "exec"), namespace)  # noqa: S102
-        load_chat_model = namespace["load_chat_model"]
+        load_chat_model = cast(Callable[[str], object], namespace["load_chat_model"])
 
-        load_chat_model("atlascloud/qwen/qwen3.8-max")  # type: ignore[operator]
+        load_chat_model(" atlascloud/qwen/qwen3.8-max ")
 
         chat_openai.assert_called_once_with(
             model="qwen/qwen3.8-max",
@@ -159,6 +162,14 @@ class TestTemplateRegistry:
             base_url="https://api.atlascloud.ai/v1",
         )
         init_chat_model.assert_not_called()
+
+        monkeypatch.delenv("ATLASCLOUD_API_KEY")
+        with pytest.raises(ValueError, match="ATLASCLOUD_API_KEY is required"):
+            load_chat_model("atlascloud/qwen/qwen3.8-max")
+
+        for invalid_name in ("atlascloud", "atlascloud/", "/qwen/qwen3.8-max"):
+            with pytest.raises(ValueError, match="provider/model"):
+                load_chat_model(invalid_name)
 
     def test_load_shared_gitignore(self: TestTemplateRegistry) -> None:
         content = load_shared_file("gitignore")

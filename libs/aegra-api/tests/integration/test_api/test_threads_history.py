@@ -46,7 +46,7 @@ def _thread_row():
 
 
 @pytest.fixture()
-def client() -> TestClient:
+def client(monkeypatch: pytest.MonkeyPatch) -> TestClient:
     # Build app with threads router only
     app = create_test_app(include_runs=False, include_threads=True)
 
@@ -55,8 +55,13 @@ def client() -> TestClient:
         async def scalar(self, _stmt):
             return _thread_row()
 
-    # Override the ORM get_session dependency
+    # Override the ORM get_session dependency (still used by POST /threads)
     app.dependency_overrides[core_get_session] = override_get_session_dep(Session)
+
+    # History endpoints manage their session manually via _get_session_maker
+    # (not Depends(get_session)), so the dependency override above doesn't
+    # reach them — patch the session-maker entry point directly instead.
+    monkeypatch.setattr("aegra_api.api.threads._get_session_maker", lambda: Session)
 
     return make_client(app)
 

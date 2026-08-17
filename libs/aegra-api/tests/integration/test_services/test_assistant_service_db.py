@@ -582,6 +582,58 @@ class TestAssistantServiceDatabase:
         assistant_service.session.commit.assert_not_awaited()
 
     @pytest.mark.asyncio
+    async def test_create_assistant_do_nothing_applies_none_valued_injection(
+        self, assistant_service: AssistantService, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A handler injecting a *new* key with a None value must still count
+        as a change — dict.get(k) also defaults to None for an absent key, so
+        a naive `!=` comparison would silently drop it."""
+        existing = AssistantORM(
+            assistant_id="existing-id",
+            name="Existing Assistant",
+            graph_id="test-graph",
+            config={},
+            context={},
+            user_id="user-123",
+            version=1,
+            metadata_dict={},
+            created_at=datetime.now(UTC),
+            updated_at=datetime.now(UTC),
+        )
+        existing_version = AssistantVersionORM(
+            assistant_id="existing-id",
+            version=1,
+            graph_id="test-graph",
+            config={},
+            context={},
+            metadata_dict={},
+            name="Existing Assistant",
+            created_at=datetime.now(UTC),
+        )
+        assistant_service.session.scalar.side_effect = [existing, existing_version]
+
+        async def inject_none_handler(ctx: AuthContextWrapper | None, value: dict[str, object]) -> None:
+            value["metadata"]["team_id"] = None
+            return None
+
+        monkeypatch.setattr(authenticated, "handle_event", inject_none_handler)
+
+        request = AssistantCreate(
+            graph_id="test-graph",
+            name="New Request Name",
+            metadata={},
+            if_exists="do_nothing",
+        )
+
+        result = await assistant_service.create_assistant(request)
+
+        assert "team_id" in result.metadata
+        assert result.metadata["team_id"] is None
+        assert "team_id" in existing.metadata_dict
+        assert "team_id" in existing_version.metadata_dict
+        assistant_service.session.commit.assert_awaited()
+
+    @pytest.mark.asyncio
     async def test_assistant_special_characters(self, assistant_service):
         """Test assistant creation with special characters"""
         special_name = "Assistant with émojis 🚀 and spëcial çharacters"

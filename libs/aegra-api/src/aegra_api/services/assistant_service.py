@@ -165,7 +165,11 @@ class AssistantService(Authenticated):
         # Isolate what the handler itself added/changed, as opposed to
         # whatever the client already sent — the do_nothing branch below must
         # not let a client's own metadata overwrite an existing assistant's.
-        handler_injected = {k: v for k, v in (value.get("metadata") or {}).items() if original_metadata.get(k) != v}
+        handler_injected = {
+            k: v
+            for k, v in (value.get("metadata") or {}).items()
+            if k not in original_metadata or original_metadata[k] != v
+        }
 
         available_graphs = self.langgraph_service.list_graphs()
 

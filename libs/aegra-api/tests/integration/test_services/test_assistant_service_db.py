@@ -634,6 +634,58 @@ class TestAssistantServiceDatabase:
         assistant_service.session.commit.assert_awaited()
 
     @pytest.mark.asyncio
+    async def test_create_assistant_do_nothing_applies_nested_handler_mutation(
+        self, assistant_service: AssistantService, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A handler that mutates a nested dict *inside* client-supplied
+        metadata (rather than replacing the top-level key) must still count
+        as a change — a shallow copy of the pre-dispatch metadata would share
+        that nested dict by reference, hiding the mutation from the diff."""
+        existing = AssistantORM(
+            assistant_id="existing-id",
+            name="Existing Assistant",
+            graph_id="test-graph",
+            config={},
+            context={},
+            user_id="user-123",
+            version=1,
+            metadata_dict={},
+            created_at=datetime.now(UTC),
+            updated_at=datetime.now(UTC),
+        )
+        existing_version = AssistantVersionORM(
+            assistant_id="existing-id",
+            version=1,
+            graph_id="test-graph",
+            config={},
+            context={},
+            metadata_dict={},
+            name="Existing Assistant",
+            created_at=datetime.now(UTC),
+        )
+        assistant_service.session.scalar.side_effect = [existing, existing_version]
+
+        async def mutate_nested_handler(ctx: AuthContextWrapper | None, value: dict[str, object]) -> None:
+            value["metadata"]["org"]["team_id"] = "team111"
+            return None
+
+        monkeypatch.setattr(authenticated, "handle_event", mutate_nested_handler)
+
+        request = AssistantCreate(
+            graph_id="test-graph",
+            name="New Request Name",
+            metadata={"org": {}},
+            if_exists="do_nothing",
+        )
+
+        result = await assistant_service.create_assistant(request)
+
+        assert result.metadata.get("org", {}).get("team_id") == "team111"
+        assert existing.metadata_dict.get("org", {}).get("team_id") == "team111"
+        assert existing_version.metadata_dict.get("org", {}).get("team_id") == "team111"
+        assistant_service.session.commit.assert_awaited()
+
+    @pytest.mark.asyncio
     async def test_assistant_special_characters(self, assistant_service):
         """Test assistant creation with special characters"""
         special_name = "Assistant with émojis 🚀 and spëcial çharacters"

@@ -15,6 +15,7 @@ applied to other APIs (runs, threads, crons) as part of ongoing refactoring.
 """
 
 import uuid
+from copy import deepcopy
 from datetime import UTC, datetime
 from typing import Any
 from uuid import uuid4
@@ -159,7 +160,10 @@ class AssistantService(Authenticated):
     async def create_assistant(self, request: AssistantCreate) -> Assistant:
         """Create a new assistant"""
         value = request.model_dump()
-        original_metadata = dict(value.get("metadata") or {})
+        # Deep copy: a handler may mutate a nested dict/list in place, and a
+        # shallow copy would share that nested object, hiding the change from
+        # the delta comparison below.
+        original_metadata = deepcopy(value.get("metadata") or {})
         await self._dispatch("create", value)
         request.metadata = _injected_metadata(request.metadata, value)
         # Isolate what the handler itself added/changed, as opposed to

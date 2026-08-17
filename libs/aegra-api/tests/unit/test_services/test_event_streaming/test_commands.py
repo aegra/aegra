@@ -88,6 +88,17 @@ class TestRunStart:
         assert run_id is None
         prepared_run.assert_not_called()
 
+    @pytest.mark.parametrize("context", [[], False, 0, ""])
+    async def test_run_start_rejects_non_object_context(
+        self, prepared_run: AsyncMock, user: User, context: Any
+    ) -> None:
+        resp, run_id = await _dispatch(
+            {"id": 1, "method": "run.start", "params": {"assistant_id": "agent", "context": context}}, user
+        )
+        assert resp["error"] == "invalid_argument"
+        assert run_id is None
+        prepared_run.assert_not_called()
+
     async def test_run_start_forwards_multitask_strategy(self, prepared_run: AsyncMock, user: User) -> None:
         await _dispatch(
             {

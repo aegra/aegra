@@ -3,7 +3,7 @@
   "info": {
     "title": "Aegra",
     "description": "Production-ready Agent Protocol server",
-    "version": "0.10.2"
+    "version": "0.10.4"
   },
   "paths": {
     "/info": {
@@ -148,7 +148,7 @@
           "Assistants"
         ],
         "summary": "Create Assistant",
-        "description": "Create a new assistant.\n\nAn assistant is a configured instance of a graph. Provide a `graph_id`\nreferencing a graph defined in your `aegra.json`. If `assistant_id` is\nomitted, one is auto-generated. Set `if_exists` to `\"do_nothing\"` for\nidempotent creation.",
+        "description": "Create a new assistant.\n\nAn assistant is a configured instance of a graph. Provide a `graph_id`\nreferencing a graph defined in your `aegra.json`. If `assistant_id` is\nomitted, one is auto-generated. Set `if_exists` to `\"do_nothing\"` for\nidempotent creation; otherwise a taken `assistant_id` or an identical\ngraph/config pair answers 409.",
         "operationId": "create_assistant_assistants_post",
         "requestBody": {
           "content": {
@@ -167,6 +167,16 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/Assistant"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Resource state conflict",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AgentProtocolError"
                 }
               }
             }

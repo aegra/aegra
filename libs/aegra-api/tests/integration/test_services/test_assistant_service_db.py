@@ -8,13 +8,14 @@ from unittest.mock import Mock
 
 import pytest
 from fastapi import HTTPException
+from sqlalchemy import Insert
+from sqlalchemy.dialects import postgresql
 
-from aegra_api.core.orm import Assistant as AssistantORM
 from aegra_api.core.orm import AssistantVersion as AssistantVersionORM
 from aegra_api.models import Assistant, AssistantCreate, AssistantUpdate
 from aegra_api.models.auth import User
 from aegra_api.services.assistant_service import AssistantService
-from tests.fixtures.database import DummySessionBase
+from tests.fixtures.database import DummyScalarResult, DummySessionBase, echo_inserted_row
 
 
 class TestAssistantServiceDatabase:
@@ -33,7 +34,13 @@ class TestAssistantServiceDatabase:
     @pytest.fixture
     def db_session(self):
         """Database session for testing"""
-        from unittest.mock import AsyncMock
+        from unittest.mock import DEFAULT, AsyncMock
+
+        def echo_inserts(stmt=None):
+            """Inserts echo their RETURNING row; reads fall through to return_value."""
+            if isinstance(stmt, Insert):
+                return DummyScalarResult([echo_inserted_row(stmt)])
+            return DEFAULT
 
         class AssistantTestSession(DummySessionBase):
             def __init__(self):
@@ -43,7 +50,7 @@ class TestAssistantServiceDatabase:
 
                 # Create mockable methods
                 self.scalar = AsyncMock()
-                self.scalars = AsyncMock()
+                self.scalars = AsyncMock(side_effect=echo_inserts)
                 self.execute = AsyncMock()
                 self.commit = AsyncMock()
                 self.refresh = AsyncMock()
@@ -103,12 +110,16 @@ class TestAssistantServiceDatabase:
         assert result.config == {"temperature": 0.7}
         assert result.metadata == {"env": "test"}
 
-        # Verify assistant ORM object was added to session
-        assert len(assistant_service.session.added_objects) >= 1
-        assistant_orm = assistant_service.session.added_objects[0]
-        assert isinstance(assistant_orm, AssistantORM)
-        assert assistant_orm.name == "Test Assistant"
-        assert assistant_orm.metadata_dict == {"env": "test"}
+        # The row is written by one conflict-tolerant INSERT and read back from its
+        # RETURNING, so a concurrent create cannot turn a unique violation into a 500.
+        insert_stmt = assistant_service.session.scalars.call_args.args[0]
+        compiled = str(insert_stmt.compile(dialect=postgresql.dialect()))
+        assert "INSERT INTO assistant" in compiled
+        assert "ON CONFLICT DO NOTHING" in compiled
+        assert "RETURNING" in compiled
+
+        # Only the version row goes through session.add now
+        assert all(isinstance(obj, AssistantVersionORM) for obj in assistant_service.session.added_objects)
 
     @pytest.mark.asyncio
     async def test_create_assistant_version_creation(self, assistant_service):
@@ -252,6 +263,8 @@ class TestAssistantServiceDatabase:
         mock_result.all.return_value = []
 
         assistant_service.session.scalars.return_value = mock_result
+        # Drop the creates' inserts so the count below only covers the search
+        assistant_service.session.scalars.reset_mock()
 
         result = await assistant_service.search_assistants(mock_request)
 
@@ -380,6 +393,8 @@ class TestAssistantServiceDatabase:
         mock_result.all.return_value = []
 
         assistant_service.session.scalars.return_value = mock_result
+        # Drop the creates' inserts so the count below only covers the search
+        assistant_service.session.scalars.reset_mock()
 
         result = await assistant_service.search_assistants(mock_request)
 
@@ -412,8 +427,8 @@ class TestAssistantServiceDatabase:
         result = await assistant_service.count_assistants(mock_request)
 
         assert result == 3
-        # scalar is called 4 times: 3 for create_assistant + 1 for count_assistants
-        assert assistant_service.session.scalar.call_count == 4
+        # Uncontended creates never SELECT, so only count_assistants calls scalar
+        assert assistant_service.session.scalar.call_count == 1
 
     @pytest.mark.asyncio
     async def test_assistant_concurrent_operations(self, assistant_service):

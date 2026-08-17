@@ -1,11 +1,26 @@
 """Database fixtures for tests"""
 
 from collections.abc import AsyncIterator, Callable
+from datetime import UTC, datetime
 from types import SimpleNamespace
 from typing import Any
 
-from sqlalchemy import Insert
+from sqlalchemy import DateTime, Insert, inspect
 from sqlalchemy.dialects import postgresql
+from sqlalchemy.exc import NoInspectionAvailable
+
+
+def _orm_attribute_names(stmt: Insert) -> dict[str, str]:
+    """Map column names to the ORM attributes a handler reads them back through.
+
+    Assistant stores metadata in a column named ``metadata`` behind the
+    ``metadata_dict`` attribute, so echoing the bound keys verbatim is not enough.
+    """
+    try:
+        mapper = inspect(stmt.entity_description["type"])
+    except (KeyError, TypeError, NoInspectionAvailable):
+        return {}
+    return {column.key: prop.key for prop in mapper.column_attrs for column in prop.columns}
 
 
 def echo_inserted_row(stmt: Insert) -> Any:
@@ -15,7 +30,17 @@ def echo_inserted_row(stmt: Insert) -> Any:
     object it built itself, so a session mock has to echo the bound values back.
     """
     params = stmt.compile(dialect=postgresql.dialect()).params
-    return SimpleNamespace(**params)
+    attributes = _orm_attribute_names(stmt)
+    row = {attributes.get(key, key): value for key, value in params.items()}
+
+    # Postgres fills the timestamps the statement left out; without them a row
+    # read straight back through Pydantic fails on missing created_at/updated_at.
+    now = datetime.now(UTC)
+    for column in stmt.table.columns:
+        if column.key not in params and isinstance(column.type, DateTime):
+            row.setdefault(attributes.get(column.key, column.key), now)
+
+    return SimpleNamespace(**row)
 
 
 class DummyScalarResult:

@@ -58,9 +58,8 @@ def client(monkeypatch: pytest.MonkeyPatch) -> TestClient:
     # Override the ORM get_session dependency (still used by POST /threads)
     app.dependency_overrides[core_get_session] = override_get_session_dep(Session)
 
-    # History endpoints manage their session manually via _get_session_maker
-    # (not Depends(get_session)), so the dependency override above doesn't
-    # reach them — patch the session-maker entry point directly instead.
+    # History endpoints use _get_session_maker rather than Depends(get_session),
+    # so patch the session-maker entry point directly.
     monkeypatch.setattr("aegra_api.api.threads._get_session_maker", lambda: Session)
 
     return make_client(app)

@@ -36,7 +36,7 @@ aegra dev
   },
   "http": {
     "app": "./custom_routes.py:app",
-    "enable_custom_route_auth": false,
+    "enable_custom_route_auth": true,
     "cors": {
       "allow_origins": ["https://example.com"],
       "allow_credentials": true
@@ -226,7 +226,7 @@ Configure custom routes and CORS.
 {
   "http": {
     "app": "./custom_routes.py:app",
-    "enable_custom_route_auth": false,
+    "enable_custom_route_auth": true,
     "cors": {
       "allow_origins": ["https://example.com"],
       "allow_credentials": true
@@ -238,7 +238,7 @@ Configure custom routes and CORS.
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `app` | `string` | `None` | Import path to custom FastAPI app |
-| `enable_custom_route_auth` | `bool` | `false` | Apply Aegra auth to all custom routes |
+| `enable_custom_route_auth` | `bool` | `true` | Apply Aegra auth to all custom routes |
 | `cors.allow_origins` | `list[str]` | `["*"]` | Allowed CORS origins |
 | `cors.allow_credentials` | `bool` | `false` when origins is `["*"]`, `true` otherwise | Allow credentials in CORS requests |
 

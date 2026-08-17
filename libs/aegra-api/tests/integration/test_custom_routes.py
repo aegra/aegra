@@ -130,9 +130,11 @@ async def test_create_app_enables_custom_route_auth_by_default(
     from aegra_api.main import create_app
 
     app = create_app()
-    route = _find_route(app, "/custom/hello")
+    custom_route = _find_route(app, "/custom/hello")
+    health_route = _find_route(app, "/health")
 
-    assert route.dependencies[: len(auth_dependency)] == auth_dependency
+    assert custom_route.dependencies[: len(auth_dependency)] == auth_dependency
+    assert health_route.dependencies == []
 
 
 @pytest.mark.asyncio

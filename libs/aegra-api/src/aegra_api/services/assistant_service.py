@@ -212,6 +212,12 @@ class AssistantService(Authenticated):
 
         if existing:
             if request.if_exists == "do_nothing":
+                merged_metadata = _injected_metadata(existing.metadata_dict, value) or {}
+                if merged_metadata != existing.metadata_dict:
+                    existing.metadata_dict = merged_metadata
+                    existing.updated_at = datetime.now(UTC)
+                    await self.session.commit()
+                    await self.session.refresh(existing)
                 return to_pydantic(existing)
             else:  # error (default)
                 raise HTTPException(409, f"Assistant '{assistant_id}' already exists")

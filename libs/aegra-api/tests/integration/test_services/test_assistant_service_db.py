@@ -478,6 +478,51 @@ class TestAssistantServiceDatabase:
         assert result.name == "Large Metadata Assistant"
 
     @pytest.mark.asyncio
+    async def test_create_assistant_do_nothing_refreshes_injected_metadata(self, assistant_service, monkeypatch):
+        """Regression test for #495.
+
+        A create() call that resolves via if_exists="do_nothing" to a
+        pre-existing row must still apply the auth handler's freshly-injected
+        metadata (e.g. created_by, team_id), not silently return the stale row.
+        """
+        existing = AssistantORM(
+            assistant_id="existing-id",
+            name="Existing Assistant",
+            graph_id="test-graph",
+            config={},
+            context={},
+            user_id="user-123",
+            version=1,
+            metadata_dict={},
+            created_at=datetime.now(UTC),
+            updated_at=datetime.now(UTC),
+        )
+        assistant_service.session.scalar.return_value = existing
+
+        from aegra_api.services import authenticated
+
+        async def inject_handler(ctx, value):
+            value["metadata"]["created_by"] = "charlie"
+            value["metadata"]["team_id"] = "team111"
+            return None
+
+        monkeypatch.setattr(authenticated, "handle_event", inject_handler)
+
+        request = AssistantCreate(
+            graph_id="test-graph",
+            name="New Request Name",
+            metadata={},
+            if_exists="do_nothing",
+        )
+
+        result = await assistant_service.create_assistant(request)
+
+        assert result.metadata.get("created_by") == "charlie"
+        assert result.metadata.get("team_id") == "team111"
+        assert existing.metadata_dict.get("created_by") == "charlie"
+        assistant_service.session.commit.assert_awaited()
+
+    @pytest.mark.asyncio
     async def test_assistant_special_characters(self, assistant_service):
         """Test assistant creation with special characters"""
         special_name = "Assistant with émojis 🚀 and spëcial çharacters"

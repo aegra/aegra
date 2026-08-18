@@ -58,17 +58,11 @@ def _thread_run_lister(thread_id: str, user: User) -> RunLister:
     broker events expired instead of tailing them forever; graph_name feeds the
     run's root lifecycle events. Each tick uses a short-lived session so a
     connection is not held for the whole SSE lifetime (see #423).
-
-    The checkout is shielded from sse-starlette's ``cancel_on_finish`` anyio
-    scope: that cancel punches through ``asyncio.shield``, so an unshielded
-    ``async with`` is GC-terminated and leaks the pooled asyncpg connection
-    (#530). The SELECT is a single indexed poll, so delaying cancel until it
-    finishes is cheaper than losing the connection. The caller awaits
-    ``asyncio.sleep`` between ticks, which is the unshielded cancel checkpoint.
     """
 
     async def list_run_ids() -> list[tuple[str, str | None, str | None]]:
         maker = _get_session_maker()
+        # sse-starlette's anyio cancel punches through asyncio.shield (#530).
         with anyio.CancelScope(shield=True):
             async with maker() as session:
                 rows = await session.execute(

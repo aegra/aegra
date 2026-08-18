@@ -13,6 +13,7 @@ from __future__ import annotations
 
 from collections.abc import AsyncGenerator
 
+import anyio
 import structlog
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import JSONResponse
@@ -57,18 +58,26 @@ def _thread_run_lister(thread_id: str, user: User) -> RunLister:
     broker events expired instead of tailing them forever; graph_name feeds the
     run's root lifecycle events. Each tick uses a short-lived session so a
     connection is not held for the whole SSE lifetime (see #423).
+
+    The checkout is shielded from sse-starlette's ``cancel_on_finish`` anyio
+    scope: that cancel punches through ``asyncio.shield``, so an unshielded
+    ``async with`` is GC-terminated and leaks the pooled asyncpg connection
+    (#530). The SELECT is a single indexed poll, so delaying cancel until it
+    finishes is cheaper than losing the connection. The caller awaits
+    ``asyncio.sleep`` between ticks, which is the unshielded cancel checkpoint.
     """
 
     async def list_run_ids() -> list[tuple[str, str | None, str | None]]:
         maker = _get_session_maker()
-        async with maker() as session:
-            rows = await session.execute(
-                select(RunORM.run_id, RunORM.status, AssistantORM.graph_id)
-                .outerjoin(AssistantORM, RunORM.assistant_id == AssistantORM.assistant_id)
-                .where(RunORM.thread_id == thread_id, RunORM.user_id == user.identity)
-                .order_by(RunORM.created_at.asc())
-            )
-            return [(run_id, status, graph_id) for run_id, status, graph_id in rows.all()]
+        with anyio.CancelScope(shield=True):
+            async with maker() as session:
+                rows = await session.execute(
+                    select(RunORM.run_id, RunORM.status, AssistantORM.graph_id)
+                    .outerjoin(AssistantORM, RunORM.assistant_id == AssistantORM.assistant_id)
+                    .where(RunORM.thread_id == thread_id, RunORM.user_id == user.identity)
+                    .order_by(RunORM.created_at.asc())
+                )
+                return [(run_id, status, graph_id) for run_id, status, graph_id in rows.all()]
 
     return list_run_ids
 

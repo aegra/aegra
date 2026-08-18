@@ -19,7 +19,7 @@ from typing import Any
 import structlog
 from redis import RedisError
 
-from aegra_api.core.active_runs import active_runs, explicit_run_cancellations
+from aegra_api.core.active_runs import request_local_cancellation
 from aegra_api.core.redis_manager import redis_manager
 from aegra_api.core.serializers import GeneralSerializer
 from aegra_api.models.enums import RunCancellationAction
@@ -48,6 +48,8 @@ _BACKOFF_FACTOR = 2.0
 # block forever, but it should still retry a transient blip rather than drop the
 # event — a dropped event is a permanently lost SSE token.
 _PUT_MAX_ATTEMPTS = 3
+# Survives a missed pub/sub so the owning worker can honor cancel on heartbeat.
+_CANCEL_INTENT_TTL_SECONDS = 3600
 
 
 def _serialize_payload(payload: Any) -> str:
@@ -65,6 +67,31 @@ def _deserialize_payload(raw: Any) -> Any:
     if isinstance(raw, list) and len(raw) >= 1 and isinstance(raw[0], str):
         return tuple(raw)
     return raw
+
+
+def cancel_intent_key(run_id: str) -> str:
+    """Per-run durable cancel key. Untagged, matching existing per-run keys."""
+    return f"{settings.redis.REDIS_CHANNEL_PREFIX}{run_id}:cancel"
+
+
+async def persist_cancel_intent(run_id: str, action: RunCancellationAction) -> None:
+    """Record cancel/interrupt so a missed PUBLISH is still recoverable."""
+    try:
+        client = redis_manager.get_client()
+        await client.set(cancel_intent_key(run_id), action, ex=_CANCEL_INTENT_TTL_SECONDS)
+    except RedisError:
+        logger.warning("Failed to persist cancel intent", run_id=run_id)
+
+
+async def cancel_intent_exists(run_id: str) -> bool:
+    """True when a durable cancel/interrupt intent is set for this run."""
+    try:
+        client = redis_manager.get_client()
+        value = await client.get(cancel_intent_key(run_id))
+    except RedisError:
+        logger.warning("Failed to read cancel intent", run_id=run_id)
+        return False
+    return bool(value)
 
 
 def _backoff_delay(attempt: int) -> float:
@@ -383,7 +410,8 @@ class RedisBrokerManager(BaseBrokerManager):
         *,
         emit_end_event: bool = True,
     ) -> None:
-        """Broadcast a cancel command via Redis pub/sub."""
+        """Persist cancel intent, publish, then always cancel a local owner."""
+        await persist_cancel_intent(run_id, action)
         message = json.dumps(
             {
                 "run_id": run_id,
@@ -397,9 +425,7 @@ class RedisBrokerManager(BaseBrokerManager):
             logger.info(f"Published {action} command for run {run_id}")
         except RedisError as e:
             logger.error(f"Failed to publish {action} for run {run_id}: {e}")
-            # Fall back to local execution - if the task is on this instance,
-            # we can still cancel it even if Redis publish fails.
-            await self._execute_cancel(run_id, emit_end_event=emit_end_event)
+        await self._execute_cancel(run_id, emit_end_event=emit_end_event)
 
     async def get_event_sequence(self, run_id: str) -> int:
         """Read the current event sequence counter from Redis (O(1) GET)."""
@@ -479,13 +505,10 @@ class RedisBrokerManager(BaseBrokerManager):
 
     async def _execute_cancel(self, run_id: str, *, emit_end_event: bool = True) -> None:
         """Cancel a locally-owned task and signal the broker."""
-        task = active_runs.get(run_id)
-        if task is None or task.done():
+        if not request_local_cancellation(run_id):
             return
 
         logger.info(f"Cancelling run {run_id} (local task found)")
-        explicit_run_cancellations.add(run_id)
-        task.cancel()
 
         broker = self.get_or_create_broker(run_id)
         if emit_end_event and not broker.is_finished():

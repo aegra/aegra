@@ -224,7 +224,7 @@ await client.runs.cancel(
 
 Cancellation is asynchronous while a live worker owns the run.
 The cancel response may therefore still show `pending` or `running`; poll, join, or stream the run until it reaches a terminal status.
-Use the REST endpoint with `wait=1` when the caller needs the request to wait briefly for the worker to settle.
+Use `wait=1` to block the request until the worker settles (about 25 seconds by default: two heartbeats plus slack). The response may still be non-terminal if that bound expires.
 
 ## SSE reconnection
 

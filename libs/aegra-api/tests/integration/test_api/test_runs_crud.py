@@ -295,6 +295,12 @@ class TestUpdateRun:
 class TestCancelRun:
     """Test POST /threads/{thread_id}/runs/{run_id}/cancel"""
 
+    def _session_maker(self, session: DummySessionBase) -> MagicMock:
+        ctx = AsyncMock()
+        ctx.__aenter__ = AsyncMock(return_value=session)
+        ctx.__aexit__ = AsyncMock(return_value=False)
+        return MagicMock(return_value=ctx)
+
     def test_cancel_run_not_found(self):
         """Test canceling a non-existent run"""
         app = create_test_app(include_runs=True, include_threads=False)
@@ -303,10 +309,11 @@ class TestCancelRun:
             async def scalar(self, _stmt):
                 return None
 
-        override_session_dependency(app, BasicSession)
+        maker = self._session_maker(Session())
         client = make_client(app)
 
-        resp = client.post("/threads/test-thread-123/runs/nonexistent/cancel")
+        with patch("aegra_api.api.runs.get_session_maker", return_value=maker):
+            resp = client.post("/threads/test-thread-123/runs/nonexistent/cancel")
 
         assert resp.status_code == 404
 
@@ -326,10 +333,11 @@ class TestCancelRun:
             async def commit(self):
                 pass
 
-        override_session_dependency(app, Session)
+        maker = self._session_maker(Session())
         client = make_client(app)
 
         with (
+            patch("aegra_api.api.runs.get_session_maker", return_value=maker),
             patch("aegra_api.api.runs.streaming_service") as mock_streaming,
             patch(
                 "aegra_api.api.runs.interrupt_unowned_run",

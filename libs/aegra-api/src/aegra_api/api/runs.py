@@ -18,7 +18,7 @@ from aegra_api.core.auth_deps import auth_dependency, get_current_user
 from aegra_api.core.auth_handlers import build_auth_context, handle_event
 from aegra_api.core.orm import Run as RunORM
 from aegra_api.core.orm import Thread as ThreadORM
-from aegra_api.core.orm import _get_session_maker, get_session
+from aegra_api.core.orm import _get_session_maker, get_session, get_session_maker
 from aegra_api.core.sse import create_end_event, get_sse_headers, make_sse_response, sse_to_bytes
 from aegra_api.models import Run, RunCreate, RunStatus, User
 from aegra_api.models.enums import RunCancellationAction
@@ -26,7 +26,12 @@ from aegra_api.models.errors import CONFLICT, NOT_FOUND, SSE_RESPONSE
 from aegra_api.services.broker import broker_manager
 from aegra_api.services.run_preparation import _prepare_run
 from aegra_api.services.run_status import interrupt_unowned_run
-from aegra_api.services.run_waiters import TERMINAL_STATES, encode_output, heartbeat_wait_body
+from aegra_api.services.run_waiters import (
+    TERMINAL_STATES,
+    encode_output,
+    heartbeat_wait_body,
+    wait_for_terminal_run,
+)
 from aegra_api.services.streaming_service import streaming_service
 from aegra_api.settings import settings
 from aegra_api.utils.status_compat import validate_run_status
@@ -482,51 +487,59 @@ async def cancel_run_endpoint(
         0,
         ge=0,
         le=1,
-        description="Set to 1 to wait up to 10 seconds for the run task to settle before returning.",
+        description=(
+            "Set to 1 to wait for the run task to settle before returning. "
+            "Default bound is 25 seconds (2 heartbeats + 5s); the response may "
+            "still report pending or running if the bound expires."
+        ),
     ),
     action: RunCancellationAction = Query(
         "cancel",
         description="Cancellation strategy: 'cancel' for hard cancel, 'interrupt' for cooperative interrupt.",
     ),
     user: User = Depends(get_current_user),
-    session: AsyncSession = Depends(get_session),
 ) -> Run:
     """Cancel or interrupt a running execution.
 
     Use `action=cancel` to hard-cancel the run immediately, or
     `action=interrupt` to cooperatively interrupt (the graph can handle the
-    interrupt and save partial state). Set `wait=1` to wait up to 10 seconds
-    for the background task to settle before returning the updated run. The
-    response may still report `pending` or `running` if the timeout expires.
-    Without `wait=1`, a live-owned run is cancelled asynchronously, so the
-    response may still report `pending` or `running`.
+    interrupt and save partial state). Set `wait=1` to wait up to 25 seconds
+    by default (2 worker heartbeats + 5s) for the background task to settle
+    before returning the updated run. The response may still report `pending`
+    or `running` if the bound expires. Without `wait=1`, a live-owned run is
+    cancelled asynchronously, so the response may still report `pending` or
+    `running`.
     """
+    maker = get_session_maker()
     logger.info(f"[cancel_run] fetch run run_id={run_id} thread_id={thread_id} user={user.identity}")
-    run_orm = await session.scalar(
-        select(RunORM).where(
-            RunORM.run_id == run_id,
-            RunORM.thread_id == thread_id,
-            RunORM.user_id == user.identity,
+    async with maker() as session:
+        run_orm = await session.scalar(
+            select(RunORM).where(
+                RunORM.run_id == run_id,
+                RunORM.thread_id == thread_id,
+                RunORM.user_id == user.identity,
+            )
         )
-    )
-    if not run_orm:
-        raise HTTPException(404, f"Run '{run_id}' not found")
+        if not run_orm:
+            raise HTTPException(404, f"Run '{run_id}' not found")
 
-    logger.info(f"[cancel_run] request {action} run_id={run_id} user={user.identity} thread_id={thread_id}")
-    await _request_run_interruption(session, run_orm, action)
+        logger.info(f"[cancel_run] request {action} run_id={run_id} user={user.identity} thread_id={thread_id}")
+        await _request_run_interruption(session, run_orm, action)
 
-    # Optionally wait for the run to settle
     if wait:
-        # Poll DB until the run reaches a terminal state (or 10s timeout).
-        for _ in range(20):
-            await asyncio.sleep(0.5)
-            session.expire_all()  # sync method, clears cache
-            fresh = await session.scalar(select(RunORM).where(RunORM.run_id == run_id))
-            if fresh and fresh.status in TERMINAL_STATES:
-                break
+        await wait_for_terminal_run(run_id)
 
-    await session.refresh(run_orm)
-    return Run.model_validate(run_orm)
+    async with maker() as session:
+        fresh = await session.scalar(
+            select(RunORM).where(
+                RunORM.run_id == run_id,
+                RunORM.thread_id == thread_id,
+                RunORM.user_id == user.identity,
+            )
+        )
+        if not fresh:
+            raise HTTPException(404, f"Run '{run_id}' not found")
+        return Run.model_validate(fresh)
 
 
 @router.delete(

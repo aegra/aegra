@@ -13,6 +13,7 @@ from aegra_api.services.redis_broker import (
     RedisRunBroker,
     _deserialize_payload,
     _serialize_payload,
+    read_cancel_intent,
 )
 
 
@@ -56,6 +57,33 @@ class TestSerializationHelpers:
         result = _deserialize_payload(["end", {"status": "success"}])
         assert result == ("end", {"status": "success"})
         assert isinstance(result, tuple)
+
+
+class TestReadCancelIntent:
+    @pytest.mark.asyncio
+    async def test_returns_stored_action(self) -> None:
+        mock_client = MagicMock()
+        mock_client.get = AsyncMock(return_value=b"interrupt")
+
+        with patch("aegra_api.services.redis_broker.redis_manager") as mock_rm:
+            mock_rm.get_client.return_value = mock_client
+            assert await read_cancel_intent("run-123") == "interrupt"
+
+        mock_client.get.assert_awaited_once_with("aegra:run:run-123:cancel")
+
+    @pytest.mark.asyncio
+    async def test_returns_none_when_missing_or_redis_fails(self) -> None:
+        mock_client = MagicMock()
+        mock_client.get = AsyncMock(return_value=None)
+
+        with patch("aegra_api.services.redis_broker.redis_manager") as mock_rm:
+            mock_rm.get_client.return_value = mock_client
+            assert await read_cancel_intent("run-123") is None
+
+        mock_client.get = AsyncMock(side_effect=RedisConnectionError("Redis down"))
+        with patch("aegra_api.services.redis_broker.redis_manager") as mock_rm:
+            mock_rm.get_client.return_value = mock_client
+            assert await read_cancel_intent("run-123") is None
 
 
 class TestRedisRunBroker:
@@ -826,7 +854,7 @@ class TestRedisBrokerManager:
         ):
             await manager._execute_cancel("run-123")
 
-        assert cancellations == {"run-123"}
+        assert cancellations == set()
 
     @pytest.mark.asyncio
     async def test_start_and_stop(self) -> None:

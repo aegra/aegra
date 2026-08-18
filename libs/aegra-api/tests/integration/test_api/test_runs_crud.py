@@ -295,18 +295,18 @@ class TestUpdateRun:
 class TestCancelRun:
     """Test POST /threads/{thread_id}/runs/{run_id}/cancel"""
 
-    def _session_maker(self, session: DummySessionBase) -> MagicMock:
+    def _session_maker(self: "TestCancelRun", session: DummySessionBase) -> MagicMock:
         ctx = AsyncMock()
         ctx.__aenter__ = AsyncMock(return_value=session)
         ctx.__aexit__ = AsyncMock(return_value=False)
         return MagicMock(return_value=ctx)
 
-    def test_cancel_run_not_found(self):
+    def test_cancel_run_not_found(self) -> None:
         """Test canceling a non-existent run"""
         app = create_test_app(include_runs=True, include_threads=False)
 
         class Session(DummySessionBase):
-            async def scalar(self, _stmt):
+            async def scalar(self, _stmt: object) -> DummyRun | None:
                 return None
 
         maker = self._session_maker(Session())
@@ -317,21 +317,21 @@ class TestCancelRun:
 
         assert resp.status_code == 404
 
-    def test_cancel_run_success(self):
+    def test_cancel_run_success(self) -> None:
         """Test successfully canceling a run"""
         app = create_test_app(include_runs=True, include_threads=False)
 
         run = _run_row(status="running")
 
         class Session(DummySessionBase):
-            async def scalar(self, _stmt):
+            async def scalar(self, _stmt: object) -> DummyRun:
                 return run
 
-            async def execute(self, _stmt):
-                pass
+            async def execute(self, _stmt: object) -> None:
+                return None
 
-            async def commit(self):
-                pass
+            async def commit(self) -> None:
+                return None
 
         maker = self._session_maker(Session())
         client = make_client(app)

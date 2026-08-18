@@ -36,6 +36,7 @@ def cancel_wait_timeout_seconds() -> float:
 async def wait_for_terminal_run(
     run_id: str,
     *,
+    user_id: str,
     timeout_seconds: float | None = None,
 ) -> RunORM | None:
     """Poll the run row until it is terminal or the wait bound elapses.
@@ -48,7 +49,12 @@ async def wait_for_terminal_run(
     latest: RunORM | None = None
     while True:
         async with maker() as session:
-            latest = await session.scalar(select(RunORM).where(RunORM.run_id == run_id))
+            latest = await session.scalar(
+                select(RunORM).where(
+                    RunORM.run_id == run_id,
+                    RunORM.user_id == user_id,
+                )
+            )
             if latest is not None:
                 session.expunge(latest)
                 if latest.status in TERMINAL_STATES:

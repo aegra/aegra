@@ -255,8 +255,10 @@ sequenceDiagram
         A->>R: PUBLISH end event
     else live owner
         PG-->>A: no row updated
+        A->>R: SET aegra:run:{run_id}:cancel TTL 1h
         A->>R: PUBLISH aegra:run:cancel
         R->>B: Cancel message received
+        Note over B: heartbeat GET intent if pub/sub missed
         B->>B: task.cancel()
         B->>PG: Finalize run and thread
         B->>R: PUBLISH end event
@@ -288,6 +290,7 @@ sequenceDiagram
 | `aegra:run:cache:{run_id}` | SSE replay buffer | Worker (RPUSH) | API (LRANGE) |
 | `aegra:run:counter:{run_id}` | Event sequence counter | Worker (INCR) | API (GET) |
 | `aegra:run:cancel` | Cancel commands | API (PUBLISH) | Worker (SUBSCRIBE) |
+| `aegra:run:{run_id}:cancel` | Durable cancel/interrupt intent (TTL 1h) | API (SET) | Worker heartbeat (GET) |
 | `aegra:run:done:{run_id}` | Completion signal (TTL 1h) | Worker (SET) | API (EXISTS) |
 
 ## Configuration

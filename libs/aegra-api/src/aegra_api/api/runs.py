@@ -483,6 +483,7 @@ async def stream_run(
 async def cancel_run_endpoint(
     thread_id: str,
     run_id: str,
+    *,
     wait: int = Query(
         0,
         ge=0,
@@ -527,7 +528,7 @@ async def cancel_run_endpoint(
         await _request_run_interruption(session, run_orm, action)
 
     if wait:
-        await wait_for_terminal_run(run_id)
+        await wait_for_terminal_run(run_id, user_id=user.identity)
 
     async with maker() as session:
         fresh = await session.scalar(

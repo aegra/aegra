@@ -27,7 +27,7 @@ async def test_wait_for_terminal_run_returns_on_interrupted() -> None:
     maker.return_value = ctx
 
     with patch("aegra_api.services.run_waiters._get_session_maker", return_value=maker):
-        result = await wait_for_terminal_run("run-1", timeout_seconds=5)
+        result = await wait_for_terminal_run("run-1", user_id="user-1", timeout_seconds=5)
 
     assert result is run
     session.expunge.assert_called_once_with(run)
@@ -52,7 +52,7 @@ async def test_wait_for_terminal_run_times_out_still_running() -> None:
         patch("aegra_api.services.run_waiters.time") as mock_time,
     ):
         mock_time.monotonic.side_effect = [0.0, 6.0]
-        result = await wait_for_terminal_run("run-1", timeout_seconds=5)
+        result = await wait_for_terminal_run("run-1", user_id="user-1", timeout_seconds=5)
 
     assert result is run
     mock_sleep.assert_not_awaited()

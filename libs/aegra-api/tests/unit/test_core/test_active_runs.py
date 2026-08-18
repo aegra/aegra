@@ -20,7 +20,7 @@ def test_request_local_cancellation_cancels_live_task() -> None:
     assert run_id in cancellations
 
 
-def test_request_local_cancellation_marks_intent_without_local_task() -> None:
+def test_request_local_cancellation_skips_missing_task() -> None:
     run_id = "run-123"
 
     with (
@@ -29,7 +29,7 @@ def test_request_local_cancellation_marks_intent_without_local_task() -> None:
     ):
         assert request_local_cancellation(run_id) is False
 
-    assert run_id in cancellations
+    assert run_id not in cancellations
 
 
 def test_request_local_cancellation_skips_completed_task() -> None:
@@ -44,4 +44,4 @@ def test_request_local_cancellation_skips_completed_task() -> None:
         assert request_local_cancellation(run_id) is False
 
     mock_task.cancel.assert_not_called()
-    assert run_id in cancellations
+    assert run_id not in cancellations

@@ -83,15 +83,23 @@ async def persist_cancel_intent(run_id: str, action: RunCancellationAction) -> N
         logger.warning("Failed to persist cancel intent", run_id=run_id)
 
 
-async def cancel_intent_exists(run_id: str) -> bool:
-    """True when a durable cancel/interrupt intent is set for this run."""
+async def read_cancel_intent(run_id: str) -> RunCancellationAction | None:
+    """Return the stored cancel/interrupt action, or None if unset."""
     try:
         client = redis_manager.get_client()
         value = await client.get(cancel_intent_key(run_id))
     except RedisError:
         logger.warning("Failed to read cancel intent", run_id=run_id)
-        return False
-    return bool(value)
+        return None
+    if value is None:
+        return None
+    action = value.decode() if isinstance(value, (bytes, bytearray)) else str(value)
+    if action == "cancel":
+        return "cancel"
+    if action == "interrupt":
+        return "interrupt"
+    logger.warning("Unknown cancel intent action", run_id=run_id, action=action)
+    return None
 
 
 def _backoff_delay(attempt: int) -> float:

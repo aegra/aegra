@@ -215,7 +215,7 @@ class TestHeartbeatLoop:
             patch(f"{MODULE}._get_session_maker", return_value=maker),
             patch(f"{MODULE}.settings") as mock_settings,
             patch(f"{MODULE}.asyncio.sleep", side_effect=counting_sleep),
-            patch(f"{MODULE}.cancel_intent_exists", new_callable=AsyncMock, return_value=False),
+            patch(f"{MODULE}.read_cancel_intent", new_callable=AsyncMock, return_value=None),
         ):
             mock_settings.worker.HEARTBEAT_INTERVAL_SECONDS = 1
             mock_settings.worker.LEASE_DURATION_SECONDS = 30
@@ -245,7 +245,7 @@ class TestHeartbeatLoop:
             patch(f"{MODULE}._get_session_maker", return_value=maker),
             patch(f"{MODULE}.settings") as mock_settings,
             patch(f"{MODULE}.asyncio.sleep", side_effect=counting_sleep),
-            patch(f"{MODULE}.cancel_intent_exists", new_callable=AsyncMock, return_value=False),
+            patch(f"{MODULE}.read_cancel_intent", new_callable=AsyncMock, return_value=None),
         ):
             mock_settings.worker.HEARTBEAT_INTERVAL_SECONDS = 1
             mock_settings.worker.LEASE_DURATION_SECONDS = 30
@@ -257,7 +257,8 @@ class TestHeartbeatLoop:
         assert session.execute.await_count == 2
 
     @pytest.mark.asyncio
-    async def test_honors_cancel_intent_without_stopping_heartbeat(self) -> None:
+    @pytest.mark.parametrize("intent", ["cancel", "interrupt"])
+    async def test_honors_cancel_intent_without_stopping_heartbeat(self, intent: str) -> None:
         session = AsyncMock()
         session.execute = AsyncMock()
         session.commit = AsyncMock()
@@ -278,7 +279,7 @@ class TestHeartbeatLoop:
             patch(f"{MODULE}._get_session_maker", return_value=maker),
             patch(f"{MODULE}.settings") as mock_settings,
             patch(f"{MODULE}.asyncio.sleep", side_effect=counting_sleep),
-            patch(f"{MODULE}.cancel_intent_exists", new_callable=AsyncMock, return_value=True),
+            patch(f"{MODULE}.read_cancel_intent", new_callable=AsyncMock, return_value=intent),
             patch.dict("aegra_api.core.active_runs.active_runs", {run_id: mock_task}, clear=True),
             patch("aegra_api.core.active_runs.explicit_run_cancellations", set()) as cancellations,
         ):
@@ -311,7 +312,7 @@ class TestHeartbeatLoop:
             patch(f"{MODULE}.settings") as mock_settings,
             patch(f"{MODULE}.asyncio.sleep", side_effect=counting_sleep),
             patch(
-                f"{MODULE}.cancel_intent_exists",
+                f"{MODULE}.read_cancel_intent",
                 new_callable=AsyncMock,
                 side_effect=RedisConnectionError("Redis down"),
             ),

@@ -4,6 +4,9 @@ Periodically scans the runs table for rows where
 ``status='running' AND lease_expires_at < now()``. It atomically either
 returns them to ``pending`` or marks their retry budget exhausted, then
 re-enqueues only retryable run IDs.
+
+Runs that never took a lease cannot match that predicate; a startup sweep
+reconciles those separately.
 """
 
 import asyncio
@@ -22,6 +25,11 @@ from aegra_api.services.run_status import set_thread_status_if_no_active_runs
 from aegra_api.settings import settings
 
 logger = structlog.getLogger(__name__)
+
+# Bound the startup sweep so a large backlog cannot open one huge transaction.
+_SWEEP_BATCH_SIZE = 500
+_SWEEP_MAX_BATCHES = 100
+_MAX_LOGGED_RUN_IDS = 20
 
 
 class LeaseReaper:
@@ -116,6 +124,93 @@ class LeaseReaper:
             stuck_pending = [row[0] for row in stuck_result.fetchall()]
 
         return crashed, stuck_pending
+
+    @staticmethod
+    async def sweep_leaseless_orphans() -> int:
+        """Fail stale ``running`` rows that never took a lease. Returns the count swept.
+
+        Assumes every replica agrees on ``REDIS_BROKER_ENABLED``; a replica still
+        running the local executor would have its active runs swept.
+        """
+        if not settings.worker.ORPHAN_SWEEP_ENABLED:
+            logger.info("Orphan sweep disabled, skipping")
+            return 0
+
+        total = 0
+        sample: list[str] = []
+
+        for _ in range(_SWEEP_MAX_BATCHES):
+            selected, swept = await LeaseReaper._sweep_one_batch()
+            if swept:
+                total += len(swept)
+                sample.extend(swept[: _MAX_LOGGED_RUN_IDS - len(sample)])
+                REAPER_RECOVERED_RUNS.labels(outcome="local_orphan").inc(len(swept))
+            if selected == 0:
+                break
+        else:
+            logger.warning("Orphan sweep hit its batch limit; the rest waits for the next startup")
+
+        if total:
+            logger.warning("Swept runs orphaned without a lease", count=total, run_ids=sample)
+
+        return total
+
+    @staticmethod
+    async def _sweep_one_batch() -> tuple[int, list[str]]:
+        """Sweep one batch in a single transaction. Returns (rows seen, run IDs swept)."""
+        now = datetime.now(UTC)
+        cutoff = now - timedelta(seconds=settings.worker.ORPHAN_SWEEP_MIN_AGE_SECONDS)
+        swept: list[str] = []
+        threads_by_user: dict[str, set[str]] = {}
+
+        maker = _get_session_maker()
+        async with maker() as session:
+            locked_result = await session.execute(
+                select(RunORM.run_id, RunORM.thread_id, RunORM.user_id)
+                .where(
+                    RunORM.status == "running",
+                    RunORM.claimed_by.is_(None),
+                    RunORM.lease_expires_at.is_(None),
+                    RunORM.updated_at < cutoff,
+                )
+                .limit(_SWEEP_BATCH_SIZE)
+                .with_for_update(skip_locked=True)
+            )
+            rows = locked_result.fetchall()
+
+            for run_id, thread_id, user_id in rows:
+                update_result = await session.execute(
+                    update(RunORM)
+                    .where(
+                        RunORM.run_id == run_id,
+                        RunORM.user_id == user_id,
+                        RunORM.status == "running",
+                        RunORM.claimed_by.is_(None),
+                        RunORM.lease_expires_at.is_(None),
+                    )
+                    .values(
+                        status="error",
+                        error_message="Run orphaned without a lease and could not be recovered",
+                        updated_at=now,
+                    )
+                    .returning(RunORM.run_id)
+                )
+                if update_result.scalar_one_or_none() is None:
+                    continue
+
+                swept.append(run_id)
+                threads_by_user.setdefault(user_id, set()).add(thread_id)
+
+            for user_id, thread_ids in threads_by_user.items():
+                await set_thread_status_if_no_active_runs(
+                    session,
+                    thread_ids,
+                    "error",
+                    user_id=user_id,
+                )
+            await session.commit()
+
+        return len(rows), swept
 
     @staticmethod
     async def _recover_crashed_runs(run_ids: list[str]) -> tuple[list[str], list[str]]:

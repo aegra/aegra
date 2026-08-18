@@ -4,9 +4,10 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from redis import RedisError
+from sqlalchemy.dialects import postgresql
 
 from aegra_api.observability.metrics import REAPER_RECOVERED_RUNS
-from aegra_api.services.lease_reaper import LeaseReaper
+from aegra_api.services.lease_reaper import _SWEEP_MAX_BATCHES, LeaseReaper
 
 
 def _recovered_count(outcome: str) -> float:
@@ -400,3 +401,125 @@ class TestStartStop:
         # Should not raise
         await reaper.stop()
         assert reaper._task is None
+
+
+class TestSweepOneBatch:
+    @pytest.mark.asyncio
+    async def test_marks_orphan_error_and_reconciles_its_thread(self) -> None:
+        session = AsyncMock()
+        locked = MagicMock()
+        locked.fetchall.return_value = [("run-1", "thread-1", "user-1")]
+        updated = MagicMock()
+        updated.scalar_one_or_none.return_value = "run-1"
+        session.execute = AsyncMock(side_effect=[locked, updated])
+        session.commit = AsyncMock()
+        maker = _make_session_maker(session)
+
+        with (
+            patch("aegra_api.services.lease_reaper._get_session_maker", return_value=maker),
+            patch("aegra_api.services.lease_reaper.settings") as mock_settings,
+            patch(
+                "aegra_api.services.lease_reaper.set_thread_status_if_no_active_runs",
+                new_callable=AsyncMock,
+            ) as mock_set_thread,
+        ):
+            mock_settings.worker.ORPHAN_SWEEP_MIN_AGE_SECONDS = 300
+            seen, swept = await LeaseReaper._sweep_one_batch()
+
+        assert (seen, swept) == (1, ["run-1"])
+        mock_set_thread.assert_awaited_once_with(session, {"thread-1"}, "error", user_id="user-1")
+        session.commit.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_selects_only_running_rows_that_never_held_a_lease(self) -> None:
+        session = AsyncMock()
+        locked = MagicMock()
+        locked.fetchall.return_value = []
+        session.execute = AsyncMock(return_value=locked)
+        session.commit = AsyncMock()
+        maker = _make_session_maker(session)
+
+        with (
+            patch("aegra_api.services.lease_reaper._get_session_maker", return_value=maker),
+            patch("aegra_api.services.lease_reaper.settings") as mock_settings,
+            patch(
+                "aegra_api.services.lease_reaper.set_thread_status_if_no_active_runs",
+                new_callable=AsyncMock,
+            ),
+        ):
+            mock_settings.worker.ORPHAN_SWEEP_MIN_AGE_SECONDS = 300
+            await LeaseReaper._sweep_one_batch()
+
+        statement = session.execute.await_args_list[0].args[0]
+        compiled = str(statement.compile(dialect=postgresql.dialect()))
+        assert "runs.claimed_by IS NULL" in compiled
+        assert "runs.lease_expires_at IS NULL" in compiled
+        assert "runs.updated_at <" in compiled
+        assert "FOR UPDATE SKIP LOCKED" in compiled
+
+    @pytest.mark.asyncio
+    async def test_counts_a_row_seen_but_not_swept_when_its_update_loses(self) -> None:
+        session = AsyncMock()
+        locked = MagicMock()
+        locked.fetchall.return_value = [("run-1", "thread-1", "user-1")]
+        updated = MagicMock()
+        updated.scalar_one_or_none.return_value = None
+        session.execute = AsyncMock(side_effect=[locked, updated])
+        session.commit = AsyncMock()
+        maker = _make_session_maker(session)
+
+        with (
+            patch("aegra_api.services.lease_reaper._get_session_maker", return_value=maker),
+            patch("aegra_api.services.lease_reaper.settings") as mock_settings,
+            patch(
+                "aegra_api.services.lease_reaper.set_thread_status_if_no_active_runs",
+                new_callable=AsyncMock,
+            ) as mock_set_thread,
+        ):
+            mock_settings.worker.ORPHAN_SWEEP_MIN_AGE_SECONDS = 300
+            seen, swept = await LeaseReaper._sweep_one_batch()
+
+        assert (seen, swept) == (1, [])
+        mock_set_thread.assert_not_awaited()
+
+
+class TestSweepLeaselessOrphans:
+    @pytest.mark.asyncio
+    async def test_keeps_batching_until_a_batch_sees_nothing(self) -> None:
+        batches = [(2, ["run-1", "run-2"]), (1, ["run-3"]), (0, [])]
+        before = _recovered_count("local_orphan")
+
+        with (
+            patch("aegra_api.services.lease_reaper.settings") as mock_settings,
+            patch.object(LeaseReaper, "_sweep_one_batch", new_callable=AsyncMock, side_effect=batches) as mock_batch,
+        ):
+            mock_settings.worker.ORPHAN_SWEEP_ENABLED = True
+            total = await LeaseReaper.sweep_leaseless_orphans()
+
+        assert total == 3
+        assert mock_batch.await_count == 3
+        assert _recovered_count("local_orphan") == before + 3
+
+    @pytest.mark.asyncio
+    async def test_stops_at_the_batch_limit_instead_of_looping_forever(self) -> None:
+        with (
+            patch("aegra_api.services.lease_reaper.settings") as mock_settings,
+            patch.object(LeaseReaper, "_sweep_one_batch", new_callable=AsyncMock, return_value=(1, [])) as mock_batch,
+        ):
+            mock_settings.worker.ORPHAN_SWEEP_ENABLED = True
+            total = await LeaseReaper.sweep_leaseless_orphans()
+
+        assert total == 0
+        assert mock_batch.await_count == _SWEEP_MAX_BATCHES
+
+    @pytest.mark.asyncio
+    async def test_does_not_touch_the_database_when_disabled(self) -> None:
+        with (
+            patch("aegra_api.services.lease_reaper.settings") as mock_settings,
+            patch.object(LeaseReaper, "_sweep_one_batch", new_callable=AsyncMock) as mock_batch,
+        ):
+            mock_settings.worker.ORPHAN_SWEEP_ENABLED = False
+            total = await LeaseReaper.sweep_leaseless_orphans()
+
+        assert total == 0
+        mock_batch.assert_not_awaited()

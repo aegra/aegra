@@ -376,6 +376,11 @@ class WorkerSettings(EnvBase):
     STUCK_PENDING_THRESHOLD_SECONDS: int = 120
     POSTGRES_POLL_INTERVAL_SECONDS: int = 5
 
+    # Startup sweep for running rows the reaper cannot see: no lease, no owner.
+    # Assumes every replica agrees on REDIS_BROKER_ENABLED.
+    ORPHAN_SWEEP_ENABLED: bool = True
+    ORPHAN_SWEEP_MIN_AGE_SECONDS: int = Field(default=300, ge=1)
+
     @model_validator(mode="after")
     def _validate_lease_timing(self) -> "WorkerSettings":
         """Ensure the worker lease safely outlives missed heartbeat intervals."""

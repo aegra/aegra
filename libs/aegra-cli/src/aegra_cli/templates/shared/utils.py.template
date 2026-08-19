@@ -1,7 +1,12 @@
 """Utility functions for $project_name."""
 
+import os
+
 from langchain.chat_models import init_chat_model
 from langchain_core.language_models import BaseChatModel
+from langchain_openai import ChatOpenAI
+
+_ORCAROUTER_BASE_URL = "https://api.orcarouter.ai/v1"
 
 
 def load_chat_model(fully_specified_name: str) -> BaseChatModel:
@@ -9,7 +14,8 @@ def load_chat_model(fully_specified_name: str) -> BaseChatModel:
 
     Args:
         fully_specified_name: String in the format 'provider/model'
-            e.g. 'openai/gpt-4o-mini', 'anthropic/claude-sonnet-4-20250514'.
+            e.g. 'openai/gpt-4o-mini', 'anthropic/claude-sonnet-4-20250514',
+            'orcarouter/orcarouter/auto'.
 
     Returns:
         A BaseChatModel instance.
@@ -18,13 +24,23 @@ def load_chat_model(fully_specified_name: str) -> BaseChatModel:
         ValueError: If fully_specified_name is not in 'provider/model' format.
     """
     if not fully_specified_name or not fully_specified_name.strip():
-        raise ValueError("fully_specified_name must be in 'provider/model' format, got empty string")
-    if fully_specified_name.count("/") != 1:
         raise ValueError(
-            f"fully_specified_name must be in 'provider/model' format, got '{fully_specified_name}'"
+            "fully_specified_name must be in 'provider/model' format, got empty string"
         )
     provider, model = fully_specified_name.split("/", maxsplit=1)
     if not provider.strip() or not model.strip():
+        raise ValueError(
+            f"fully_specified_name must be in 'provider/model' format, got '{fully_specified_name}'"
+        )
+    if provider == "orcarouter":
+        # OrcaRouter model IDs may themselves contain a slash (e.g. deepseek/deepseek-v4-pro).
+        api_key = os.environ.get("ORCAROUTER_API_KEY")
+        if not api_key:
+            raise ValueError(
+                "ORCAROUTER_API_KEY is not set — add it to your .env to use OrcaRouter."
+            )
+        return ChatOpenAI(model=model, api_key=api_key, base_url=_ORCAROUTER_BASE_URL)
+    if fully_specified_name.count("/") != 1:
         raise ValueError(
             f"fully_specified_name must be in 'provider/model' format, got '{fully_specified_name}'"
         )

@@ -288,6 +288,10 @@ class TestGeneralSerializer:
         with pytest.raises(SerializationError, match="serialize to the same key"):
             self.serializer.serialize({identifier: "uuid", str(identifier): "string"})
 
+    def test_serialize_dict_rejects_json_property_key_collisions(self) -> None:
+        with pytest.raises(SerializationError, match="serialize to the same key"):
+            self.serializer.serialize({1: "integer", "1": "string"})
+
     def test_serialize_command_structurally(self):
         """A LangGraph Command (returned by state-updating tools like
         write_todos) must serialize to its structural dict, NOT the str()

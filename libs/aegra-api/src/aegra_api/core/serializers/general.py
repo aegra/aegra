@@ -82,16 +82,20 @@ class GeneralSerializer(Serializer):
         else:
             return str(obj)
 
-    def _serialize_mapping_key(self, key: Any) -> str | int | float | bool | None:
+    def _serialize_mapping_key(self, key: Any) -> str:
         serialized_key = self._serialize_object(key)
-        if isinstance(serialized_key, (str, int, float, bool, type(None))):
+        if isinstance(serialized_key, str):
             return serialized_key
+        if isinstance(serialized_key, bool):
+            return "true" if serialized_key else "false"
+        if serialized_key is None:
+            return "null"
 
         return str(serialized_key)
 
-    def _serialize_mapping(self, mapping: dict[Any, Any]) -> dict[str | int | float | bool | None, Any]:
-        result: dict[str | int | float | bool | None, Any] = {}
-        original_keys: dict[str | int | float | bool | None, Any] = {}
+    def _serialize_mapping(self, mapping: dict[Any, Any]) -> dict[str, Any]:
+        result: dict[str, Any] = {}
+        original_keys: dict[str, Any] = {}
 
         for key, value in mapping.items():
             serialized_key = self._serialize_mapping_key(key)

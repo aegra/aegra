@@ -111,7 +111,8 @@ recursively by field, and common Python values use these representations:
 
 Nested values inside Pydantic or LangChain model dumps are normalized using the
 same rules. Mapping values are serialized recursively, and non-JSON-native keys
-such as `UUID` or `Path` are converted with the same scalar rules.
+such as `UUID` or `Path` are converted to JSON property names with the same
+scalar rules. Key collisions after conversion raise a serialization error.
 
 | Event | Description |
 |-------|-------------|

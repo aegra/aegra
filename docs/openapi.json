@@ -148,7 +148,7 @@
           "Assistants"
         ],
         "summary": "Create Assistant",
-        "description": "Create a new assistant.\n\nAn assistant is a configured instance of a graph. Provide a `graph_id`\nreferencing a graph defined in your `aegra.json`. If `assistant_id` is\nomitted, one is auto-generated. Set `if_exists` to `\"do_nothing\"` for\nidempotent creation; otherwise a taken `assistant_id` or an identical\ngraph/config pair answers 409.",
+        "description": "Create a new assistant.\n\nAn assistant is a configured instance of a graph. Provide a `graph_id`\nreferencing a graph defined in your `aegra.json`. If `assistant_id` is\nomitted, one is auto-generated. Set `if_exists` to `\"do_nothing\"` for\nidempotent creation.",
         "operationId": "create_assistant_assistants_post",
         "requestBody": {
           "content": {
@@ -167,16 +167,6 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/Assistant"
-                }
-              }
-            }
-          },
-          "409": {
-            "description": "Resource state conflict",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/AgentProtocolError"
                 }
               }
             }
@@ -2376,15 +2366,15 @@
             "required": false,
             "schema": {
               "enum": [
-                "cancel",
-                "interrupt"
+                "interrupt",
+                "rollback"
               ],
               "type": "string",
-              "description": "Cancellation strategy: 'cancel' for hard cancel, 'interrupt' for cooperative interrupt.",
+              "description": "Cancellation strategy: 'interrupt' or SDK-compatible 'rollback'.",
               "default": "interrupt",
               "title": "Action"
             },
-            "description": "Cancellation strategy: 'cancel' for hard cancel, 'interrupt' for cooperative interrupt."
+            "description": "Cancellation strategy: 'interrupt' or SDK-compatible 'rollback'."
           }
         ],
         "requestBody": {
@@ -4701,6 +4691,43 @@
         "description": "Run entity model\n\nStatus values: pending, running, error, success, timeout, interrupted"
       },
       "RunCancelMany": {
+        "anyOf": [
+          {
+            "properties": {
+              "thread_id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "thread_id"
+            ]
+          },
+          {
+            "properties": {
+              "run_ids": {
+                "minItems": 1
+              }
+            },
+            "required": [
+              "run_ids"
+            ]
+          },
+          {
+            "properties": {
+              "status": {
+                "type": "string",
+                "enum": [
+                  "pending",
+                  "running",
+                  "all"
+                ]
+              }
+            },
+            "required": [
+              "status"
+            ]
+          }
+        ],
         "properties": {
           "thread_id": {
             "anyOf": [
@@ -4720,7 +4747,8 @@
                 "items": {
                   "type": "string"
                 },
-                "type": "array"
+                "type": "array",
+                "minItems": 1
               },
               {
                 "type": "null"

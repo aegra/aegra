@@ -165,7 +165,7 @@ async def test_runs_cancel_e2e():
 
 @pytest.mark.e2e
 @pytest.mark.asyncio
-async def test_runs_cancel_many_sdk_e2e():
+async def test_runs_cancel_many_sdk_e2e() -> None:
     """The LangGraph SDK cancel_many helper must not 404 against Aegra."""
     client = get_e2e_client()
 

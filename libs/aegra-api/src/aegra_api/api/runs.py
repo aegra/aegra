@@ -21,7 +21,7 @@ from aegra_api.core.orm import Thread as ThreadORM
 from aegra_api.core.orm import _get_session_maker, get_session
 from aegra_api.core.sse import create_end_event, get_sse_headers, make_sse_response, sse_to_bytes
 from aegra_api.models import Run, RunCancelMany, RunCreate, RunStatus, User
-from aegra_api.models.enums import RunCancellationAction
+from aegra_api.models.enums import BulkRunCancellationAction, RunCancellationAction
 from aegra_api.models.errors import CONFLICT, NOT_FOUND, SSE_RESPONSE
 from aegra_api.services.broker import broker_manager
 from aegra_api.services.run_preparation import _prepare_run
@@ -532,9 +532,9 @@ async def cancel_run_endpoint(
 @router.post("/runs/cancel", response_model=list[Run])
 async def cancel_runs_endpoint(
     request: RunCancelMany,
-    action: RunCancellationAction = Query(
+    action: BulkRunCancellationAction = Query(
         "interrupt",
-        description="Cancellation strategy: 'cancel' for hard cancel, 'interrupt' for cooperative interrupt.",
+        description="Cancellation strategy: 'interrupt' or SDK-compatible 'rollback'.",
     ),
     user: User = Depends(get_current_user),
     session: AsyncSession = Depends(get_session),
@@ -557,12 +557,10 @@ async def cancel_runs_endpoint(
     result = await session.scalars(select(RunORM).where(*filters))
     run_orms = list(result.all())
 
-    logger.info(
-        f"[cancel_runs] request {action} matched={len(run_orms)} "
-        f"user={user.identity} thread_id={request.thread_id} status={request.status}"
-    )
+    logger.info(f"[cancel_runs] request {action} matched={len(run_orms)}")
+    interruption_action: RunCancellationAction = "interrupt"
     for run_orm in run_orms:
-        await _request_run_interruption(session, run_orm, action)
+        await _request_run_interruption(session, run_orm, interruption_action)
 
     for run_orm in run_orms:
         await session.refresh(run_orm)

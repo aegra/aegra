@@ -1,5 +1,6 @@
 """Integration tests for runs CRUD operations"""
 
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from tests.fixtures.clients import create_test_app, make_client
@@ -346,7 +347,7 @@ class TestCancelRun:
             mock_streaming.cancel_run.assert_awaited_once_with("test-run-123", emit_end_event=False)
             mock_streaming.signal_run_cancelled.assert_awaited_once_with("test-run-123")
 
-    def test_cancel_many_matches_sdk_payload(self):
+    def test_cancel_many_matches_sdk_payload(self) -> None:
         """Test bulk cancel accepts the langgraph-sdk cancel_many payload."""
         app = create_test_app(include_runs=True, include_threads=False)
 
@@ -356,9 +357,9 @@ class TestCancelRun:
         ]
 
         class Session(DummySessionBase):
-            async def scalars(self, _stmt):
+            async def scalars(self, _stmt: Any) -> Any:
                 class Result:
-                    def all(self):
+                    def all(self) -> list[Any]:
                         return runs
 
                 return Result()
@@ -389,16 +390,16 @@ class TestCancelRun:
             mock_streaming.interrupt_run.assert_any_await("run-2", emit_end_event=False)
             assert mock_streaming.signal_run_cancelled.await_count == 2
 
-    def test_cancel_many_status_all_is_safe_for_terminal_runs(self):
+    def test_cancel_many_status_all_is_safe_for_terminal_runs(self) -> None:
         """Test bulk cancel accepts status=all and leaves terminal runs untouched."""
         app = create_test_app(include_runs=True, include_threads=False)
 
         terminal_run = _run_row(run_id="run-success", status="success")
 
         class Session(DummySessionBase):
-            async def scalars(self, _stmt):
+            async def scalars(self, _stmt: Any) -> Any:
                 class Result:
-                    def all(self):
+                    def all(self) -> list[Any]:
                         return [terminal_run]
 
                 return Result()
@@ -421,7 +422,7 @@ class TestCancelRun:
             mock_streaming.cancel_run.assert_not_awaited()
             mock_streaming.interrupt_run.assert_not_awaited()
 
-    def test_cancel_many_requires_a_selector(self):
+    def test_cancel_many_requires_a_selector(self) -> None:
         """Test an empty bulk cancel request is rejected."""
         app = create_test_app(include_runs=True, include_threads=False)
 
@@ -432,14 +433,47 @@ class TestCancelRun:
 
         assert resp.status_code == 422
 
-    def test_cancel_many_rejects_unsupported_action(self):
-        """Test unsupported SDK actions fail explicitly."""
+    def test_cancel_many_accepts_sdk_rollback_action(self) -> None:
+        """Test the SDK rollback action is accepted for bulk cancellation."""
+        app = create_test_app(include_runs=True, include_threads=False)
+
+        run = _run_row(run_id="run-rollback", status="running")
+
+        class Session(DummySessionBase):
+            async def scalars(self, _stmt: Any) -> Any:
+                class Result:
+                    def all(self) -> list[Any]:
+                        return [run]
+
+                return Result()
+
+        override_session_dependency(app, Session)
+        client = make_client(app)
+
+        with (
+            patch("aegra_api.api.runs.streaming_service") as mock_streaming,
+            patch(
+                "aegra_api.api.runs.interrupt_unowned_run",
+                new_callable=AsyncMock,
+                return_value=True,
+            ),
+        ):
+            mock_streaming.interrupt_run = AsyncMock()
+            mock_streaming.signal_run_cancelled = AsyncMock()
+
+            resp = client.post("/runs/cancel?action=rollback", json={"status": "running"})
+
+            assert resp.status_code == 200
+            mock_streaming.interrupt_run.assert_awaited_once_with("run-rollback", emit_end_event=False)
+
+    def test_cancel_many_rejects_unsupported_action(self) -> None:
+        """Test unsupported actions fail explicitly."""
         app = create_test_app(include_runs=True, include_threads=False)
 
         override_session_dependency(app, BasicSession)
         client = make_client(app)
 
-        resp = client.post("/runs/cancel?action=rollback", json={"status": "running"})
+        resp = client.post("/runs/cancel?action=cancel", json={"status": "running"})
 
         assert resp.status_code == 422
 

@@ -144,8 +144,21 @@ class RunCreate(BaseModel):
 class RunCancelMany(BaseModel):
     """Request model for cancelling multiple runs."""
 
+    model_config = ConfigDict(
+        json_schema_extra={
+            "anyOf": [
+                {"required": ["thread_id"], "properties": {"thread_id": {"type": "string"}}},
+                {"required": ["run_ids"], "properties": {"run_ids": {"minItems": 1}}},
+                {
+                    "required": ["status"],
+                    "properties": {"status": {"type": "string", "enum": ["pending", "running", "all"]}},
+                },
+            ]
+        }
+    )
+
     thread_id: str | None = Field(None, description="Thread containing runs to cancel.")
-    run_ids: list[str] | None = Field(None, description="Specific run IDs to cancel.")
+    run_ids: list[str] | None = Field(None, min_length=1, description="Specific run IDs to cancel.")
     status: Literal["pending", "running", "all"] | None = Field(
         None,
         description="Run status selector. Use 'all' to target every matching non-terminal run.",

@@ -49,6 +49,37 @@ def test_convert_snapshot_to_thread_state_basic():
     assert result.interrupts == [{"value": "Provide value:", "id": TEST_INTERRUPT_ID}]
 
 
+def test_convert_snapshot_to_thread_state_moves_task_config_to_checkpoint() -> None:
+    service = ThreadStateService()
+    task = make_task(
+        state={
+            "configurable": {
+                "thread_id": "thread-123",
+                "checkpoint_ns": "gather-intent-agent:123",
+                "checkpoint_id": "checkpoint-subgraph",
+                "checkpoint_map": {"": "checkpoint-parent"},
+            }
+        },
+        interrupts=(),
+    )
+    snapshot = make_snapshot(
+        {},
+        {"configurable": {"checkpoint_id": "checkpoint-1", "checkpoint_ns": ""}},
+        tasks=(task,),
+    )
+
+    result = service.convert_snapshot_to_thread_state(snapshot, "thread-123", subgraphs=False)
+
+    task_result = result.tasks[0]
+    assert task_result["state"] is None
+    assert task_result["checkpoint"] == {
+        "thread_id": "thread-123",
+        "checkpoint_ns": "gather-intent-agent:123",
+        "checkpoint_id": "checkpoint-subgraph",
+        "checkpoint_map": {"": "checkpoint-parent"},
+    }
+
+
 def test_convert_snapshot_to_thread_state_subgraphs_recurses():
     service = ThreadStateService()
 
@@ -112,6 +143,24 @@ def test_convert_snapshot_to_thread_state_subgraphs_recurses():
     assert nested_state.parent_checkpoint is not None
     assert nested_state.parent_checkpoint.checkpoint_id == "checkpoint-parent"
     assert nested_state.interrupts == [{"value": "Provide value:", "id": "child-interrupt"}]
+
+
+def test_convert_snapshot_to_thread_state_preserves_checkpoint_map() -> None:
+    service = ThreadStateService()
+    snapshot = make_snapshot(
+        {},
+        {
+            "configurable": {
+                "checkpoint_id": "checkpoint-1",
+                "checkpoint_ns": "",
+                "checkpoint_map": {"child": "checkpoint-child"},
+            }
+        },
+    )
+
+    result = service.convert_snapshot_to_thread_state(snapshot, "thread-123")
+
+    assert result.checkpoint.checkpoint_map == {"child": "checkpoint-child"}
 
 
 def test_convert_snapshots_to_thread_states_skips_failures():

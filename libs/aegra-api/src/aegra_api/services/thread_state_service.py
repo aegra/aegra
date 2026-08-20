@@ -111,11 +111,13 @@ class ThreadStateService:
         configurable = config.get("configurable", {})
         checkpoint_id = configurable.get("checkpoint_id")
         checkpoint_ns = configurable.get("checkpoint_ns", "")
+        checkpoint_map = configurable.get("checkpoint_map") or {}
 
         return ThreadCheckpoint(
             checkpoint_id=checkpoint_id,
             thread_id=thread_id,
             checkpoint_ns=checkpoint_ns,
+            checkpoint_map=checkpoint_map,
         )
 
     def _extract_checkpoint_id(self, config: Any) -> str | None:

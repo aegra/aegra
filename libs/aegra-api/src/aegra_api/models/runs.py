@@ -141,6 +141,24 @@ class RunCreate(BaseModel):
         return self
 
 
+class RunCancelMany(BaseModel):
+    """Request model for cancelling multiple runs."""
+
+    thread_id: str | None = Field(None, description="Thread containing runs to cancel.")
+    run_ids: list[str] | None = Field(None, description="Specific run IDs to cancel.")
+    status: Literal["pending", "running", "all"] | None = Field(
+        None,
+        description="Run status selector. Use 'all' to target every matching non-terminal run.",
+    )
+
+    @model_validator(mode="after")
+    def validate_has_selector(self) -> Self:
+        """Require at least one selector so an empty request is never broad by accident."""
+        if self.thread_id is None and not self.run_ids and self.status is None:
+            raise ValueError("Must specify at least one of 'thread_id', 'run_ids', or 'status'")
+        return self
+
+
 class Run(BaseModel):
     """Run entity model
 

@@ -220,6 +220,13 @@ await client.runs.cancel(
     run_id=run["run_id"],
     action="interrupt",
 )
+
+# Cancel several runs selected by thread, run IDs, or status
+await client.runs.cancel_many(
+    thread_id=thread_id,
+    run_ids=[run["run_id"]],
+    action="interrupt",
+)
 ```
 
 Cancellation is asynchronous while a live worker owns the run.

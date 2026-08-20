@@ -51,6 +51,7 @@ description: "What Aegra supports today, what's coming soon, and what's not yet 
 | Concurrent execution | Supported | Up to `N_JOBS_PER_WORKER` (default 10) concurrent runs per worker. |
 | Lease-based crash recovery | Supported | Automatic re-execution of runs from crashed workers via checkpoint resumption. |
 | Cross-instance cancel | Supported | Cancel propagates via Redis pub/sub to any instance. |
+| Bulk run cancellation | Supported | `client.runs.cancel_many()` maps to `POST /runs/cancel` with thread, run ID, or status selectors. |
 | Job timeout | Supported | Configurable max execution time (default 1 hour). |
 | Postgres fallback | Supported | Workers fall back to DB polling when Redis is unavailable. |
 | Multi-instance SSE | Supported | SSE streams work across instances via Redis broker. |

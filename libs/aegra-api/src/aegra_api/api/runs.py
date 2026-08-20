@@ -20,7 +20,7 @@ from aegra_api.core.orm import Run as RunORM
 from aegra_api.core.orm import Thread as ThreadORM
 from aegra_api.core.orm import _get_session_maker, get_session
 from aegra_api.core.sse import create_end_event, get_sse_headers, make_sse_response, sse_to_bytes
-from aegra_api.models import Run, RunCreate, RunStatus, User
+from aegra_api.models import Run, RunCancelMany, RunCreate, RunStatus, User
 from aegra_api.models.enums import RunCancellationAction
 from aegra_api.models.errors import CONFLICT, NOT_FOUND, SSE_RESPONSE
 from aegra_api.services.broker import broker_manager
@@ -527,6 +527,46 @@ async def cancel_run_endpoint(
 
     await session.refresh(run_orm)
     return Run.model_validate(run_orm)
+
+
+@router.post("/runs/cancel", response_model=list[Run])
+async def cancel_runs_endpoint(
+    request: RunCancelMany,
+    action: RunCancellationAction = Query(
+        "interrupt",
+        description="Cancellation strategy: 'cancel' for hard cancel, 'interrupt' for cooperative interrupt.",
+    ),
+    user: User = Depends(get_current_user),
+    session: AsyncSession = Depends(get_session),
+) -> list[Run]:
+    """Cancel or interrupt multiple runs selected by thread, run IDs, or status.
+
+    This endpoint matches the LangGraph SDK ``runs.cancel_many()`` request
+    shape. Selectors are scoped to the authenticated user, so unauthorized runs
+    are simply excluded from the matching set. Runs that are already terminal
+    are safe no-ops.
+    """
+    filters = [RunORM.user_id == user.identity]
+    if request.thread_id is not None:
+        filters.append(RunORM.thread_id == request.thread_id)
+    if request.run_ids:
+        filters.append(RunORM.run_id.in_(request.run_ids))
+    if request.status is not None and request.status != "all":
+        filters.append(RunORM.status == validate_run_status(request.status))
+
+    result = await session.scalars(select(RunORM).where(*filters))
+    run_orms = list(result.all())
+
+    logger.info(
+        f"[cancel_runs] request {action} matched={len(run_orms)} "
+        f"user={user.identity} thread_id={request.thread_id} status={request.status}"
+    )
+    for run_orm in run_orms:
+        await _request_run_interruption(session, run_orm, action)
+
+    for run_orm in run_orms:
+        await session.refresh(run_orm)
+    return [Run.model_validate(run_orm) for run_orm in run_orms]
 
 
 @router.delete(

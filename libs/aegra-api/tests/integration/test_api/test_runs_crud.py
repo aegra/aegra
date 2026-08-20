@@ -346,6 +346,103 @@ class TestCancelRun:
             mock_streaming.cancel_run.assert_awaited_once_with("test-run-123", emit_end_event=False)
             mock_streaming.signal_run_cancelled.assert_awaited_once_with("test-run-123")
 
+    def test_cancel_many_matches_sdk_payload(self):
+        """Test bulk cancel accepts the langgraph-sdk cancel_many payload."""
+        app = create_test_app(include_runs=True, include_threads=False)
+
+        runs = [
+            _run_row(run_id="run-1", thread_id="thread-1", status="running"),
+            _run_row(run_id="run-2", thread_id="thread-1", status="pending"),
+        ]
+
+        class Session(DummySessionBase):
+            async def scalars(self, _stmt):
+                class Result:
+                    def all(self):
+                        return runs
+
+                return Result()
+
+        override_session_dependency(app, Session)
+        client = make_client(app)
+
+        with (
+            patch("aegra_api.api.runs.streaming_service") as mock_streaming,
+            patch(
+                "aegra_api.api.runs.interrupt_unowned_run",
+                new_callable=AsyncMock,
+                return_value=True,
+            ),
+        ):
+            mock_streaming.interrupt_run = AsyncMock()
+            mock_streaming.signal_run_cancelled = AsyncMock()
+
+            resp = client.post(
+                "/runs/cancel?action=interrupt",
+                json={"thread_id": "thread-1", "run_ids": ["run-1", "run-2"]},
+            )
+
+            assert resp.status_code == 200
+            assert [run["run_id"] for run in resp.json()] == ["run-1", "run-2"]
+            assert mock_streaming.interrupt_run.await_count == 2
+            mock_streaming.interrupt_run.assert_any_await("run-1", emit_end_event=False)
+            mock_streaming.interrupt_run.assert_any_await("run-2", emit_end_event=False)
+            assert mock_streaming.signal_run_cancelled.await_count == 2
+
+    def test_cancel_many_status_all_is_safe_for_terminal_runs(self):
+        """Test bulk cancel accepts status=all and leaves terminal runs untouched."""
+        app = create_test_app(include_runs=True, include_threads=False)
+
+        terminal_run = _run_row(run_id="run-success", status="success")
+
+        class Session(DummySessionBase):
+            async def scalars(self, _stmt):
+                class Result:
+                    def all(self):
+                        return [terminal_run]
+
+                return Result()
+
+        override_session_dependency(app, Session)
+        client = make_client(app)
+
+        with (
+            patch("aegra_api.api.runs.streaming_service") as mock_streaming,
+            patch("aegra_api.api.runs.interrupt_unowned_run", new_callable=AsyncMock) as mock_interrupt_unowned,
+        ):
+            mock_streaming.cancel_run = AsyncMock()
+            mock_streaming.interrupt_run = AsyncMock()
+
+            resp = client.post("/runs/cancel", json={"status": "all"})
+
+            assert resp.status_code == 200
+            assert resp.json()[0]["status"] == "success"
+            mock_interrupt_unowned.assert_not_awaited()
+            mock_streaming.cancel_run.assert_not_awaited()
+            mock_streaming.interrupt_run.assert_not_awaited()
+
+    def test_cancel_many_requires_a_selector(self):
+        """Test an empty bulk cancel request is rejected."""
+        app = create_test_app(include_runs=True, include_threads=False)
+
+        override_session_dependency(app, BasicSession)
+        client = make_client(app)
+
+        resp = client.post("/runs/cancel", json={})
+
+        assert resp.status_code == 422
+
+    def test_cancel_many_rejects_unsupported_action(self):
+        """Test unsupported SDK actions fail explicitly."""
+        app = create_test_app(include_runs=True, include_threads=False)
+
+        override_session_dependency(app, BasicSession)
+        client = make_client(app)
+
+        resp = client.post("/runs/cancel?action=rollback", json={"status": "running"})
+
+        assert resp.status_code == 422
+
 
 class TestDeleteRun:
     """Test DELETE /threads/{thread_id}/runs/{run_id}"""

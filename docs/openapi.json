@@ -3,7 +3,7 @@
   "info": {
     "title": "Aegra",
     "description": "Production-ready Agent Protocol server",
-    "version": "0.10.3"
+    "version": "0.10.4"
   },
   "paths": {
     "/info": {
@@ -148,7 +148,7 @@
           "Assistants"
         ],
         "summary": "Create Assistant",
-        "description": "Create a new assistant.\n\nAn assistant is a configured instance of a graph. Provide a `graph_id`\nreferencing a graph defined in your `aegra.json`. If `assistant_id` is\nomitted, one is auto-generated. Set `if_exists` to `\"do_nothing\"` for\nidempotent creation.",
+        "description": "Create a new assistant.\n\nAn assistant is a configured instance of a graph. Provide a `graph_id`\nreferencing a graph defined in your `aegra.json`. If `assistant_id` is\nomitted, one is auto-generated. Set `if_exists` to `\"do_nothing\"` for\nidempotent creation; otherwise a taken `assistant_id` or an identical\ngraph/config pair answers 409.",
         "operationId": "create_assistant_assistants_post",
         "requestBody": {
           "content": {
@@ -167,6 +167,16 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/Assistant"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Resource state conflict",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AgentProtocolError"
                 }
               }
             }
@@ -2334,6 +2344,70 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/AgentProtocolError"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/runs/cancel": {
+      "post": {
+        "tags": [
+          "Thread Runs"
+        ],
+        "summary": "Cancel Runs Endpoint",
+        "description": "Cancel or interrupt multiple runs selected by thread, run IDs, or status.\n\nThis endpoint matches the LangGraph SDK ``runs.cancel_many()`` request\nshape. Selectors are scoped to the authenticated user, so unauthorized runs\nare simply excluded from the matching set. Runs that are already terminal\nare safe no-ops.",
+        "operationId": "cancel_runs_endpoint_runs_cancel_post",
+        "parameters": [
+          {
+            "name": "action",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "enum": [
+                "cancel",
+                "interrupt"
+              ],
+              "type": "string",
+              "description": "Cancellation strategy: 'cancel' for hard cancel, 'interrupt' for cooperative interrupt.",
+              "default": "interrupt",
+              "title": "Action"
+            },
+            "description": "Cancellation strategy: 'cancel' for hard cancel, 'interrupt' for cooperative interrupt."
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RunCancelMany"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/Run"
+                  },
+                  "title": "Response Cancel Runs Endpoint Runs Cancel Post"
                 }
               }
             }
@@ -4625,6 +4699,57 @@
         ],
         "title": "Run",
         "description": "Run entity model\n\nStatus values: pending, running, error, success, timeout, interrupted"
+      },
+      "RunCancelMany": {
+        "properties": {
+          "thread_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Thread Id",
+            "description": "Thread containing runs to cancel."
+          },
+          "run_ids": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Run Ids",
+            "description": "Specific run IDs to cancel."
+          },
+          "status": {
+            "anyOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "pending",
+                  "running",
+                  "all"
+                ]
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Status",
+            "description": "Run status selector. Use 'all' to target every matching non-terminal run."
+          }
+        },
+        "type": "object",
+        "title": "RunCancelMany",
+        "description": "Request model for cancelling multiple runs."
       },
       "RunCreate": {
         "properties": {

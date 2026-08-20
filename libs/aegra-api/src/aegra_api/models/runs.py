@@ -148,7 +148,7 @@ class RunCancelMany(BaseModel):
         json_schema_extra={
             "anyOf": [
                 {"required": ["thread_id"], "properties": {"thread_id": {"type": "string"}}},
-                {"required": ["run_ids"], "properties": {"run_ids": {"minItems": 1}}},
+                {"required": ["run_ids"], "properties": {"run_ids": {"type": "array", "minItems": 1}}},
                 {
                     "required": ["status"],
                     "properties": {"status": {"type": "string", "enum": ["pending", "running", "all"]}},

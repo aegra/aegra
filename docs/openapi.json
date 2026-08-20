@@ -4705,6 +4705,7 @@
           {
             "properties": {
               "run_ids": {
+                "type": "array",
                 "minItems": 1
               }
             },

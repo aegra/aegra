@@ -433,8 +433,8 @@ class TestCancelRun:
 
         assert resp.status_code == 422
 
-    def test_cancel_many_accepts_sdk_rollback_action(self: "TestCancelRun") -> None:
-        """Test the SDK rollback action is accepted for bulk cancellation."""
+    def test_cancel_many_maps_sdk_rollback_to_hard_cancel(self: "TestCancelRun") -> None:
+        """Test the SDK rollback action uses hard cancellation."""
         app = create_test_app(include_runs=True, include_threads=False)
 
         run = _run_row(run_id="run-rollback", status="running")
@@ -458,13 +458,15 @@ class TestCancelRun:
                 return_value=True,
             ),
         ):
+            mock_streaming.cancel_run = AsyncMock()
             mock_streaming.interrupt_run = AsyncMock()
             mock_streaming.signal_run_cancelled = AsyncMock()
 
             resp = client.post("/runs/cancel?action=rollback", json={"status": "running"})
 
             assert resp.status_code == 200
-            mock_streaming.interrupt_run.assert_awaited_once_with("run-rollback", emit_end_event=False)
+            mock_streaming.cancel_run.assert_awaited_once_with("run-rollback", emit_end_event=False)
+            mock_streaming.interrupt_run.assert_not_awaited()
 
     def test_cancel_many_rejects_unsupported_action(self: "TestCancelRun") -> None:
         """Test unsupported actions fail explicitly."""

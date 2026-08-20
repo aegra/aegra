@@ -2357,7 +2357,7 @@
           "Thread Runs"
         ],
         "summary": "Cancel Runs Endpoint",
-        "description": "Cancel or interrupt multiple runs selected by thread, run IDs, or status.\n\nThis endpoint matches the LangGraph SDK ``runs.cancel_many()`` request\nshape. Selectors are scoped to the authenticated user, so unauthorized runs\nare simply excluded from the matching set. Runs that are already terminal\nare safe no-ops.",
+        "description": "Cancel or interrupt multiple runs selected by thread, run IDs, or status.\n\nThis endpoint matches the LangGraph SDK ``runs.cancel_many()`` request\nshape. Selectors are scoped to the authenticated user, so unauthorized runs\nare simply excluded from the matching set. SDK ``rollback`` maps to Aegra's\nhard cancel behavior. Runs that are already terminal are safe no-ops.",
         "operationId": "cancel_runs_endpoint_runs_cancel_post",
         "parameters": [
           {
@@ -2370,11 +2370,11 @@
                 "rollback"
               ],
               "type": "string",
-              "description": "Cancellation strategy: 'interrupt' or SDK-compatible 'rollback'.",
+              "description": "Cancellation strategy: 'interrupt' for cooperative interrupt or 'rollback' for hard cancel.",
               "default": "interrupt",
               "title": "Action"
             },
-            "description": "Cancellation strategy: 'interrupt' or SDK-compatible 'rollback'."
+            "description": "Cancellation strategy: 'interrupt' for cooperative interrupt or 'rollback' for hard cancel."
           }
         ],
         "requestBody": {

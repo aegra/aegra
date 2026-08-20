@@ -534,7 +534,7 @@ async def cancel_runs_endpoint(
     request: RunCancelMany,
     action: BulkRunCancellationAction = Query(
         "interrupt",
-        description="Cancellation strategy: 'interrupt' or SDK-compatible 'rollback'.",
+        description="Cancellation strategy: 'interrupt' for cooperative interrupt or 'rollback' for hard cancel.",
     ),
     user: User = Depends(get_current_user),
     session: AsyncSession = Depends(get_session),
@@ -543,8 +543,8 @@ async def cancel_runs_endpoint(
 
     This endpoint matches the LangGraph SDK ``runs.cancel_many()`` request
     shape. Selectors are scoped to the authenticated user, so unauthorized runs
-    are simply excluded from the matching set. Runs that are already terminal
-    are safe no-ops.
+    are simply excluded from the matching set. SDK ``rollback`` maps to Aegra's
+    hard cancel behavior. Runs that are already terminal are safe no-ops.
     """
     filters = [RunORM.user_id == user.identity]
     if request.thread_id is not None:
@@ -558,9 +558,9 @@ async def cancel_runs_endpoint(
     run_orms = list(result.all())
 
     logger.info(f"[cancel_runs] request {action} matched={len(run_orms)}")
-    interruption_action: RunCancellationAction = "interrupt"
+    cancellation_action: RunCancellationAction = "interrupt" if action == "interrupt" else "cancel"
     for run_orm in run_orms:
-        await _request_run_interruption(session, run_orm, interruption_action)
+        await _request_run_interruption(session, run_orm, cancellation_action)
 
     for run_orm in run_orms:
         await session.refresh(run_orm)

@@ -72,20 +72,22 @@ async def get_store_item(
 
     Returns 404 if no item exists at the given namespace and key.
     """
-    # Authorization check
+    # Handlers must see the parsed list; the raw dot-string form judges a
+    # different namespace than PUT/DELETE dispatched (#515).
     ctx = build_auth_context(user, "store", "get")
-    value = {"key": key, "namespace": namespace}
+    namespace_list = _normalize_namespace(namespace)
+    value = {"key": key, "namespace": namespace_list}
     filters = await handle_event(ctx, value)
 
     # If handler modified namespace/key, update
     if filters:
         if "namespace" in filters:
-            namespace = filters["namespace"]
+            namespace_list = _normalize_namespace(filters["namespace"])
         if "key" in filters:
             key = filters["key"]
 
     # Apply user namespace scoping
-    scoped_namespace = apply_namespace_scoping(_normalize_namespace(namespace), user)
+    scoped_namespace = apply_namespace_scoping(namespace_list, user)
 
     store = db_manager.get_store()
 
@@ -201,8 +203,9 @@ async def list_namespaces(
     Returns the namespace paths that contain items. Filter by prefix, suffix,
     or maximum depth.
     """
-    # Authorization check
-    ctx = build_auth_context(user, "store", "search")
+    # Authorization: the protocol action for namespaces is `list_namespaces`,
+    # which @auth.on.store.list_namespaces covers.
+    ctx = build_auth_context(user, "store", "list_namespaces")
     value = request.model_dump()
     filters = await handle_event(ctx, value)
 
@@ -232,12 +235,16 @@ async def list_namespaces(
 
 
 def _normalize_namespace(value: str | list[str] | None) -> list[str]:
-    """Normalize namespace input to a clean list, filtering out empty parts."""
+    """Normalize namespace input to a clean list, filtering out empty parts.
+
+    Dots split inside list items too: FastAPI may coerce ``?namespace=a.b``
+    into ``["a.b"]`` depending on version.
+    """
     if isinstance(value, str):
-        return [part for part in value.split(".") if part]
-    if isinstance(value, list):
-        return [part for part in value if part]
-    return []
+        value = [value]
+    if not isinstance(value, list):
+        return []
+    return [part for item in value if isinstance(item, str) for part in item.split(".") if part]
 
 
 def _scope(prefix: str, scope_ids: list[str], namespace: list[str]) -> list[str]:

@@ -3,7 +3,7 @@
   "info": {
     "title": "Aegra",
     "description": "Production-ready Agent Protocol server",
-    "version": "0.10.0"
+    "version": "0.10.3"
   },
   "paths": {
     "/info": {
@@ -952,7 +952,7 @@
           "Threads"
         ],
         "summary": "Delete Thread",
-        "description": "Delete a thread by its ID.\n\nPermanently removes the thread and its metadata. Any active runs on the\nthread are automatically cancelled before deletion. Checkpoint history\nstored in the graph backend is not affected.",
+        "description": "Delete a thread by its ID.\n\nPermanently removes the thread, its metadata, and its checkpoint history\nstored in the graph backend. Any active runs on the thread are\nautomatically cancelled before deletion.",
         "operationId": "delete_thread_threads__thread_id__delete",
         "parameters": [
           {
@@ -982,6 +982,16 @@
           },
           "404": {
             "description": "Resource not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AgentProtocolError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Checkpoint cleanup failed; the thread is preserved and the delete can be retried",
             "content": {
               "application/json": {
                 "schema": {
@@ -3771,15 +3781,8 @@
             "title": "Schedule"
           },
           "input": {
-            "anyOf": [
-              {
-                "additionalProperties": true,
-                "type": "object"
-              },
-              {
-                "type": "null"
-              }
-            ],
+            "additionalProperties": true,
+            "type": "object",
             "title": "Input"
           },
           "metadata": {
@@ -3960,7 +3963,8 @@
         "type": "object",
         "required": [
           "assistant_id",
-          "schedule"
+          "schedule",
+          "input"
         ],
         "title": "CronCreate",
         "description": "Request body for creating a cron job (stateless or thread-bound)."

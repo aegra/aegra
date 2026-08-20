@@ -23,7 +23,7 @@ from aegra_api.models import (
     AssistantSearchRequest,
     AssistantUpdate,
 )
-from aegra_api.models.errors import NOT_FOUND
+from aegra_api.models.errors import CONFLICT, NOT_FOUND
 from aegra_api.services.assistant_service import AssistantService, get_assistant_service
 
 router = APIRouter(tags=["Assistants"], dependencies=auth_dependency)
@@ -40,7 +40,12 @@ def _resolve_sort(request: AssistantSearchRequest) -> tuple[object, bool]:
     return AssistantORM.created_at, False
 
 
-@router.post("/assistants", response_model=Assistant, response_model_by_alias=False)
+@router.post(
+    "/assistants",
+    response_model=Assistant,
+    response_model_by_alias=False,
+    responses={**CONFLICT},
+)
 async def create_assistant(
     request: AssistantCreate,
     service: AssistantService = Depends(get_assistant_service),
@@ -50,7 +55,8 @@ async def create_assistant(
     An assistant is a configured instance of a graph. Provide a `graph_id`
     referencing a graph defined in your `aegra.json`. If `assistant_id` is
     omitted, one is auto-generated. Set `if_exists` to `"do_nothing"` for
-    idempotent creation.
+    idempotent creation; otherwise a taken `assistant_id` or an identical
+    graph/config pair answers 409.
     """
     return await service.create_assistant(request)
 

@@ -311,6 +311,29 @@ data: {"type":"event","seq":3,"event_id":"...:3","method":"lifecycle","params":{
 
 `values`, `updates`, `messages`, `tools`, `lifecycle`, `input`, `checkpoints`, `tasks`, and `custom` (plus `custom:<name>`). Message streams arrive as content-block events (`message-start` → `content-block-delta` → `message-finish`); lifecycle reports `started` / `completed` / `failed` / `interrupted`.
 
+### Human-in-the-loop interrupts
+
+When you subscribe to the `input` channel, a graph interrupt arrives as an `input.requested` event. Its `params.data` includes the interrupt id and two identical content fields:
+
+```json
+{
+  "type": "event",
+  "seq": 4,
+  "event_id": "...:4",
+  "method": "input.requested",
+  "params": {
+    "data": {
+      "interrupt_id": "interrupt-id",
+      "payload": {"question": "Approve?"},
+      "value": {"question": "Approve?"}
+    },
+    "namespace": []
+  }
+}
+```
+
+`payload` is the Agent Protocol field consumed by the JavaScript SDK and Vue/React `useStream()` integrations. `value` mirrors it for current Python SDKs, including `ts.interrupts[].value`. If the source interrupt has no value, both content fields are omitted; explicit `null`, empty, and falsy values are preserved under both fields.
+
 <Note>
   This first release covers the HTTP SSE + commands path the JS/Python SDKs use, verified end-to-end against the stock `langgraph-sdk`. The WebSocket transport and the `agent.getTree` / `state.fork` / `subscription.*` commands are not yet implemented; SSE filtering via the POST body covers the `useStream()` path without them.
 </Note>

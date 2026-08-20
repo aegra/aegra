@@ -72,7 +72,7 @@ class GeneralSerializer(Serializer):
 
         # Handle dictionaries recursively
         elif isinstance(obj, dict):
-            return {self._serialize_mapping_key(k): self._serialize_object(v) for k, v in obj.items()}
+            return self._serialize_mapping(obj)
 
         # Handle basic JSON-serializable types
         elif isinstance(obj, (str, int, float, bool, type(None))):
@@ -88,3 +88,18 @@ class GeneralSerializer(Serializer):
             return serialized_key
 
         return str(serialized_key)
+
+    def _serialize_mapping(self, mapping: dict[Any, Any]) -> dict[str | int | float | bool | None, Any]:
+        result: dict[str | int | float | bool | None, Any] = {}
+        original_keys: dict[str | int | float | bool | None, Any] = {}
+
+        for key, value in mapping.items():
+            serialized_key = self._serialize_mapping_key(key)
+            original_key = original_keys.get(serialized_key)
+            if serialized_key in result and original_key != key:
+                raise ValueError(f"Mapping keys {original_key!r} and {key!r} serialize to the same key")
+
+            original_keys[serialized_key] = key
+            result[serialized_key] = self._serialize_object(value)
+
+        return result

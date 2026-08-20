@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 from unittest.mock import MagicMock, patch
 
+import pytest
 from click.testing import CliRunner
 
 from aegra_cli.cli import (
@@ -94,6 +95,43 @@ class TestDevCommand:
                 mock_popen.assert_called_once()
                 call_args = mock_popen.call_args[0][0]
                 assert "--reload" not in call_args
+
+    def test_dev_no_reload_forces_selector_loop_on_windows(
+        self, cli_runner: CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """dev --no-reload hits the same Proactor default as serve (#513)."""
+        monkeypatch.setattr("aegra_cli.cli.sys.platform", "win32")
+        with cli_runner.isolated_filesystem(temp_dir=tmp_path):
+            Path("aegra.json").write_text('{"graphs": {}}')
+
+            with patch("aegra_cli.cli.subprocess.Popen") as mock_popen:
+                mock_popen.return_value = create_mock_popen(0)
+                result = cli_runner.invoke(cli, ["dev", "--no-db-check", "--no-reload"])
+
+                assert result.exit_code == 0
+                cmd = mock_popen.call_args[0][0]
+                assert "--loop" in cmd
+                loop_idx = cmd.index("--loop")
+                assert cmd[loop_idx + 1] == "aegra_api.utils.event_loop:selector_loop_factory"
+
+    def test_dev_reload_also_forces_selector_loop_on_windows(
+        self, cli_runner: CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Reload mode gets the same explicit loop: it is the loop the reload
+        subprocess would pick anyway, and uniform args are easier to reason about."""
+        monkeypatch.setattr("aegra_cli.cli.sys.platform", "win32")
+        with cli_runner.isolated_filesystem(temp_dir=tmp_path):
+            Path("aegra.json").write_text('{"graphs": {}}')
+
+            with patch("aegra_cli.cli.subprocess.Popen") as mock_popen:
+                mock_popen.return_value = create_mock_popen(0)
+                result = cli_runner.invoke(cli, ["dev", "--no-db-check"])
+
+                assert result.exit_code == 0
+                cmd = mock_popen.call_args[0][0]
+                assert "--loop" in cmd
+                loop_idx = cmd.index("--loop")
+                assert cmd[loop_idx + 1] == "aegra_api.utils.event_loop:selector_loop_factory"
 
     def test_dev_default_host_and_port(self, cli_runner: CliRunner, tmp_path: Path) -> None:
         """Test that dev command uses default host and port."""
@@ -798,6 +836,95 @@ class TestConfigDiscovery:
             result = find_config_file()
             assert result is None
 
+    def test_find_config_file_honors_aegra_config_env(
+        self, cli_runner: CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A pre-set AEGRA_CONFIG wins over a discoverable aegra.json in cwd."""
+        with cli_runner.isolated_filesystem(temp_dir=tmp_path):
+            Path("aegra.json").write_text('{"graphs": {}}')
+            Path("staging.json").write_text('{"graphs": {}}')
+            monkeypatch.setenv("AEGRA_CONFIG", "staging.json")
+
+            result = find_config_file()
+
+            assert result is not None
+            assert result.name == "staging.json"
+
+    def test_find_config_file_ignores_env_pointing_outside_cwd(
+        self, cli_runner: CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A stale AEGRA_CONFIG must not boot an unrelated project.
+
+        Exporting AEGRA_CONFIG in a shell used to leak into every later `aegra
+        dev`, silently running a different project than the one you stand in.
+        """
+        external = tmp_path / "elsewhere" / "other.json"
+        external.parent.mkdir(parents=True)
+        external.write_text('{"graphs": {}}')
+
+        with cli_runner.isolated_filesystem(temp_dir=tmp_path):
+            Path("aegra.json").write_text('{"graphs": {}}')
+            monkeypatch.setenv("AEGRA_CONFIG", str(external))
+
+            result = find_config_file()
+
+            assert result is not None
+            assert result.name == "aegra.json"
+
+    def test_find_config_file_falls_back_when_env_path_missing(
+        self, cli_runner: CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A stale AEGRA_CONFIG must not mask a usable local manifest."""
+        with cli_runner.isolated_filesystem(temp_dir=tmp_path):
+            Path("aegra.json").write_text('{"graphs": {}}')
+            monkeypatch.setenv("AEGRA_CONFIG", "gone.json")
+
+            result = find_config_file()
+
+            assert result is not None
+            assert result.name == "aegra.json"
+
+    def test_find_config_file_env_cannot_conjure_config_in_empty_dir(
+        self, cli_runner: CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An ambient AEGRA_CONFIG must not make an empty directory look configured.
+
+        `aegra dev` must still fail fast here instead of starting a server for
+        whatever project the env var happened to name.
+        """
+        external = tmp_path / "elsewhere" / "other.json"
+        external.parent.mkdir(parents=True)
+        external.write_text('{"graphs": {}}')
+
+        with cli_runner.isolated_filesystem(temp_dir=tmp_path):
+            monkeypatch.setenv("AEGRA_CONFIG", str(external))
+
+            assert find_config_file() is None
+
+    def test_find_config_file_ignores_blank_env(
+        self, cli_runner: CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An empty or whitespace AEGRA_CONFIG is treated as unset, not as cwd."""
+        with cli_runner.isolated_filesystem(temp_dir=tmp_path):
+            Path("aegra.json").write_text('{"graphs": {}}')
+            monkeypatch.setenv("AEGRA_CONFIG", "   ")
+
+            result = find_config_file()
+
+            assert result is not None
+            assert result.name == "aegra.json"
+
+    def test_find_config_file_env_does_not_leak_into_discovery(
+        self, cli_runner: CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """With AEGRA_CONFIG unset, discovery is unchanged."""
+        with cli_runner.isolated_filesystem(temp_dir=tmp_path):
+            monkeypatch.delenv("AEGRA_CONFIG", raising=False)
+
+            result = find_config_file()
+
+            assert result is None
+
     def test_dev_fails_without_config(self, cli_runner: CliRunner, tmp_path: Path) -> None:
         """Test that dev command fails when no config file is found."""
         with cli_runner.isolated_filesystem(temp_dir=tmp_path):
@@ -1062,6 +1189,60 @@ class TestServeCommand:
                 assert "2026" in cmd
                 # No --reload flag (production mode)
                 assert "--reload" not in cmd
+
+    def test_serve_forces_selector_loop_on_windows(
+        self, cli_runner: CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Windows serve must pass a psycopg-compatible loop factory (#513).
+
+        uvicorn picks the Proactor loop on win32 without --reload; the
+        LangGraph psycopg pool cannot connect on it.
+        """
+        monkeypatch.setattr("aegra_cli.cli.sys.platform", "win32")
+        with cli_runner.isolated_filesystem(temp_dir=tmp_path):
+            Path("aegra.json").write_text('{"graphs": {}}')
+
+            with patch("aegra_cli.cli.subprocess.run") as mock_run:
+                mock_run.return_value.returncode = 0
+                result = cli_runner.invoke(cli, ["serve"])
+
+                assert result.exit_code == 0
+                cmd = mock_run.call_args[0][0]
+                assert "--loop" in cmd
+                assert "aegra_api.utils.event_loop:selector_loop_factory" in cmd
+
+    def test_serve_keeps_default_loop_off_windows(
+        self, cli_runner: CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Linux/macOS keep uvicorn's auto loop (uvloop stays available)."""
+        monkeypatch.setattr("aegra_cli.cli.sys.platform", "linux")
+        with cli_runner.isolated_filesystem(temp_dir=tmp_path):
+            Path("aegra.json").write_text('{"graphs": {}}')
+
+            with patch("aegra_cli.cli.subprocess.run") as mock_run:
+                mock_run.return_value.returncode = 0
+                result = cli_runner.invoke(cli, ["serve"])
+
+                assert result.exit_code == 0
+                assert "--loop" not in mock_run.call_args[0][0]
+
+    def test_serve_skips_loop_when_api_lacks_factory(
+        self, cli_runner: CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An older aegra-api without the factory module must not break startup."""
+        monkeypatch.setattr("aegra_cli.cli.sys.platform", "win32")
+        with cli_runner.isolated_filesystem(temp_dir=tmp_path):
+            Path("aegra.json").write_text('{"graphs": {}}')
+
+            with (
+                patch("aegra_cli.cli.importlib.util.find_spec", return_value=None),
+                patch("aegra_cli.cli.subprocess.run") as mock_run,
+            ):
+                mock_run.return_value.returncode = 0
+                result = cli_runner.invoke(cli, ["serve"])
+
+                assert result.exit_code == 0
+                assert "--loop" not in mock_run.call_args[0][0]
 
     def test_serve_port_from_env_var(self, cli_runner: CliRunner, tmp_path: Path) -> None:
         """Test that serve command picks up PORT from env var when no CLI flag is passed."""

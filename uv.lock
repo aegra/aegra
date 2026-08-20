@@ -15,7 +15,7 @@ members = [
 
 [[package]]
 name = "aegra-api"
-version = "0.10.1"
+version = "0.10.3"
 source = { editable = "libs/aegra-api" }
 dependencies = [
     { name = "alembic" },
@@ -80,7 +80,7 @@ requires-dist = [
     { name = "sqlalchemy", specifier = ">=2.0.0" },
     { name = "sse-starlette", specifier = ">=3.3.4,<4.0.0" },
     { name = "structlog", specifier = ">=25.4.0" },
-    { name = "uvicorn", specifier = ">=0.35.0" },
+    { name = "uvicorn", specifier = ">=0.36.0" },
 ]
 
 [package.metadata.requires-dev]
@@ -100,7 +100,7 @@ dev = [
 
 [[package]]
 name = "aegra-cli"
-version = "0.10.1"
+version = "0.10.3"
 source = { editable = "libs/aegra-cli" }
 dependencies = [
     { name = "aegra-api" },

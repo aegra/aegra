@@ -256,6 +256,32 @@ class TestGeneralSerializer:
 
         assert result == {"payload": {"bytes": "/w=="}}
 
+    def test_serialize_sets_recursively_normalizes_members(self) -> None:
+        identifier = UUID("7d247e59-3c1e-4c5e-8f32-ec4e9d0c12ab")
+        path = Path("/tmp/state.json")
+
+        result = self.serializer.serialize({identifier, path, Color.RED, b"\xff"})
+
+        assert set(result) == {str(identifier), str(path), "red", "/w=="}
+
+    def test_serialize_dict_recursively_normalizes_non_json_keys(self) -> None:
+        identifier = UUID("7d247e59-3c1e-4c5e-8f32-ec4e9d0c12ab")
+        path = Path("/tmp/state.json")
+
+        result = self.serializer.serialize(
+            {
+                identifier: Path("/tmp/value.json"),
+                path: b"\xff",
+                Color.RED: Decimal("1.50"),
+            }
+        )
+
+        assert result == {
+            str(identifier): str(Path("/tmp/value.json")),
+            str(path): "/w==",
+            "red": "1.50",
+        }
+
     def test_serialize_command_structurally(self):
         """A LangGraph Command (returned by state-updating tools like
         write_todos) must serialize to its structural dict, NOT the str()

@@ -1,6 +1,6 @@
 [project]
 name = "aegra-api"
-version = "0.10.1"
+version = "0.10.3"
 description = "Aegra core API - Self-hosted Agent Protocol server"
 readme = "README.md"
 requires-python = ">=3.12"
@@ -19,7 +19,8 @@ classifiers = [
 dependencies = [
     # Core
     "fastapi>=0.110.1",
-    "uvicorn>=0.35.0",
+    # >=0.36.0: --loop accepts import strings (Windows selector loop, #513)
+    "uvicorn>=0.36.0",
     "pydantic>=2.11.7",
     "pydantic-settings>=2.14.2",
     "sse-starlette>=3.3.4,<4.0.0",

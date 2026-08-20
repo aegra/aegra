@@ -7,14 +7,14 @@ from unittest.mock import Mock, mock_open, patch
 
 import pytest
 
+# Import the settings singleton directly to patch it
+from aegra_api import config as config_module
 from aegra_api.services.langgraph_service import (
     LangGraphService,
     create_run_config,
     create_thread_config,
     inject_user_context,
 )
-
-# Import the settings singleton directly to patch it
 from aegra_api.settings import settings
 
 
@@ -57,10 +57,10 @@ class TestLangGraphServiceConfig:
         config_data = {"graphs": {"test": "./graphs/test.py:graph"}}
         env_path = "/env/path/config.json"
 
-        # Patch the settings object directly. This ensures the service sees the change
-        # without needing to reload modules.
+        # A sibling test reloads aegra_api.settings, so patch the settings
+        # object aegra_api.config actually holds (#512).
         with (
-            patch.object(settings.app, "AEGRA_CONFIG", env_path),
+            patch.object(config_module.settings.app, "AEGRA_CONFIG", env_path),
             patch("pathlib.Path.exists", return_value=True),
             patch("pathlib.Path.open", mock_open(read_data=json.dumps(config_data))),
             patch("aegra_api.services.langgraph_service.LangGraphService._ensure_default_assistants"),

@@ -2,7 +2,13 @@
 
 from typing import Any
 
-from tests.fixtures.database import DummySessionBase, override_get_session_dep
+from sqlalchemy import Insert
+
+from tests.fixtures.database import (
+    DummyScalarResult,
+    DummySessionBase,
+    override_get_session_dep,
+)
 
 
 class BasicSession(DummySessionBase):
@@ -28,17 +34,11 @@ class ThreadSession(BasicSession):
         super().__init__()
         self.threads = threads or []
 
-    async def scalars(self, stmt: Any) -> Any:
-        """Mock scalars method for thread queries"""
-
-        class Result:
-            def __init__(self, threads_list):
-                self.threads_list = threads_list
-
-            def all(self) -> list[Any]:
-                return self.threads_list
-
-        return Result(self.threads)
+    async def scalars(self, stmt: Any = None) -> Any:
+        # Inserts go to the base, which echoes the RETURNING row create paths read.
+        if isinstance(stmt, Insert):
+            return await super().scalars(stmt)
+        return DummyScalarResult(self.threads)
 
 
 class RunSession(BasicSession):

@@ -66,17 +66,13 @@ class GeneralSerializer(Serializer):
         elif isinstance(obj, Exception):
             return {"type": obj.__class__.__name__, "message": str(obj)}
 
-        # Handle sets and frozensets
-        elif isinstance(obj, (set, frozenset)):
-            return list(obj)
-
         # Handle array-like containers recursively.
-        elif isinstance(obj, (deque, tuple, list)):
+        elif isinstance(obj, (set, frozenset, deque, tuple, list)):
             return [self._serialize_object(item) for item in obj]
 
         # Handle dictionaries recursively
         elif isinstance(obj, dict):
-            return {k: self._serialize_object(v) for k, v in obj.items()}
+            return {self._serialize_mapping_key(k): self._serialize_object(v) for k, v in obj.items()}
 
         # Handle basic JSON-serializable types
         elif isinstance(obj, (str, int, float, bool, type(None))):
@@ -85,3 +81,10 @@ class GeneralSerializer(Serializer):
         # Fallback to string representation for unknown types
         else:
             return str(obj)
+
+    def _serialize_mapping_key(self, key: Any) -> str | int | float | bool | None:
+        serialized_key = self._serialize_object(key)
+        if isinstance(serialized_key, (str, int, float, bool, type(None))):
+            return serialized_key
+
+        return str(serialized_key)

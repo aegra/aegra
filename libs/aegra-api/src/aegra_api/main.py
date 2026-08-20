@@ -22,6 +22,7 @@ from aegra_api.api.threads import router as threads_router
 from aegra_api.config import CorsConfig, HttpConfig, get_config_dir, load_http_config
 from aegra_api.core.app_loader import load_custom_app
 from aegra_api.core.auth_deps import auth_dependency
+from aegra_api.core.auth_enforcement import apply_auth_enforcement
 from aegra_api.core.database import db_manager
 from aegra_api.core.health import router as health_router
 from aegra_api.core.migrations import run_migrations_async
@@ -311,6 +312,10 @@ def _include_core_routers(app: FastAPI) -> None:
     app.include_router(crons_router)
     app.include_router(store_router)
     app.include_router(event_streaming_router)
+
+    # Attach @auth.on dispatch from the route registry. Routes must opt out
+    # explicitly; forgetting the in-body call no longer disables authorization.
+    apply_auth_enforcement(app)
 
 
 def create_app() -> FastAPI:

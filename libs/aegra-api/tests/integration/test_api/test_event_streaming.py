@@ -3,13 +3,17 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
+import threading
 import uuid
 from collections.abc import Iterator
 from functools import partial
 from typing import Any
 
+import httpx
 import pytest
+import uvicorn
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
@@ -168,6 +172,11 @@ class TestStreamRoute:
             await broker.put(f"{run_id}_event_4", ("end", {"status": "success"}))
 
         asyncio.run(seed())
+        monkeypatch.setattr(
+            es_module,
+            "ThreadEventSession",
+            partial(ThreadEventSession, idle_grace_seconds=0.01),
+        )
         client = TestClient(_make_app(monkeypatch, run_ids=[run_id]))
 
         with client.stream("POST", "/threads/t1/stream/events", json={"channels": ["messages", "lifecycle"]}) as resp:
@@ -227,3 +236,71 @@ class TestStreamRoute:
             "value": interrupt_value,
             "payload": interrupt_value,
         }
+
+    async def test_lister_session_close_survives_sse_cancel(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Disconnect during a lister poll must still run session ``__aexit__``."""
+        poll_started = threading.Event()
+        closed = threading.Event()
+        state = {"aexit_cancelled": False, "aexits": 0}
+
+        class _SlowSession(_Session):
+            async def execute(self, _stmt: Any) -> Any:
+                poll_started.set()
+                await asyncio.sleep(0.4)
+                return await super().execute(_stmt)
+
+            async def __aexit__(self, *_exc: Any) -> None:
+                try:
+                    await asyncio.sleep(0)
+                except asyncio.CancelledError:
+                    state["aexit_cancelled"] = True
+                    raise
+                state["aexits"] += 1
+                # Ownership check closes first; the second close is the in-stream poll.
+                if state["aexits"] >= 2:
+                    closed.set()
+
+        monkeypatch.setattr(
+            es_module,
+            "ThreadEventSession",
+            partial(ThreadEventSession, idle_grace_seconds=5),
+        )
+        app = _make_app(monkeypatch)
+        monkeypatch.setattr(es_module, "_get_session_maker", lambda: lambda: _SlowSession(owner=_USER))
+        # Separate loop: uvicorn.serve() cancels every task on its running loop.
+        server = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=0, log_level="error", lifespan="off"))
+        loop = asyncio.new_event_loop()
+        thread = threading.Thread(target=loop.run_forever, daemon=True)
+        thread.start()
+        serve = asyncio.run_coroutine_threadsafe(server.serve(), loop)
+        try:
+            for _ in range(50):
+                if server.started and server.servers:
+                    break
+                await asyncio.sleep(0.02)
+            else:
+                raise RuntimeError("uvicorn did not bind a port")
+            port = server.servers[0].sockets[0].getsockname()[1]
+            async with (
+                httpx.AsyncClient(timeout=None) as client,
+                client.stream(
+                    "POST",
+                    f"http://127.0.0.1:{port}/threads/t1/stream/events",
+                    json={"channels": ["messages"]},
+                ) as resp,
+            ):
+                assert resp.status_code == 200
+                if not await asyncio.to_thread(poll_started.wait, 1.5):
+                    raise TimeoutError("lister poll did not start")
+                await resp.aclose()
+            if not await asyncio.to_thread(closed.wait, 1.5):
+                raise TimeoutError("lister session was not closed")
+        finally:
+            server.should_exit = True
+            with contextlib.suppress(TimeoutError):
+                serve.result(timeout=3)
+            loop.call_soon_threadsafe(loop.stop)
+            thread.join(timeout=3)
+            loop.close()
+
+        assert not state["aexit_cancelled"]

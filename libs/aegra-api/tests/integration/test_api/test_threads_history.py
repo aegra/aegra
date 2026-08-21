@@ -1,4 +1,6 @@
 import json
+from collections.abc import AsyncIterator, Callable
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -15,19 +17,16 @@ from tests.fixtures.langgraph import FakeAgent, make_snapshot, patch_langgraph_s
 from tests.fixtures.test_helpers import DummyThread
 
 
-def _make_session_maker(session_instance: DummySessionBase, on_exit=None) -> MagicMock:
+def _make_session_maker(session_instance: DummySessionBase, on_exit: Callable[[], None] | None = None) -> MagicMock:
     """Return a callable mimicking ``async_sessionmaker``.
 
-    Calling the returned object produces an async context manager that yields
-    *session_instance*, matching the ``async with maker() as session:`` pattern
-    ``get_thread_history_post`` uses (see ``aegra_api.api.runs`` for the same idiom).
-    ``on_exit``, if given, is invoked when the context manager exits (i.e. the
-    pooled connection would be released back to the pool).
+    Yields *session_instance* under ``async with maker() as session:``; ``on_exit``
+    fires on exit, i.e. when the pooled connection is released back to the pool.
     """
     ctx = MagicMock()
     ctx.__aenter__ = AsyncMock(return_value=session_instance)
 
-    async def _aexit(*_args):
+    async def _aexit(*_args: object) -> bool:
         if on_exit is not None:
             on_exit()
         return False
@@ -80,9 +79,8 @@ def client(monkeypatch: pytest.MonkeyPatch) -> TestClient:
     # POST /threads (used by _ensure_thread below) still uses Depends(get_session).
     app.dependency_overrides[core_get_session] = override_get_session_dep(Session)
 
-    # get_thread_history_post/get manage their own session via
-    # _get_session_maker() (not Depends), scoped to the thread lookup only —
-    # patch that instead of overriding the get_session dependency.
+    # history handlers manage their own session via _get_session_maker(), not
+    # Depends — patch that instead of overriding the get_session dependency.
     monkeypatch.setattr(
         "aegra_api.api.threads._get_session_maker",
         lambda: _make_session_maker(Session()),
@@ -322,28 +320,20 @@ class TestBeforeParameterFormats:
         assert captured[0] is None
 
 
-# ------------------------------------------------------------------
-# Regression: the thread-lookup session must be released back to the pool
-# before the (potentially long-running / abortable) aget_state_history
-# iteration starts, not held open across it. See: aegra#517.
-# ------------------------------------------------------------------
+# Regression: the thread-lookup session must be released before the
+# (potentially long-running) aget_state_history iteration. See: aegra#517.
 
 
 def test_post_history_session_released_before_state_history_iterates(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The DB session used for the thread lookup must be closed before
-    ``aget_state_history`` is iterated, so an abort mid-iteration can't strand
-    a checked-out connection.
-
-    Fails before the fix: the session dependency stayed open for the whole
-    handler, so ``session_closed`` was still empty when the first snapshot
-    was pulled.
+    """Fails before the fix: the session stayed open for the whole handler,
+    so ``session_closed`` was still empty when the first snapshot was pulled.
     """
     app = create_test_app(include_runs=False, include_threads=True)
 
     class Session(DummySessionBase):
-        async def scalar(self, _stmt):
+        async def scalar(self, _stmt: Any) -> DummyThread:
             return _thread_row()
 
     app.dependency_overrides[core_get_session] = override_get_session_dep(Session)
@@ -364,7 +354,7 @@ def test_post_history_session_released_before_state_history_iterates(
                 ]
             )
 
-        async def aget_state_history(self, config, **kwargs):
+        async def aget_state_history(self, config: dict, **kwargs: dict) -> AsyncIterator[Any]:  # type: ignore[override]
             if not session_closed:
                 raise AssertionError("thread-lookup session still open when aget_state_history started")
             async for s in super().aget_state_history(config, **kwargs):

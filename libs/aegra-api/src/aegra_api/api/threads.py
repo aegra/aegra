@@ -696,8 +696,7 @@ async def get_thread_history_post(
 ) -> list[ThreadState]:
     """Get the checkpoint history for a thread (POST variant).
 
-    Returns a list of past states ordered from newest to oldest. Use `limit`
-    to control how many states are returned and `before` to paginate.
+    Returns states newest to oldest; `limit` bounds the count, `before` paginates.
     """
     try:
         limit = request.limit or 10
@@ -710,9 +709,8 @@ async def get_thread_history_post(
         subgraphs = bool(request.subgraphs) if request.subgraphs is not None else False
         checkpoint_ns = request.checkpoint_ns
 
-        # Session scoped to this lookup only: aget_state_history below can run
-        # long, and holding a pooled connection open across it is what leaked
-        # connections on aborted requests (aegra#517, same shape as #423/#428).
+        # Scoped to this lookup only: holding it open across aget_state_history
+        # below leaked connections on aborted requests (aegra#517).
         maker = _get_session_maker()
         async with maker() as session:
             stmt = select(ThreadORM).where(ThreadORM.thread_id == thread_id, ThreadORM.user_id == user.identity)

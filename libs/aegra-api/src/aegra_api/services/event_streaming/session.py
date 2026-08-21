@@ -117,7 +117,7 @@ class ThreadEventSession:
                 self._drained.add(run_id)
                 if not saw_any_run:
                     saw_any_run = True
-                    idle_deadline = None
+                idle_deadline = None
 
             if progressed:
                 idle_deadline = None

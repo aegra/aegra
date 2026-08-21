@@ -6,11 +6,13 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from aegra_api.models.auth import User
-from aegra_api.models.run_job import RunExecution, RunIdentity, RunJob
+from aegra_api.models.run_job import RunBehavior, RunExecution, RunIdentity, RunJob
 from aegra_api.services import run_executor as run_executor_module
 from aegra_api.services.run_executor import (
+    _build_run_config,
     _GraphResult,
     _lease_loss_cancellations,
+    _normalize_interrupt_value,
     _signal_end_event,
     _signal_run_done,
     _stream_native_v2,
@@ -35,6 +37,24 @@ def _make_job(run_id: str = "run-1") -> RunJob:
 def _patch_execute_run_deps() -> dict[str, MagicMock | AsyncMock]:
     """Return a dict of patch targets and their mocks for execute_run tests."""
     return {}
+
+
+class TestRunInterruptConfiguration:
+    @pytest.mark.parametrize(
+        ("value", "expected"),
+        [(["agent"], ["agent"]), (["*"], "*"), ("agent", "agent"), (None, None)],
+    )
+    def test_normalizes_interrupt_value(self, value: str | list[str] | None, expected: str | list[str] | None) -> None:
+        assert _normalize_interrupt_value(value) == expected
+
+    def test_interrupts_do_not_enter_run_config(self) -> None:
+        job = _make_job()
+        job = job.model_copy(update={"behavior": RunBehavior(interrupt_before=["agent"], interrupt_after=["tools"])})
+
+        config = _build_run_config(job)
+
+        assert "interrupt_before" not in config
+        assert "interrupt_after" not in config
 
 
 class TestExecuteRunSuccess:

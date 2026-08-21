@@ -60,6 +60,7 @@ def _make_session(
     depth: int | None = None,
     statuses: dict[str, str] | None = None,
     graph: str | None = None,
+    initial_grace_seconds: float = 0.0,
 ) -> ThreadEventSession:
     return ThreadEventSession(
         thread_id,
@@ -69,6 +70,7 @@ def _make_session(
         namespaces=namespaces,
         depth=depth,
         idle_grace_seconds=0.0,
+        initial_grace_seconds=initial_grace_seconds,
     )
 
 
@@ -337,6 +339,41 @@ class TestMisc:
         events = await _collect(_make_session("t1", channels={"lifecycle"}, run_ids=()))
         assert events == []
 
+    async def test_run_starting_after_idle_grace_still_streams(
+        self, manager: BrokerManager, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A run that starts only after the (short) idle grace has elapsed must
+        still be delivered — the initial wait is bounded separately (#461)."""
+        monkeypatch.setattr(session_module, "_POLL_INTERVAL_SECONDS", 0.01)
+        run_started = False
+        run_observed = asyncio.Event()
+
+        async def lister() -> list[tuple[str, str | None, str | None]]:
+            if run_started:
+                run_observed.set()
+                return [("run-1", "success", None)]
+            return []
+
+        async def start_run_late() -> None:
+            nonlocal run_started
+            await asyncio.sleep(0.05)
+            await _seed(manager, "run-1", [("end", {"status": "success"})])
+            run_started = True
+
+        session = ThreadEventSession(
+            "t1",
+            channels={"lifecycle"},
+            list_run_ids=lister,
+            idle_grace_seconds=0.02,
+            initial_grace_seconds=1.0,
+        )
+        starter = asyncio.create_task(start_run_late())
+        events = await _collect(session)
+        await asyncio.wait_for(starter, timeout=1.0)
+
+        assert run_observed.is_set()
+        assert [e["params"]["data"].get("event") for e in events] == ["running", "completed"]
+
 
 class TestResumeAcrossRuns:
     """A HITL resume starts a fresh run on the thread; its events must reach the
@@ -398,6 +435,102 @@ class TestResumeAcrossRuns:
         session = _make_session("t1", channels={"values", "lifecycle"}, run_ids=("run-1",))
         events = await _collect(session)
         assert [e["method"] for e in events] == ["lifecycle", "values", "lifecycle"]
+
+    async def test_stale_deadline_reset_after_run_drains_with_no_envelopes(
+        self, manager: BrokerManager, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A run that drains without yielding anything (already-terminal, no
+        surviving events) must reset idle_deadline, not just saw_any_run.
+
+        The stream first waits under the long initial grace (no run yet), which
+        stamps a deadline ~0.3s out. When run-old then appears and drains empty,
+        saw_any_run flips true; if idle_deadline is left at that stale mark
+        instead of being reset, the stream keeps waiting until the old ~0.3s
+        mark instead of closing one short idle_grace after the empty drain (#461).
+        """
+        monkeypatch.setattr(session_module, "_POLL_INTERVAL_SECONDS", 0.005)
+        run_ready = False
+        run_observed = asyncio.Event()
+
+        async def lister() -> list[tuple[str, str | None, str | None]]:
+            if run_ready:
+                run_observed.set()
+                return [("run-old", "success", None)]
+            return []
+
+        async def reveal_after_delay() -> None:
+            nonlocal run_ready
+            await asyncio.sleep(0.05)
+            run_ready = True
+
+        session = ThreadEventSession(
+            "t1",
+            channels={"lifecycle"},
+            list_run_ids=lister,
+            idle_grace_seconds=0.03,
+            initial_grace_seconds=0.5,
+        )
+        revealer = asyncio.create_task(reveal_after_delay())
+        loop = asyncio.get_running_loop()
+        start = loop.time()
+        events = await _collect(session)
+        elapsed = loop.time() - start
+        await asyncio.wait_for(revealer, timeout=1.0)
+
+        assert run_observed.is_set()
+        assert events == []
+        # run-old is already terminal with no surviving broker events, so it
+        # drains silently: this asserts on observable timeout behavior, since
+        # nothing is ever yielded to check idle_deadline against directly.
+        assert elapsed < 0.3
+
+    async def test_second_drained_empty_run_also_resets_idle_deadline(
+        self, manager: BrokerManager, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A SECOND run that drains without yielding anything must reset
+        idle_deadline too, not only the first (#541).
+
+        run-old drains empty first, setting saw_any_run=True and stamping an
+        idle_deadline ~short-grace out. Before that deadline fires, run-new
+        appears and also drains empty (e.g. another already-terminal run). If
+        only the first-run transition clears idle_deadline, the second drain
+        is invisible to the timer and the stream closes on the stale mark —
+        exactly as if run-new had never appeared. Resetting on every drain
+        instead restarts the short-grace window from run-new's drain time.
+        """
+        monkeypatch.setattr(session_module, "_POLL_INTERVAL_SECONDS", 0.005)
+        run_new_ready = False
+
+        async def lister() -> list[tuple[str, str | None, str | None]]:
+            rows: list[tuple[str, str | None, str | None]] = [("run-old", "success", None)]
+            if run_new_ready:
+                rows.append(("run-new", "success", None))
+            return rows
+
+        async def reveal_run_new_late() -> None:
+            nonlocal run_new_ready
+            await asyncio.sleep(0.03)
+            run_new_ready = True
+
+        session = ThreadEventSession(
+            "t1",
+            channels={"lifecycle"},
+            list_run_ids=lister,
+            idle_grace_seconds=0.05,
+            initial_grace_seconds=1.0,
+        )
+        revealer = asyncio.create_task(reveal_run_new_late())
+        loop = asyncio.get_running_loop()
+        start = loop.time()
+        events = await _collect(session)
+        elapsed = loop.time() - start
+        await asyncio.wait_for(revealer, timeout=1.0)
+
+        assert events == []
+        # Buggy code closes ~0.05s in (run-new's drain never restarts the
+        # timer); fixed code restarts the grace at run-new's ~0.03s drain,
+        # closing at ~0.08s. The gap comfortably separates the two.
+        assert elapsed > 0.065
 
 
 class TestNamespaceFilter:

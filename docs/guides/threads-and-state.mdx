@@ -76,6 +76,14 @@ print(state["interrupts"])
 print(state["checkpoint"]["checkpoint_id"])
 ```
 
+<Note>
+  Binary values (`bytes` and `bytearray`) stored in state channels are returned as
+  standard Base64-encoded strings in JSON responses. This applies to all arbitrary
+  fields: `values`, `tasks`, `interrupts`, and `metadata`, including binary data
+  used as dictionary keys. Values accessed in Python (e.g. inside custom middleware)
+  retain the original `bytes` type.
+</Note>
+
 ## Updating thread state
 
 You can modify thread state directly, for example to inject data or correct values:

@@ -215,6 +215,7 @@ class TestHeartbeatLoop:
             patch(f"{MODULE}._get_session_maker", return_value=maker),
             patch(f"{MODULE}.settings") as mock_settings,
             patch(f"{MODULE}.asyncio.sleep", side_effect=counting_sleep),
+            patch(f"{MODULE}.read_cancel_intent", new_callable=AsyncMock, return_value=None),
         ):
             mock_settings.worker.HEARTBEAT_INTERVAL_SECONDS = 1
             mock_settings.worker.LEASE_DURATION_SECONDS = 30
@@ -244,6 +245,7 @@ class TestHeartbeatLoop:
             patch(f"{MODULE}._get_session_maker", return_value=maker),
             patch(f"{MODULE}.settings") as mock_settings,
             patch(f"{MODULE}.asyncio.sleep", side_effect=counting_sleep),
+            patch(f"{MODULE}.read_cancel_intent", new_callable=AsyncMock, return_value=None),
         ):
             mock_settings.worker.HEARTBEAT_INTERVAL_SECONDS = 1
             mock_settings.worker.LEASE_DURATION_SECONDS = 30
@@ -253,6 +255,75 @@ class TestHeartbeatLoop:
 
         # Loop continued despite DB errors (2 iterations before cancel on 3rd sleep)
         assert session.execute.await_count == 2
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("intent", ["cancel", "interrupt"])
+    async def test_honors_cancel_intent_without_stopping_heartbeat(self, intent: str) -> None:
+        session = AsyncMock()
+        session.execute = AsyncMock()
+        session.commit = AsyncMock()
+        maker = _make_session_maker(session)
+        mock_task = MagicMock()
+        mock_task.done.return_value = False
+        run_id = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+
+        call_count = 0
+
+        async def counting_sleep(delay: float) -> None:
+            nonlocal call_count
+            call_count += 1
+            if call_count >= 2:
+                raise asyncio.CancelledError
+
+        with (
+            patch(f"{MODULE}._get_session_maker", return_value=maker),
+            patch(f"{MODULE}.settings") as mock_settings,
+            patch(f"{MODULE}.asyncio.sleep", side_effect=counting_sleep),
+            patch(f"{MODULE}.read_cancel_intent", new_callable=AsyncMock, return_value=intent),
+            patch.dict("aegra_api.core.active_runs.active_runs", {run_id: mock_task}, clear=True),
+            patch("aegra_api.core.active_runs.explicit_run_cancellations", set()) as cancellations,
+        ):
+            mock_settings.worker.HEARTBEAT_INTERVAL_SECONDS = 1
+            mock_settings.worker.LEASE_DURATION_SECONDS = 30
+            with pytest.raises(asyncio.CancelledError):
+                await _heartbeat_loop(run_id, "worker-0")
+
+        mock_task.cancel.assert_called()
+        assert run_id in cancellations
+        assert session.execute.await_count == 1
+
+    @pytest.mark.asyncio
+    async def test_intent_redis_error_does_not_skip_lease_renewal(self) -> None:
+        session = AsyncMock()
+        session.execute = AsyncMock()
+        session.commit = AsyncMock()
+        maker = _make_session_maker(session)
+
+        call_count = 0
+
+        async def counting_sleep(delay: float) -> None:
+            nonlocal call_count
+            call_count += 1
+            if call_count >= 2:
+                raise asyncio.CancelledError
+
+        with (
+            patch(f"{MODULE}._get_session_maker", return_value=maker),
+            patch(f"{MODULE}.settings") as mock_settings,
+            patch(f"{MODULE}.asyncio.sleep", side_effect=counting_sleep),
+            patch(
+                f"{MODULE}.read_cancel_intent",
+                new_callable=AsyncMock,
+                side_effect=RedisConnectionError("Redis down"),
+            ),
+        ):
+            mock_settings.worker.HEARTBEAT_INTERVAL_SECONDS = 1
+            mock_settings.worker.LEASE_DURATION_SECONDS = 30
+            with pytest.raises(asyncio.CancelledError):
+                await _heartbeat_loop("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee", "worker-0")
+
+        assert session.execute.await_count == 1
+        assert session.commit.await_count == 1
 
 
 # ------------------------------------------------------------------

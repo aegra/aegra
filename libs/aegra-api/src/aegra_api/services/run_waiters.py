@@ -8,6 +8,7 @@ yields the final JSON result when the run completes.
 import asyncio
 import contextlib
 import json
+import time
 from collections.abc import AsyncIterator
 from typing import Any
 
@@ -23,6 +24,44 @@ logger = structlog.getLogger(__name__)
 
 # Terminal run states — used by join/wait to skip waiting
 TERMINAL_STATES = {"success", "error", "interrupted"}
+CANCEL_WAIT_POLL_SECONDS = 0.5
+CANCEL_WAIT_SLACK_SECONDS = 5.0
+
+
+def cancel_wait_timeout_seconds() -> float:
+    """Bound for cancel?wait=1: two heartbeats plus slack."""
+    return 2 * settings.worker.HEARTBEAT_INTERVAL_SECONDS + CANCEL_WAIT_SLACK_SECONDS
+
+
+async def wait_for_terminal_run(
+    run_id: str,
+    *,
+    user_id: str,
+    timeout_seconds: float | None = None,
+) -> RunORM | None:
+    """Poll the run row until it is terminal or the wait bound elapses.
+
+    Opens a short-lived session per poll so the cancel request does not hold
+    a connection for the full wait.
+    """
+    maker = _get_session_maker()
+    deadline = time.monotonic() + (timeout_seconds if timeout_seconds is not None else cancel_wait_timeout_seconds())
+    latest: RunORM | None = None
+    while True:
+        async with maker() as session:
+            latest = await session.scalar(
+                select(RunORM).where(
+                    RunORM.run_id == run_id,
+                    RunORM.user_id == user_id,
+                )
+            )
+            if latest is not None:
+                session.expunge(latest)
+                if latest.status in TERMINAL_STATES:
+                    return latest
+        if time.monotonic() >= deadline:
+            return latest
+        await asyncio.sleep(CANCEL_WAIT_POLL_SECONDS)
 
 
 async def read_run_output(

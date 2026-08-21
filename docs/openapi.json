@@ -3,7 +3,7 @@
   "info": {
     "title": "Aegra",
     "description": "Production-ready Agent Protocol server",
-    "version": "0.10.3"
+    "version": "0.10.4"
   },
   "paths": {
     "/info": {
@@ -2265,7 +2265,7 @@
           "Thread Runs"
         ],
         "summary": "Cancel Run Endpoint",
-        "description": "Cancel or interrupt a running execution.\n\nUse `action=cancel` to hard-cancel the run immediately, or\n`action=interrupt` to cooperatively interrupt (the graph can handle the\ninterrupt and save partial state). Set `wait=1` to wait up to 10 seconds\nfor the background task to settle before returning the updated run. The\nresponse may still report `pending` or `running` if the timeout expires.\nWithout `wait=1`, a live-owned run is cancelled asynchronously, so the\nresponse may still report `pending` or `running`.",
+        "description": "Cancel or interrupt a running execution.\n\nUse `action=cancel` to hard-cancel the run immediately, or\n`action=interrupt` to cooperatively interrupt (the graph can handle the\ninterrupt and save partial state). Set `wait=1` to wait up to 25 seconds\nby default (2 worker heartbeats + 5s) for the background task to settle\nbefore returning the updated run. The response may still report `pending`\nor `running` if the bound expires. Without `wait=1`, a live-owned run is\ncancelled asynchronously, so the response may still report `pending` or\n`running`.",
         "operationId": "cancel_run_endpoint_threads__thread_id__runs__run_id__cancel_post",
         "parameters": [
           {
@@ -2294,11 +2294,11 @@
               "type": "integer",
               "maximum": 1,
               "minimum": 0,
-              "description": "Set to 1 to wait up to 10 seconds for the run task to settle before returning.",
+              "description": "Set to 1 to wait for the run task to settle before returning. Default bound is 25 seconds (2 heartbeats + 5s); the response may still report pending or running if the bound expires.",
               "default": 0,
               "title": "Wait"
             },
-            "description": "Set to 1 to wait up to 10 seconds for the run task to settle before returning."
+            "description": "Set to 1 to wait for the run task to settle before returning. Default bound is 25 seconds (2 heartbeats + 5s); the response may still report pending or running if the bound expires."
           },
           {
             "name": "action",

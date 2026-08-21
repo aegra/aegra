@@ -22,13 +22,14 @@ from redis import RedisError
 from redis import TimeoutError as RedisTimeoutError
 from sqlalchemy import select, update
 
-from aegra_api.core.active_runs import active_runs, explicit_run_cancellations
+from aegra_api.core.active_runs import active_runs, explicit_run_cancellations, request_local_cancellation
 from aegra_api.core.orm import Run as RunORM
 from aegra_api.core.orm import _get_session_maker
 from aegra_api.core.redis_manager import redis_manager
 from aegra_api.models.run_job import RunJob
 from aegra_api.observability.span_enrichment import merge_run_metadata, set_trace_context
 from aegra_api.services.base_executor import BaseExecutor
+from aegra_api.services.redis_broker import read_cancel_intent
 from aegra_api.services.run_executor import _lease_loss_cancellations, _timeout_cancellations, execute_run
 from aegra_api.services.run_status import finalize_run
 from aegra_api.settings import settings
@@ -473,7 +474,8 @@ async def _heartbeat_loop(
 ) -> None:
     """Extend lease periodically while the job is running.
 
-    If the lease is lost (another worker claimed the run), cancels
+    Honors a durable cancel intent without stopping lease renewal — the
+    owning task's cleanup releases the lease. Lease loss still cancels
     ``job_task`` to prevent double execution.
     """
     interval = settings.worker.HEARTBEAT_INTERVAL_SECONDS
@@ -481,6 +483,20 @@ async def _heartbeat_loop(
     maker = _get_session_maker()
 
     while True:
+        try:
+            intent = await read_cancel_intent(run_id)
+            if intent is not None:
+                logger.info(
+                    "Honoring durable cancel intent",
+                    run_id=run_id,
+                    worker=worker_name,
+                    action=intent,
+                )
+                # Pub/sub already hard-cancels both cancel and interrupt.
+                request_local_cancellation(run_id)
+        except RedisError:
+            logger.warning("Cancel-intent check failed", run_id=run_id, worker=worker_name)
+
         await asyncio.sleep(interval)
         try:
             new_expiry = datetime.now(UTC) + timedelta(seconds=duration)

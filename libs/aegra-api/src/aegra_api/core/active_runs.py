@@ -10,3 +10,13 @@ active_runs: dict[str, asyncio.Task[None]] = {}
 
 # Explicit API cancellations are marked so worker shutdown remains recoverable.
 explicit_run_cancellations: set[str] = set()
+
+
+def request_local_cancellation(run_id: str) -> bool:
+    """Cancel the owning task if this process has it. Skip non-owners."""
+    task = active_runs.get(run_id)
+    if task is None or task.done():
+        return False
+    explicit_run_cancellations.add(run_id)
+    task.cancel()
+    return True

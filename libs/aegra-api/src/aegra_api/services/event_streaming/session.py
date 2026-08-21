@@ -115,7 +115,9 @@ class ThreadEventSession:
                     progressed = True
                     yield envelope
                 self._drained.add(run_id)
-                saw_any_run = True
+                if not saw_any_run:
+                    saw_any_run = True
+                    idle_deadline = None
 
             if progressed:
                 idle_deadline = None

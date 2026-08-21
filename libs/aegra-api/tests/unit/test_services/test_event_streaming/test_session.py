@@ -431,6 +431,49 @@ class TestResumeAcrossRuns:
         events = await _collect(session)
         assert [e["method"] for e in events] == ["lifecycle", "values", "lifecycle"]
 
+    async def test_stale_deadline_reset_after_run_drains_with_no_envelopes(
+        self, manager: BrokerManager, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A run that drains without yielding anything (already-terminal, no
+        surviving events) must reset idle_deadline, not just saw_any_run.
+
+        The stream first waits under the long initial grace (no run yet), which
+        stamps a deadline ~0.3s out. When run-old then appears and drains empty,
+        saw_any_run flips true; if idle_deadline is left at that stale mark
+        instead of being reset, the stream keeps waiting until the old ~0.3s
+        mark instead of closing one short idle_grace after the empty drain (#461).
+        """
+        monkeypatch.setattr(session_module, "_POLL_INTERVAL_SECONDS", 0.005)
+        run_ready = False
+
+        async def lister() -> list[tuple[str, str | None, str | None]]:
+            return [("run-old", "success", None)] if run_ready else []
+
+        async def reveal_after_delay() -> None:
+            nonlocal run_ready
+            await asyncio.sleep(0.05)
+            run_ready = True
+
+        session = ThreadEventSession(
+            "t1",
+            channels={"lifecycle"},
+            list_run_ids=lister,
+            idle_grace_seconds=0.03,
+            initial_grace_seconds=0.5,
+        )
+        revealer = asyncio.create_task(reveal_after_delay())
+        loop = asyncio.get_running_loop()
+        start = loop.time()
+        events = await _collect(session)
+        elapsed = loop.time() - start
+        await asyncio.wait_for(revealer, timeout=1.0)
+
+        assert events == []
+        # run-old is already terminal with no surviving broker events, so it
+        # drains silently: this asserts on observable timeout behavior, since
+        # nothing is ever yielded to check idle_deadline against directly.
+        assert elapsed < 0.3
+
 
 class TestNamespaceFilter:
     """namespaces (prefix include-list) and depth (nesting cap) filter subgraph events."""

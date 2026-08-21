@@ -28,6 +28,19 @@ def create_get_graph_mock(return_value=None, side_effect=None):
     return get_graph
 
 
+def _make_session_maker(session: AsyncMock) -> MagicMock:
+    """Build a mock async_sessionmaker that always yields the given session.
+
+    get_thread_state_at_checkpoint manages its session manually via
+    _get_session_maker (not Depends(get_session)) so the pooled connection is
+    released before any LangGraph checkpoint read starts.
+    """
+    ctx = MagicMock()
+    ctx.__aenter__ = AsyncMock(return_value=session)
+    ctx.__aexit__ = AsyncMock(return_value=False)
+    return MagicMock(return_value=ctx)
+
+
 class TestGetThreadStateAtCheckpoint:
     """Exercise edge cases and success path for get_thread_state_at_checkpoint."""
 
@@ -50,6 +63,7 @@ class TestGetThreadStateAtCheckpoint:
         config = {"configurable": {}}
 
         with (
+            patch("aegra_api.api.threads._get_session_maker", return_value=_make_session_maker(session)),
             patch("aegra_api.services.langgraph_service.get_langgraph_service") as mock_service,
             patch(
                 "aegra_api.services.langgraph_service.create_thread_config",
@@ -67,7 +81,6 @@ class TestGetThreadStateAtCheckpoint:
                 "checkpoint-1",
                 subgraphs=True,
                 user=user,
-                session=session,
             )
 
         assert result is mock_thread_state
@@ -94,6 +107,7 @@ class TestGetThreadStateAtCheckpoint:
         config = {"configurable": {}}
 
         with (
+            patch("aegra_api.api.threads._get_session_maker", return_value=_make_session_maker(session)),
             patch("aegra_api.services.langgraph_service.get_langgraph_service") as mock_service,
             patch(
                 "aegra_api.services.langgraph_service.create_thread_config",
@@ -112,7 +126,6 @@ class TestGetThreadStateAtCheckpoint:
                 subgraphs=False,
                 checkpoint_ns="my-namespace",
                 user=user,
-                session=session,
             )
 
         assert config["configurable"]["checkpoint_id"] == "checkpoint-1"
@@ -137,6 +150,7 @@ class TestGetThreadStateAtCheckpoint:
         config = {"configurable": {}}
 
         with (
+            patch("aegra_api.api.threads._get_session_maker", return_value=_make_session_maker(session)),
             patch("aegra_api.services.langgraph_service.get_langgraph_service") as mock_service,
             patch(
                 "aegra_api.services.langgraph_service.create_thread_config",
@@ -155,7 +169,6 @@ class TestGetThreadStateAtCheckpoint:
                 subgraphs=False,
                 checkpoint_ns=None,
                 user=user,
-                session=session,
             )
 
         assert config["configurable"]["checkpoint_id"] == "checkpoint-1"
@@ -169,7 +182,6 @@ class TestGetThreadStateAtCheckpointPost:
     async def test_success_with_checkpoint_ns(self):
         """Verify checkpoint_ns from request is passed to GET endpoint."""
         user = User(identity="user-1", scopes=[])
-        session = AsyncMock()
 
         checkpoint = ThreadCheckpoint(
             checkpoint_id="checkpoint-1",
@@ -184,7 +196,7 @@ class TestGetThreadStateAtCheckpointPost:
             "aegra_api.api.threads.get_thread_state_at_checkpoint",
             return_value=mock_thread_state,
         ) as mock_get:
-            result = await get_thread_state_at_checkpoint_post("thread-123", request, user=user, session=session)
+            result = await get_thread_state_at_checkpoint_post("thread-123", request, user=user)
 
         assert result is mock_thread_state
         # Verify GET endpoint was called with checkpoint_ns
@@ -194,14 +206,12 @@ class TestGetThreadStateAtCheckpointPost:
             True,  # subgraphs
             "my-namespace",  # checkpoint_ns
             user,
-            session,
         )
 
     @pytest.mark.asyncio
     async def test_success_without_checkpoint_ns(self):
         """Verify None checkpoint_ns is handled correctly."""
         user = User(identity="user-1", scopes=[])
-        session = AsyncMock()
 
         checkpoint = ThreadCheckpoint(
             checkpoint_id="checkpoint-1",
@@ -216,7 +226,7 @@ class TestGetThreadStateAtCheckpointPost:
             "aegra_api.api.threads.get_thread_state_at_checkpoint",
             return_value=mock_thread_state,
         ) as mock_get:
-            result = await get_thread_state_at_checkpoint_post("thread-123", request, user=user, session=session)
+            result = await get_thread_state_at_checkpoint_post("thread-123", request, user=user)
 
         assert result is mock_thread_state
         # Verify GET endpoint was called with None checkpoint_ns
@@ -226,14 +236,12 @@ class TestGetThreadStateAtCheckpointPost:
             False,  # subgraphs
             None,  # checkpoint_ns (empty string becomes None)
             user,
-            session,
         )
 
     @pytest.mark.asyncio
     async def test_missing_checkpoint_id_raises_error(self):
         """Verify missing checkpoint_id raises 400 error."""
         user = User(identity="user-1", scopes=[])
-        session = AsyncMock()
 
         checkpoint = ThreadCheckpoint(
             checkpoint_id=None,  # Missing checkpoint_id
@@ -243,7 +251,7 @@ class TestGetThreadStateAtCheckpointPost:
         request = ThreadCheckpointPostRequest(checkpoint=checkpoint, subgraphs=False)
 
         with pytest.raises(HTTPException) as exc_info:
-            await get_thread_state_at_checkpoint_post("thread-123", request, user=user, session=session)
+            await get_thread_state_at_checkpoint_post("thread-123", request, user=user)
 
         assert exc_info.value.status_code == 400
         assert "checkpoint_id is required" in exc_info.value.detail.lower()
@@ -252,7 +260,6 @@ class TestGetThreadStateAtCheckpointPost:
     async def test_subgraphs_passed_correctly(self):
         """Verify subgraphs parameter from request is passed through."""
         user = User(identity="user-1", scopes=[])
-        session = AsyncMock()
 
         checkpoint = ThreadCheckpoint(
             checkpoint_id="checkpoint-1",
@@ -267,7 +274,7 @@ class TestGetThreadStateAtCheckpointPost:
             "aegra_api.api.threads.get_thread_state_at_checkpoint",
             return_value=mock_thread_state,
         ) as mock_get:
-            await get_thread_state_at_checkpoint_post("thread-123", request, user=user, session=session)
+            await get_thread_state_at_checkpoint_post("thread-123", request, user=user)
 
         # Verify subgraphs=True was passed
         call_args = mock_get.call_args[0]

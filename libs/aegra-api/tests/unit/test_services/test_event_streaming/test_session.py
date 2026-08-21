@@ -60,6 +60,7 @@ def _make_session(
     depth: int | None = None,
     statuses: dict[str, str] | None = None,
     graph: str | None = None,
+    initial_grace_seconds: float = 0.0,
 ) -> ThreadEventSession:
     return ThreadEventSession(
         thread_id,
@@ -69,6 +70,7 @@ def _make_session(
         namespaces=namespaces,
         depth=depth,
         idle_grace_seconds=0.0,
+        initial_grace_seconds=initial_grace_seconds,
     )
 
 
@@ -336,6 +338,36 @@ class TestMisc:
     async def test_empty_thread_closes_after_idle(self, manager: BrokerManager) -> None:
         events = await _collect(_make_session("t1", channels={"lifecycle"}, run_ids=()))
         assert events == []
+
+    async def test_run_starting_after_idle_grace_still_streams(
+        self, manager: BrokerManager, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A run that starts only after the (short) idle grace has elapsed must
+        still be delivered — the initial wait is bounded separately (#461)."""
+        monkeypatch.setattr(session_module, "_POLL_INTERVAL_SECONDS", 0.01)
+        run_started = False
+
+        async def lister() -> list[tuple[str, str | None, str | None]]:
+            return [("run-1", "success", None)] if run_started else []
+
+        async def start_run_late() -> None:
+            nonlocal run_started
+            await asyncio.sleep(0.05)
+            await _seed(manager, "run-1", [("end", {"status": "success"})])
+            run_started = True
+
+        session = ThreadEventSession(
+            "t1",
+            channels={"lifecycle"},
+            list_run_ids=lister,
+            idle_grace_seconds=0.02,
+            initial_grace_seconds=1.0,
+        )
+        starter = asyncio.create_task(start_run_late())
+        events = await _collect(session)
+        await asyncio.wait_for(starter, timeout=1.0)
+
+        assert [e["params"]["data"].get("event") for e in events] == ["running", "completed"]
 
 
 class TestResumeAcrossRuns:

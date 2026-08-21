@@ -160,6 +160,18 @@ def _json_key(key: Any) -> str:
     return str(key)
 
 
+def _normalize_mapping_keys(mapping: dict[Any, Any]) -> dict[str, Any]:
+    normalized: dict[str, Any] = {}
+    original_keys: dict[str, Any] = {}
+    for key, value in mapping.items():
+        normalized_key = _json_key(key)
+        if normalized_key in normalized and original_keys[normalized_key] != key:
+            raise ValueError(f"Mapping keys {original_keys[normalized_key]!r} and {key!r} serialize to the same key")
+        original_keys[normalized_key] = key
+        normalized[normalized_key] = value
+    return normalized
+
+
 def _to_jsonable(value: Any, _seen: frozenset[int] = frozenset()) -> Any:
     """Recursively convert arbitrary thread state to a JSON-compatible value.
 
@@ -180,7 +192,8 @@ def _to_jsonable(value: Any, _seen: frozenset[int] = frozenset()) -> Any:
         if id(value) in _seen:
             return None
         seen = _seen | {id(value)}
-        return {_json_key(k): _to_jsonable(v, seen) for k, v in value.items()}
+        normalized = _normalize_mapping_keys(value)
+        return {key: _to_jsonable(item, seen) for key, item in normalized.items()}
     # NamedTuple is a tuple subclass; convert via _asdict before the generic
     # container branch, otherwise it would serialize as an array.
     if isinstance(value, tuple) and hasattr(value, "_asdict"):
@@ -263,7 +276,7 @@ class ThreadState(BaseModel):
         for field in ("values", "metadata"):
             mapping = normalized.get(field)
             if isinstance(mapping, dict) and not all(isinstance(key, str) for key in mapping):
-                normalized[field] = {_json_key(key): value for key, value in mapping.items()}
+                normalized[field] = _normalize_mapping_keys(mapping)
         return normalized
 
     @field_serializer("values", "metadata", when_used="json")

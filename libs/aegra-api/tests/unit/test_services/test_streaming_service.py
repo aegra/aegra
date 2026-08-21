@@ -347,7 +347,7 @@ class TestStreamingService:
             success = await service.interrupt_run(run_id)
 
             assert success is True
-            mock_bm.request_cancel.assert_awaited_once_with(run_id, "interrupt")
+            mock_bm.request_cancel.assert_awaited_once_with(run_id, "interrupt", emit_end_event=True)
 
     async def test_cancel_run_delegates_to_broker_manager(self) -> None:
         """Test run cancellation delegates to broker_manager"""
@@ -359,7 +359,7 @@ class TestStreamingService:
             success = await service.cancel_run(run_id)
 
             assert success is True
-            mock_bm.request_cancel.assert_awaited_once_with(run_id, "cancel")
+            mock_bm.request_cancel.assert_awaited_once_with(run_id, "cancel", emit_end_event=True)
 
     async def test_is_run_streaming(self) -> None:
         """Test fetching if run is streaming"""

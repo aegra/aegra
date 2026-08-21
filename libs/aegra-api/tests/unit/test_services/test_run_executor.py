@@ -7,6 +7,16 @@ import pytest
 
 from aegra_api.models.auth import User
 from aegra_api.models.run_job import RunExecution, RunIdentity, RunJob
+from aegra_api.services import run_executor as run_executor_module
+from aegra_api.services.run_executor import (
+    _GraphResult,
+    _lease_loss_cancellations,
+    _signal_end_event,
+    _signal_run_done,
+    _stream_native_v2,
+    _timeout_cancellations,
+    execute_run,
+)
 
 
 async def _empty_async_gen():  # type: ignore[no-untyped-def]
@@ -38,12 +48,12 @@ class TestExecuteRunSuccess:
         mock_service = MagicMock()
         mock_service.get_graph = MagicMock(return_value=mock_graph)
 
-        mock_update = AsyncMock()
-        mock_finalize = AsyncMock()
+        mock_start = AsyncMock(return_value=True)
+        mock_finalize = AsyncMock(return_value=True)
 
         with (
             patch("aegra_api.services.run_executor.get_langgraph_service", return_value=mock_service),
-            patch("aegra_api.services.run_executor.update_run_status", mock_update),
+            patch("aegra_api.services.run_executor.start_run", mock_start),
             patch("aegra_api.services.run_executor.finalize_run", mock_finalize),
             patch("aegra_api.services.run_executor.streaming_service") as mock_streaming,
             patch("aegra_api.services.run_executor.stream_graph_events", return_value=_empty_async_gen()),
@@ -57,13 +67,9 @@ class TestExecuteRunSuccess:
             mock_auth.return_value = mock_auth_ctx
             mock_streaming.cleanup_run = AsyncMock()
 
-            from aegra_api.services.run_executor import execute_run
-
             await execute_run(_make_job())
 
-        # update_run_status called once for "running"
-        assert mock_update.await_count == 1
-        assert mock_update.await_args_list[0].args == ("run-1", "running")
+        mock_start.assert_awaited_once_with("run-1", user_id="user-1")
 
         # finalize_run called once for success
         mock_finalize.assert_awaited_once()
@@ -75,11 +81,11 @@ class TestExecuteRunSuccess:
 class TestExecuteRunCancelledError:
     @pytest.mark.asyncio
     async def test_cancelled_error_sets_interrupted_and_signals(self) -> None:
-        mock_update = AsyncMock()
-        mock_finalize = AsyncMock()
+        mock_start = AsyncMock(return_value=True)
+        mock_finalize = AsyncMock(return_value=True)
 
         with (
-            patch("aegra_api.services.run_executor.update_run_status", mock_update),
+            patch("aegra_api.services.run_executor.start_run", mock_start),
             patch("aegra_api.services.run_executor.finalize_run", mock_finalize),
             patch("aegra_api.services.run_executor.streaming_service") as mock_streaming,
             patch("aegra_api.services.run_executor._signal_run_done", new_callable=AsyncMock),
@@ -92,28 +98,64 @@ class TestExecuteRunCancelledError:
             mock_streaming.signal_run_cancelled = AsyncMock()
             mock_streaming.cleanup_run = AsyncMock()
 
-            from aegra_api.services.run_executor import execute_run
-
             with pytest.raises(asyncio.CancelledError):
                 await execute_run(_make_job())
 
-        # update_run_status called once for "running"
-        assert mock_update.await_count == 1
-        assert mock_update.await_args_list[0].args == ("run-1", "running")
+        mock_start.assert_awaited_once_with("run-1", user_id="user-1")
         # finalize_run called for "interrupted"
         mock_finalize.assert_awaited_once()
         assert mock_finalize.await_args.kwargs["status"] == "interrupted"
+        assert mock_finalize.await_args.kwargs["user_id"] == "user-1"
         mock_streaming.signal_run_cancelled.assert_awaited_once_with("run-1")
+
+    @pytest.mark.asyncio
+    async def test_timeout_cancel_sets_error_and_signals(self) -> None:
+        mock_finalize = AsyncMock(return_value=True)
+
+        with (
+            patch("aegra_api.services.run_executor.start_run", new_callable=AsyncMock, return_value=True),
+            patch("aegra_api.services.run_executor.finalize_run", mock_finalize),
+            patch("aegra_api.services.run_executor.streaming_service") as mock_streaming,
+            patch("aegra_api.services.run_executor._signal_run_done", new_callable=AsyncMock),
+            patch(
+                "aegra_api.services.run_executor._stream_graph",
+                new_callable=AsyncMock,
+                side_effect=asyncio.CancelledError,
+            ),
+        ):
+            mock_streaming.signal_run_error = AsyncMock()
+            mock_streaming.cleanup_run = AsyncMock()
+            _timeout_cancellations.add("run-1")
+            try:
+                with pytest.raises(asyncio.CancelledError):
+                    await execute_run(_make_job())
+            finally:
+                _timeout_cancellations.discard("run-1")
+
+        mock_finalize.assert_awaited_once_with(
+            "run-1",
+            "thread-1",
+            user_id="user-1",
+            status="error",
+            thread_status="error",
+            output={},
+            error="Job exceeded maximum execution time",
+        )
+        mock_streaming.signal_run_error.assert_awaited_once_with(
+            "run-1",
+            "TimeoutError: execution failed",
+            "TimeoutError",
+        )
 
 
 class TestExecuteRunException:
     @pytest.mark.asyncio
     async def test_exception_sets_error_and_signals(self) -> None:
-        mock_update = AsyncMock()
-        mock_finalize = AsyncMock()
+        mock_start = AsyncMock(return_value=True)
+        mock_finalize = AsyncMock(return_value=True)
 
         with (
-            patch("aegra_api.services.run_executor.update_run_status", mock_update),
+            patch("aegra_api.services.run_executor.start_run", mock_start),
             patch("aegra_api.services.run_executor.finalize_run", mock_finalize),
             patch("aegra_api.services.run_executor.streaming_service") as mock_streaming,
             patch("aegra_api.services.run_executor._signal_run_done", new_callable=AsyncMock),
@@ -126,17 +168,14 @@ class TestExecuteRunException:
             mock_streaming.signal_run_error = AsyncMock()
             mock_streaming.cleanup_run = AsyncMock()
 
-            from aegra_api.services.run_executor import execute_run
-
             await execute_run(_make_job())
 
-        # update_run_status called once for "running"
-        assert mock_update.await_count == 1
-        assert mock_update.await_args_list[0].args == ("run-1", "running")
+        mock_start.assert_awaited_once_with("run-1", user_id="user-1")
         # finalize_run called for "error"
         mock_finalize.assert_awaited_once()
         assert mock_finalize.await_args.kwargs["status"] == "error"
         assert mock_finalize.await_args.kwargs["thread_status"] == "error"
+        assert mock_finalize.await_args.kwargs["user_id"] == "user-1"
         mock_streaming.signal_run_error.assert_awaited_once()
         # Verify sanitized message used (not raw exception)
         error_args = mock_streaming.signal_run_error.await_args
@@ -157,14 +196,11 @@ class TestStreamNativeV2InterruptDetection:
     the run finalizes 'success' and the client gets input.requested + completed."""
 
     async def _run(self, *events: tuple[str, dict]) -> bool:
-        from aegra_api.services import run_executor as mod
-        from aegra_api.services.run_executor import _GraphResult, _stream_native_v2
-
         result = _GraphResult()
         with (
-            patch.object(mod, "stream_native_v3_events", _v3_stream(*events)),
-            patch.object(mod, "broker_manager") as bm,
-            patch.object(mod, "streaming_service") as ss,
+            patch.object(run_executor_module, "stream_native_v3_events", _v3_stream(*events)),
+            patch.object(run_executor_module, "broker_manager") as bm,
+            patch.object(run_executor_module, "streaming_service") as ss,
         ):
             bm.allocate_event_id = AsyncMock(return_value="run-1_event_1")
             ss.put_to_broker = AsyncMock()
@@ -199,8 +235,6 @@ class TestSignalEndEvent:
             mock_bm.get_broker.return_value = mock_broker
             mock_bm.allocate_event_id = AsyncMock(return_value="run-1_event_5")
 
-            from aegra_api.services.run_executor import _signal_end_event
-
             await _signal_end_event("run-1", "success")
 
         mock_broker.put.assert_awaited_once_with("run-1_event_5", ("end", {"status": "success"}))
@@ -209,8 +243,6 @@ class TestSignalEndEvent:
     async def test_noop_when_broker_is_none(self) -> None:
         with patch("aegra_api.services.run_executor.broker_manager") as mock_bm:
             mock_bm.get_broker.return_value = None
-
-            from aegra_api.services.run_executor import _signal_end_event
 
             await _signal_end_event("run-1", "success")
             # No error, no put call
@@ -223,8 +255,6 @@ class TestSignalEndEvent:
         with patch("aegra_api.services.run_executor.broker_manager") as mock_bm:
             mock_bm.get_broker.return_value = mock_broker
 
-            from aegra_api.services.run_executor import _signal_end_event
-
             await _signal_end_event("run-1", "success")
 
 
@@ -235,8 +265,6 @@ class TestSignalRunDone:
 
         with patch("aegra_api.services.run_executor.redis_manager") as mock_rm:
             mock_rm.get_client.return_value = mock_client
-
-            from aegra_api.services.run_executor import _signal_run_done
 
             await _signal_run_done("run-1")
 
@@ -257,8 +285,6 @@ class TestSignalRunDone:
             mock_rm.get_client.return_value = mock_client
             mock_settings.redis.REDIS_CHANNEL_PREFIX = "aegra:agent-foo:run:"
 
-            from aegra_api.services.run_executor import _signal_run_done
-
             await _signal_run_done("run-1")
 
         key = mock_client.set.await_args.args[0]
@@ -269,8 +295,6 @@ class TestSignalRunDone:
         with patch("aegra_api.services.run_executor.redis_manager") as mock_rm:
             mock_rm.get_client.side_effect = Exception("connection refused")
 
-            from aegra_api.services.run_executor import _signal_run_done
-
             # Should not raise
             await _signal_run_done("run-1")
 
@@ -280,13 +304,13 @@ class TestLeaseLossCancellation:
     async def test_lease_loss_cancel_skips_finalize_and_signal(self) -> None:
         """Regression: when cancellation is due to lease loss (not user action),
         execute_run must NOT finalize the run, send SSE events, signal done,
-        or clean up the broker — another worker will re-execute it."""
-        mock_update = AsyncMock()
+        or clean up the broker - another worker will re-execute it."""
+        mock_start = AsyncMock(return_value=True)
         mock_finalize = AsyncMock()
         mock_signal_done = AsyncMock()
 
         with (
-            patch("aegra_api.services.run_executor.update_run_status", mock_update),
+            patch("aegra_api.services.run_executor.start_run", mock_start),
             patch("aegra_api.services.run_executor.finalize_run", mock_finalize),
             patch("aegra_api.services.run_executor.streaming_service") as mock_streaming,
             patch("aegra_api.services.run_executor._signal_run_done", mock_signal_done),
@@ -298,8 +322,6 @@ class TestLeaseLossCancellation:
         ):
             mock_streaming.signal_run_cancelled = AsyncMock()
             mock_streaming.cleanup_run = AsyncMock()
-
-            from aegra_api.services.run_executor import _lease_loss_cancellations, execute_run
 
             # Simulate heartbeat marking this as a lease-loss cancel
             _lease_loss_cancellations.add("run-1")
@@ -321,12 +343,12 @@ class TestLeaseLossCancellation:
     @pytest.mark.asyncio
     async def test_user_cancel_still_finalizes(self) -> None:
         """Normal (user-initiated) cancellation must still finalize and signal."""
-        mock_update = AsyncMock()
-        mock_finalize = AsyncMock()
+        mock_start = AsyncMock(return_value=True)
+        mock_finalize = AsyncMock(return_value=True)
         mock_signal_done = AsyncMock()
 
         with (
-            patch("aegra_api.services.run_executor.update_run_status", mock_update),
+            patch("aegra_api.services.run_executor.start_run", mock_start),
             patch("aegra_api.services.run_executor.finalize_run", mock_finalize),
             patch("aegra_api.services.run_executor.streaming_service") as mock_streaming,
             patch("aegra_api.services.run_executor._signal_run_done", mock_signal_done),
@@ -339,8 +361,6 @@ class TestLeaseLossCancellation:
             mock_streaming.signal_run_cancelled = AsyncMock()
             mock_streaming.cleanup_run = AsyncMock()
 
-            from aegra_api.services.run_executor import execute_run
-
             with pytest.raises(asyncio.CancelledError):
                 await execute_run(_make_job())
 
@@ -351,3 +371,38 @@ class TestLeaseLossCancellation:
         # Done-key and cleanup MUST happen on normal cancel
         mock_signal_done.assert_awaited_once_with("run-1")
         mock_streaming.cleanup_run.assert_awaited_once_with("run-1")
+
+
+class TestTerminalStateRaces:
+    @pytest.mark.asyncio
+    async def test_terminal_run_does_not_start_graph_execution(self) -> None:
+        with (
+            patch("aegra_api.services.run_executor.start_run", new_callable=AsyncMock, return_value=False),
+            patch("aegra_api.services.run_executor._stream_graph", new_callable=AsyncMock) as mock_stream,
+            patch("aegra_api.services.run_executor.finalize_run", new_callable=AsyncMock) as mock_finalize,
+            patch("aegra_api.services.run_executor.streaming_service") as mock_streaming,
+            patch("aegra_api.services.run_executor._signal_run_done", new_callable=AsyncMock),
+        ):
+            mock_streaming.cleanup_run = AsyncMock()
+
+            await execute_run(_make_job())
+
+        mock_stream.assert_not_awaited()
+        mock_finalize.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_lost_finalization_race_does_not_signal_success(self) -> None:
+        graph_result = MagicMock(has_interrupt=False, data={"late": True})
+        with (
+            patch("aegra_api.services.run_executor.start_run", new_callable=AsyncMock, return_value=True),
+            patch("aegra_api.services.run_executor._stream_graph", new_callable=AsyncMock, return_value=graph_result),
+            patch("aegra_api.services.run_executor.finalize_run", new_callable=AsyncMock, return_value=False),
+            patch("aegra_api.services.run_executor._signal_end_event", new_callable=AsyncMock) as mock_signal_end,
+            patch("aegra_api.services.run_executor.streaming_service") as mock_streaming,
+            patch("aegra_api.services.run_executor._signal_run_done", new_callable=AsyncMock),
+        ):
+            mock_streaming.cleanup_run = AsyncMock()
+
+            await execute_run(_make_job())
+
+        mock_signal_end.assert_not_awaited()

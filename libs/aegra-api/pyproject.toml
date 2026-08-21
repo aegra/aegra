@@ -1,6 +1,6 @@
 [project]
 name = "aegra-api"
-version = "0.9.25"
+version = "0.10.3"
 description = "Aegra core API - Self-hosted Agent Protocol server"
 readme = "README.md"
 requires-python = ">=3.12"
@@ -19,7 +19,8 @@ classifiers = [
 dependencies = [
     # Core
     "fastapi>=0.110.1",
-    "uvicorn>=0.35.0",
+    # >=0.36.0: --loop accepts import strings (Windows selector loop, #513)
+    "uvicorn>=0.36.0",
     "pydantic>=2.11.7",
     "pydantic-settings>=2.14.2",
     "sse-starlette>=3.3.4,<4.0.0",
@@ -116,6 +117,7 @@ markers = [
     "unit: unit tests",
     "e2e: end-to-end tests requiring a running server",
     "prod_only: tests that require Redis workers (skipped in dev mode)",
+    "auth_only: tests that require an auth-enabled server (run with -m auth_only)",
 ]
 
 [dependency-groups]

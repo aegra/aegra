@@ -154,7 +154,8 @@ for thread in threads:
 
 ## Deleting threads
 
-Deleting a thread cancels any active runs and removes all state:
+Deleting a thread cancels any active runs and removes all state, including
+the checkpoint history stored in the graph backend:
 
 ```python
 await client.threads.delete(thread_id)

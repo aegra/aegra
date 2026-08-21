@@ -3,7 +3,7 @@ import re
 from typing import Annotated
 from urllib.parse import parse_qsl, quote_plus, urlencode
 
-from pydantic import BeforeValidator, computed_field, model_validator
+from pydantic import BeforeValidator, Field, computed_field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from aegra_api import __version__
@@ -341,6 +341,12 @@ class RedisSettings(EnvBase):
     REDIS_URL: str = "redis://localhost:6379/0"
     REDIS_CHANNEL_PREFIX: str = "aegra:run:"
     REDIS_MAX_CONNECTIONS: int = 250
+    # PING pooled connections idle longer than this (seconds) before reuse, so
+    # server-side idle disconnects don't surface as ConnectionError. 0 disables.
+    REDIS_HEALTH_CHECK_INTERVAL: int = Field(default=30, ge=0)
+    # Non-negative retries after the initial attempt (up to 4 calls total) on
+    # connection and timeout errors, with exponential backoff 50ms..1s.
+    REDIS_RETRY_ATTEMPTS: int = Field(default=3, ge=0)
 
 
 class WorkerSettings(EnvBase):

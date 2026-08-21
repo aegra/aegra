@@ -27,3 +27,5 @@ MultitaskStrategy = Literal[
     "interrupt",
     "enqueue",
 ]
+
+RunCancellationAction = Literal["cancel", "interrupt"]

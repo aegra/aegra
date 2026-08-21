@@ -147,7 +147,11 @@ class TestForwarding:
         )
         events = await _collect(_make_session("t1", channels={"input", "updates"}, run_ids=("run-1",)))
         input_events = [e for e in events if e["method"] == "input.requested"]
-        assert input_events[0]["params"]["data"] == {"interrupt_id": "int-9", "value": {"q": "ok?"}}
+        assert input_events[0]["params"]["data"] == {
+            "interrupt_id": "int-9",
+            "value": {"q": "ok?"},
+            "payload": {"q": "ok?"},
+        }
         assert not [e for e in events if e["method"] == "updates"]
 
 
@@ -233,7 +237,11 @@ class TestInterruptsToInputChannel:
         events = await _collect(_make_session("t1", channels={"input", "values"}, run_ids=("run-1",)))
         input_events = [e for e in events if e["method"] == "input.requested"]
         assert input_events
-        assert input_events[0]["params"]["data"] == {"interrupt_id": "int-1", "value": interrupt_payload}
+        assert input_events[0]["params"]["data"] == {
+            "interrupt_id": "int-1",
+            "value": interrupt_payload,
+            "payload": interrupt_payload,
+        }
 
     async def test_interrupt_stripped_from_values_payload(self, manager: BrokerManager) -> None:
         """__interrupt__ never leaks into the forwarded values data."""
@@ -377,7 +385,10 @@ class TestResumeAcrossRuns:
         await asyncio.wait_for(seeder, timeout=1.0)
 
         methods = [(e["method"], e["params"]["data"]) for e in events]
-        assert ("input.requested", {"interrupt_id": "int-1", "value": {"q": "ok?"}}) in methods
+        assert (
+            "input.requested",
+            {"interrupt_id": "int-1", "value": {"q": "ok?"}, "payload": {"q": "ok?"}},
+        ) in methods
         # run-b's completion proves the stream stayed open across the run gap.
         assert any(e["method"] == "lifecycle" and e["params"]["data"] == {"event": "completed"} for e in events)
 

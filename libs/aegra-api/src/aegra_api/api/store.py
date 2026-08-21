@@ -1,8 +1,13 @@
 """Store endpoints for Agent Protocol"""
 
+from collections.abc import Mapping
+from functools import cache
+
+import structlog
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import Response
 
+from aegra_api.config import load_store_config
 from aegra_api.core.auth_deps import auth_dependency, get_current_user
 from aegra_api.core.auth_handlers import build_auth_context, handle_event
 from aegra_api.core.database import db_manager
@@ -18,6 +23,8 @@ from aegra_api.models import (
     User,
 )
 from aegra_api.models.errors import BAD_REQUEST, NOT_FOUND
+
+logger = structlog.get_logger(__name__)
 
 router = APIRouter(tags=["Store"], dependencies=auth_dependency)
 
@@ -44,7 +51,7 @@ async def put_store_item(request: StorePutRequest, user: User = Depends(get_curr
             request.value = filters["value"]
 
     # Apply user namespace scoping
-    scoped_namespace = apply_user_namespace_scoping(user.identity, request.namespace)
+    scoped_namespace = apply_namespace_scoping(request.namespace, user)
 
     store = db_manager.get_store()
 
@@ -65,20 +72,22 @@ async def get_store_item(
 
     Returns 404 if no item exists at the given namespace and key.
     """
-    # Authorization check
+    # Handlers must see the parsed list; the raw dot-string form judges a
+    # different namespace than PUT/DELETE dispatched (#515).
     ctx = build_auth_context(user, "store", "get")
-    value = {"key": key, "namespace": namespace}
+    namespace_list = _normalize_namespace(namespace)
+    value = {"key": key, "namespace": namespace_list}
     filters = await handle_event(ctx, value)
 
     # If handler modified namespace/key, update
     if filters:
         if "namespace" in filters:
-            namespace = filters["namespace"]
+            namespace_list = _normalize_namespace(filters["namespace"])
         if "key" in filters:
             key = filters["key"]
 
     # Apply user namespace scoping
-    scoped_namespace = apply_user_namespace_scoping(user.identity, _normalize_namespace(namespace))
+    scoped_namespace = apply_namespace_scoping(namespace_list, user)
 
     store = db_manager.get_store()
 
@@ -127,7 +136,7 @@ async def delete_store_item(
             k = filters["key"]
 
     # Apply user namespace scoping
-    scoped_namespace = apply_user_namespace_scoping(user.identity, ns)
+    scoped_namespace = apply_namespace_scoping(ns, user)
 
     store = db_manager.get_store()
 
@@ -160,7 +169,7 @@ async def search_store_items(
             request.filter = {**(request.filter or {}), **handler_filters}
 
     # Apply user namespace scoping
-    scoped_prefix = apply_user_namespace_scoping(user.identity, request.namespace_prefix)
+    scoped_prefix = apply_namespace_scoping(request.namespace_prefix, user)
 
     store = db_manager.get_store()
 
@@ -194,8 +203,9 @@ async def list_namespaces(
     Returns the namespace paths that contain items. Filter by prefix, suffix,
     or maximum depth.
     """
-    # Authorization check
-    ctx = build_auth_context(user, "store", "search")
+    # Authorization: the protocol action for namespaces is `list_namespaces`,
+    # which @auth.on.store.list_namespaces covers.
+    ctx = build_auth_context(user, "store", "list_namespaces")
     value = request.model_dump()
     filters = await handle_event(ctx, value)
 
@@ -207,7 +217,7 @@ async def list_namespaces(
             request.suffix = filters["suffix"]
 
     # Apply user namespace scoping to prefix
-    scoped_prefix = apply_user_namespace_scoping(user.identity, request.prefix or [])
+    scoped_prefix = apply_namespace_scoping(request.prefix or [], user)
     prefix: tuple[str, ...] = tuple(scoped_prefix)
     suffix: tuple[str, ...] | None = tuple(request.suffix) if request.suffix else None
 
@@ -225,25 +235,76 @@ async def list_namespaces(
 
 
 def _normalize_namespace(value: str | list[str] | None) -> list[str]:
-    """Normalize namespace input to a clean list, filtering out empty parts."""
-    if isinstance(value, str):
-        return [part for part in value.split(".") if part]
-    if isinstance(value, list):
-        return [part for part in value if part]
-    return []
+    """Normalize namespace input to a clean list, filtering out empty parts.
 
-
-def apply_user_namespace_scoping(user_id: str, namespace: list[str]) -> list[str]:
-    """Apply user-based namespace scoping for data isolation.
-
-    All store operations are scoped to the authenticated user's namespace.
-    Users can only access namespaces under ["users", <their_user_id>].
+    Dots split inside list items too: FastAPI may coerce ``?namespace=a.b``
+    into ``["a.b"]`` depending on version.
     """
-    if not namespace:
-        return ["users", user_id]
+    if isinstance(value, str):
+        value = [value]
+    if not isinstance(value, list):
+        return []
+    return [part for item in value if isinstance(item, str) for part in item.split(".") if part]
 
-    if namespace[0] == "users" and len(namespace) >= 2 and namespace[1] == user_id:
+
+def _scope(prefix: str, scope_ids: list[str], namespace: list[str]) -> list[str]:
+    """Bury a namespace under [prefix, *scope_ids] unless it already starts with exactly that."""
+    head = [prefix, *scope_ids]
+    if namespace[: len(head)] == head:
         return namespace
+    return [*head, *namespace]
 
-    # Scope any other namespace under the user's prefix
-    return ["users", user_id] + namespace
+
+_USER_SCOPE_PREFIX = "users"
+
+
+@cache
+def _scope_attr_map() -> Mapping[str, list[str]]:
+    """Map of namespace prefix -> list of User attributes, from aegra.json store.scopes.
+
+    Empty unless configured — configurable scopes are entirely opt-in. The
+    reserved "users" prefix is dropped so it can never be remapped away from
+    per-user isolation.
+    """
+    store_config = load_store_config()
+    configured = store_config.get("scopes") if store_config else None
+    if not configured:
+        return {}
+    if not isinstance(configured, dict):
+        logger.warning("store.scopes must be a mapping of prefix -> attribute names; ignoring %r", configured)
+        return {}
+
+    scopes: dict[str, list[str]] = {}
+    for prefix, attrs in configured.items():
+        if prefix == _USER_SCOPE_PREFIX:
+            logger.warning("store.scopes key %r is reserved and was ignored", _USER_SCOPE_PREFIX)
+            continue
+        if not isinstance(attrs, list) or not attrs or not all(isinstance(a, str) and a for a in attrs):
+            logger.warning("store.scopes[%r] must be a non-empty list of attribute names; ignoring", prefix)
+            continue
+        scopes[prefix] = attrs
+    return scopes
+
+
+def apply_namespace_scoping(
+    namespace: list[str], user: User, *, scopes: Mapping[str, list[str]] | None = None
+) -> list[str]:
+    """Scope store namespaces for data isolation.
+
+    User scope is the default. A leading element matching a configured scope
+    prefix opts into that scope, isolating data under [prefix, *<user attrs>].
+    Items land in the same scope for every user sharing those attribute values,
+    so mapping a shared attribute (e.g. org_id) shares data across that group.
+    """
+    scopes = scopes if scopes is not None else _scope_attr_map()
+
+    if namespace and (prefix := namespace[0]) in scopes:
+        values: list[str] = []
+        for attr in scopes[prefix]:
+            value = getattr(user, attr, None)
+            if value is None or value == "":
+                raise HTTPException(403, f"User has no {attr!r} required for {prefix!r}-scoped store access")
+            values.append(str(value))
+        return _scope(prefix, values, namespace)
+
+    return _scope(_USER_SCOPE_PREFIX, [user.identity], namespace)

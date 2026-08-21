@@ -73,7 +73,8 @@ async def authenticate(headers: dict[str, str]) -> dict[str, str | bool | list[s
 
     user_id = parts[0]
     role = parts[1]
-    team_id = parts[2] if len(parts) > 2 else "team_default"
+    has_team = len(parts) > 2
+    team_id = parts[2] if has_team else "team_default"
 
     # Determine subscription tier based on role
     subscription_tier = "premium" if role in ("admin", "premium") else "free"
@@ -87,6 +88,8 @@ async def authenticate(headers: dict[str, str]) -> dict[str, str | bool | list[s
         "role": role,
         "subscription_tier": subscription_tier,
         "team_id": team_id,
+        # A team doubles as the user's org for org-scoped store sharing; no team => no org.
+        "org_id": team_id if has_team else None,
         "email": f"{user_id}@example.com",
     }
 

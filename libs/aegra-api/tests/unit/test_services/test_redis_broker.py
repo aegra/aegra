@@ -690,7 +690,7 @@ class TestRedisBrokerManager:
             channel, message = mock_client.publish.call_args[0]
             assert channel == "aegra:run:cancel"
             payload = json.loads(message)
-            assert payload == {"run_id": "run-123", "action": "cancel"}
+            assert payload == {"run_id": "run-123", "action": "cancel", "emit_end_event": True}
 
     @pytest.mark.asyncio
     async def test_request_cancel_falls_back_on_redis_error(self) -> None:
@@ -707,7 +707,7 @@ class TestRedisBrokerManager:
 
             await manager.request_cancel("run-123", "cancel")
 
-            mock_exec.assert_awaited_once_with("run-123")
+            mock_exec.assert_awaited_once_with("run-123", emit_end_event=True)
 
     @pytest.mark.asyncio
     async def test_execute_cancel_cancels_local_task(self) -> None:
@@ -722,6 +722,7 @@ class TestRedisBrokerManager:
 
         with (
             patch.dict("aegra_api.core.active_runs.active_runs", {"run-123": mock_task}, clear=True),
+            patch("aegra_api.services.redis_broker.explicit_run_cancellations", set()) as cancellations,
             patch.object(manager, "get_or_create_broker", return_value=mock_broker),
             patch.object(manager, "allocate_event_id", new_callable=AsyncMock, return_value="run-123_event_6"),
         ):
@@ -729,6 +730,26 @@ class TestRedisBrokerManager:
 
             mock_task.cancel.assert_called_once()
             mock_broker.put.assert_awaited_once()
+            assert cancellations == {"run-123"}
+
+    @pytest.mark.asyncio
+    async def test_execute_cancel_can_leave_terminal_signaling_to_api(self) -> None:
+        manager = self._make_manager()
+        mock_task = MagicMock()
+        mock_task.done.return_value = False
+        mock_broker = MagicMock()
+        mock_broker.put = AsyncMock()
+
+        with (
+            patch.dict("aegra_api.core.active_runs.active_runs", {"run-123": mock_task}, clear=True),
+            patch("aegra_api.services.redis_broker.explicit_run_cancellations", set()) as cancellations,
+            patch.object(manager, "get_or_create_broker", return_value=mock_broker),
+        ):
+            await manager._execute_cancel("run-123", emit_end_event=False)
+
+        mock_task.cancel.assert_called_once()
+        mock_broker.put.assert_not_awaited()
+        assert cancellations == {"run-123"}
 
     @pytest.mark.asyncio
     async def test_execute_cancel_ignores_missing_task(self) -> None:

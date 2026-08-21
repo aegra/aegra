@@ -68,8 +68,8 @@ class TestStreamingErrorHandling:
                 "aegra_api.services.run_executor.stream_graph_events",
                 return_value=failing_stream(),
             ),
-            patch("aegra_api.services.run_executor.update_run_status", new_callable=AsyncMock),
-            patch("aegra_api.services.run_executor.finalize_run", new_callable=AsyncMock),
+            patch("aegra_api.services.run_executor.start_run", new_callable=AsyncMock, return_value=True),
+            patch("aegra_api.services.run_executor.finalize_run", new_callable=AsyncMock, return_value=True),
         ):
             mock_lg_service.return_value.get_graph.return_value.__aenter__ = AsyncMock(return_value=mock_graph)
             mock_lg_service.return_value.get_graph.return_value.__aexit__ = AsyncMock(return_value=None)
@@ -134,8 +134,8 @@ class TestStreamingErrorHandling:
                 "aegra_api.services.run_executor.stream_graph_events",
                 return_value=failing_stream(),
             ),
-            patch("aegra_api.services.run_executor.update_run_status", new_callable=AsyncMock),
-            patch("aegra_api.services.run_executor.finalize_run", new_callable=AsyncMock),
+            patch("aegra_api.services.run_executor.start_run", new_callable=AsyncMock, return_value=True),
+            patch("aegra_api.services.run_executor.finalize_run", new_callable=AsyncMock, return_value=True),
         ):
             mock_graph = MagicMock()
             mock_lg_service.return_value.get_graph.return_value.__aenter__ = AsyncMock(return_value=mock_graph)
@@ -183,8 +183,8 @@ class TestStreamingErrorHandling:
             patch(
                 "aegra_api.services.run_executor.stream_graph_events",
             ) as mock_stream_graph,
-            patch("aegra_api.services.run_executor.update_run_status", new_callable=AsyncMock),
-            patch("aegra_api.services.run_executor.finalize_run", new_callable=AsyncMock),
+            patch("aegra_api.services.run_executor.start_run", new_callable=AsyncMock, return_value=True),
+            patch("aegra_api.services.run_executor.finalize_run", new_callable=AsyncMock, return_value=True),
         ):
             # Set up the mock to return the async generator
             mock_stream_graph.return_value = failing_stream()
@@ -243,8 +243,8 @@ class TestStreamingErrorHandling:
                 "aegra_api.services.run_executor.stream_graph_events",
                 return_value=failing_stream(),
             ),
-            patch("aegra_api.services.run_executor.update_run_status", new_callable=AsyncMock),
-            patch("aegra_api.services.run_executor.finalize_run", new_callable=AsyncMock),
+            patch("aegra_api.services.run_executor.start_run", new_callable=AsyncMock, return_value=True),
+            patch("aegra_api.services.run_executor.finalize_run", new_callable=AsyncMock, return_value=True),
         ):
             mock_graph = MagicMock()
             mock_lg_service.return_value.get_graph.return_value.__aenter__ = AsyncMock(return_value=mock_graph)

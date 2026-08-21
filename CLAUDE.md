@@ -206,9 +206,10 @@ Aegra has two execution modes (dev = LocalExecutor, prod = WorkerExecutor). E2E 
 make e2e-dev     # Dev mode (no Redis, in-process tasks)
 make e2e-prod    # Prod mode (Redis workers, lease recovery)
 make e2e-both    # Run both sequentially
+make e2e-auth    # Auth-enabled server (JWT mock); runs auth_only tests
 ```
 
-Tests marked `@pytest.mark.prod_only` are skipped in dev mode (they require Redis workers). Multi-instance and stress tests in `tests/e2e/multi_instance/` are manual-only — run them explicitly when testing worker architecture or scaling changes.
+Tests marked `@pytest.mark.prod_only` are skipped in dev mode (they require Redis workers). Tests marked `@pytest.mark.auth_only` live under `tests/e2e/manual_auth_tests/` and run only in the auth job / `make e2e-auth`. Multi-instance and stress tests in `tests/e2e/multi_instance/` are manual-only — run them explicitly when testing worker architecture or scaling changes.
 
 ### LLM Agent Anti-Patterns (IMPORTANT)
 These rules exist because AI agents repeatedly make these mistakes. Follow them carefully:

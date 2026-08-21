@@ -2,15 +2,24 @@
 
 from base64 import b64encode
 from contextlib import asynccontextmanager
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock, Mock, patch
 
 import pytest
+from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from langgraph.types import StateSnapshot
+from psycopg import Error as PsycopgError
+from sqlalchemy.dialects import postgresql
 
+from aegra_api.api import threads as threads_module
 from aegra_api.core.orm import get_session as core_get_session
 from tests.fixtures.clients import create_test_app, make_client
-from tests.fixtures.database import DummySessionBase, override_get_session_dep
+from tests.fixtures.database import (
+    DummyScalarResult,
+    DummySessionBase,
+    override_get_session_dep,
+)
 from tests.fixtures.session_fixtures import BasicSession, override_session_dependency
 from tests.fixtures.test_helpers import DummyRun, DummyThread
 
@@ -62,6 +71,25 @@ def _run_row(
 ):
     """Create a mock run ORM object"""
     return DummyRun(run_id, thread_id, status, user_id)
+
+
+def _conflicting_app(app: FastAPI, incumbent: Any) -> FastAPI:
+    """Wire the app to a session whose INSERT conflicts.
+
+    ``incumbent`` is the row the follow-up read finds, or None to model a row
+    that was deleted between the conflict and the read.
+    """
+
+    class Session(DummySessionBase):
+        async def scalars(self, stmt: Any = None) -> DummyScalarResult:
+            # Insert hit a unique constraint, so RETURNING yields nothing.
+            return DummyScalarResult()
+
+        async def scalar(self, _stmt: Any) -> Any:
+            return incumbent
+
+    app.dependency_overrides[core_get_session] = override_get_session_dep(Session)
+    return app
 
 
 class TestCreateThread:
@@ -178,19 +206,7 @@ class TestCreateThread:
         app = create_test_app(include_runs=False, include_threads=True)
 
         existing_thread = _thread_row("existing-thread-id", metadata={"original": True})
-
-        class Session(DummySessionBase):
-            call_count = 0
-
-            async def scalar(self, _stmt):
-                # First call is the existence check
-                Session.call_count += 1
-                if Session.call_count == 1:
-                    return existing_thread
-                return None
-
-        app.dependency_overrides[core_get_session] = override_get_session_dep(Session)
-        client = make_client(app)
+        client = make_client(_conflicting_app(app, existing_thread))
 
         # Try to create with same ID and ifExists='do_nothing'
         resp = client.post(
@@ -208,13 +224,7 @@ class TestCreateThread:
         app = create_test_app(include_runs=False, include_threads=True)
 
         existing_thread = _thread_row("conflict-thread-id")
-
-        class Session(DummySessionBase):
-            async def scalar(self, _stmt):
-                return existing_thread
-
-        app.dependency_overrides[core_get_session] = override_get_session_dep(Session)
-        client = make_client(app)
+        client = make_client(_conflicting_app(app, existing_thread))
 
         # Try to create with same ID (default ifExists='raise')
         resp = client.post("/threads", json={"threadId": "conflict-thread-id"})
@@ -226,18 +236,60 @@ class TestCreateThread:
         app = create_test_app(include_runs=False, include_threads=True)
 
         existing_thread = _thread_row("conflict-thread-id")
-
-        class Session(DummySessionBase):
-            async def scalar(self, _stmt):
-                return existing_thread
-
-        app.dependency_overrides[core_get_session] = override_get_session_dep(Session)
-        client = make_client(app)
+        client = make_client(_conflicting_app(app, existing_thread))
 
         # Explicitly set ifExists='raise'
         resp = client.post(
             "/threads",
             json={"threadId": "conflict-thread-id", "ifExists": "raise"},
+        )
+        assert resp.status_code == 409
+        assert "already exists" in resp.json()["detail"]
+
+    def test_create_thread_insert_is_atomic(self) -> None:
+        """Creation must arbitrate on thread_pkey, not on a preceding SELECT.
+
+        A SELECT-then-INSERT lets two concurrent creates for one thread_id both
+        miss the SELECT and then collide on the primary key, and the loser's
+        UniqueViolationError surfaces as a 500 instead of honouring ifExists.
+        """
+        app = create_test_app(include_runs=False, include_threads=True)
+
+        statements: list[Any] = []
+
+        class Session(DummySessionBase):
+            async def scalars(self, stmt: Any = None) -> DummyScalarResult:
+                statements.append(stmt)
+                return await super().scalars(stmt)
+
+            async def scalar(self, stmt: Any) -> Any:
+                statements.append(stmt)
+                return None
+
+        app.dependency_overrides[core_get_session] = override_get_session_dep(Session)
+        client = make_client(app)
+
+        resp = client.post("/threads", json={"threadId": "atomic-thread-id"})
+        assert resp.status_code == 200
+
+        # The insert is the first statement issued, and it is conflict-tolerant.
+        assert statements, "create_thread issued no statements"
+        sql = str(statements[0].compile(dialect=postgresql.dialect()))
+        assert "INSERT INTO thread" in sql
+        assert "ON CONFLICT (thread_id) DO NOTHING" in sql
+        assert "RETURNING" in sql
+
+    def test_create_thread_conflict_with_other_owner_conflicts(self) -> None:
+        """thread_pkey is global while the read is scoped, so the ID can be taken
+        by another owner. That used to be a permanent 500; it is now a 409, and
+        the other owner's thread is never adopted.
+        """
+        app = create_test_app(include_runs=False, include_threads=True)
+        client = make_client(_conflicting_app(app, None))
+
+        resp = client.post(
+            "/threads",
+            json={"threadId": "foreign-thread-id", "ifExists": "do_nothing"},
         )
         assert resp.status_code == 409
         assert "already exists" in resp.json()["detail"]
@@ -338,6 +390,15 @@ class TestGetThread:
 class TestDeleteThread:
     """Test DELETE /threads/{thread_id} endpoint"""
 
+    @pytest.fixture
+    def mock_checkpointer(self, monkeypatch: pytest.MonkeyPatch) -> AsyncMock:
+        """Stub the checkpointer — db_manager is never initialized in tests."""
+        checkpointer = AsyncMock()
+        db = MagicMock()
+        db.get_checkpointer.return_value = checkpointer
+        monkeypatch.setattr(threads_module, "db_manager", db)
+        return checkpointer
+
     def test_delete_thread_not_found(self):
         """Test deleting a non-existent thread"""
         app = create_test_app(include_runs=False, include_threads=True)
@@ -352,7 +413,22 @@ class TestDeleteThread:
         resp = client.delete("/threads/nonexistent")
         assert resp.status_code == 404
 
-    def test_delete_thread_no_active_runs(self):
+    def test_delete_thread_not_found_skips_checkpointer(self, mock_checkpointer: AsyncMock) -> None:
+        """The 404 path never touches the checkpoint backend."""
+        app = create_test_app(include_runs=False, include_threads=True)
+
+        class Session(DummySessionBase):
+            async def scalar(self, _stmt: object) -> None:
+                return None
+
+        app.dependency_overrides[core_get_session] = override_get_session_dep(Session)
+        client = make_client(app)
+
+        resp = client.delete("/threads/nonexistent")
+        assert resp.status_code == 404
+        mock_checkpointer.adelete_thread.assert_not_called()
+
+    def test_delete_thread_no_active_runs(self, mock_checkpointer: AsyncMock) -> None:
         """Test deleting a thread with no active runs"""
         app = create_test_app(include_runs=False, include_threads=True)
 
@@ -381,6 +457,61 @@ class TestDeleteThread:
         resp = client.delete("/threads/test-123")
         assert resp.status_code == 200
         assert resp.json()["status"] == "deleted"
+
+    def test_delete_thread_deletes_backend_checkpoints(self, mock_checkpointer: AsyncMock) -> None:
+        """Deleting a thread also deletes its checkpoint history."""
+        app = create_test_app(include_runs=False, include_threads=True)
+
+        thread = _thread_row("test-123")
+
+        class Session(DummySessionBase):
+            async def scalar(self, _stmt: object) -> object:
+                return thread
+
+            async def delete(self, obj: object) -> None:
+                pass
+
+        app.dependency_overrides[core_get_session] = override_get_session_dep(Session)
+        client = make_client(app)
+
+        resp = client.delete("/threads/test-123")
+        assert resp.status_code == 200
+        mock_checkpointer.adelete_thread.assert_awaited_once_with("test-123")
+
+    def test_delete_thread_returns_500_and_keeps_row_when_checkpoint_delete_fails(
+        self, mock_checkpointer: AsyncMock
+    ) -> None:
+        """Checkpoint-delete failure propagates; the thread row is not committed.
+
+        Deleting the row anyway would orphan the checkpoints — the exact bug
+        this endpoint change fixes. A 500 leaves the delete retryable.
+        """
+        app = create_test_app(include_runs=False, include_threads=True)
+
+        thread = _thread_row("test-123")
+        deleted: list[object] = []
+        committed: list[bool] = []
+
+        class Session(DummySessionBase):
+            async def scalar(self, _stmt: object) -> object:
+                return thread
+
+            async def delete(self, obj: object) -> None:
+                deleted.append(obj)
+
+            async def commit(self) -> None:
+                committed.append(True)
+
+        mock_checkpointer.adelete_thread.side_effect = PsycopgError("checkpoint backend down")
+
+        app.dependency_overrides[core_get_session] = override_get_session_dep(Session)
+        client = TestClient(app, raise_server_exceptions=False)
+
+        resp = client.delete("/threads/test-123")
+        assert resp.status_code == 500
+        mock_checkpointer.adelete_thread.assert_awaited_once_with("test-123")
+        assert deleted == []
+        assert committed == []
 
 
 class TestSearchThreads:

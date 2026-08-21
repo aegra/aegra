@@ -1,0 +1,13 @@
+{
+  "dependencies": ["./examples"],
+  "graphs": {
+    "agent": "./examples/react_agent/graph.py:graph"
+  },
+  "auth": {
+    "path": "./examples/jwt_mock_auth_example.py:auth"
+  },
+  "http": {
+    "app": "./examples/custom_routes_example.py:app",
+    "enable_custom_route_auth": false
+  }
+}

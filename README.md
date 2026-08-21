@@ -177,10 +177,10 @@ Apache 2.0 - see [LICENSE](LICENSE).
   <strong>⭐ Star us if Aegra helps you escape vendor lock-in ⭐</strong>
 </p>
 
-<a href="https://www.star-history.com/#aegra/aegra&Date">
+<a href="https://star-history.dera.page/#aegra/aegra&Date">
   <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/svg?repos=aegra/aegra&type=Date&theme=dark" />
-    <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/svg?repos=aegra/aegra&type=Date" />
-    <img alt="Star History Chart" src="https://api.star-history.com/svg?repos=aegra/aegra&type=Date" />
+    <source media="(prefers-color-scheme: dark)" srcset="https://star-history.dera.page/svg?repos=aegra/aegra&type=Date&theme=dark" />
+    <source media="(prefers-color-scheme: light)" srcset="https://star-history.dera.page/svg?repos=aegra/aegra&type=Date" />
+    <img alt="Star History Chart" src="https://star-history.dera.page/svg?repos=aegra/aegra&type=Date" />
   </picture>
 </a>

@@ -111,8 +111,8 @@ class TestRunExecutorBoundaryConditions:
 
         with (
             patch("aegra_api.services.run_executor.get_langgraph_service", return_value=mock_service),
-            patch("aegra_api.services.run_executor.update_run_status", new_callable=AsyncMock),
-            patch("aegra_api.services.run_executor.finalize_run", new_callable=AsyncMock),
+            patch("aegra_api.services.run_executor.start_run", new_callable=AsyncMock, return_value=True),
+            patch("aegra_api.services.run_executor.finalize_run", new_callable=AsyncMock, return_value=True),
             patch("aegra_api.services.run_executor.streaming_service") as mock_streaming,
             patch("aegra_api.services.run_executor.stream_graph_events", return_value=_empty_async_gen()),
         ):

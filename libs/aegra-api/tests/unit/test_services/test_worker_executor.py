@@ -1,15 +1,17 @@
 """Unit tests for worker_executor service."""
 
 import asyncio
+from collections.abc import Iterator
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from redis import ConnectionError as RedisConnectionError
 from redis import TimeoutError as RedisTimeoutError
 
-from aegra_api.core.active_runs import active_runs
+from aegra_api.core.active_runs import active_runs, explicit_run_cancellations
 from aegra_api.models.auth import User
 from aegra_api.models.run_job import RunBehavior, RunExecution, RunIdentity, RunJob
+from aegra_api.services.run_executor import _timeout_cancellations
 from aegra_api.services.worker_executor import (
     WorkerExecutor,
     _acquire_and_load,
@@ -563,6 +565,19 @@ class TestWorkerExecutorStop:
 
 
 class TestExecuteAndRelease:
+    @pytest.fixture(autouse=True)
+    def _clear_cancellation_state(self) -> Iterator[None]:
+        active_runs.clear()
+        explicit_run_cancellations.clear()
+        _timeout_cancellations.clear()
+        yield
+        for task in active_runs.values():
+            if not task.done():
+                task.cancel()
+        active_runs.clear()
+        explicit_run_cancellations.clear()
+        _timeout_cancellations.clear()
+
     @pytest.mark.asyncio
     async def test_registers_in_active_runs_and_cleans_up(self) -> None:
         run_id = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
@@ -598,9 +613,15 @@ class TestExecuteAndRelease:
         await semaphore.acquire()
 
         executor = WorkerExecutor()
+        timeout_marker_seen = False
 
         async def slow_execute(rid: str, wn: str) -> None:
-            await asyncio.sleep(9999)
+            nonlocal timeout_marker_seen
+            try:
+                await asyncio.sleep(9999)
+            except asyncio.CancelledError:
+                timeout_marker_seen = run_id in _timeout_cancellations
+                raise
 
         executor._execute_with_lease = AsyncMock(side_effect=slow_execute)  # type: ignore[method-assign]
 
@@ -608,7 +629,11 @@ class TestExecuteAndRelease:
 
         with (
             patch(f"{MODULE}.settings") as mock_settings,
-            patch(f"{MODULE}._get_thread_id_for_run", new_callable=AsyncMock, return_value=thread_id),
+            patch(
+                f"{MODULE}._get_run_identity",
+                new_callable=AsyncMock,
+                return_value=(thread_id, "user-1"),
+            ),
             patch(f"{MODULE}.finalize_run", new_callable=AsyncMock) as mock_finalize,
             patch(f"{MODULE}._release_lease") as mock_release,
         ):
@@ -620,15 +645,160 @@ class TestExecuteAndRelease:
         mock_finalize.assert_awaited_once_with(
             run_id,
             thread_id,
+            user_id="user-1",
             status="error",
             thread_status="error",
             error="Job exceeded maximum execution time",
         )
         mock_release.assert_awaited_once_with(run_id, "worker-0")
+        assert timeout_marker_seen is True
         # Semaphore released even on timeout
         assert not semaphore.locked()
         # Cleaned up
         assert run_id not in active_runs
+        assert run_id not in _timeout_cancellations
+
+    @pytest.mark.asyncio
+    async def test_explicit_cancel_before_execution_reconciles_database(self) -> None:
+        run_id = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+        thread_id = "tttttttt-tttt-tttt-tttt-tttttttttttt"
+        semaphore = asyncio.Semaphore(1)
+        await semaphore.acquire()
+        executor = WorkerExecutor()
+        executor._execute_with_lease = AsyncMock(side_effect=asyncio.CancelledError)  # type: ignore[method-assign]
+        explicit_run_cancellations.add(run_id)
+
+        with (
+            patch(f"{MODULE}.settings") as mock_settings,
+            patch(
+                f"{MODULE}._get_run_identity",
+                new_callable=AsyncMock,
+                return_value=(thread_id, "user-1"),
+            ),
+            patch(f"{MODULE}.finalize_run", new_callable=AsyncMock, return_value=True) as mock_finalize,
+        ):
+            mock_settings.worker.BG_JOB_TIMEOUT_SECS = 60
+            with pytest.raises(asyncio.CancelledError):
+                await executor._execute_and_release(run_id, "worker-0", semaphore)
+
+        mock_finalize.assert_awaited_once_with(
+            run_id,
+            thread_id,
+            user_id="user-1",
+            status="interrupted",
+            thread_status="idle",
+            output={},
+        )
+        assert run_id not in explicit_run_cancellations
+        assert run_id not in active_runs
+        assert not semaphore.locked()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("failure_source", ["identity", "finalize"])
+    async def test_cleanup_failure_preserves_cancellation(self, failure_source: str) -> None:
+        run_id = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+        thread_id = "tttttttt-tttt-tttt-tttt-tttttttttttt"
+        semaphore = asyncio.Semaphore(1)
+        await semaphore.acquire()
+        executor = WorkerExecutor()
+        executor._execute_with_lease = AsyncMock(side_effect=asyncio.CancelledError)  # type: ignore[method-assign]
+        explicit_run_cancellations.add(run_id)
+
+        with (
+            patch(f"{MODULE}.settings") as mock_settings,
+            patch(
+                f"{MODULE}._get_run_identity",
+                new_callable=AsyncMock,
+                return_value=(thread_id, "user-1"),
+                side_effect=RuntimeError("database unavailable") if failure_source == "identity" else None,
+            ),
+            patch(
+                f"{MODULE}.finalize_run",
+                new_callable=AsyncMock,
+                side_effect=RuntimeError("database unavailable") if failure_source == "finalize" else None,
+            ),
+            patch(f"{MODULE}.logger.exception") as mock_log_exception,
+        ):
+            mock_settings.worker.BG_JOB_TIMEOUT_SECS = 60
+            with pytest.raises(asyncio.CancelledError):
+                await executor._execute_and_release(run_id, "worker-0", semaphore)
+
+        mock_log_exception.assert_called_once_with(
+            "Failed to persist explicit run cancellation",
+            run_id=run_id,
+        )
+        assert run_id not in explicit_run_cancellations
+        assert run_id not in active_runs
+        assert not semaphore.locked()
+
+    @pytest.mark.asyncio
+    async def test_repeated_external_cancel_waits_for_database_reconciliation(self) -> None:
+        run_id = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+        thread_id = "tttttttt-tttt-tttt-tttt-tttttttttttt"
+        semaphore = asyncio.Semaphore(1)
+        await semaphore.acquire()
+        executor = WorkerExecutor()
+        execution_started = asyncio.Event()
+        finalize_started = asyncio.Event()
+        allow_finalize = asyncio.Event()
+        inner_cancelled = False
+
+        async def long_running(rid: str, worker_name: str) -> None:
+            nonlocal inner_cancelled
+            execution_started.set()
+            try:
+                await asyncio.sleep(9999)
+            except asyncio.CancelledError:
+                inner_cancelled = True
+                raise
+
+        async def delayed_finalize(*args: object, **kwargs: object) -> bool:
+            finalize_started.set()
+            await allow_finalize.wait()
+            return True
+
+        executor._execute_with_lease = AsyncMock(side_effect=long_running)  # type: ignore[method-assign]
+        explicit_run_cancellations.add(run_id)
+
+        with (
+            patch(f"{MODULE}.settings") as mock_settings,
+            patch(
+                f"{MODULE}._get_run_identity",
+                new_callable=AsyncMock,
+                return_value=(thread_id, "user-1"),
+            ),
+            patch(
+                f"{MODULE}.finalize_run",
+                new_callable=AsyncMock,
+                side_effect=delayed_finalize,
+            ) as mock_finalize,
+        ):
+            mock_settings.worker.BG_JOB_TIMEOUT_SECS = 60
+            task = asyncio.create_task(executor._execute_and_release(run_id, "worker-0", semaphore))
+            await asyncio.wait_for(execution_started.wait(), timeout=1)
+
+            task.cancel()
+            await asyncio.wait_for(finalize_started.wait(), timeout=1)
+            task.cancel()
+            await asyncio.sleep(0)
+
+            assert not task.done()
+            allow_finalize.set()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+
+        assert inner_cancelled is True
+        mock_finalize.assert_awaited_once_with(
+            run_id,
+            thread_id,
+            user_id="user-1",
+            status="interrupted",
+            thread_status="idle",
+            output={},
+        )
+        assert run_id not in explicit_run_cancellations
+        assert run_id not in active_runs
+        assert not semaphore.locked()
 
 
 class TestExecuteWithLease:

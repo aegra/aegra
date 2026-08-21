@@ -79,7 +79,10 @@ class TestRunsStreamingEndpoints:
             patch("aegra_api.services.run_preparation.update_thread_metadata", new_callable=AsyncMock),
             patch("aegra_api.services.run_preparation.set_thread_status", new_callable=AsyncMock),
             patch("aegra_api.services.run_preparation.uuid4", return_value=run_id),
-            patch("aegra_api.api.runs.asyncio.create_task") as mock_create_task,
+            patch(
+                "aegra_api.services.run_preparation.executor.submit",
+                new_callable=AsyncMock,
+            ) as mock_submit,
             patch("aegra_api.api.runs.active_runs", {}),
             patch("aegra_api.api.runs.streaming_service.stream_run_execution") as mock_stream_exec,
             patch("aegra_api.api.runs._get_session_maker", return_value=_make_session_maker(mock_session)),
@@ -109,8 +112,8 @@ class TestRunsStreamingEndpoints:
             mock_session.add.assert_called_once()
             mock_session.commit.assert_called_once()
 
-            # Verify background task creation
-            mock_create_task.assert_called_once()
+            # Verify background execution submission
+            mock_submit.assert_awaited_once()
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
@@ -158,7 +161,10 @@ class TestRunsStreamingEndpoints:
             patch("aegra_api.services.run_preparation.update_thread_metadata", new_callable=AsyncMock),
             patch("aegra_api.services.run_preparation.set_thread_status", new_callable=AsyncMock),
             patch("aegra_api.services.run_preparation.uuid4", return_value=run_id),
-            patch("aegra_api.api.runs.asyncio.create_task"),
+            patch(
+                "aegra_api.services.run_preparation.executor.submit",
+                new_callable=AsyncMock,
+            ),
             patch("aegra_api.api.runs.active_runs", {}),
             patch("aegra_api.api.runs.streaming_service.stream_run_execution", return_value=_fake_stream()),
             patch("aegra_api.api.runs.broker_manager.request_cancel", new_callable=AsyncMock) as mock_cancel,
@@ -209,7 +215,10 @@ class TestRunsStreamingEndpoints:
             patch("aegra_api.services.run_preparation.update_thread_metadata", new_callable=AsyncMock),
             patch("aegra_api.services.run_preparation.set_thread_status", new_callable=AsyncMock),
             patch("aegra_api.services.run_preparation.uuid4", return_value=run_id),
-            patch("aegra_api.api.runs.asyncio.create_task"),
+            patch(
+                "aegra_api.services.run_preparation.executor.submit",
+                new_callable=AsyncMock,
+            ),
             patch("aegra_api.api.runs.active_runs", {}),
             patch("aegra_api.api.runs.streaming_service.stream_run_execution", return_value=_fake_stream()),
             patch(
@@ -258,11 +267,17 @@ class TestRunsStreamingEndpoints:
             response = await create_and_stream_run(thread_id, request, mock_user)
 
         assert response.status_code == 200
-        mock_handle.assert_awaited_once()
-        ctx, value = mock_handle.call_args[0]
+        # Two events per run creation: threads.create_run, then assistants.read
+        # for the assistant the run uses.
+        assert mock_handle.await_count == 2
+        ctx, value = mock_handle.await_args_list[0].args
         assert ctx.resource == "threads"
         assert ctx.action == "create_run"
         assert value["thread_id"] == thread_id
+        ctx, value = mock_handle.await_args_list[1].args
+        assert ctx.resource == "assistants"
+        assert ctx.action == "read"
+        assert value["assistant_id"] == "test-assistant"
 
     @pytest.mark.asyncio
     async def test_create_and_stream_run_auth_handler_denies_with_403(
@@ -464,8 +479,8 @@ class TestRunsStreamingEndpoints:
                 "aegra_api.services.run_executor.stream_graph_events",
                 return_value=failing_stream(),
             ),
-            patch("aegra_api.services.run_executor.update_run_status", new_callable=AsyncMock),
-            patch("aegra_api.services.run_executor.finalize_run", new_callable=AsyncMock),
+            patch("aegra_api.services.run_executor.start_run", new_callable=AsyncMock, return_value=True),
+            patch("aegra_api.services.run_executor.finalize_run", new_callable=AsyncMock, return_value=True),
         ):
             mock_graph = MagicMock()
             mock_lg_service.return_value.get_graph.return_value.__aenter__ = AsyncMock(return_value=mock_graph)

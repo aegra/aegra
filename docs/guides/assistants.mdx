@@ -56,6 +56,18 @@ assistant = await client.assistants.create(
 )
 ```
 
+An assistant has two uniqueness keys: its `assistant_id`, which is unique across
+every user, and its `graph_id` plus `config` pair, which is unique per owner.
+Either match counts as "already exists", so a second create with the same graph
+and config returns the first assistant rather than a duplicate. Creation is
+atomic, so callers racing on the same
+`assistant_id` — retries, replays, several replicas booting at once — all
+converge on one stored assistant instead of one of them failing.
+
+With the default `if_exists="error"`, a duplicate answers `409`. An
+`assistant_id` already taken by *another* user also answers `409`: it is never
+returned to you, even with `if_exists="do_nothing"`.
+
 <Note>
   The snippets below assume you are inside an `async def` function with an initialized `client` — see the example above.
 </Note>

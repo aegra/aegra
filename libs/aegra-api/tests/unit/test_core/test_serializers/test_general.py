@@ -1,6 +1,12 @@
 """Unit tests for serializers"""
 
-from collections import namedtuple
+from collections import deque, namedtuple
+from dataclasses import dataclass
+from datetime import UTC, date, datetime
+from decimal import Decimal
+from enum import Enum
+from pathlib import Path
+from uuid import UUID
 
 import pytest
 from langchain_core.messages import ToolMessage
@@ -28,6 +34,16 @@ class PydanticV1Style:
 
     def dict(self):
         return {"name": self.name, "value": self.value}
+
+
+class Color(Enum):
+    RED = "red"
+
+
+@dataclass
+class AgentState:
+    todos: list[str]
+    count: int
 
 
 class InterruptMock:
@@ -195,6 +211,86 @@ class TestGeneralSerializer:
 
         assert isinstance(result, str)
         assert "CustomObject" in result
+
+    def test_serialize_common_types_structurally(self):
+        identifier = UUID("7d247e59-3c1e-4c5e-8f32-ec4e9d0c12ab")
+        value = {
+            "state": AgentState(todos=["review"], count=1),
+            "bytes": b"\xff\x00",
+            "enum": Color.RED,
+            "deque": deque([1, AgentState(todos=[], count=0)]),
+            "datetime": datetime(2026, 1, 1, 12, 30, tzinfo=UTC),
+            "date": date(2026, 1, 2),
+            "uuid": identifier,
+            "decimal": Decimal("1.50"),
+            "path": Path("/tmp/state.json"),
+        }
+
+        result = self.serializer.serialize(value)
+
+        assert result == {
+            "state": {"todos": ["review"], "count": 1},
+            "bytes": "/wA=",
+            "enum": "red",
+            "deque": [1, {"todos": [], "count": 0}],
+            "datetime": "2026-01-01T12:30:00+00:00",
+            "date": "2026-01-02",
+            "uuid": str(identifier),
+            "decimal": "1.50",
+            "path": str(Path("/tmp/state.json")),
+        }
+
+    def test_serialize_exception_preserves_type_and_message(self):
+        result = self.serializer.serialize(ValueError("boom"))
+
+        assert result == {"type": "ValueError", "message": "boom"}
+
+    def test_serialize_model_dump_recursively_normalizes_common_types(self):
+        class DumpingModel:
+            def model_dump(self):
+                return {"payload": {"bytes": b"\xff"}}
+
+        model = DumpingModel()
+
+        result = self.serializer.serialize(model)
+
+        assert result == {"payload": {"bytes": "/w=="}}
+
+    def test_serialize_sets_recursively_normalizes_members(self) -> None:
+        identifier = UUID("7d247e59-3c1e-4c5e-8f32-ec4e9d0c12ab")
+        path = Path("/tmp/state.json")
+
+        result = self.serializer.serialize({identifier, path, Color.RED, b"\xff"})
+
+        assert set(result) == {str(identifier), str(path), "red", "/w=="}
+
+    def test_serialize_dict_recursively_normalizes_non_json_keys(self) -> None:
+        identifier = UUID("7d247e59-3c1e-4c5e-8f32-ec4e9d0c12ab")
+        path = Path("/tmp/state.json")
+
+        result = self.serializer.serialize(
+            {
+                identifier: Path("/tmp/value.json"),
+                path: b"\xff",
+                Color.RED: Decimal("1.50"),
+            }
+        )
+
+        assert result == {
+            str(identifier): str(Path("/tmp/value.json")),
+            str(path): "/w==",
+            "red": "1.50",
+        }
+
+    def test_serialize_dict_rejects_serialized_key_collisions(self) -> None:
+        identifier = UUID("7d247e59-3c1e-4c5e-8f32-ec4e9d0c12ab")
+
+        with pytest.raises(SerializationError, match="serialize to the same key"):
+            self.serializer.serialize({identifier: "uuid", str(identifier): "string"})
+
+    def test_serialize_dict_rejects_json_property_key_collisions(self) -> None:
+        with pytest.raises(SerializationError, match="serialize to the same key"):
+            self.serializer.serialize({1: "integer", "1": "string"})
 
     def test_serialize_command_structurally(self):
         """A LangGraph Command (returned by state-updating tools like

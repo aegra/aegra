@@ -4,12 +4,8 @@ Claim under test:
   When authentication is enabled, threads are automatically scoped to the
   authenticated user. Users can only see and interact with their own threads.
 
-⚠️ MANUAL TESTS - These are skipped by default. Run with: pytest -m manual_auth
-
-Requires a running Aegra server with auth enabled. See README.md for setup.
-
-Run:
-    pytest tests/e2e/manual_auth_tests/test_thread_user_isolation_e2e.py -v -m manual_auth
+Require an auth-enabled server. See README.md for setup.
+Run with: make e2e-auth  or  pytest -m auth_only
 """
 
 import uuid
@@ -38,7 +34,7 @@ def get_client_with_auth(user_id: str, role: str = "user", team_id: str = "team1
 
 
 @pytest.mark.e2e
-@pytest.mark.manual_auth
+@pytest.mark.auth_only
 class TestThreadOwnership:
     """Threads are created and stored under the authenticated user's identity."""
 
@@ -72,7 +68,7 @@ class TestThreadOwnership:
 
 
 @pytest.mark.e2e
-@pytest.mark.manual_auth
+@pytest.mark.auth_only
 class TestThreadSearch:
     """Thread search/list only returns threads belonging to the requesting user."""
 
@@ -126,7 +122,7 @@ class TestThreadSearch:
 
 
 @pytest.mark.e2e
-@pytest.mark.manual_auth
+@pytest.mark.auth_only
 class TestThreadMutationIsolation:
     """Users cannot mutate threads that belong to another user."""
 
@@ -223,7 +219,7 @@ class TestThreadMutationIsolation:
 
 
 @pytest.mark.e2e
-@pytest.mark.manual_auth
+@pytest.mark.auth_only
 class TestUnauthenticatedAccess:
     """Requests without a valid token are rejected entirely."""
 

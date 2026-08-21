@@ -22,7 +22,7 @@ def create_test_app(include_runs: bool = True, include_threads: bool = True) -> 
     # ------------------------------------
 
     # 1. Create a proper test user
-    mock_user = User(identity="test-user", display_name="Test User")
+    mock_user = User(identity="test-user", display_name="Test User", org_id="org-1")
 
     # 2. Override dependencies
     # require_auth: allows access to protected routes

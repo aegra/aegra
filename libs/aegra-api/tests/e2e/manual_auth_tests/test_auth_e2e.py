@@ -1,20 +1,9 @@
 """E2E tests for authentication flow with running server.
 
-⚠️ MANUAL TESTS - These are skipped by default. Run with: pytest -m manual_auth
+These tests require a server started with auth enabled (see aegra.auth.json).
+Skipped by default; run with: make e2e-auth  or  pytest -m auth_only
 
-These tests require a server started with auth enabled (create your own config file).
-
-See tests/e2e/manual_auth_tests/README.md for details on when and how to run these tests.
-
-To run these tests:
-1. Create a config file with auth.path pointing to jwt_mock_auth_example.py:auth
-2. Start the server with your auth config:
-   AEGRA_CONFIG=my_auth_config.json python run_server.py
-   # OR for Docker:
-   AEGRA_CONFIG=my_auth_config.json docker compose up
-
-3. Run tests explicitly:
-   pytest tests/e2e/manual_auth_tests/test_auth_e2e.py -v -m manual_auth
+See tests/e2e/manual_auth_tests/README.md for details.
 """
 
 import httpx
@@ -42,7 +31,7 @@ def get_auth_headers(token: str | None = None) -> dict[str, str]:
 
 
 @pytest.mark.e2e
-@pytest.mark.manual_auth
+@pytest.mark.auth_only
 class TestCoreRoutesAuth:
     """Test that core routes require authentication"""
 
@@ -99,7 +88,7 @@ class TestCoreRoutesAuth:
 
 
 @pytest.mark.e2e
-@pytest.mark.manual_auth
+@pytest.mark.auth_only
 class TestCustomRoutesAuth:
     """Test authentication with custom routes"""
 
@@ -176,7 +165,7 @@ class TestCustomRoutesAuth:
 
 
 @pytest.mark.e2e
-@pytest.mark.manual_auth
+@pytest.mark.auth_only
 class TestCustomRouteAuthConfig:
     """Test enable_custom_route_auth configuration"""
 
@@ -208,7 +197,7 @@ class TestCustomRouteAuthConfig:
 
 
 @pytest.mark.e2e
-@pytest.mark.manual_auth
+@pytest.mark.auth_only
 class TestUserCustomFields:
     """Test that custom fields from auth flow through to routes"""
 
@@ -263,7 +252,7 @@ class TestUserCustomFields:
 
 
 @pytest.mark.e2e
-@pytest.mark.manual_auth
+@pytest.mark.auth_only
 class TestNoopAuth:
     """Test noop authentication behavior"""
 
@@ -284,7 +273,7 @@ class TestNoopAuth:
 
 
 @pytest.mark.e2e
-@pytest.mark.manual_auth
+@pytest.mark.auth_only
 class TestAuthErrorHandling:
     """Test authentication error handling"""
 

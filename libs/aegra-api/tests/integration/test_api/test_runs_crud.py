@@ -329,12 +329,22 @@ class TestCancelRun:
         override_session_dependency(app, Session)
         client = make_client(app)
 
-        with patch("aegra_api.api.runs.streaming_service") as mock_streaming:
+        with (
+            patch("aegra_api.api.runs.streaming_service") as mock_streaming,
+            patch(
+                "aegra_api.api.runs.interrupt_unowned_run",
+                new_callable=AsyncMock,
+                return_value=True,
+            ),
+        ):
             mock_streaming.cancel_run = AsyncMock()
+            mock_streaming.signal_run_cancelled = AsyncMock()
 
             resp = client.post("/threads/test-thread-123/runs/test-run-123/cancel")
 
             assert resp.status_code == 200
+            mock_streaming.cancel_run.assert_awaited_once_with("test-run-123", emit_end_event=False)
+            mock_streaming.signal_run_cancelled.assert_awaited_once_with("test-run-123")
 
 
 class TestDeleteRun:

@@ -1,4 +1,5 @@
 import pytest
+from langgraph_sdk.errors import PermissionDeniedError
 
 from tests.e2e._utils import elog, get_e2e_client
 
@@ -38,6 +39,24 @@ async def test_store_endpoints_via_sdk():
     # Ensure deleted
     with pytest.raises(Exception):  # noqa: B017 - SDK doesn't expose specific exception type
         await client.store.get_item(ns, key=key)
+
+
+@pytest.mark.e2e
+@pytest.mark.asyncio
+async def test_org_prefix_without_org_membership_is_forbidden():
+    """The anonymous user has no org_id, so the "orgs" prefix is rejected with 403.
+
+    Relies on aegra.json configuring store.scopes {"orgs": ["org_id"]}. The org-scoped
+    happy path needs auth that sets org_id; it lives in the auth-enabled suite
+    (manual_auth_tests/test_store_org_isolation_e2e.py).
+    """
+    client = get_e2e_client()
+
+    with pytest.raises(PermissionDeniedError) as exc_info:
+        await client.store.put_item(["orgs", "shared-prompts"], key="greeting", value={"text": "hi"})
+    elog("store.put_item orgs prefix rejected", str(exc_info.value))
+    # Names the attribute the scope needs, so the message stays actionable.
+    assert "org_id" in str(exc_info.value)
 
 
 @pytest.mark.e2e

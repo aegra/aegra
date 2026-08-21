@@ -47,7 +47,9 @@ class CronCreate(BaseModel):
 
     assistant_id: str = Field(..., max_length=_STR_FIELD_MAX_LEN)
     schedule: str = Field(..., max_length=_SCHEDULE_MAX_LEN)
-    input: dict[str, Any] | None = None
+    # Required: every firing builds a RunCreate from this payload, and
+    # RunCreate rejects an empty input — fail at the API boundary (#514).
+    input: dict[str, Any]
     metadata: dict[str, Any] | None = None
     config: dict[str, Any] | None = None
     context: dict[str, Any] | None = None

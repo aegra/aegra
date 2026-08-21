@@ -72,7 +72,6 @@ Namespaces organize your data hierarchically. They work like directory paths:
 ```
 ["users", "alice", "preferences"]     → User preferences
 ["users", "alice", "conversations"]   → Conversation history
-["knowledge", "docs"]                 → Shared knowledge base
 ```
 
 ### List namespaces
@@ -93,6 +92,63 @@ All store operations are automatically scoped to the authenticated user's namesp
 - Any other namespace (e.g. `["configs"]`) is automatically prefixed to `["users", <user_id>, "configs"]`
 
 This ensures users can never access each other's data, even if they craft a request with another user's namespace.
+
+### Configurable scoping
+
+Beyond the default per-user scope, you can define **configurable scopes**: a map of **namespace prefix → list of User attributes** under `store.scopes` in `aegra.json`. A namespace starting with a configured prefix is isolated under `[prefix, *<user attribute values>]`, where the values come from the authenticated user populated by [your auth handler](/guides/authentication).
+
+Every user whose attribute values match lands in the same scope, so data is shared exactly as widely as those attributes. Mapping an attribute many users share (like `org_id`) is the common way to **share a pool across a group** — for example, a knowledge base or agent skills that every member can read and contribute to.
+
+For example, to share data across an organization, map `"orgs"` to a list containing the user's `org_id` in `aegra.json`:
+
+```json
+{
+  "store": {
+    "scopes": {
+      "orgs": ["org_id"]
+    }
+  }
+}
+```
+
+```python
+# Shared across all members of the caller's organization
+await client.store.put_item(
+    namespace=["orgs", "<org_id>", "shared-skills"],
+    key="summarize-ticket",
+    value={
+        "name": "summarize-ticket",
+        "description": "Condenses a support ticket thread.",
+        "instructions": "..."
+    },
+)
+```
+
+A configured scope follows the same rule as user scoping (using the `"orgs"` → `org_id` example):
+
+- A fully-qualified namespace `["orgs", <org_id>, ...]` passes through unchanged. The `<org_id>` is visible in `get`/`search`/`list_namespaces` responses, which echo the scoped namespace.
+- Any namespace not fully qualified with your own `org_id` (including a foreign org id) is buried under `["orgs", <org_id>, ...]`, so members can never reach another organization's data.
+- A request using the `"orgs"` prefix when the user has no `org_id` returns **403 Forbidden**.
+
+An empty or unconfigured prefix always defaults to user scope — a configured scope is never applied implicitly.
+
+#### Partitioning by multiple attributes
+
+A scope can list more than one attribute. The namespace is then partitioned by every listed attribute, in order. Reach for this when no single attribute is enough on its own — for example, isolating data per organization **and** per region, where each org/region pair is its own partition:
+
+```json
+{
+  "store": {
+    "scopes": {
+      "regional": ["org_id", "region"]
+    }
+  }
+}
+```
+
+A namespace `["regional", ...]` is isolated under `["regional", <org_id>, <region>, ...]`. **All** listed attributes are required — a user missing any of them gets **403 Forbidden**, exactly as with a single-attribute scope.
+
+You can map any prefix to any attributes your auth handler sets (`team_id`, `tenant_id`, `region`, …), and configure several scopes at once. The `"users"` prefix is reserved for per-user isolation and cannot be remapped.
 
 ## Semantic search
 

@@ -1,9 +1,9 @@
 """Background task that recovers runs with expired worker leases.
 
 Periodically scans the runs table for rows where
-``status='running' AND lease_expires_at < now()``, resets them to
-``pending`` (clearing the lease), and re-enqueues their run_ids to the
-Redis job queue so another worker can pick them up.
+``status='running' AND lease_expires_at < now()``. It atomically either
+returns them to ``pending`` or marks their retry budget exhausted, then
+re-enqueues only retryable run IDs.
 """
 
 import asyncio
@@ -17,6 +17,8 @@ from sqlalchemy import select, update
 from aegra_api.core.orm import Run as RunORM
 from aegra_api.core.orm import _get_session_maker
 from aegra_api.core.redis_manager import redis_manager
+from aegra_api.observability.metrics import REAPER_RECOVERED_RUNS
+from aegra_api.services.run_status import set_thread_status_if_no_active_runs
 from aegra_api.settings import settings
 
 logger = structlog.getLogger(__name__)
@@ -64,21 +66,20 @@ class LeaseReaper:
         if not crashed and not stuck_pending:
             return
 
-        # Crashed workers: reset first (atomic claim), then check retries
         if crashed:
             logger.warning("Reaping crashed worker runs", count=len(crashed), run_ids=crashed)
-            actually_reset = await self._reset_to_pending(crashed)
-            if actually_reset:
-                retryable, exhausted = await self._check_retry_limits(actually_reset)
-                if exhausted:
-                    await self._mark_permanently_failed(exhausted)
-                if retryable:
-                    await self._reenqueue(retryable)
+            retryable, exhausted = await self._recover_crashed_runs(crashed)
+            if exhausted:
+                REAPER_RECOVERED_RUNS.labels(outcome="crashed_exhausted").inc(len(exhausted))
+            if retryable:
+                pushed = await self._reenqueue(retryable)
+                REAPER_RECOVERED_RUNS.labels(outcome="crashed_retried").inc(len(pushed))
 
         # Stuck pending: just re-enqueue (never executed, no retry budget)
         if stuck_pending:
             logger.warning("Re-enqueueing stuck pending runs", count=len(stuck_pending), run_ids=stuck_pending)
-            await self._reenqueue(stuck_pending)
+            pushed = await self._reenqueue(stuck_pending)
+            REAPER_RECOVERED_RUNS.labels(outcome="stuck_pending").inc(len(pushed))
 
         logger.info(
             "Lease recovery complete",
@@ -117,61 +118,68 @@ class LeaseReaper:
         return crashed, stuck_pending
 
     @staticmethod
-    async def _reset_to_pending(run_ids: list[str]) -> list[str]:
-        """Reset crashed runs to pending. Re-checks lease expiry atomically."""
-        maker = _get_session_maker()
-        async with maker() as session:
-            result = await session.execute(
-                update(RunORM)
-                .where(
-                    RunORM.run_id.in_(run_ids),
-                    RunORM.status == "running",
-                    RunORM.lease_expires_at < datetime.now(UTC),
-                )
-                .values(status="pending", claimed_by=None, lease_expires_at=None)
-                .returning(RunORM.run_id)
-            )
-            reset_ids = [row[0] for row in result.fetchall()]
-            await session.commit()
-            return reset_ids
-
-    @staticmethod
-    async def _reenqueue(run_ids: list[str]) -> None:
-        queue_key = settings.worker.WORKER_QUEUE_KEY
-        try:
-            client = redis_manager.get_client()
-            for run_id in run_ids:
-                await client.rpush(queue_key, run_id)  # type: ignore[arg-type]
-                logger.info("Re-enqueued recovered run", run_id=run_id)
-        except RedisError:
-            logger.warning(
-                "Redis unavailable during re-enqueue; workers will pick up via Postgres poll",
-                run_ids=run_ids,
-            )
-
-    @staticmethod
-    async def _check_retry_limits(run_ids: list[str]) -> tuple[list[str], list[str]]:
-        """Split runs into retryable vs exhausted based on retry count.
-
-        Increments _retry_count in execution_params for each run.
-        Returns (retryable_ids, exhausted_ids).
-        """
+    async def _recover_crashed_runs(run_ids: list[str]) -> tuple[list[str], list[str]]:
+        """Atomically classify expired runs and apply their next state."""
+        now = datetime.now(UTC)
         max_retries = settings.worker.BG_JOB_MAX_RETRIES
         retryable: list[str] = []
         exhausted: list[str] = []
+        exhausted_threads_by_user: dict[str, set[str]] = {}
 
         maker = _get_session_maker()
         async with maker() as session:
-            for run_id in run_ids:
-                run_orm = await session.scalar(select(RunORM).where(RunORM.run_id == run_id))
-                if run_orm is None:
+            locked_result = await session.execute(
+                select(
+                    RunORM.run_id,
+                    RunORM.thread_id,
+                    RunORM.user_id,
+                    RunORM.execution_params,
+                )
+                .where(
+                    RunORM.run_id.in_(run_ids),
+                    RunORM.status == "running",
+                    RunORM.lease_expires_at < now,
+                )
+                .with_for_update(skip_locked=True)
+            )
+
+            for run_id, thread_id, user_id, execution_params in locked_result.fetchall():
+                params = dict(execution_params or {})
+                retry_count = params.get("_retry_count", 0) + 1
+                params["_retry_count"] = retry_count
+
+                values: dict[str, object] = {
+                    "execution_params": params,
+                    "claimed_by": None,
+                    "lease_expires_at": None,
+                    "updated_at": now,
+                }
+                is_exhausted = retry_count > max_retries
+                if is_exhausted:
+                    values.update(
+                        status="error",
+                        error_message="Max retries exceeded after repeated worker failures",
+                    )
+                else:
+                    values["status"] = "pending"
+
+                update_result = await session.execute(
+                    update(RunORM)
+                    .where(
+                        RunORM.run_id == run_id,
+                        RunORM.user_id == user_id,
+                        RunORM.status == "running",
+                        RunORM.lease_expires_at < now,
+                    )
+                    .values(**values)
+                    .returning(RunORM.run_id)
+                )
+                if update_result.scalar_one_or_none() is None:
                     continue
 
-                params = run_orm.execution_params or {}
-                retry_count = params.get("_retry_count", 0) + 1
-
-                if retry_count > max_retries:
+                if is_exhausted:
                     exhausted.append(run_id)
+                    exhausted_threads_by_user.setdefault(user_id, set()).add(thread_id)
                     logger.error(
                         "Run exceeded max retries, marking as permanently failed",
                         run_id=run_id,
@@ -179,8 +187,6 @@ class LeaseReaper:
                         max_retries=max_retries,
                     )
                 else:
-                    params["_retry_count"] = retry_count
-                    await session.execute(update(RunORM).where(RunORM.run_id == run_id).values(execution_params=params))
                     retryable.append(run_id)
                     logger.info(
                         "Incrementing retry count",
@@ -189,26 +195,34 @@ class LeaseReaper:
                         max_retries=max_retries,
                     )
 
+            for user_id, thread_ids in exhausted_threads_by_user.items():
+                await set_thread_status_if_no_active_runs(
+                    session,
+                    thread_ids,
+                    "error",
+                    user_id=user_id,
+                )
             await session.commit()
 
         return retryable, exhausted
 
     @staticmethod
-    async def _mark_permanently_failed(run_ids: list[str]) -> None:
-        """Mark runs as error with max retries exceeded message."""
-        maker = _get_session_maker()
-        async with maker() as session:
-            await session.execute(
-                update(RunORM)
-                .where(RunORM.run_id.in_(run_ids))
-                .values(
-                    status="error",
-                    error_message="Max retries exceeded after repeated worker failures",
-                    claimed_by=None,
-                    lease_expires_at=None,
-                )
+    async def _reenqueue(run_ids: list[str]) -> list[str]:
+        """Push run_ids to the worker queue. Returns only the IDs confirmed pushed."""
+        queue_key = settings.worker.WORKER_QUEUE_KEY
+        pushed: list[str] = []
+        try:
+            client = redis_manager.get_client()
+            for run_id in run_ids:
+                await client.rpush(queue_key, run_id)  # type: ignore[arg-type]
+                pushed.append(run_id)
+                logger.info("Re-enqueued recovered run", run_id=run_id)
+        except RedisError:
+            logger.warning(
+                "Redis unavailable during re-enqueue; workers will pick up via Postgres poll",
+                run_ids=run_ids[len(pushed) :],
             )
-            await session.commit()
+        return pushed
 
 
 lease_reaper = LeaseReaper()

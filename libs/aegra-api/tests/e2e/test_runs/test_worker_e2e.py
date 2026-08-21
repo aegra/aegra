@@ -19,7 +19,7 @@ import httpx
 import pytest
 
 from aegra_api.settings import settings
-from tests.e2e._utils import check_and_skip_if_geo_blocked, elog, get_e2e_client
+from tests.e2e._utils import await_terminal_run, check_and_skip_if_geo_blocked, elog, get_e2e_client
 
 
 async def _run_and_check_geo(client, thread_id: str, run_id: str) -> dict:
@@ -128,10 +128,9 @@ async def test_worker_cancel_via_redis() -> None:
     )
     elog("Cancel response", cancelled)
 
-    final_run = await client.runs.get(
-        thread_id=thread["thread_id"],
-        run_id=run["run_id"],
-    )
+    # The worker owns this run, so it finalizes asynchronously after the cancel.
+    final_run = await await_terminal_run(client, thread["thread_id"], run["run_id"])
+    check_and_skip_if_geo_blocked(final_run)
     elog("Final run state", final_run)
     assert final_run["status"] == "interrupted", f"Expected interrupted, got {final_run['status']}"
 

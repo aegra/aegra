@@ -23,6 +23,7 @@ from fastapi import Depends, HTTPException
 from langchain_core.runnables.utils import create_model
 from pydantic import TypeAdapter
 from sqlalchemy import func, or_, select, update
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from aegra_api.core.auth_deps import get_current_user
@@ -200,40 +201,35 @@ class AssistantService(Authenticated):
         # Generate name if not provided
         name = request.name or f"Assistant for {graph_id}"
 
-        # Check if an assistant already exists for this user, graph and config pair
-        existing_stmt = select(AssistantORM).where(
-            AssistantORM.user_id == self.user.identity,
-            or_(
-                (AssistantORM.graph_id == graph_id) & (AssistantORM.config == config),
-                AssistantORM.assistant_id == assistant_id,
-            ),
+        metadata = request.metadata or {}
+
+        # Insert first and let the unique indexes arbitrate: a SELECT-then-INSERT lets
+        # two creates collide, and the loser's UniqueViolationError 500s past if_exists.
+        insert_stmt = (
+            pg_insert(AssistantORM)
+            .values(
+                assistant_id=assistant_id,
+                name=name,
+                description=request.description,
+                config=config,
+                context=context,
+                graph_id=graph_id,
+                user_id=self.user.identity,
+                metadata_dict=metadata,
+                version=1,
+            )
+            # No conflict target: assistant_pkey, idx_assistant_user_assistant and
+            # idx_assistant_user_graph_config all have to yield the same outcome.
+            .on_conflict_do_nothing()
+            .returning(AssistantORM)
         )
-        existing = await self.session.scalar(existing_stmt)
+        created = (await self.session.scalars(insert_stmt)).first()
 
-        if existing:
-            if request.if_exists == "do_nothing":
-                return to_pydantic(existing)
-            else:  # error (default)
-                raise HTTPException(409, f"Assistant '{assistant_id}' already exists")
+        if created is None:
+            return await self._resolve_create_conflict(assistant_id, graph_id, config, request.if_exists)
 
-        # Create assistant record
-        assistant_orm = AssistantORM(
-            assistant_id=assistant_id,
-            name=name,
-            description=request.description,
-            config=config,
-            context=context,
-            graph_id=graph_id,
-            user_id=self.user.identity,
-            metadata_dict=request.metadata,
-            version=1,
-        )
-
-        self.session.add(assistant_orm)
-        await self.session.commit()
-        await self.session.refresh(assistant_orm)
-
-        # Create initial version record
+        # Version 1 commits with the assistant it describes: an assistant whose only
+        # version went missing 404s out of list_assistant_versions while it is live.
         assistant_version_orm = AssistantVersionORM(
             assistant_id=assistant_id,
             version=1,
@@ -243,12 +239,37 @@ class AssistantService(Authenticated):
             created_at=datetime.now(UTC),
             name=name,
             description=request.description,
-            metadata_dict=request.metadata,
+            metadata_dict=metadata,
         )
         self.session.add(assistant_version_orm)
         await self.session.commit()
 
-        return to_pydantic(assistant_orm)
+        return to_pydantic(created)
+
+    async def _resolve_create_conflict(
+        self,
+        assistant_id: str,
+        graph_id: str,
+        config: dict[str, Any] | None,
+        if_exists: str | None,
+    ) -> Assistant:
+        """Apply ``if_exists`` to the row that won the insert, or 409."""
+        # Scoped to the caller while assistant_pkey is global, so an incumbent owned
+        # by someone else is deliberately not found and conflicts instead of being adopted.
+        existing = await self.session.scalar(
+            select(AssistantORM).where(
+                AssistantORM.user_id == self.user.identity,
+                or_(
+                    (AssistantORM.graph_id == graph_id) & (AssistantORM.config == config),
+                    AssistantORM.assistant_id == assistant_id,
+                ),
+            )
+        )
+
+        if existing is not None and if_exists == "do_nothing":
+            return to_pydantic(existing)
+
+        raise HTTPException(409, f"Assistant '{assistant_id}' already exists")
 
     async def list_assistants(self) -> list[Assistant]:
         """List user's assistants and system assistants.

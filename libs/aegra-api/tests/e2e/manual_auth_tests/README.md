@@ -1,64 +1,69 @@
-# Manual Auth Tests
+# Auth E2E Tests
 
-**⚠️ These tests are skipped by default and should only be run when making changes to authentication/authorization code.**
+These tests verify authentication and authorization against a real server with JWT mock auth enabled. They are skipped by default (`-m "not auth_only"`) and run automatically in CI via the **E2E (Auth Enabled)** job.
 
 ## Purpose
 
-These tests verify the authentication and authorization functionality of Aegra. Since Aegra is designed to be a package where users implement their own auth, these tests are not part of the regular test suite.
+Aegra is designed so users bring their own auth. These tests exercise the auth middleware, `@auth.authenticate` / `@auth.on.*` handlers, custom routes, and per-user thread isolation using [`examples/jwt_mock_auth_example.py`](../../../../../examples/jwt_mock_auth_example.py).
 
-## When to Run These Tests
+## When to run locally
 
-Run these tests when:
-- Making changes to `src/agent_server/core/auth_middleware.py`
-- Making changes to `src/agent_server/core/auth_handlers.py`
-- Making changes to `src/agent_server/core/auth_deps.py`
-- Making changes to authorization handler resolution logic
-- Adding new authentication features
-- Fixing authentication-related bugs
+Run these when changing:
 
-## How to Run
+- `libs/aegra-api/src/aegra_api/core/auth_middleware.py`
+- `libs/aegra-api/src/aegra_api/core/auth_handlers.py`
+- `libs/aegra-api/src/aegra_api/core/auth_deps.py`
+- Authorization handler resolution
+- Auth-related features or bug fixes
 
-1. **Create an auth config file** (e.g., `my_auth_config.json`):
-   ```json
-   {
-     "graphs": {
-       "agent": "./graphs/react_agent/graph.py:graph"
-     },
-     "auth": {
-       "path": "./jwt_mock_auth_example.py:auth"
-     },
-     "http": {
-       "app": "./custom_routes_example.py:app",
-       "enable_custom_route_auth": false
-     }
-   }
-   ```
+## How to run
 
-2. **Start the server with auth enabled:**
+### Recommended: Makefile
+
+```bash
+make e2e-auth
+```
+
+This starts Docker (dev executor + [`aegra.auth.json`](../../../../../aegra.auth.json)), waits for health, runs the auth suite, then tears down.
+
+### Manual
+
+1. Start the server with auth config (from repo root):
+
    ```bash
-   AEGRA_CONFIG=my_auth_config.json python run_server.py
-   # OR for Docker:
-   AEGRA_CONFIG=my_auth_config.json docker compose up
+   # Full Docker (dev executor + auth config):
+   docker compose -f docker-compose.yml -f docker-compose.dev.yml -f docker-compose.auth.yml up -d
+
+   # Or API process only (Postgres already running):
+   AEGRA_CONFIG=aegra.auth.json AUTH_TYPE=custom REDIS_BROKER_ENABLED=false \
+     uv run --package aegra-api uvicorn aegra_api.main:app --host 127.0.0.1 --port 2026
    ```
 
-3. **Run the manual auth tests:**
+2. Run the tests:
+
    ```bash
-   # Run all manual auth tests
-   pytest tests/e2e/manual_auth_tests/ -v -m manual_auth
+   uv run --package aegra-api pytest libs/aegra-api/tests/e2e/manual_auth_tests/ -v -m auth_only
 
-   # Run specific test file
-   pytest tests/e2e/manual_auth_tests/test_auth_e2e.py -v -m manual_auth
-   pytest tests/e2e/manual_auth_tests/test_authorization_handlers_e2e.py -v -m manual_auth
+   # Specific file
+   uv run --package aegra-api pytest libs/aegra-api/tests/e2e/manual_auth_tests/test_auth_e2e.py -v -m auth_only
    ```
 
-## Test Files
+## Config
 
-- `test_auth_e2e.py` - Core authentication flow tests (JWT, custom routes, error handling)
-- `test_authorization_handlers_e2e.py` - Authorization handler tests (@auth.on.* decorators)
+Root [`aegra.auth.json`](../../../../../aegra.auth.json) registers:
+
+- Graph: `examples/react_agent`
+- Auth: `examples/jwt_mock_auth_example.py:auth`
+- Custom HTTP app: `examples/custom_routes_example.py:app`
+
+## Test files
+
+- `test_auth_e2e.py` — Core auth flow (JWT, custom routes, error handling)
+- `test_authorization_handlers_e2e.py` — `@auth.on.*` authorization handlers
+- `test_thread_user_isolation_e2e.py` — Per-user thread isolation
 
 ## Notes
 
-- These tests require a server running with auth enabled (create your own config file)
-- Tests will automatically skip if the server doesn't have auth enabled
-- These tests use the mock JWT auth from `jwt_mock_auth_example.py`
-- Since auth is user-specific, these tests are manual and not part of CI
+- Tests skip automatically if the server is up but auth is not enabled (`check_server_has_auth`)
+- Token format for the mock handler: `mock-jwt-<user_id>-<role>-<team_id>`
+- Marker: `@pytest.mark.auth_only` (same pattern as `prod_only`)

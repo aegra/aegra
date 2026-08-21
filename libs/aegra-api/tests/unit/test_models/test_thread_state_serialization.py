@@ -21,7 +21,7 @@ from uuid import UUID
 from zoneinfo import ZoneInfo
 
 import pytest
-from pydantic import BaseModel, TypeAdapter
+from pydantic import BaseModel, TypeAdapter, ValidationError
 
 from aegra_api.models.threads import ThreadCheckpoint, ThreadState
 
@@ -314,6 +314,15 @@ class TestDictionaryKeys:
         state = _make_state(values={b"\xff": "x"})
         result = _dump_list(state)
         assert result["values"] == {"/w==": "x"}
+
+    def test_top_level_normalized_key_collision_is_rejected(self):
+        with pytest.raises(ValidationError, match="serialize to the same key"):
+            _make_state(values={b"\xff": "binary", "/w==": "string"})
+
+    def test_nested_normalized_key_collision_is_rejected(self):
+        state = _make_state(values={"payload": {b"\xff": "binary", "/w==": "string"}})
+        with pytest.raises(ValueError, match="serialize to the same key"):
+            _dump_list(state)
 
 
 class TestDatetimeAndTimezoneFormatting:

@@ -3,7 +3,7 @@
   "info": {
     "title": "Aegra",
     "description": "Production-ready Agent Protocol server",
-    "version": "0.9.24"
+    "version": "0.10.3"
   },
   "paths": {
     "/info": {
@@ -952,7 +952,7 @@
           "Threads"
         ],
         "summary": "Delete Thread",
-        "description": "Delete a thread by its ID.\n\nPermanently removes the thread and its metadata. Any active runs on the\nthread are automatically cancelled before deletion. Checkpoint history\nstored in the graph backend is not affected.",
+        "description": "Delete a thread by its ID.\n\nPermanently removes the thread, its metadata, and its checkpoint history\nstored in the graph backend. Any active runs on the thread are\nautomatically cancelled before deletion.",
         "operationId": "delete_thread_threads__thread_id__delete",
         "parameters": [
           {
@@ -982,6 +982,16 @@
           },
           "404": {
             "description": "Resource not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AgentProtocolError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Checkpoint cleanup failed; the thread is preserved and the delete can be retried",
             "content": {
               "application/json": {
                 "schema": {
@@ -1876,7 +1886,7 @@
           "Thread Runs"
         ],
         "summary": "Update Run",
-        "description": "Update a run's status.\n\nPrimarily used to interrupt a running execution. Set `status` to\n`\"interrupted\"` to cooperatively stop the run.",
+        "description": "Update a run's status.\n\nPrimarily used to interrupt a running execution. Set `status` to\n`\"interrupted\"` to cooperatively stop the run. When a live worker owns\nthe run, interruption is asynchronous and the response may still report\n`pending` or `running`. Poll or stream the run until it becomes terminal.",
         "operationId": "update_run_threads__thread_id__runs__run_id__patch",
         "parameters": [
           {
@@ -2255,7 +2265,7 @@
           "Thread Runs"
         ],
         "summary": "Cancel Run Endpoint",
-        "description": "Cancel or interrupt a running execution.\n\nUse `action=cancel` to hard-cancel the run immediately, or\n`action=interrupt` to cooperatively interrupt (the graph can handle the\ninterrupt and save partial state). Set `wait=1` to block until the\nbackground task has fully settled before returning the updated run.",
+        "description": "Cancel or interrupt a running execution.\n\nUse `action=cancel` to hard-cancel the run immediately, or\n`action=interrupt` to cooperatively interrupt (the graph can handle the\ninterrupt and save partial state). Set `wait=1` to wait up to 10 seconds\nfor the background task to settle before returning the updated run. The\nresponse may still report `pending` or `running` if the timeout expires.\nWithout `wait=1`, a live-owned run is cancelled asynchronously, so the\nresponse may still report `pending` or `running`.",
         "operationId": "cancel_run_endpoint_threads__thread_id__runs__run_id__cancel_post",
         "parameters": [
           {
@@ -2284,19 +2294,22 @@
               "type": "integer",
               "maximum": 1,
               "minimum": 0,
-              "description": "Set to 1 to wait for the run task to settle before returning.",
+              "description": "Set to 1 to wait up to 10 seconds for the run task to settle before returning.",
               "default": 0,
               "title": "Wait"
             },
-            "description": "Set to 1 to wait for the run task to settle before returning."
+            "description": "Set to 1 to wait up to 10 seconds for the run task to settle before returning."
           },
           {
             "name": "action",
             "in": "query",
             "required": false,
             "schema": {
+              "enum": [
+                "cancel",
+                "interrupt"
+              ],
               "type": "string",
-              "pattern": "^(cancel|interrupt)$",
               "description": "Cancellation strategy: 'cancel' for hard cancel, 'interrupt' for cooperative interrupt.",
               "default": "cancel",
               "title": "Action"
@@ -3768,15 +3781,8 @@
             "title": "Schedule"
           },
           "input": {
-            "anyOf": [
-              {
-                "additionalProperties": true,
-                "type": "object"
-              },
-              {
-                "type": "null"
-              }
-            ],
+            "additionalProperties": true,
+            "type": "object",
             "title": "Input"
           },
           "metadata": {
@@ -3957,7 +3963,8 @@
         "type": "object",
         "required": [
           "assistant_id",
-          "schedule"
+          "schedule",
+          "input"
         ],
         "title": "CronCreate",
         "description": "Request body for creating a cron job (stateless or thread-bound)."

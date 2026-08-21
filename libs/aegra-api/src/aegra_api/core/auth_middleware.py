@@ -239,7 +239,7 @@ class LangGraphAuthBackend(AuthenticationBackend):
             user_data: Auth.types.MinimalUserDict = {
                 "identity": "anonymous",
                 "display_name": "Anonymous User",
-                "is_authenticated": True,
+                "is_authenticated": False,
             }
             credentials = AuthCredentials([])
             user = LangGraphUser(user_data)

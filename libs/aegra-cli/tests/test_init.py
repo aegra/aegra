@@ -576,6 +576,31 @@ class TestInitFileContents:
         assert "def load_chat_model" in content
         assert "init_chat_model" in content
 
+    def test_utils_py_supports_orcarouter(
+        self: TestInitFileContents, cli_runner: CliRunner, tmp_path: Path
+    ) -> None:
+        """Generated utils.py should expose a named OrcaRouter provider branch."""
+        project_dir = tmp_path / "test-orca-utils"
+        result = cli_runner.invoke(cli, ["init", str(project_dir), "-t", "1"])
+        assert result.exit_code == 0
+
+        slug = slugify("test-orca-utils")
+        content = (project_dir / f"src/{slug}/utils.py").read_text()
+        assert 'provider == "orcarouter"' in content
+        assert "https://api.orcarouter.ai/v1" in content
+        assert "ORCAROUTER_API_KEY" in content
+
+    def test_env_example_includes_orcarouter(
+        self: TestInitFileContents, cli_runner: CliRunner, tmp_path: Path
+    ) -> None:
+        """Generated .env.example should document the OrcaRouter API key."""
+        project_dir = tmp_path / "test-orca-env"
+        result = cli_runner.invoke(cli, ["init", str(project_dir), "-t", "1"])
+        assert result.exit_code == 0
+
+        content = (project_dir / ".env.example").read_text()
+        assert "ORCAROUTER_API_KEY" in content
+
     def test_prompts_py_has_system_prompt(
         self: TestInitFileContents, cli_runner: CliRunner, tmp_path: Path
     ) -> None:

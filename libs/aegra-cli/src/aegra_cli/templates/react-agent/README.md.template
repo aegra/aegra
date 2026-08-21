@@ -5,10 +5,12 @@ Built with [Aegra](https://github.com/aegra/aegra) -- a self-hosted LangSmith De
 ## Setup
 
 ```bash
-cp .env.example .env       # Configure your environment
+cp .env.example .env       # Configure your environment (add OPENAI_API_KEY or ORCAROUTER_API_KEY)
 uv sync                    # Install dependencies
 uv run aegra dev           # Start developing!
 ```
+
+Set `MODEL=orcarouter/orcarouter/auto` in `.env` to run the agent through [OrcaRouter](https://www.orcarouter.ai), an OpenAI-compatible gateway.
 
 ## Project Structure
 

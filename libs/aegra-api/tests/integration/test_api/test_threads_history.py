@@ -1,4 +1,7 @@
 import json
+from collections.abc import AsyncIterator, Callable
+from typing import Any
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from fastapi.testclient import TestClient
@@ -12,6 +15,24 @@ from tests.fixtures.clients import create_test_app, make_client
 from tests.fixtures.database import DummySessionBase, override_get_session_dep
 from tests.fixtures.langgraph import FakeAgent, make_snapshot, patch_langgraph_service
 from tests.fixtures.test_helpers import DummyThread
+
+
+def _make_session_maker(session_instance: DummySessionBase, on_exit: Callable[[], None] | None = None) -> MagicMock:
+    """Return a callable mimicking ``async_sessionmaker``.
+
+    Yields *session_instance* under ``async with maker() as session:``; ``on_exit``
+    fires on exit, i.e. when the pooled connection is released back to the pool.
+    """
+    ctx = MagicMock()
+    ctx.__aenter__ = AsyncMock(return_value=session_instance)
+
+    async def _aexit(*_args: object) -> bool:
+        if on_exit is not None:
+            on_exit()
+        return False
+
+    ctx.__aexit__ = AsyncMock(side_effect=_aexit)
+    return MagicMock(return_value=ctx)
 
 
 def _thread_row():
@@ -46,7 +67,7 @@ def _thread_row():
 
 
 @pytest.fixture()
-def client() -> TestClient:
+def client(monkeypatch: pytest.MonkeyPatch) -> TestClient:
     # Build app with threads router only
     app = create_test_app(include_runs=False, include_threads=True)
 
@@ -55,8 +76,15 @@ def client() -> TestClient:
         async def scalar(self, _stmt):
             return _thread_row()
 
-    # Override the ORM get_session dependency
+    # POST /threads (used by _ensure_thread below) still uses Depends(get_session).
     app.dependency_overrides[core_get_session] = override_get_session_dep(Session)
+
+    # history handlers manage their own session via _get_session_maker(), not
+    # Depends — patch that instead of overriding the get_session dependency.
+    monkeypatch.setattr(
+        "aegra_api.api.threads._get_session_maker",
+        lambda: _make_session_maker(Session()),
+    )
 
     return make_client(app)
 
@@ -290,3 +318,54 @@ class TestBeforeParameterFormats:
 
         assert len(captured) == 1
         assert captured[0] is None
+
+
+# Regression: the thread-lookup session must be released before the
+# (potentially long-running) aget_state_history iteration. See: aegra#517.
+
+
+def test_post_history_session_released_before_state_history_iterates(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Fails before the fix: the session stayed open for the whole handler,
+    so ``session_closed`` was still empty when the first snapshot was pulled.
+    """
+    app = create_test_app(include_runs=False, include_threads=True)
+
+    class Session(DummySessionBase):
+        async def scalar(self, _stmt: Any) -> DummyThread:
+            return _thread_row()
+
+    app.dependency_overrides[core_get_session] = override_get_session_dep(Session)
+
+    session_closed: list[bool] = []
+    monkeypatch.setattr(
+        "aegra_api.api.threads._get_session_maker",
+        lambda: _make_session_maker(Session(), on_exit=lambda: session_closed.append(True)),
+    )
+
+    class AssertingAgent(FakeAgent):
+        """Blows up if the thread-lookup session is still open when history streaming starts."""
+
+        def __init__(self) -> None:
+            super().__init__(
+                snapshots=[
+                    make_snapshot({"messages": ["hello"]}, {"configurable": {"checkpoint_id": "cp_1"}}),
+                ]
+            )
+
+        async def aget_state_history(self, config: dict, **kwargs: dict) -> AsyncIterator[Any]:  # type: ignore[override]
+            if not session_closed:
+                raise AssertionError("thread-lookup session still open when aget_state_history started")
+            async for s in super().aget_state_history(config, **kwargs):
+                yield s
+
+    client = make_client(app)
+    thread_id = _ensure_thread(client)
+
+    with patch_langgraph_service(agent=AssertingAgent()):
+        resp = client.post(f"/threads/{thread_id}/history", json={"limit": 10})
+
+    assert resp.status_code == 200, resp.text
+    assert session_closed, "session was never released"
+    assert len(resp.json()) == 1

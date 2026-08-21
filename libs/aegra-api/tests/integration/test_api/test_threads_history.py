@@ -1,4 +1,6 @@
 import json
+from collections.abc import AsyncIterator
+from typing import Any
 
 import pytest
 from fastapi.testclient import TestClient
@@ -10,7 +12,7 @@ from aegra_api.core.orm import (
 # Reuse shared test helpers
 from tests.fixtures.clients import create_test_app, make_client
 from tests.fixtures.database import DummySessionBase, override_get_session_dep
-from tests.fixtures.langgraph import FakeAgent, make_snapshot, patch_langgraph_service
+from tests.fixtures.langgraph import FakeAgent, FakeSnapshot, make_snapshot, make_task, patch_langgraph_service
 from tests.fixtures.test_helpers import DummyThread
 
 
@@ -161,6 +163,36 @@ def test_post_history_with_checkpoint_ns(client: TestClient, mock_langgraph):
     assert len(states) == 2
     for s in states:
         assert s["checkpoint"]["checkpoint_ns"] == "nsA"
+
+
+def test_post_history_subgraphs_serializes_expanded_task_state(client: TestClient) -> None:
+    thread_id = _ensure_thread(client)
+    child_snapshot = make_snapshot(
+        {"foo": "bar"},
+        {"configurable": {"thread_id": thread_id, "checkpoint_id": "checkpoint-child", "checkpoint_ns": "child"}},
+    )
+    parent_snapshot = make_snapshot(
+        {},
+        {"configurable": {"thread_id": thread_id, "checkpoint_id": "checkpoint-parent", "checkpoint_ns": ""}},
+        tasks=(make_task(state=child_snapshot, interrupts=()),),
+    )
+
+    class SubgraphHistoryAgent(FakeAgent):
+        def __init__(self) -> None:
+            super().__init__([parent_snapshot])
+
+        async def aget_state_history(self, _config: dict[str, Any], **_kwargs: Any) -> AsyncIterator[FakeSnapshot]:
+            for snapshot in self._snapshots:
+                yield snapshot
+
+    with patch_langgraph_service(agent=SubgraphHistoryAgent()):
+        resp = client.post(f"/threads/{thread_id}/history", json={"subgraphs": True})
+
+    assert resp.status_code == 200, resp.text
+    task = resp.json()[0]["tasks"][0]
+    assert task["checkpoint"] is None
+    assert task["state"]["values"] == {"foo": "bar"}
+    assert task["state"]["checkpoint"]["checkpoint_id"] == "checkpoint-child"
 
 
 def test_get_history_basic(client: TestClient, mock_langgraph):

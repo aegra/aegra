@@ -163,6 +163,25 @@ def test_convert_snapshot_to_thread_state_preserves_checkpoint_map() -> None:
     assert result.checkpoint.checkpoint_map == {"child": "checkpoint-child"}
 
 
+def test_convert_snapshots_to_thread_states_forwards_subgraphs() -> None:
+    service = ThreadStateService()
+    child_snapshot = make_snapshot(
+        {"foo": "bar"},
+        {"configurable": {"checkpoint_id": "checkpoint-child", "checkpoint_ns": "child"}},
+    )
+    snapshot = make_snapshot(
+        {},
+        {"configurable": {"checkpoint_id": "checkpoint-parent", "checkpoint_ns": ""}},
+        tasks=(make_task(state=child_snapshot, interrupts=()),),
+    )
+
+    result = service.convert_snapshots_to_thread_states([snapshot], "thread-123", subgraphs=True)
+
+    nested_state = result[0].tasks[0]["state"]
+    assert nested_state.values == {"foo": "bar"}
+    assert nested_state.checkpoint.checkpoint_id == "checkpoint-child"
+
+
 def test_convert_snapshots_to_thread_states_skips_failures():
     service = ThreadStateService()
 

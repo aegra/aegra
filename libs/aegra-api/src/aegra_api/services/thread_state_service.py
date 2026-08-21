@@ -75,13 +75,19 @@ class ThreadStateService:
             )
             raise
 
-    def convert_snapshots_to_thread_states(self, snapshots: list[Any], thread_id: str) -> list[ThreadState]:
+    def convert_snapshots_to_thread_states(
+        self,
+        snapshots: list[Any],
+        thread_id: str,
+        *,
+        subgraphs: bool = False,
+    ) -> list[ThreadState]:
         """Convert multiple snapshots to ThreadState objects"""
         thread_states = []
 
         for i, snapshot in enumerate(snapshots):
             try:
-                thread_state = self.convert_snapshot_to_thread_state(snapshot, thread_id)
+                thread_state = self.convert_snapshot_to_thread_state(snapshot, thread_id, subgraphs=subgraphs)
                 thread_states.append(thread_state)
             except Exception as e:
                 logger.error(f"Failed to convert snapshot in batch: {e} (thread_id={thread_id}, snapshot_index={i})")

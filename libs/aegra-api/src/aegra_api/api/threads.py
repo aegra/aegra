@@ -21,7 +21,7 @@ from aegra_api.core.auth_handlers import build_auth_context, handle_event
 from aegra_api.core.database import db_manager
 from aegra_api.core.orm import Run as RunORM
 from aegra_api.core.orm import Thread as ThreadORM
-from aegra_api.core.orm import get_session
+from aegra_api.core.orm import _get_session_maker, get_session
 from aegra_api.models import (
     Thread,
     ThreadCheckpoint,
@@ -693,7 +693,6 @@ async def get_thread_history_post(
     thread_id: str,
     request: ThreadHistoryRequest,
     user: User = Depends(get_current_user),
-    session: AsyncSession = Depends(get_session),
 ) -> list[ThreadState]:
     """Get the checkpoint history for a thread (POST variant).
 
@@ -711,8 +710,13 @@ async def get_thread_history_post(
         subgraphs = bool(request.subgraphs) if request.subgraphs is not None else False
         checkpoint_ns = request.checkpoint_ns
 
-        stmt = select(ThreadORM).where(ThreadORM.thread_id == thread_id, ThreadORM.user_id == user.identity)
-        thread = await session.scalar(stmt)
+        # Session scoped to this lookup only: aget_state_history below can run
+        # long, and holding a pooled connection open across it is what leaked
+        # connections on aborted requests (aegra#517, same shape as #423/#428).
+        maker = _get_session_maker()
+        async with maker() as session:
+            stmt = select(ThreadORM).where(ThreadORM.thread_id == thread_id, ThreadORM.user_id == user.identity)
+            thread = await session.scalar(stmt)
         if not thread:
             raise HTTPException(404, f"Thread '{thread_id}' not found")
 
@@ -796,7 +800,6 @@ async def get_thread_history_get(
     checkpoint_ns: str | None = Query(None, description="Checkpoint namespace"),
     metadata: str | None = Query(None, description="JSON-encoded metadata filter"),
     user: User = Depends(get_current_user),
-    session: AsyncSession = Depends(get_session),
 ) -> list[ThreadState]:
     """Get the checkpoint history for a thread.
 
@@ -819,7 +822,7 @@ async def get_thread_history_get(
         subgraphs=subgraphs,
         checkpoint_ns=checkpoint_ns,
     )
-    return await get_thread_history_post(thread_id, req, user, session)
+    return await get_thread_history_post(thread_id, req, user)
 
 
 @router.delete(

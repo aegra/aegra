@@ -3,9 +3,30 @@
 from datetime import datetime
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field, field_validator
 
 from aegra_api.utils.status_compat import validate_thread_status
+
+
+class ThreadTTLSpec(BaseModel):
+    """Per-thread TTL override supplied on thread creation.
+
+    The langgraph SDK sends the minutes value as "ttl" while issue #288 names
+    it "default_ttl" — AliasChoices accepts both spellings.
+    """
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    default_ttl: float | None = Field(
+        None,
+        gt=0,
+        validation_alias=AliasChoices("default_ttl", "ttl"),
+        description="Thread TTL in minutes; falls back to the server default when omitted",
+    )
+    strategy: Literal["delete", "keep_latest"] | None = Field(
+        None,
+        description="Expiry strategy: 'delete' removes the thread, 'keep_latest' prunes history",
+    )
 
 
 class ThreadCreate(BaseModel):
@@ -25,12 +46,23 @@ class ThreadCreate(BaseModel):
         alias="ifExists",
         description="Behavior when thread exists: 'raise' (default) or 'do_nothing'",
     )
+    ttl: ThreadTTLSpec | None = Field(
+        None,
+        description="Per-thread TTL override; requires TTL to be configured server-side or default_ttl set",
+    )
 
 
 class ThreadUpdate(BaseModel):
     """Request model for updating threads"""
 
     metadata: dict[str, Any] | None = Field(None, description="Thread metadata to update")
+
+
+class ThreadPruneResponse(BaseModel):
+    """Response model for POST /threads/prune"""
+
+    deleted: int = Field(0, description="Expired threads fully deleted (strategy 'delete')")
+    pruned: int = Field(0, description="Expired threads whose history was pruned (strategy 'keep_latest')")
 
 
 class Thread(BaseModel):

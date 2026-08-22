@@ -35,11 +35,13 @@ from aegra_api.models.threads import (
     ThreadCreate,
     ThreadHistoryRequest,
     ThreadList,
+    ThreadPruneResponse,
     ThreadSearchRequest,
     ThreadSearchResponse,
     ThreadState,
     ThreadStateUpdate,
     ThreadStateUpdateResponse,
+    ThreadTTLSpec,
     ThreadUpdate,
 )
 
@@ -63,6 +65,8 @@ __all__ = [
     "ThreadCheckpoint",
     "ThreadCheckpointPostRequest",
     "ThreadHistoryRequest",
+    "ThreadPruneResponse",
+    "ThreadTTLSpec",
     # Runs
     "Run",
     "RunCreate",

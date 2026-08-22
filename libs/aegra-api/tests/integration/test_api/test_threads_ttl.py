@@ -148,3 +148,42 @@ class TestCreateThreadTTL:
 
         assert resp.status_code == 200
         assert session.added == []
+
+
+class TestPruneEndpoint:
+    """POST /threads/prune maps the service result and scopes to the caller."""
+
+    def test_prune_returns_counts_for_caller(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        called: dict[str, object] = {}
+
+        async def fake_prune(
+            session: object, *, user_id: str, auth_filter: object = None
+        ) -> tuple[int, int]:
+            called["user_id"] = user_id
+            called["auth_filter"] = auth_filter
+            return 2, 1
+
+        monkeypatch.setattr(threads_module, "prune_expired_threads_for_user", fake_prune)
+        session = RecordingSession()
+        client = _make_client(session)
+
+        resp = client.post("/threads/prune")
+
+        assert resp.status_code == 200
+        assert resp.json() == {"deleted": 2, "pruned": 1}
+        assert called["user_id"] == "test-user"
+
+    def test_prune_with_nothing_expired_returns_zeros(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        async def fake_prune(
+            session: object, *, user_id: str, auth_filter: object = None
+        ) -> tuple[int, int]:
+            return 0, 0
+
+        monkeypatch.setattr(threads_module, "prune_expired_threads_for_user", fake_prune)
+        session = RecordingSession()
+        client = _make_client(session)
+
+        resp = client.post("/threads/prune")
+
+        assert resp.status_code == 200
+        assert resp.json() == {"deleted": 0, "pruned": 0}

@@ -185,6 +185,7 @@ _SPEC_TUPLES: dict[tuple[str, str], tuple[str, str]] = {
     ("POST", "/threads"): ("threads", "create"),
     ("GET", "/threads"): ("threads", "search"),
     ("POST", "/threads/search"): ("threads", "search"),
+    ("POST", "/threads/prune"): ("threads", "delete"),
     ("GET", "/threads/{thread_id}"): ("threads", "read"),
     ("PATCH", "/threads/{thread_id}"): ("threads", "update"),
     ("DELETE", "/threads/{thread_id}"): ("threads", "delete"),

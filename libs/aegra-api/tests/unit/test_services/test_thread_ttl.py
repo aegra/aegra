@@ -17,6 +17,7 @@ from aegra_api.services.thread_ttl import (
     _expired_claim_stmt,
     _process_expired_batch,
     get_thread_ttl_config,
+    prune_expired_threads_for_user,
 )
 from aegra_api.settings import settings
 
@@ -428,3 +429,26 @@ class TestSchemaCanary:
         # keep_latest keeps exactly the blob versions the latest checkpoint
         # references — the same join langgraph's reader performs.
         assert "jsonb_each_text(checkpoint -> 'channel_versions')" in SELECT_SQL
+
+
+class TestPruneForUser:
+    """prune_expired_threads_for_user loops user-scoped claims until dry."""
+
+    @pytest.mark.asyncio
+    async def test_accumulates_counts_until_no_more_claims(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr("aegra_api.services.thread_ttl.get_thread_ttl_config", lambda: None)
+        session = AsyncMock()
+
+        batches = [(2, 1, 1), (1, 1, 0), (0, 0, 0)]
+        with patch(
+            "aegra_api.services.thread_ttl._process_expired_batch",
+            new_callable=AsyncMock,
+            side_effect=batches,
+        ) as mock_batch:
+            deleted, pruned = await prune_expired_threads_for_user(session, user_id="user-1")
+
+        assert (deleted, pruned) == (2, 1)
+        assert mock_batch.await_count == 3
+        claim_sql = str(mock_batch.await_args_list[0].args[1].compile(dialect=postgresql.dialect()))
+        assert "thread.user_id" in claim_sql
+        assert "FOR UPDATE OF thread_ttl SKIP LOCKED" in claim_sql

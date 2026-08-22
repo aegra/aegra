@@ -30,6 +30,7 @@ from aegra_api.models import (
     ThreadCreate,
     ThreadHistoryRequest,
     ThreadList,
+    ThreadPruneResponse,
     ThreadSearchRequest,
     ThreadState,
     ThreadStateUpdate,
@@ -41,7 +42,7 @@ from aegra_api.models import (
 from aegra_api.models.errors import CONFLICT, NOT_FOUND, AgentProtocolError
 from aegra_api.services.streaming_service import streaming_service
 from aegra_api.services.thread_state_service import ThreadStateService
-from aegra_api.services.thread_ttl import get_thread_ttl_config
+from aegra_api.services.thread_ttl import get_thread_ttl_config, prune_expired_threads_for_user
 from aegra_api.utils.run_utils import strip_pinned_config_keys
 
 router = APIRouter(tags=["Threads"], dependencies=auth_dependency)
@@ -925,6 +926,28 @@ async def delete_thread(
     await session.commit()
 
     return {"status": "deleted"}
+
+
+@router.post("/threads/prune", response_model=ThreadPruneResponse)
+async def prune_threads(
+    user: User = Depends(get_current_user),
+    session: AsyncSession = Depends(get_session),
+) -> ThreadPruneResponse:
+    """Immediately apply TTL policies to the caller's expired threads.
+
+    Threads whose TTL has expired are deleted (strategy `delete`) or have
+    their checkpoint history compacted (strategy `keep_latest`). Threads with
+    active runs are skipped and handled once their runs settle.
+    """
+    # Authorization check — pruning is a bulk threads.delete
+    ctx = build_auth_context(user, "threads", "delete")
+    filters = await handle_event(ctx, {})
+    auth_filter = build_metadata_filter(ThreadORM.metadata_json, filters)
+
+    deleted, pruned = await prune_expired_threads_for_user(
+        session, user_id=user.identity, auth_filter=auth_filter
+    )
+    return ThreadPruneResponse(deleted=deleted, pruned=pruned)
 
 
 @router.post("/threads/search", response_model=list[Thread])

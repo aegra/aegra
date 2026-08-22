@@ -164,3 +164,66 @@ async def test_lifespan_runs_migrations_when_enabled(monkeypatch):
             pass
 
         mock_migrations.assert_called_once()
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_lifespan_starts_ttl_sweeper_when_configured():
+    """The TTL sweeper starts when a TTL config resolves and stops before DB close."""
+    import aegra_api.main as main_module
+
+    importlib.reload(main_module)
+
+    with (
+        patch("aegra_api.main.run_migrations_async", new_callable=AsyncMock),
+        patch("aegra_api.main.db_manager") as mock_db_manager,
+        patch("aegra_api.main.get_langgraph_service") as mock_get_langgraph_service,
+        patch("aegra_api.main.setup_observability"),
+        patch("aegra_api.main.get_thread_ttl_config", return_value=MagicMock()),
+        patch("aegra_api.main.thread_ttl_sweeper") as mock_sweeper,
+    ):
+        mock_db_manager.initialize = AsyncMock()
+        mock_db_manager.close = AsyncMock()
+        mock_langgraph_service = MagicMock()
+        mock_langgraph_service.initialize = AsyncMock()
+        mock_get_langgraph_service.return_value = mock_langgraph_service
+        mock_sweeper.start = AsyncMock()
+        mock_sweeper.stop = AsyncMock()
+
+        async with main_module.lifespan(MagicMock()):
+            mock_sweeper.start.assert_awaited_once()
+            mock_sweeper.stop.assert_not_awaited()
+
+        mock_sweeper.stop.assert_awaited_once()
+        mock_db_manager.close.assert_called_once()
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_lifespan_skips_ttl_sweeper_without_config():
+    """No TTL config resolved → the sweeper never starts."""
+    import aegra_api.main as main_module
+
+    importlib.reload(main_module)
+
+    with (
+        patch("aegra_api.main.run_migrations_async", new_callable=AsyncMock),
+        patch("aegra_api.main.db_manager") as mock_db_manager,
+        patch("aegra_api.main.get_langgraph_service") as mock_get_langgraph_service,
+        patch("aegra_api.main.setup_observability"),
+        patch("aegra_api.main.get_thread_ttl_config", return_value=None),
+        patch("aegra_api.main.thread_ttl_sweeper") as mock_sweeper,
+    ):
+        mock_db_manager.initialize = AsyncMock()
+        mock_db_manager.close = AsyncMock()
+        mock_langgraph_service = MagicMock()
+        mock_langgraph_service.initialize = AsyncMock()
+        mock_get_langgraph_service.return_value = mock_langgraph_service
+        mock_sweeper.start = AsyncMock()
+        mock_sweeper.stop = AsyncMock()
+
+        async with main_module.lifespan(MagicMock()):
+            pass
+
+        mock_sweeper.start.assert_not_awaited()
+        mock_sweeper.stop.assert_not_awaited()

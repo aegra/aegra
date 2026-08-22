@@ -1,15 +1,44 @@
 """Unit tests for thread TTL config resolution and the expiry sweep."""
 
 import json
+from datetime import UTC, datetime
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from psycopg import Error as PsycopgError
 from pydantic import ValidationError
+from sqlalchemy.dialects import postgresql
 
+from aegra_api.observability.metrics import THREAD_TTL_SWEPT
 from aegra_api.services.thread_ttl import (
     ThreadTTLConfig,
+    ThreadTTLSweeper,
+    _apply_strategy,
+    _expired_claim_stmt,
+    _process_expired_batch,
     get_thread_ttl_config,
 )
 from aegra_api.settings import settings
+
+
+def _swept_count(outcome: str) -> float:
+    """Read the current value of the TTL counter for one outcome label."""
+    return THREAD_TTL_SWEPT.labels(outcome=outcome)._value.get()
+
+
+def _make_lg_pool() -> tuple[MagicMock, AsyncMock]:
+    """Fake db_manager.lg_pool: connection() and transaction() async CMs."""
+    conn = AsyncMock()
+    tx = AsyncMock()
+    tx.__aenter__ = AsyncMock(return_value=None)
+    tx.__aexit__ = AsyncMock(return_value=False)
+    conn.transaction = MagicMock(return_value=tx)
+    pool_cm = AsyncMock()
+    pool_cm.__aenter__ = AsyncMock(return_value=conn)
+    pool_cm.__aexit__ = AsyncMock(return_value=False)
+    pool = MagicMock()
+    pool.connection = MagicMock(return_value=pool_cm)
+    return pool, conn
 
 
 @pytest.fixture(autouse=True)
@@ -161,3 +190,241 @@ class TestThreadTTLConfigModel:
     def test_rejects_non_positive_values(self, field: str) -> None:
         with pytest.raises(ValidationError):
             ThreadTTLConfig.model_validate({field: 0})
+
+
+class TestClaimQuery:
+    """The claim statement locks only thread_ttl rows and skips busy threads."""
+
+    def test_sweep_claim_shape(self) -> None:
+        stmt = _expired_claim_stmt(datetime.now(UTC), 10)
+        sql = str(stmt.compile(dialect=postgresql.dialect()))
+
+        assert "FOR UPDATE OF thread_ttl SKIP LOCKED" in sql
+        assert "EXISTS" in sql
+        assert "expires_at <=" in sql
+        assert "LIMIT" in sql
+        assert "runs" in sql  # active-run guard subquery
+
+    def test_prune_claim_is_user_scoped(self) -> None:
+        stmt = _expired_claim_stmt(datetime.now(UTC), 10, user_id="user-1")
+        sql = str(stmt.compile(dialect=postgresql.dialect()))
+
+        assert "thread.user_id" in sql
+        assert "FOR UPDATE OF thread_ttl SKIP LOCKED" in sql
+
+
+class TestDeleteStrategy:
+    """strategy=delete removes checkpoints strictly before the thread row."""
+
+    @pytest.mark.asyncio
+    async def test_deletes_checkpoints_before_thread_row(self) -> None:
+        order: list[str] = []
+        checkpointer = AsyncMock()
+        checkpointer.adelete_thread.side_effect = lambda _tid: order.append("checkpoints")
+        db = MagicMock()
+        db.get_checkpointer.return_value = checkpointer
+        session = AsyncMock()
+        session.execute.side_effect = lambda _stmt: order.append("thread_row")
+
+        with patch("aegra_api.services.thread_ttl.db_manager", db):
+            outcome = await _apply_strategy(session, "t-1", "delete", 5.0, datetime.now(UTC))
+
+        assert outcome == "deleted"
+        assert order == ["checkpoints", "thread_row"]
+        checkpointer.adelete_thread.assert_awaited_once_with("t-1")
+
+
+class TestKeepLatest:
+    """strategy=keep_latest prunes history on the lg_pool and re-arms the TTL."""
+
+    @pytest.mark.asyncio
+    async def test_prunes_three_tables_in_order_and_rearms(self) -> None:
+        pool, conn = _make_lg_pool()
+        db = MagicMock()
+        db.lg_pool = pool
+        session = AsyncMock()
+
+        with patch("aegra_api.services.thread_ttl.db_manager", db):
+            outcome = await _apply_strategy(session, "t-1", "keep_latest", 30.0, datetime.now(UTC))
+
+        assert outcome == "pruned"
+        statements = [call.args[0] for call in conn.execute.await_args_list]
+        assert len(statements) == 3
+        assert "DELETE FROM checkpoints" in statements[0]
+        assert "DELETE FROM checkpoint_writes" in statements[1]
+        assert "DELETE FROM checkpoint_blobs" in statements[2]
+        for call in conn.execute.await_args_list:
+            assert "%(tid)s" in call.args[0]
+            assert call.args[1] == {"tid": "t-1"}
+        # Re-arm lands on the SQLAlchemy session, not the lg_pool
+        rearm_sql = str(session.execute.await_args_list[0].args[0].compile(dialect=postgresql.dialect()))
+        assert "UPDATE thread_ttl" in rearm_sql
+        assert "expires_at" in rearm_sql
+
+    @pytest.mark.asyncio
+    async def test_raises_when_db_not_initialized(self) -> None:
+        db = MagicMock()
+        db.lg_pool = None
+        session = AsyncMock()
+
+        with patch("aegra_api.services.thread_ttl.db_manager", db):
+            with pytest.raises(RuntimeError, match="not initialized"):
+                await _apply_strategy(session, "t-1", "keep_latest", 30.0, datetime.now(UTC))
+
+
+class TestFailureIsolation:
+    """A checkpointer failure skips the item without poisoning the batch."""
+
+    @pytest.mark.asyncio
+    async def test_psycopg_error_skips_item_and_continues(self) -> None:
+        checkpointer = AsyncMock()
+        checkpointer.adelete_thread.side_effect = [PsycopgError("backend down"), None]
+        db = MagicMock()
+        db.get_checkpointer.return_value = checkpointer
+
+        claim_result = MagicMock()
+        claim_result.all.return_value = [("t-1", "delete", 5.0), ("t-2", "delete", 5.0)]
+        session = AsyncMock()
+        session.execute.side_effect = [claim_result, MagicMock()]
+
+        errors_before = _swept_count("error")
+        with patch("aegra_api.services.thread_ttl.db_manager", db):
+            claimed, deleted, pruned = await _process_expired_batch(
+                session, MagicMock(), datetime.now(UTC)
+            )
+
+        assert (claimed, deleted, pruned) == (2, 1, 0)
+        assert checkpointer.adelete_thread.await_count == 2
+        session.commit.assert_awaited_once()
+        assert _swept_count("error") == errors_before + 1
+
+    @pytest.mark.asyncio
+    async def test_empty_claim_returns_zero_without_commit(self) -> None:
+        claim_result = MagicMock()
+        claim_result.all.return_value = []
+        session = AsyncMock()
+        session.execute.return_value = claim_result
+
+        claimed, deleted, pruned = await _process_expired_batch(session, MagicMock(), datetime.now(UTC))
+
+        assert (claimed, deleted, pruned) == (0, 0, 0)
+        session.commit.assert_not_awaited()
+
+
+class TestSweepLimit:
+    """_tick claims sub-batches until sweep_limit is reached."""
+
+    @pytest.mark.asyncio
+    async def test_stops_at_sweep_limit(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        sweeper = ThreadTTLSweeper()
+        config = ThreadTTLConfig(sweep_limit=250)
+        monkeypatch.setattr("aegra_api.services.thread_ttl.get_thread_ttl_config", lambda: config)
+
+        session = AsyncMock()
+        maker = MagicMock()
+        maker.return_value.__aenter__ = AsyncMock(return_value=session)
+        maker.return_value.__aexit__ = AsyncMock(return_value=False)
+
+        batches = [(100, 100, 0), (100, 100, 0), (50, 50, 0), (0, 0, 0)]
+        with (
+            patch("aegra_api.services.thread_ttl._get_session_maker", return_value=maker),
+            patch(
+                "aegra_api.services.thread_ttl._process_expired_batch",
+                new_callable=AsyncMock,
+                side_effect=batches,
+            ) as mock_batch,
+        ):
+            await sweeper._tick()
+
+        assert mock_batch.await_count == 3
+        limits = [call.args[1]._limit_clause.value for call in mock_batch.await_args_list]
+        assert limits == [100, 100, 50]
+
+    @pytest.mark.asyncio
+    async def test_tick_is_noop_without_config(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        sweeper = ThreadTTLSweeper()
+        monkeypatch.setattr("aegra_api.services.thread_ttl.get_thread_ttl_config", lambda: None)
+
+        with patch(
+            "aegra_api.services.thread_ttl._process_expired_batch", new_callable=AsyncMock
+        ) as mock_batch:
+            await sweeper._tick()
+
+        mock_batch.assert_not_awaited()
+
+
+class TestStartStop:
+    """Sweeper lifecycle mirrors the cron scheduler."""
+
+    @pytest.mark.asyncio
+    async def test_loop_ticks_first_then_sleeps(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        sweeper = ThreadTTLSweeper()
+        config = ThreadTTLConfig(sweep_interval_minutes=0.001)
+        monkeypatch.setattr("aegra_api.services.thread_ttl.get_thread_ttl_config", lambda: config)
+
+        tick_count = 0
+
+        async def counting_tick() -> None:
+            nonlocal tick_count
+            tick_count += 1
+            sweeper._running = False
+
+        sweeper._running = True
+        with patch.object(sweeper, "_tick", side_effect=counting_tick):
+            await sweeper._loop()
+
+        assert tick_count == 1
+
+    @pytest.mark.asyncio
+    async def test_loop_survives_tick_exception(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        sweeper = ThreadTTLSweeper()
+        config = ThreadTTLConfig(sweep_interval_minutes=0.001)
+        monkeypatch.setattr("aegra_api.services.thread_ttl.get_thread_ttl_config", lambda: config)
+
+        call_count = 0
+
+        async def failing_tick() -> None:
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                raise ValueError("boom")
+            sweeper._running = False
+
+        sweeper._running = True
+        with patch.object(sweeper, "_tick", side_effect=failing_tick):
+            await sweeper._loop()
+
+        assert call_count == 2
+
+    @pytest.mark.asyncio
+    async def test_start_creates_task_and_stop_cancels_it(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        sweeper = ThreadTTLSweeper()
+        config = ThreadTTLConfig(sweep_interval_minutes=60)
+        monkeypatch.setattr("aegra_api.services.thread_ttl.get_thread_ttl_config", lambda: config)
+
+        with patch.object(sweeper, "_tick", new_callable=AsyncMock):
+            await sweeper.start()
+            task = sweeper._task
+            assert task is not None
+            assert not task.done()
+
+            await sweeper.stop()
+
+        assert sweeper._task is None
+        assert task.done()
+
+
+class TestSchemaCanary:
+    """Fail loudly if a langgraph-checkpoint-postgres bump changes the schema
+    the keep_latest pruning SQL is pinned to."""
+
+    def test_checkpoint_tables_match_pruning_assumptions(self) -> None:
+        from langgraph.checkpoint.postgres.base import MIGRATIONS, SELECT_SQL
+
+        ddl = "\n".join(MIGRATIONS)
+        assert "PRIMARY KEY (thread_id, checkpoint_ns, checkpoint_id)" in ddl
+        assert "PRIMARY KEY (thread_id, checkpoint_ns, channel, version)" in ddl
+        assert "PRIMARY KEY (thread_id, checkpoint_ns, checkpoint_id, task_id, idx)" in ddl
+        # keep_latest keeps exactly the blob versions the latest checkpoint
+        # references — the same join langgraph's reader performs.
+        assert "jsonb_each_text(checkpoint -> 'channel_versions')" in SELECT_SQL

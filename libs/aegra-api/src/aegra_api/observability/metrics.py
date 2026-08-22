@@ -29,6 +29,17 @@ REAPER_RECOVERED_RUNS = prometheus_client.Counter(
 for _outcome in ("crashed_retried", "crashed_exhausted", "stuck_pending"):
     REAPER_RECOVERED_RUNS.labels(outcome=_outcome)
 
+THREAD_TTL_SWEPT = prometheus_client.Counter(
+    "aegra_thread_ttl_swept_threads_total",
+    "Threads processed by the TTL sweep or POST /threads/prune, by outcome: "
+    "deleted (strategy=delete, thread removed), pruned (strategy=keep_latest, "
+    "history compacted), error (item failed and will be retried next tick).",
+    labelnames=["outcome"],
+)
+
+for _outcome in ("deleted", "pruned", "error"):
+    THREAD_TTL_SWEPT.labels(outcome=_outcome)
+
 
 def setup_prometheus_metrics(
     app: FastAPI,

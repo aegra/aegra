@@ -168,7 +168,7 @@ async def test_lifespan_runs_migrations_when_enabled(monkeypatch):
 
 @pytest.mark.unit
 @pytest.mark.asyncio
-async def test_lifespan_starts_ttl_sweeper_when_configured():
+async def test_lifespan_starts_ttl_sweeper_when_configured() -> None:
     """The TTL sweeper starts when a TTL config resolves and stops before DB close."""
     import aegra_api.main as main_module
 
@@ -200,7 +200,7 @@ async def test_lifespan_starts_ttl_sweeper_when_configured():
 
 @pytest.mark.unit
 @pytest.mark.asyncio
-async def test_lifespan_skips_ttl_sweeper_without_config():
+async def test_lifespan_skips_ttl_sweeper_without_config() -> None:
     """No TTL config resolved → the sweeper never starts."""
     import aegra_api.main as main_module
 

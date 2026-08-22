@@ -1,6 +1,9 @@
 """Unit tests for HTTP and store configuration loading"""
 
 import json
+from pathlib import Path
+
+import pytest
 
 from aegra_api.config import load_checkpointer_config, load_http_config, load_store_config
 
@@ -207,7 +210,7 @@ def test_load_store_config_from_langgraph_json(tmp_path, monkeypatch):
 # ============================================================================
 
 
-def test_load_checkpointer_config_with_ttl(tmp_path, monkeypatch):
+def test_load_checkpointer_config_with_ttl(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Test loading checkpointer config with a ttl block"""
     monkeypatch.chdir(tmp_path)
 
@@ -228,7 +231,7 @@ def test_load_checkpointer_config_with_ttl(tmp_path, monkeypatch):
     assert config["ttl"]["default_ttl"] == 43200
 
 
-def test_load_checkpointer_config_no_section(tmp_path, monkeypatch):
+def test_load_checkpointer_config_no_section(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Test loading when config exists but has no checkpointer section"""
     monkeypatch.chdir(tmp_path)
 
@@ -240,7 +243,7 @@ def test_load_checkpointer_config_no_section(tmp_path, monkeypatch):
     assert config is None
 
 
-def test_load_checkpointer_config_no_config(tmp_path, monkeypatch):
+def test_load_checkpointer_config_no_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Test loading when no config file exists"""
     monkeypatch.chdir(tmp_path)
 

@@ -86,6 +86,36 @@ PHOENIX_COLLECTOR_ENDPOINT=http://127.0.0.1:6006/v1/traces
 
 Each backend receives the same trace data through separate `BatchSpanProcessor` instances.
 
+### Custom span attributes
+
+Register an enricher to add your own attributes to every span before it is exported.
+The callback receives the finished span, so response-time values — token costs, rate-limit headers, feature flags — are available at this point.
+
+```python
+from collections.abc import Mapping
+
+from opentelemetry.sdk.trace import ReadableSpan
+
+from aegra_api.observability.otel import otel_provider
+
+
+def rate_limit_attrs(span: ReadableSpan) -> Mapping[str, int] | None:
+    remaining = span.attributes.get("llm.response.headers.x-ratelimit-remaining-requests")
+    if remaining is None:
+        return None
+    return {"langfuse.observation.metadata.ratelimit_remaining": int(remaining)}
+
+
+otel_provider.add_span_enricher(rate_limit_attrs)
+```
+
+Return a mapping of attributes, or `None` to add nothing.
+Enrichers run once per span, ahead of the fan-out, so every configured target sees the same result and `OTEL_TARGETS` needs no change.
+Register them at graph-module import time — before or after startup both work.
+
+Values must be `str`, `int`, `float`, or `bool`; anything else is dropped with a warning, matching the rule for run metadata below.
+An enricher that raises is logged and skipped for that span, so a broken callback cannot stop a trace from being exported.
+
 ## How it works
 
 Aegra uses a pure OpenTelemetry approach:

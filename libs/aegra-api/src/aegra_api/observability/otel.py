@@ -13,7 +13,7 @@ from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import BatchSpanProcessor, ConsoleSpanExporter
 
 from aegra_api.observability.base import ObservabilityProvider
-from aegra_api.observability.span_enrichment import SpanEnrichmentProcessor
+from aegra_api.observability.span_enrichment import SpanEnricher, SpanEnrichmentProcessor
 from aegra_api.observability.targets import (
     BaseOtelTarget,
     GenericOtelTarget,
@@ -33,6 +33,7 @@ class OpenTelemetryProvider(ObservabilityProvider):
     def __init__(self) -> None:
         self._enabled = False
         self._tracer_provider: TracerProvider | None = None
+        self._enrichment_processor = SpanEnrichmentProcessor()
 
         # Defining the list of active targets
         self._active_targets: list[BaseOtelTarget] = self._resolve_targets()
@@ -83,6 +84,16 @@ class OpenTelemetryProvider(ObservabilityProvider):
             except Exception as e:
                 logger.error(f"Observability: Failed to attach target '{target.name}': {e}")
 
+    def add_span_enricher(self, enricher: SpanEnricher) -> None:
+        """Register a callback that adds attributes to every span before export.
+
+        The callback receives the ended span and returns a mapping of extra
+        attributes, or ``None``. It runs once per span, ahead of the fan-out to
+        every configured target, so ``OTEL_TARGETS`` needs no change. Enrichers
+        may be registered before or after :meth:`setup`.
+        """
+        self._enrichment_processor.add_enricher(enricher)
+
     def setup(self) -> None:
         """Initializes the Global Tracer Provider. Runs once."""
         if self._tracer_provider:
@@ -98,7 +109,7 @@ class OpenTelemetryProvider(ObservabilityProvider):
         )
 
         self._tracer_provider = TracerProvider(resource=resource)
-        self._tracer_provider.add_span_processor(SpanEnrichmentProcessor())
+        self._tracer_provider.add_span_processor(self._enrichment_processor)
         processors_count = 0
 
         # 2. Attach Exporters

@@ -169,6 +169,24 @@ Set `CRON_ENABLED=false` to disable scheduling without removing cron records. Jo
 Cron firing is **at-least-once**: if a worker crashes after claiming a cron but before the run setup commits, the claim eventually expires (after `CRON_CLAIM_DURATION_SECONDS`) and another tick re-fires the cron. Make agent runs idempotent if duplicate firings are unacceptable.
 </Note>
 
+## Thread TTL
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `AEGRA_THREAD_TTL` | — | Thread retention policy. Either a bare number (`default_ttl` in minutes) or a JSON object with any of `strategy`, `default_ttl`, `sweep_interval_minutes`, `sweep_limit` |
+
+```bash
+# 30-day TTL, delete strategy, other fields at defaults
+AEGRA_THREAD_TTL=43200
+
+# Full policy as JSON
+AEGRA_THREAD_TTL='{"strategy": "keep_latest", "default_ttl": 1440, "sweep_interval_minutes": 5, "sweep_limit": 1000}'
+```
+
+<Note>
+`AEGRA_THREAD_TTL` takes precedence. When set, the `checkpointer.ttl` block in `aegra.json` is ignored entirely and unset fields fall back to their defaults. See the [configuration reference](/reference/configuration#checkpointer) for field semantics.
+</Note>
+
 ## Prometheus metrics
 
 | Variable | Default | Description |

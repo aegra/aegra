@@ -3,7 +3,7 @@ title: "Configuration"
 description: "Complete reference for the aegra.json configuration file."
 ---
 
-Aegra uses a JSON configuration file (`aegra.json`) to define graphs, authentication, HTTP settings, and the semantic store.
+Aegra uses a JSON configuration file (`aegra.json`) to define graphs, authentication, HTTP settings, the semantic store, and checkpointer retention (thread TTL).
 
 ## Config file resolution
 
@@ -47,6 +47,14 @@ aegra dev
       "dims": 1536,
       "embed": "openai:text-embedding-3-small",
       "fields": ["$"]
+    }
+  },
+  "checkpointer": {
+    "ttl": {
+      "strategy": "delete",
+      "default_ttl": 43200,
+      "sweep_interval_minutes": 5,
+      "sweep_limit": 1000
     }
   }
 }
@@ -269,6 +277,41 @@ Configure semantic store with vector embeddings.
 If `store` is not configured, Aegra operates in basic key-value mode.
 
 See [semantic store guide](/guides/semantic-store) for details.
+
+## `checkpointer`
+
+Configure thread retention (TTL). When a `ttl` block is present, every newly
+created thread gets an expiry, and a background sweep deletes or compacts
+expired threads.
+
+```json
+{
+  "checkpointer": {
+    "ttl": {
+      "strategy": "delete",
+      "default_ttl": 43200,
+      "sweep_interval_minutes": 5,
+      "sweep_limit": 1000
+    }
+  }
+}
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `ttl.strategy` | `string` | `delete` | `delete` removes the thread, its runs/crons, and all checkpoint data. `keep_latest` prunes checkpoint history but keeps the thread and its latest state, then re-arms the TTL (periodic compaction). |
+| `ttl.default_ttl` | `number` | `43200` | Default thread TTL in minutes (43200 = 30 days), applied to threads created after TTL is enabled. |
+| `ttl.sweep_interval_minutes` | `number` | `5` | How often the background sweep runs. |
+| `ttl.sweep_limit` | `integer` | `1000` | Max threads processed per sweep iteration. |
+
+Notes:
+
+- Threads with pending or running runs are skipped and swept once their runs settle.
+- Deleting an expired thread cascades to its runs and thread-bound crons.
+- Individual threads can override the default via the `ttl` field on `POST /threads`; expired threads can be cleaned immediately with `POST /threads/prune`. See the [threads guide](/guides/threads-and-state#thread-ttl).
+- The `AEGRA_THREAD_TTL` environment variable replaces this block entirely when set — see [environment variables](/reference/environment-variables#thread-ttl).
+
+If neither `checkpointer.ttl` nor `AEGRA_THREAD_TTL` is configured, threads never expire.
 
 ## Common configurations
 

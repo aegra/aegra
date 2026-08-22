@@ -39,6 +39,7 @@ ROUTE_AUTH_MAP: Final[dict[tuple[str, str], tuple[str, str]]] = {
     ("GET", "/threads/{thread_id}"): ("threads", "read"),
     ("PATCH", "/threads/{thread_id}"): ("threads", "update"),
     ("DELETE", "/threads/{thread_id}"): ("threads", "delete"),
+    ("POST", "/threads/prune"): ("threads", "delete"),
     # Reading or writing checkpointed state is a thread read/update, not a
     # separate resource: handlers scoping "threads" must cover it.
     ("GET", "/threads/{thread_id}/state"): ("threads", "read"),
@@ -116,6 +117,7 @@ SELF_DISPATCHING: Final[frozenset[tuple[str, str]]] = frozenset(
         ("POST", "/threads"),
         ("GET", "/threads"),
         ("POST", "/threads/search"),
+        ("POST", "/threads/prune"),
         ("GET", "/threads/{thread_id}"),
         ("PATCH", "/threads/{thread_id}"),
         ("DELETE", "/threads/{thread_id}"),

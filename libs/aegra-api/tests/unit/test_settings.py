@@ -6,7 +6,14 @@ import pytest
 from pydantic import ValidationError
 from sqlalchemy.engine import make_url
 
-from aegra_api.settings import AppSettings, CronSettings, DatabaseSettings, RedisSettings, WorkerSettings
+from aegra_api.settings import (
+    AppSettings,
+    CronSettings,
+    DatabaseSettings,
+    RedisSettings,
+    ThreadTTLSettings,
+    WorkerSettings,
+)
 
 
 class TestAppSettingsServerURL:
@@ -637,3 +644,19 @@ class TestCronSettingsValidation:
 
         with pytest.raises((ValueError, ValidationError), match="CRON_POLL_INTERVAL_SECONDS"):
             CronSettings(_env_file=None)
+
+
+class TestThreadTTLSettings:
+    """AEGRA_THREAD_TTL is passed through raw; parsing lives in services.thread_ttl."""
+
+    def test_defaults_to_none(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv("AEGRA_THREAD_TTL", raising=False)
+        ttl = ThreadTTLSettings(_env_file=None)
+
+        assert ttl.AEGRA_THREAD_TTL is None
+
+    def test_raw_string_passthrough(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("AEGRA_THREAD_TTL", '{"default_ttl": 60}')
+        ttl = ThreadTTLSettings(_env_file=None)
+
+        assert ttl.AEGRA_THREAD_TTL == '{"default_ttl": 60}'

@@ -268,9 +268,11 @@ class TestKeepLatest:
         db.lg_pool = None
         session = AsyncMock()
 
-        with patch("aegra_api.services.thread_ttl.db_manager", db):
-            with pytest.raises(RuntimeError, match="not initialized"):
-                await _apply_strategy(session, "t-1", "keep_latest", 30.0, datetime.now(UTC))
+        with (
+            patch("aegra_api.services.thread_ttl.db_manager", db),
+            pytest.raises(RuntimeError, match="not initialized"),
+        ):
+            await _apply_strategy(session, "t-1", "keep_latest", 30.0, datetime.now(UTC))
 
 
 class TestFailureIsolation:
@@ -290,9 +292,7 @@ class TestFailureIsolation:
 
         errors_before = _swept_count("error")
         with patch("aegra_api.services.thread_ttl.db_manager", db):
-            claimed, deleted, pruned = await _process_expired_batch(
-                session, MagicMock(), datetime.now(UTC)
-            )
+            claimed, deleted, pruned = await _process_expired_batch(session, MagicMock(), datetime.now(UTC))
 
         assert (claimed, deleted, pruned) == (2, 1, 0)
         assert checkpointer.adelete_thread.await_count == 2
@@ -346,9 +346,7 @@ class TestSweepLimit:
         sweeper = ThreadTTLSweeper()
         monkeypatch.setattr("aegra_api.services.thread_ttl.get_thread_ttl_config", lambda: None)
 
-        with patch(
-            "aegra_api.services.thread_ttl._process_expired_batch", new_callable=AsyncMock
-        ) as mock_batch:
+        with patch("aegra_api.services.thread_ttl._process_expired_batch", new_callable=AsyncMock) as mock_batch:
             await sweeper._tick()
 
         mock_batch.assert_not_awaited()

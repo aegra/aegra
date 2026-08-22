@@ -156,9 +156,7 @@ class TestPruneEndpoint:
     def test_prune_returns_counts_for_caller(self, monkeypatch: pytest.MonkeyPatch) -> None:
         called: dict[str, object] = {}
 
-        async def fake_prune(
-            session: object, *, user_id: str, auth_filter: object = None
-        ) -> tuple[int, int]:
+        async def fake_prune(session: object, *, user_id: str, auth_filter: object = None) -> tuple[int, int]:
             called["user_id"] = user_id
             called["auth_filter"] = auth_filter
             return 2, 1
@@ -174,9 +172,7 @@ class TestPruneEndpoint:
         assert called["user_id"] == "test-user"
 
     def test_prune_with_nothing_expired_returns_zeros(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        async def fake_prune(
-            session: object, *, user_id: str, auth_filter: object = None
-        ) -> tuple[int, int]:
+        async def fake_prune(session: object, *, user_id: str, auth_filter: object = None) -> tuple[int, int]:
             return 0, 0
 
         monkeypatch.setattr(threads_module, "prune_expired_threads_for_user", fake_prune)

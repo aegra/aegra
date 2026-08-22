@@ -191,16 +191,10 @@ def _expired_claim_stmt(
         ~active_runs_exist,
     )
     if user_id is not None:
-        stmt = stmt.join(ThreadORM, ThreadORM.thread_id == ThreadTTLORM.thread_id).where(
-            ThreadORM.user_id == user_id
-        )
+        stmt = stmt.join(ThreadORM, ThreadORM.thread_id == ThreadTTLORM.thread_id).where(ThreadORM.user_id == user_id)
         if auth_filter is not None:
             stmt = stmt.where(auth_filter)
-    return (
-        stmt.order_by(ThreadTTLORM.expires_at.asc())
-        .limit(limit)
-        .with_for_update(skip_locked=True, of=ThreadTTLORM)
-    )
+    return stmt.order_by(ThreadTTLORM.expires_at.asc()).limit(limit).with_for_update(skip_locked=True, of=ThreadTTLORM)
 
 
 async def _process_expired_batch(

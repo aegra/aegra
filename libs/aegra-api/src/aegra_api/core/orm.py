@@ -227,9 +227,7 @@ class Cron(Base):
 class ThreadTTL(Base):
     __tablename__ = "thread_ttl"
 
-    thread_id: Mapped[str] = mapped_column(
-        Text, ForeignKey("thread.thread_id", ondelete="CASCADE"), primary_key=True
-    )
+    thread_id: Mapped[str] = mapped_column(Text, ForeignKey("thread.thread_id", ondelete="CASCADE"), primary_key=True)
     strategy: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("'delete'"))
     ttl_minutes: Mapped[float] = mapped_column(Float, nullable=False)
     created_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), server_default=text("now()"))

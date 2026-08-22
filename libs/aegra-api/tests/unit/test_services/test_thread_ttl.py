@@ -1,10 +1,13 @@
 """Unit tests for thread TTL config resolution and the expiry sweep."""
 
 import json
+from collections.abc import Iterator
 from datetime import UTC, datetime
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from langgraph.checkpoint.postgres.base import MIGRATIONS, SELECT_SQL
 from psycopg import Error as PsycopgError
 from pydantic import ValidationError
 from sqlalchemy.dialects import postgresql
@@ -43,7 +46,7 @@ def _make_lg_pool() -> tuple[MagicMock, AsyncMock]:
 
 
 @pytest.fixture(autouse=True)
-def _clear_ttl_config_cache() -> None:
+def _clear_ttl_config_cache() -> Iterator[None]:
     get_thread_ttl_config.cache_clear()
     yield
     get_thread_ttl_config.cache_clear()
@@ -57,12 +60,12 @@ def _no_env_ttl(monkeypatch: pytest.MonkeyPatch) -> None:
 class TestResolveConfig:
     """Tests for get_thread_ttl_config source precedence and validation."""
 
-    def test_returns_none_when_no_source_configured(self, tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_returns_none_when_no_source_configured(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.chdir(tmp_path)
 
         assert get_thread_ttl_config() is None
 
-    def test_loads_from_aegra_json_checkpointer_ttl(self, tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_loads_from_aegra_json_checkpointer_ttl(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.chdir(tmp_path)
         (tmp_path / "aegra.json").write_text(
             json.dumps(
@@ -81,7 +84,7 @@ class TestResolveConfig:
         assert config.sweep_interval_minutes == 5
         assert config.sweep_limit == 1000
 
-    def test_env_bare_number_sets_default_ttl(self, tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_env_bare_number_sets_default_ttl(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.chdir(tmp_path)
         monkeypatch.setattr(settings.thread_ttl, "AEGRA_THREAD_TTL", "43200")
 
@@ -91,7 +94,7 @@ class TestResolveConfig:
         assert config.default_ttl == 43200
         assert config.strategy == "delete"
 
-    def test_env_json_object_sets_all_fields(self, tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_env_json_object_sets_all_fields(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.chdir(tmp_path)
         monkeypatch.setattr(
             settings.thread_ttl,
@@ -114,7 +117,7 @@ class TestResolveConfig:
         assert config.sweep_interval_minutes == 1
         assert config.sweep_limit == 50
 
-    def test_env_replaces_aegra_json_block_entirely(self, tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_env_replaces_aegra_json_block_entirely(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         """Whole-source override: json keys do not leak under an env config."""
         monkeypatch.chdir(tmp_path)
         (tmp_path / "aegra.json").write_text(
@@ -134,28 +137,28 @@ class TestResolveConfig:
         assert config.strategy == "delete"
         assert config.sweep_limit == 1000
 
-    def test_invalid_env_json_raises(self, tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_invalid_env_json_raises(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.chdir(tmp_path)
         monkeypatch.setattr(settings.thread_ttl, "AEGRA_THREAD_TTL", "{not json")
 
         with pytest.raises(json.JSONDecodeError):
             get_thread_ttl_config()
 
-    def test_invalid_strategy_raises(self, tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_invalid_strategy_raises(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.chdir(tmp_path)
         monkeypatch.setattr(settings.thread_ttl, "AEGRA_THREAD_TTL", json.dumps({"strategy": "purge"}))
 
         with pytest.raises(ValidationError):
             get_thread_ttl_config()
 
-    def test_non_positive_default_ttl_raises(self, tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_non_positive_default_ttl_raises(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.chdir(tmp_path)
         monkeypatch.setattr(settings.thread_ttl, "AEGRA_THREAD_TTL", "0")
 
         with pytest.raises(ValidationError):
             get_thread_ttl_config()
 
-    def test_blank_env_falls_back_to_json(self, tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_blank_env_falls_back_to_json(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.chdir(tmp_path)
         (tmp_path / "aegra.json").write_text(
             json.dumps(
@@ -192,15 +195,21 @@ class TestThreadTTLConfigModel:
         with pytest.raises(ValidationError):
             ThreadTTLConfig.model_validate({field: 0})
 
+    @pytest.mark.parametrize("value", [float("inf"), 1e308])
+    def test_rejects_timedelta_unsafe_ttl(self, value: float) -> None:
+        """Values above MAX_TTL_MINUTES would overflow timedelta at insert time."""
+        with pytest.raises(ValidationError):
+            ThreadTTLConfig.model_validate({"default_ttl": value})
+
 
 class TestClaimQuery:
-    """The claim statement locks only thread_ttl rows and skips busy threads."""
+    """The claim statement locks thread_ttl and thread rows and skips busy threads."""
 
     def test_sweep_claim_shape(self) -> None:
         stmt = _expired_claim_stmt(datetime.now(UTC), 10)
         sql = str(stmt.compile(dialect=postgresql.dialect()))
 
-        assert "FOR UPDATE OF thread_ttl SKIP LOCKED" in sql
+        assert "FOR UPDATE OF thread_ttl, thread SKIP LOCKED" in sql
         assert "EXISTS" in sql
         assert "expires_at <=" in sql
         assert "LIMIT" in sql
@@ -211,7 +220,7 @@ class TestClaimQuery:
         sql = str(stmt.compile(dialect=postgresql.dialect()))
 
         assert "thread.user_id" in sql
-        assert "FOR UPDATE OF thread_ttl SKIP LOCKED" in sql
+        assert "FOR UPDATE OF thread_ttl, thread SKIP LOCKED" in sql
 
 
 class TestDeleteStrategy:
@@ -342,6 +351,31 @@ class TestSweepLimit:
         assert limits == [100, 100, 50]
 
     @pytest.mark.asyncio
+    async def test_fully_failed_batch_ends_tick_early(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A batch where every item errored would be re-claimed verbatim and
+        starve later expirations for the rest of the tick — the loop must stop."""
+        sweeper = ThreadTTLSweeper()
+        config = ThreadTTLConfig(sweep_limit=1000)
+        monkeypatch.setattr("aegra_api.services.thread_ttl.get_thread_ttl_config", lambda: config)
+
+        session = AsyncMock()
+        maker = MagicMock()
+        maker.return_value.__aenter__ = AsyncMock(return_value=session)
+        maker.return_value.__aexit__ = AsyncMock(return_value=False)
+
+        with (
+            patch("aegra_api.services.thread_ttl._get_session_maker", return_value=maker),
+            patch(
+                "aegra_api.services.thread_ttl._process_expired_batch",
+                new_callable=AsyncMock,
+                return_value=(100, 0, 0),
+            ) as mock_batch,
+        ):
+            await sweeper._tick()
+
+        assert mock_batch.await_count == 1
+
+    @pytest.mark.asyncio
     async def test_tick_is_noop_without_config(self, monkeypatch: pytest.MonkeyPatch) -> None:
         sweeper = ThreadTTLSweeper()
         monkeypatch.setattr("aegra_api.services.thread_ttl.get_thread_ttl_config", lambda: None)
@@ -418,8 +452,6 @@ class TestSchemaCanary:
     the keep_latest pruning SQL is pinned to."""
 
     def test_checkpoint_tables_match_pruning_assumptions(self) -> None:
-        from langgraph.checkpoint.postgres.base import MIGRATIONS, SELECT_SQL
-
         ddl = "\n".join(MIGRATIONS)
         assert "PRIMARY KEY (thread_id, checkpoint_ns, checkpoint_id)" in ddl
         assert "PRIMARY KEY (thread_id, checkpoint_ns, channel, version)" in ddl
@@ -449,4 +481,4 @@ class TestPruneForUser:
         assert mock_batch.await_count == 3
         claim_sql = str(mock_batch.await_args_list[0].args[1].compile(dialect=postgresql.dialect()))
         assert "thread.user_id" in claim_sql
-        assert "FOR UPDATE OF thread_ttl SKIP LOCKED" in claim_sql
+        assert "FOR UPDATE OF thread_ttl, thread SKIP LOCKED" in claim_sql

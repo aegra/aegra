@@ -30,6 +30,7 @@ from aegra_api.core.orm import Run as RunORM
 from aegra_api.core.orm import Thread as ThreadORM
 from aegra_api.core.orm import ThreadTTL as ThreadTTLORM
 from aegra_api.core.orm import _get_session_maker
+from aegra_api.models.threads import MAX_TTL_MINUTES
 from aegra_api.observability.metrics import THREAD_TTL_SWEPT
 from aegra_api.settings import settings
 
@@ -97,8 +98,8 @@ class ThreadTTLConfig(BaseModel):
     """Validated TTL configuration merged from env and aegra.json."""
 
     strategy: Literal["delete", "keep_latest"] = "delete"
-    default_ttl: float = Field(43200, gt=0)  # minutes; 30 days
-    sweep_interval_minutes: float = Field(5, gt=0)
+    default_ttl: float = Field(43200, gt=0, le=MAX_TTL_MINUTES)  # minutes; 30 days
+    sweep_interval_minutes: float = Field(5, gt=0, le=MAX_TTL_MINUTES)
     sweep_limit: int = Field(1000, gt=0)
 
 
@@ -173,10 +174,14 @@ def _expired_claim_stmt(
     user_id: str | None = None,
     auth_filter: ColumnElement[bool] | None = None,
 ) -> Select[tuple[str, str, float]]:
-    """Claim query for expired thread_ttl rows, locking only thread_ttl.
+    """Claim query for expired thread_ttl rows, locking thread_ttl AND thread.
 
     ``skip_locked`` partitions work across instances (and between the sweeper
     and /threads/prune). Threads with active runs are skipped, not cancelled.
+    Locking the thread row too closes the check-then-act race with run
+    creation: a run INSERT takes FOR KEY SHARE on the thread (FK), so it waits
+    for the claim transaction instead of slipping in after the active-run
+    check and being cascade-deleted mid-flight.
     """
     active_runs_exist = (
         select(RunORM.run_id)
@@ -186,15 +191,23 @@ def _expired_claim_stmt(
         )
         .exists()
     )
-    stmt = select(ThreadTTLORM.thread_id, ThreadTTLORM.strategy, ThreadTTLORM.ttl_minutes).where(
-        ThreadTTLORM.expires_at <= now,
-        ~active_runs_exist,
+    stmt = (
+        select(ThreadTTLORM.thread_id, ThreadTTLORM.strategy, ThreadTTLORM.ttl_minutes)
+        .join(ThreadORM, ThreadORM.thread_id == ThreadTTLORM.thread_id)
+        .where(
+            ThreadTTLORM.expires_at <= now,
+            ~active_runs_exist,
+        )
     )
     if user_id is not None:
-        stmt = stmt.join(ThreadORM, ThreadORM.thread_id == ThreadTTLORM.thread_id).where(ThreadORM.user_id == user_id)
+        stmt = stmt.where(ThreadORM.user_id == user_id)
         if auth_filter is not None:
             stmt = stmt.where(auth_filter)
-    return stmt.order_by(ThreadTTLORM.expires_at.asc()).limit(limit).with_for_update(skip_locked=True, of=ThreadTTLORM)
+    return (
+        stmt.order_by(ThreadTTLORM.expires_at.asc())
+        .limit(limit)
+        .with_for_update(skip_locked=True, of=(ThreadTTLORM, ThreadORM))
+    )
 
 
 async def _process_expired_batch(
@@ -256,6 +269,11 @@ async def prune_expired_threads_for_user(
         claimed_total += claimed
         total_deleted += deleted
         total_pruned += pruned
+        # A batch where every item failed would be re-claimed verbatim (its
+        # rows stay first in expiry order) and starve everything behind it —
+        # stop and let the next call retry.
+        if deleted + pruned == 0:
+            break
     return total_deleted, total_pruned
 
 
@@ -329,6 +347,11 @@ class ThreadTTLSweeper:
             claimed_total += claimed
             deleted_total += deleted
             pruned_total += pruned
+            # A batch where every item failed would be re-claimed verbatim (its
+            # rows stay first in expiry order) and starve everything behind it
+            # for the rest of the tick — stop and retry next tick.
+            if deleted + pruned == 0:
+                break
 
         if claimed_total:
             logger.info(

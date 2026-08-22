@@ -37,7 +37,7 @@ def _make_lg_pool() -> tuple[MagicMock, AsyncMock]:
     conn.execute.return_value.fetchone for the skip path.
     """
     conn = AsyncMock()
-    conn.execute.return_value.fetchone = AsyncMock(return_value=(True,))
+    conn.execute.return_value.fetchone = AsyncMock(return_value={"has_prunable_history": True})
     tx = AsyncMock()
     tx.__aenter__ = AsyncMock(return_value=None)
     tx.__aexit__ = AsyncMock(return_value=False)
@@ -287,7 +287,7 @@ class TestKeepLatest:
     async def test_skips_deletes_when_history_already_compact(self) -> None:
         """Idle expiry cycles cost one PK-indexed probe, not three DELETEs."""
         pool, conn = _make_lg_pool()
-        conn.execute.return_value.fetchone = AsyncMock(return_value=(False,))
+        conn.execute.return_value.fetchone = AsyncMock(return_value={"has_prunable_history": False})
         db = MagicMock()
         db.lg_pool = pool
         session = AsyncMock()

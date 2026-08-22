@@ -55,7 +55,7 @@ SELECT EXISTS (
     WHERE thread_id = %(tid)s
     GROUP BY checkpoint_ns
     HAVING count(*) > 1
-)
+) AS has_prunable_history
 """
 
 # Latest checkpoint per (thread_id, checkpoint_ns) = max(checkpoint_id):
@@ -155,7 +155,8 @@ async def _prune_checkpoint_history(thread_id: str) -> None:
     async with pool.connection() as conn:
         cursor = await conn.execute(_HAS_PRUNABLE_HISTORY_SQL, {"tid": thread_id})
         row = await cursor.fetchone()
-        if row is None or not row[0]:
+        # The lg_pool is configured with row_factory=dict_row — access by name.
+        if row is None or not row["has_prunable_history"]:
             return
         async with conn.transaction():
             await conn.execute(_PRUNE_CHECKPOINTS_SQL, {"tid": thread_id})

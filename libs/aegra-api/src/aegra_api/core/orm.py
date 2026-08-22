@@ -21,6 +21,7 @@ import structlog
 from sqlalchemy import (
     TIMESTAMP,
     Boolean,
+    Float,
     ForeignKey,
     Index,
     Integer,
@@ -221,6 +222,20 @@ class Cron(Base):
         Index("idx_cron_thread_id", "thread_id"),
         Index("idx_cron_next_run", "enabled", "next_run_date"),
     )
+
+
+class ThreadTTL(Base):
+    __tablename__ = "thread_ttl"
+
+    thread_id: Mapped[str] = mapped_column(
+        Text, ForeignKey("thread.thread_id", ondelete="CASCADE"), primary_key=True
+    )
+    strategy: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("'delete'"))
+    ttl_minutes: Mapped[float] = mapped_column(Float, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), server_default=text("now()"))
+    expires_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False)
+
+    __table_args__ = (Index("idx_thread_ttl_expires_at", "expires_at"),)
 
 
 # ---------------------------------------------------------------------------

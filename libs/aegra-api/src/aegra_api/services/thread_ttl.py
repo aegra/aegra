@@ -165,7 +165,7 @@ async def _prune_checkpoint_history(thread_id: str) -> None:
 
 
 async def _apply_strategy(
-    session: AsyncSession, thread_id: str, strategy: str, ttl_minutes: float, now: datetime
+    session: AsyncSession, *, thread_id: str, strategy: str, ttl_minutes: float, now: datetime
 ) -> str:
     """Apply one expired row's strategy inside the claim transaction; return the outcome label."""
     if strategy == "keep_latest":
@@ -251,7 +251,9 @@ async def _process_expired_batch(
     failed_ids: list[str] = []
     for thread_id, strategy, ttl_minutes in rows:
         try:
-            outcome = await _apply_strategy(session, thread_id, strategy, ttl_minutes, now)
+            outcome = await _apply_strategy(
+                session, thread_id=thread_id, strategy=strategy, ttl_minutes=ttl_minutes, now=now
+            )
         except (PsycopgError, OSError):
             # Checkpointer-side failure on the other pool: this transaction is
             # untouched — skip the item, retry it on a later claim.

@@ -248,7 +248,9 @@ class TestDeleteStrategy:
         session.execute.side_effect = lambda _stmt: order.append("thread_row")
 
         with patch("aegra_api.services.thread_ttl.db_manager", db):
-            outcome = await _apply_strategy(session, "t-1", "delete", 5.0, datetime.now(UTC))
+            outcome = await _apply_strategy(
+                session, thread_id="t-1", strategy="delete", ttl_minutes=5.0, now=datetime.now(UTC)
+            )
 
         assert outcome == "deleted"
         assert order == ["checkpoints", "thread_row"]
@@ -266,7 +268,9 @@ class TestKeepLatest:
         session = AsyncMock()
 
         with patch("aegra_api.services.thread_ttl.db_manager", db):
-            outcome = await _apply_strategy(session, "t-1", "keep_latest", 30.0, datetime.now(UTC))
+            outcome = await _apply_strategy(
+                session, thread_id="t-1", strategy="keep_latest", ttl_minutes=30.0, now=datetime.now(UTC)
+            )
 
         assert outcome == "pruned"
         statements = [call.args[0] for call in conn.execute.await_args_list]
@@ -293,7 +297,9 @@ class TestKeepLatest:
         session = AsyncMock()
 
         with patch("aegra_api.services.thread_ttl.db_manager", db):
-            outcome = await _apply_strategy(session, "t-1", "keep_latest", 30.0, datetime.now(UTC))
+            outcome = await _apply_strategy(
+                session, thread_id="t-1", strategy="keep_latest", ttl_minutes=30.0, now=datetime.now(UTC)
+            )
 
         assert outcome == "pruned"
         assert conn.execute.await_count == 1  # probe only
@@ -312,7 +318,9 @@ class TestKeepLatest:
             patch("aegra_api.services.thread_ttl.db_manager", db),
             pytest.raises(RuntimeError, match="not initialized"),
         ):
-            await _apply_strategy(session, "t-1", "keep_latest", 30.0, datetime.now(UTC))
+            await _apply_strategy(
+                session, thread_id="t-1", strategy="keep_latest", ttl_minutes=30.0, now=datetime.now(UTC)
+            )
 
 
 class TestFailureIsolation:

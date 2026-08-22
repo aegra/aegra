@@ -10,15 +10,16 @@ import json
 
 import httpx
 import pytest
+from langgraph_sdk.client import LangGraphClient
 
 from aegra_api.settings import settings
 from tests.e2e._utils import elog, get_e2e_client
-from tests.e2e.test_threads.test_thread_deletion import _CHECKPOINT_TABLES, _count_checkpoint_rows
+from tests.e2e.test_threads.test_thread_deletion import _CHECKPOINT_COUNT_QUERIES, _count_checkpoint_rows
 
 _RUN_INPUT = {"messages": [{"role": "user", "content": json.dumps({"delay": 0.1, "steps": 2})}]}
 
 
-async def _run_to_completion(client, thread_id: str, assistant_id: str) -> None:
+async def _run_to_completion(client: LangGraphClient, thread_id: str, assistant_id: str) -> None:
     run = await client.runs.create(thread_id=thread_id, assistant_id=assistant_id, input=_RUN_INPUT)
     await client.runs.join(thread_id, run["run_id"])
     finished = await client.runs.get(thread_id, run["run_id"])
@@ -57,7 +58,7 @@ async def test_prune_deletes_expired_thread() -> None:
 
     after = await _count_checkpoint_rows(thread_id)
     elog("Checkpoint rows after prune", {"thread_id": thread_id, **after})
-    assert after == dict.fromkeys(_CHECKPOINT_TABLES, 0)
+    assert after == dict.fromkeys(_CHECKPOINT_COUNT_QUERIES, 0)
 
 
 @pytest.mark.e2e

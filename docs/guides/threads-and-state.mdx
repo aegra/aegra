@@ -153,6 +153,38 @@ the checkpoint history stored in the graph backend:
 await client.threads.delete(thread_id)
 ```
 
+## Thread TTL
+
+Threads can expire automatically. Configure a server-wide default under
+`checkpointer.ttl` in `aegra.json` (or the `AEGRA_THREAD_TTL` environment
+variable) — see the [configuration reference](/reference/configuration#checkpointer).
+A background sweep then applies each thread's policy:
+
+- `delete` — the thread, its runs and crons, and all checkpoint data are removed.
+- `keep_latest` — checkpoint history is compacted down to the latest state; the
+  thread stays usable and the TTL re-arms, so history is pruned periodically.
+
+Individual threads can override the default at creation:
+
+```python
+# Delete after 24 hours (minutes; the SDK sends strategy "delete")
+thread = await client.threads.create(ttl=1440)
+
+# Keep the thread, prune its history every 7 days
+thread = await client.threads.create(ttl={"ttl": 10080, "strategy": "keep_latest"})
+```
+
+Expired threads can also be cleaned up immediately for the calling user:
+
+```python
+resp = httpx.post(f"{BASE_URL}/threads/prune")
+# {"deleted": 3, "pruned": 1}
+```
+
+Threads with pending or running runs are never expired mid-run — they are
+picked up on a later sweep once their runs settle. TTL applies to threads
+created after it is enabled; pre-existing threads are not backfilled.
+
 ## Thread metadata
 
 Threads automatically track metadata about their usage:

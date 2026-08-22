@@ -80,7 +80,7 @@ run = await client.crons.create(
 print(run["cron_id"])
 ```
 
-When you keep stateless cron threads, you are responsible for cleaning them up. For long-lived deployments, use thread TTL policies or a separate cleanup job if you do not want preserved threads to accumulate.
+When you keep stateless cron threads, you are responsible for cleaning them up. For long-lived deployments, use [thread TTL policies](/guides/threads-and-state#thread-ttl) or a separate cleanup job if you do not want preserved threads to accumulate.
 
 ## Creating a thread-bound cron
 

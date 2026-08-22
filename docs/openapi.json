@@ -5862,6 +5862,7 @@
             "anyOf": [
               {
                 "type": "number",
+                "maximum": 1000000000.0,
                 "exclusiveMinimum": 0.0
               },
               {
@@ -5869,7 +5870,7 @@
               }
             ],
             "title": "Default Ttl",
-            "description": "Thread TTL in minutes; falls back to the server default when omitted"
+            "description": "Thread TTL in minutes; also accepted under the key \"ttl\" (LangGraph SDK compatibility). Falls back to the server default when omitted"
           },
           "strategy": {
             "anyOf": [

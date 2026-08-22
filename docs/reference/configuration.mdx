@@ -311,7 +311,7 @@ Notes:
 - Individual threads can override the default via the `ttl` field on `POST /threads`; expired threads can be cleaned immediately with `POST /threads/prune`. See the [threads guide](/guides/threads-and-state#thread-ttl).
 - The `AEGRA_THREAD_TTL` environment variable replaces this block entirely when set — see [environment variables](/reference/environment-variables#thread-ttl).
 
-If `checkpointer` is not configured, threads never expire.
+If neither `checkpointer.ttl` nor `AEGRA_THREAD_TTL` is configured, threads never expire.
 
 ## Common configurations
 

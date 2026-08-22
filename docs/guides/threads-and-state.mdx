@@ -177,8 +177,10 @@ thread = await client.threads.create(ttl={"ttl": 10080, "strategy": "keep_latest
 Expired threads can also be cleaned up immediately for the calling user:
 
 ```python
-resp = httpx.post(f"{BASE_URL}/threads/prune")
-# {"deleted": 3, "pruned": 1}
+import httpx
+
+resp = httpx.post("http://localhost:2026/threads/prune")
+print(resp.json())  # {"deleted": 3, "pruned": 1}
 ```
 
 Threads with pending or running runs are never expired mid-run — they are

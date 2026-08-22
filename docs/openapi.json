@@ -2361,6 +2361,70 @@
         }
       }
     },
+    "/runs/cancel": {
+      "post": {
+        "tags": [
+          "Thread Runs"
+        ],
+        "summary": "Cancel Runs Endpoint",
+        "description": "Cancel or interrupt multiple runs selected by thread, run IDs, or status.\n\nThis endpoint matches the LangGraph SDK ``runs.cancel_many()`` request\nshape. Selectors are scoped to the authenticated user, so unauthorized runs\nare simply excluded from the matching set. SDK ``rollback`` maps to Aegra's\nhard cancel behavior. Runs that are already terminal are safe no-ops.",
+        "operationId": "cancel_runs_endpoint_runs_cancel_post",
+        "parameters": [
+          {
+            "name": "action",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "enum": [
+                "interrupt",
+                "rollback"
+              ],
+              "type": "string",
+              "description": "Cancellation strategy: 'interrupt' for cooperative interrupt or 'rollback' for hard cancel.",
+              "default": "interrupt",
+              "title": "Action"
+            },
+            "description": "Cancellation strategy: 'interrupt' for cooperative interrupt or 'rollback' for hard cancel."
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RunCancelMany"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/Run"
+                  },
+                  "title": "Response Cancel Runs Endpoint Runs Cancel Post"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/runs/wait": {
       "post": {
         "tags": [
@@ -4635,6 +4699,96 @@
         ],
         "title": "Run",
         "description": "Run entity model\n\nStatus values: pending, running, error, success, timeout, interrupted"
+      },
+      "RunCancelMany": {
+        "anyOf": [
+          {
+            "properties": {
+              "thread_id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "thread_id"
+            ]
+          },
+          {
+            "properties": {
+              "run_ids": {
+                "type": "array",
+                "minItems": 1
+              }
+            },
+            "required": [
+              "run_ids"
+            ]
+          },
+          {
+            "properties": {
+              "status": {
+                "type": "string",
+                "enum": [
+                  "pending",
+                  "running",
+                  "all"
+                ]
+              }
+            },
+            "required": [
+              "status"
+            ]
+          }
+        ],
+        "properties": {
+          "thread_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Thread Id",
+            "description": "Thread containing runs to cancel."
+          },
+          "run_ids": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array",
+                "minItems": 1
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Run Ids",
+            "description": "Specific run IDs to cancel."
+          },
+          "status": {
+            "anyOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "pending",
+                  "running",
+                  "all"
+                ]
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Status",
+            "description": "Run status selector. Use 'all' to target every matching non-terminal run."
+          }
+        },
+        "type": "object",
+        "title": "RunCancelMany",
+        "description": "Request model for cancelling multiple runs."
       },
       "RunCreate": {
         "properties": {

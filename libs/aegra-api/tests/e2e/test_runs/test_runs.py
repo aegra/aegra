@@ -165,6 +165,34 @@ async def test_runs_cancel_e2e():
 
 @pytest.mark.e2e
 @pytest.mark.asyncio
+async def test_runs_cancel_many_sdk_e2e() -> None:
+    """The LangGraph SDK cancel_many helper must not 404 against Aegra."""
+    client = get_e2e_client()
+
+    assistant = await client.assistants.create(
+        graph_id="agent",
+        config={"tags": ["chat", "runs-cancel-many"]},
+        if_exists="do_nothing",
+    )
+    thread = await client.threads.create()
+    thread_id = thread["thread_id"]
+
+    run = await client.runs.create(
+        thread_id=thread_id,
+        assistant_id=assistant["assistant_id"],
+        input={"messages": [{"role": "user", "content": "Say one short sentence."}]},
+    )
+    check_and_skip_if_geo_blocked(run)
+
+    await client.runs.cancel_many(thread_id=thread_id, run_ids=[run["run_id"]], action="interrupt")
+
+    got = await client.runs.get(thread_id, run["run_id"])
+    elog("Runs.cancel_many", got)
+    assert got["run_id"] == run["run_id"]
+
+
+@pytest.mark.e2e
+@pytest.mark.asyncio
 async def test_runs_wait_stateful_e2e():
     """
     Test the stateful wait endpoint (POST /threads/{thread_id}/runs/wait).

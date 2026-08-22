@@ -17,7 +17,7 @@ from aegra_api.models.crons import (
     CronUpdate,
 )
 from aegra_api.models.errors import AgentProtocolError, get_error_type
-from aegra_api.models.runs import Run, RunCreate, RunStatus
+from aegra_api.models.runs import Run, RunCancelMany, RunCreate, RunStatus
 from aegra_api.models.store import (
     StoreDeleteRequest,
     StoreGetResponse,
@@ -65,6 +65,7 @@ __all__ = [
     "ThreadHistoryRequest",
     # Runs
     "Run",
+    "RunCancelMany",
     "RunCreate",
     "RunStatus",
     # Crons

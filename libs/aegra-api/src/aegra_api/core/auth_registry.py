@@ -68,6 +68,7 @@ ROUTE_AUTH_MAP: Final[dict[tuple[str, str], tuple[str, str]]] = {
     ("POST", "/runs"): ("threads", "create_run"),
     ("POST", "/runs/stream"): ("threads", "create_run"),
     ("POST", "/runs/wait"): ("threads", "create_run"),
+    ("POST", "/runs/cancel"): ("threads", "update"),
     # --- crons --------------------------------------------------------------
     ("POST", "/runs/crons"): ("crons", "create"),
     ("POST", "/threads/{thread_id}/runs/crons"): ("crons", "create"),

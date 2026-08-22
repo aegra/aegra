@@ -33,6 +33,12 @@ class TestThreadTTLSpec:
         with pytest.raises(ValidationError):
             ThreadTTLSpec.model_validate({"default_ttl": value})
 
+    @pytest.mark.parametrize("value", [float("inf"), 1e308])
+    def test_rejects_timedelta_unsafe_ttl(self, value: float) -> None:
+        """Values above MAX_TTL_MINUTES would overflow timedelta in create_thread."""
+        with pytest.raises(ValidationError):
+            ThreadTTLSpec.model_validate({"default_ttl": value})
+
     def test_rejects_unknown_strategy(self) -> None:
         with pytest.raises(ValidationError):
             ThreadTTLSpec.model_validate({"strategy": "purge"})

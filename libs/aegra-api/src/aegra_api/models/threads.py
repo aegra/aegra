@@ -7,6 +7,10 @@ from pydantic import AliasChoices, BaseModel, ConfigDict, Field, field_validator
 
 from aegra_api.utils.status_compat import validate_thread_status
 
+# Upper bound keeping now + timedelta(minutes=ttl) finite and timedelta-safe
+# (timedelta.max is ~1.44e9 minutes); rejects inf/1e308 at validation time.
+MAX_TTL_MINUTES = 1_000_000_000
+
 
 class ThreadTTLSpec(BaseModel):
     """Per-thread TTL override supplied on thread creation.
@@ -20,8 +24,10 @@ class ThreadTTLSpec(BaseModel):
     default_ttl: float | None = Field(
         None,
         gt=0,
+        le=MAX_TTL_MINUTES,
         validation_alias=AliasChoices("default_ttl", "ttl"),
-        description="Thread TTL in minutes; falls back to the server default when omitted",
+        description='Thread TTL in minutes; also accepted under the key "ttl" (LangGraph SDK '
+        "compatibility). Falls back to the server default when omitted",
     )
     strategy: Literal["delete", "keep_latest"] | None = Field(
         None,

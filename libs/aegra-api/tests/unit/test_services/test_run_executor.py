@@ -9,6 +9,7 @@ from aegra_api.models.auth import User
 from aegra_api.models.run_job import RunExecution, RunIdentity, RunJob
 from aegra_api.services import run_executor as run_executor_module
 from aegra_api.services.run_executor import (
+    _build_run_config,
     _GraphResult,
     _lease_loss_cancellations,
     _shutdown_cancellations,
@@ -77,6 +78,16 @@ class TestExecuteRunSuccess:
         assert mock_finalize.await_args.kwargs["status"] == "success"
 
         mock_signal_end.assert_awaited_once_with("run-1", "success")
+
+
+class TestBuildRunConfig:
+    def test_injects_job_graph_id_into_configurable(self) -> None:
+        job = _make_job()
+
+        with patch("aegra_api.services.langgraph_service.get_tracing_callbacks", return_value=[]):
+            config = _build_run_config(job)
+
+        assert config["configurable"]["graph_id"] == "graph-1"
 
 
 class TestExecuteRunCancelledError:

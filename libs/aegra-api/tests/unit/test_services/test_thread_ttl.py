@@ -31,8 +31,13 @@ def _swept_count(outcome: str) -> float:
 
 
 def _make_lg_pool() -> tuple[MagicMock, AsyncMock]:
-    """Fake db_manager.lg_pool: connection() and transaction() async CMs."""
+    """Fake db_manager.lg_pool: connection() and transaction() async CMs.
+
+    The prunable-history probe answers True by default; override
+    conn.execute.return_value.fetchone for the skip path.
+    """
     conn = AsyncMock()
+    conn.execute.return_value.fetchone = AsyncMock(return_value=(True,))
     tx = AsyncMock()
     tx.__aenter__ = AsyncMock(return_value=None)
     tx.__aexit__ = AsyncMock(return_value=False)
@@ -259,10 +264,11 @@ class TestKeepLatest:
 
         assert outcome == "pruned"
         statements = [call.args[0] for call in conn.execute.await_args_list]
-        assert len(statements) == 3
-        assert "DELETE FROM checkpoints" in statements[0]
-        assert "DELETE FROM checkpoint_writes" in statements[1]
-        assert "DELETE FROM checkpoint_blobs" in statements[2]
+        assert len(statements) == 4
+        assert "SELECT EXISTS" in statements[0]  # prunable-history probe first
+        assert "DELETE FROM checkpoints" in statements[1]
+        assert "DELETE FROM checkpoint_writes" in statements[2]
+        assert "DELETE FROM checkpoint_blobs" in statements[3]
         for call in conn.execute.await_args_list:
             assert "%(tid)s" in call.args[0]
             assert call.args[1] == {"tid": "t-1"}
@@ -270,6 +276,25 @@ class TestKeepLatest:
         rearm_sql = str(session.execute.await_args_list[0].args[0].compile(dialect=postgresql.dialect()))
         assert "UPDATE thread_ttl" in rearm_sql
         assert "expires_at" in rearm_sql
+
+    @pytest.mark.asyncio
+    async def test_skips_deletes_when_history_already_compact(self) -> None:
+        """Idle expiry cycles cost one PK-indexed probe, not three DELETEs."""
+        pool, conn = _make_lg_pool()
+        conn.execute.return_value.fetchone = AsyncMock(return_value=(False,))
+        db = MagicMock()
+        db.lg_pool = pool
+        session = AsyncMock()
+
+        with patch("aegra_api.services.thread_ttl.db_manager", db):
+            outcome = await _apply_strategy(session, "t-1", "keep_latest", 30.0, datetime.now(UTC))
+
+        assert outcome == "pruned"
+        assert conn.execute.await_count == 1  # probe only
+        conn.transaction.assert_not_called()
+        # Still re-arms so the next cycle stays scheduled
+        rearm_sql = str(session.execute.await_args_list[0].args[0].compile(dialect=postgresql.dialect()))
+        assert "UPDATE thread_ttl" in rearm_sql
 
     @pytest.mark.asyncio
     async def test_raises_when_db_not_initialized(self) -> None:

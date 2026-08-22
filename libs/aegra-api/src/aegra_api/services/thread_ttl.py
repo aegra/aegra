@@ -46,6 +46,17 @@ _CLAIM_BATCH = 100
 # schema-drift canary in tests/unit/test_services/test_thread_ttl.py fails
 # loudly if a package bump changes the assumptions below.
 
+# Cheap probe so idle keep_latest cycles skip the three DELETEs: history is
+# prunable only when some namespace holds more than one checkpoint (PK-indexed).
+_HAS_PRUNABLE_HISTORY_SQL = """
+SELECT EXISTS (
+    SELECT 1 FROM checkpoints
+    WHERE thread_id = %(tid)s
+    GROUP BY checkpoint_ns
+    HAVING count(*) > 1
+)
+"""
+
 # Latest checkpoint per (thread_id, checkpoint_ns) = max(checkpoint_id):
 # checkpoint_ids are monotonic and langgraph's own "latest" is
 # ORDER BY checkpoint_id DESC.
@@ -140,10 +151,15 @@ async def _prune_checkpoint_history(thread_id: str) -> None:
     pool = db_manager.lg_pool
     if pool is None:
         raise RuntimeError("Database not initialized")
-    async with pool.connection() as conn, conn.transaction():
-        await conn.execute(_PRUNE_CHECKPOINTS_SQL, {"tid": thread_id})
-        await conn.execute(_PRUNE_WRITES_SQL, {"tid": thread_id})
-        await conn.execute(_PRUNE_BLOBS_SQL, {"tid": thread_id})
+    async with pool.connection() as conn:
+        cursor = await conn.execute(_HAS_PRUNABLE_HISTORY_SQL, {"tid": thread_id})
+        row = await cursor.fetchone()
+        if row is None or not row[0]:
+            return
+        async with conn.transaction():
+            await conn.execute(_PRUNE_CHECKPOINTS_SQL, {"tid": thread_id})
+            await conn.execute(_PRUNE_WRITES_SQL, {"tid": thread_id})
+            await conn.execute(_PRUNE_BLOBS_SQL, {"tid": thread_id})
 
 
 async def _apply_strategy(

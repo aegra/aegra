@@ -18,7 +18,8 @@ REAPER_RECOVERED_RUNS = prometheus_client.Counter(
     "aegra_reaper_recovered_runs_total",
     "Runs recovered by the lease reaper, by outcome: crashed_retried "
     "(expired lease, re-enqueued), crashed_exhausted (max retries exceeded, "
-    "marked failed), stuck_pending (never claimed, re-enqueued). Counts only "
+    "marked error), stuck_pending (never claimed, re-enqueued), "
+    "local_orphan (no lease, swept at startup and marked error). Counts only "
     "confirmed Redis pushes and DB updates; recovery that falls back to the "
     "workers' Postgres poll during a Redis outage is not counted.",
     labelnames=["outcome"],
@@ -26,7 +27,7 @@ REAPER_RECOVERED_RUNS = prometheus_client.Counter(
 
 # Pre-create label children so every outcome series renders as 0 on /metrics
 # before the first recovery event (absent series break rate() alerts).
-for _outcome in ("crashed_retried", "crashed_exhausted", "stuck_pending"):
+for _outcome in ("crashed_retried", "crashed_exhausted", "stuck_pending", "local_orphan"):
     REAPER_RECOVERED_RUNS.labels(outcome=_outcome)
 
 

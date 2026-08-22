@@ -225,6 +225,13 @@ sequenceDiagram
 
 The reaper runs on every instance (default every 15 seconds). This is safe — the atomic lease acquisition prevents duplicate execution.
 
+### Runs orphaned without a lease
+
+`LocalExecutor` never takes a lease, so a hard crash in local mode leaves a `running` row the reaper cannot match, on a thread stuck `busy`.
+Each instance therefore sweeps once at startup, in broker mode only, marking such rows `error` and reconciling their threads.
+Only rows idle longer than `ORPHAN_SWEEP_MIN_AGE_SECONDS` (default 300) are touched, and `ORPHAN_SWEEP_ENABLED=false` disables the sweep; both assume every replica agrees on `REDIS_BROKER_ENABLED`.
+The sweep fails these runs rather than re-enqueueing them, since an orphan may be old enough that replaying its side effects would surprise callers.
+
 ## Graceful shutdown
 
 On SIGTERM (rolling deploy, pod reschedule, node drain) the executor waits up to `WORKER_DRAIN_TIMEOUT` (default 30s) for in-flight runs to finish. Runs still executing when the window closes are **handed back to the queue**, not finalized: the run is reset to `pending` with its lease cleared and re-enqueued, so another instance resumes it from the last checkpoint — the same guarantee the crash path provides. Clients streaming the run stay connected and pick up events from the resuming worker.

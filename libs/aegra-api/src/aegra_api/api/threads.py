@@ -773,7 +773,11 @@ async def get_thread_history_post(
                     state_snapshots.append(snapshot)
 
         # Convert outside the async with so the graph context is closed first
-        thread_states = thread_state_service.convert_snapshots_to_thread_states(state_snapshots, thread_id)
+        thread_states = thread_state_service.convert_snapshots_to_thread_states(
+            state_snapshots,
+            thread_id,
+            subgraphs=subgraphs,
+        )
 
         return thread_states
 

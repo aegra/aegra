@@ -31,8 +31,8 @@ class LangGraphSerializer(Serializer):
                     "name": getattr(task, "name", ""),
                     "error": getattr(task, "error", None),
                     "interrupts": [],
-                    "checkpoint": None,
-                    "state": getattr(task, "state", None),
+                    "checkpoint": self._checkpoint_from_config(getattr(task, "state", None)),
+                    "state": self._state_from_task_state(getattr(task, "state", None)),
                     "result": getattr(task, "result", None),
                 }
 
@@ -55,6 +55,34 @@ class LangGraphSerializer(Serializer):
             if isinstance(e, SerializationError):
                 raise
             raise SerializationError(f"Failed to serialize task: {str(e)}", task.__class__.__name__, e) from e
+
+    def _checkpoint_from_config(self, state: Any) -> dict[str, Any] | None:
+        if not self._is_checkpoint_config(state):
+            return None
+
+        configurable = state.get("configurable", {})
+        return {
+            "thread_id": configurable.get("thread_id"),
+            "checkpoint_ns": configurable.get("checkpoint_ns", ""),
+            "checkpoint_id": configurable.get("checkpoint_id"),
+            "checkpoint_map": configurable.get("checkpoint_map") or {},
+        }
+
+    def _state_from_task_state(self, state: Any) -> Any:
+        if self._is_checkpoint_config(state):
+            return None
+
+        return state
+
+    def _is_checkpoint_config(self, state: Any) -> bool:
+        if not isinstance(state, dict):
+            return False
+
+        configurable = state.get("configurable")
+        if not isinstance(configurable, dict):
+            return False
+
+        return any(key in configurable for key in ("thread_id", "checkpoint_ns", "checkpoint_id", "checkpoint_map"))
 
     def serialize_interrupt(self, interrupt: Any) -> dict[str, Any]:
         """Serialize a LangGraph interrupt"""

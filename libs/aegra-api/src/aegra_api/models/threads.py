@@ -109,6 +109,7 @@ class ThreadCheckpoint(BaseModel):
     checkpoint_id: str | None = None
     thread_id: str | None = None
     checkpoint_ns: str | None = ""
+    checkpoint_map: dict[str, Any] = Field(default_factory=dict)
 
 
 class ThreadCheckpointPostRequest(BaseModel):

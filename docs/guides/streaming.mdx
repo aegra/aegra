@@ -302,10 +302,16 @@ curl -X POST http://localhost:8000/threads/$THREAD/commands \
   -d '{
         "id": 1,
         "method": "run.start",
-        "params": {"assistant_id": "agent", "input": {"messages": [{"role": "user", "content": "hi"}]}}
+        "params": {
+          "assistant_id": "agent",
+          "input": {"messages": [{"role": "user", "content": "hi"}]},
+          "context": {"tenant_id": "acme"}
+        }
       }'
 # → {"type": "success", "id": 1, "result": {"run_id": "..."}}
 ```
+
+`context` is forwarded to both the graph factory through `ServerRuntime[T]` and graph nodes through `Runtime[T]`.
 
 ### Streaming events
 

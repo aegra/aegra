@@ -220,6 +220,12 @@ class TestClaimQuery:
         assert "LIMIT" in sql
         assert "runs" in sql  # active-run guard subquery
 
+    def test_exclude_ids_renders_not_in(self) -> None:
+        stmt = _expired_claim_stmt(datetime.now(UTC), 10, exclude_ids={"failed-1"})
+        sql = str(stmt.compile(dialect=postgresql.dialect()))
+
+        assert "NOT IN" in sql
+
     def test_prune_claim_is_user_scoped(self) -> None:
         stmt = _expired_claim_stmt(datetime.now(UTC), 10, user_id="user-1")
         sql = str(stmt.compile(dialect=postgresql.dialect()))
@@ -326,9 +332,10 @@ class TestFailureIsolation:
 
         errors_before = _swept_count("error")
         with patch("aegra_api.services.thread_ttl.db_manager", db):
-            claimed, deleted, pruned = await _process_expired_batch(session, MagicMock(), datetime.now(UTC))
+            claimed, deleted, pruned, failed_ids = await _process_expired_batch(session, MagicMock(), datetime.now(UTC))
 
         assert (claimed, deleted, pruned) == (2, 1, 0)
+        assert failed_ids == ["t-1"]
         assert checkpointer.adelete_thread.await_count == 2
         session.commit.assert_awaited_once()
         assert _swept_count("error") == errors_before + 1
@@ -340,9 +347,9 @@ class TestFailureIsolation:
         session = AsyncMock()
         session.execute.return_value = claim_result
 
-        claimed, deleted, pruned = await _process_expired_batch(session, MagicMock(), datetime.now(UTC))
+        claimed, deleted, pruned, failed_ids = await _process_expired_batch(session, MagicMock(), datetime.now(UTC))
 
-        assert (claimed, deleted, pruned) == (0, 0, 0)
+        assert (claimed, deleted, pruned, failed_ids) == (0, 0, 0, [])
         session.commit.assert_not_awaited()
 
 
@@ -360,7 +367,7 @@ class TestSweepLimit:
         maker.return_value.__aenter__ = AsyncMock(return_value=session)
         maker.return_value.__aexit__ = AsyncMock(return_value=False)
 
-        batches = [(100, 100, 0), (100, 100, 0), (50, 50, 0), (0, 0, 0)]
+        batches = [(100, 100, 0, []), (100, 100, 0, []), (50, 50, 0, []), (0, 0, 0, [])]
         with (
             patch("aegra_api.services.thread_ttl._get_session_maker", return_value=maker),
             patch(
@@ -376,9 +383,9 @@ class TestSweepLimit:
         assert limits == [100, 100, 50]
 
     @pytest.mark.asyncio
-    async def test_fully_failed_batch_ends_tick_early(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """A batch where every item errored would be re-claimed verbatim and
-        starve later expirations for the rest of the tick — the loop must stop."""
+    async def test_failed_rows_excluded_from_subsequent_claims(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Persistently failing rows sit first in expiry order; without the
+        exclusion they'd be re-claimed every batch and starve later rows."""
         sweeper = ThreadTTLSweeper()
         config = ThreadTTLConfig(sweep_limit=1000)
         monkeypatch.setattr("aegra_api.services.thread_ttl.get_thread_ttl_config", lambda: config)
@@ -388,17 +395,20 @@ class TestSweepLimit:
         maker.return_value.__aenter__ = AsyncMock(return_value=session)
         maker.return_value.__aexit__ = AsyncMock(return_value=False)
 
+        batches = [(2, 1, 0, ["bad-1"]), (1, 1, 0, []), (0, 0, 0, [])]
         with (
             patch("aegra_api.services.thread_ttl._get_session_maker", return_value=maker),
             patch(
                 "aegra_api.services.thread_ttl._process_expired_batch",
                 new_callable=AsyncMock,
-                return_value=(100, 0, 0),
+                side_effect=batches,
             ) as mock_batch,
         ):
             await sweeper._tick()
 
-        assert mock_batch.await_count == 1
+        assert mock_batch.await_count == 3
+        second_claim = str(mock_batch.await_args_list[1].args[1].compile(dialect=postgresql.dialect()))
+        assert "NOT IN" in second_claim
 
     @pytest.mark.asyncio
     async def test_tick_is_noop_without_config(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -494,7 +504,7 @@ class TestPruneForUser:
         monkeypatch.setattr("aegra_api.services.thread_ttl.get_thread_ttl_config", lambda: None)
         session = AsyncMock()
 
-        batches = [(2, 1, 1), (1, 1, 0), (0, 0, 0)]
+        batches = [(2, 1, 1, ["bad-1"]), (1, 1, 0, []), (0, 0, 0, [])]
         with patch(
             "aegra_api.services.thread_ttl._process_expired_batch",
             new_callable=AsyncMock,

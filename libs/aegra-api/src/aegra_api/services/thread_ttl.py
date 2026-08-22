@@ -14,6 +14,7 @@ and picked up on a later tick once their runs settle.
 import asyncio
 import contextlib
 import json
+from collections.abc import Collection
 from datetime import UTC, datetime, timedelta
 from functools import cache
 from typing import Literal
@@ -189,6 +190,7 @@ def _expired_claim_stmt(
     *,
     user_id: str | None = None,
     auth_filter: ColumnElement[bool] | None = None,
+    exclude_ids: Collection[str] = (),
 ) -> Select[tuple[str, str, float]]:
     """Claim query for expired thread_ttl rows, locking thread_ttl AND thread.
 
@@ -219,6 +221,10 @@ def _expired_claim_stmt(
         stmt = stmt.where(ThreadORM.user_id == user_id)
         if auth_filter is not None:
             stmt = stmt.where(auth_filter)
+    if exclude_ids:
+        # Rows that already failed this pass sit first in expiry order; without
+        # the exclusion they'd be re-claimed every batch and starve later rows.
+        stmt = stmt.where(ThreadTTLORM.thread_id.not_in(exclude_ids))
     return (
         stmt.order_by(ThreadTTLORM.expires_at.asc())
         .limit(limit)
@@ -228,19 +234,20 @@ def _expired_claim_stmt(
 
 async def _process_expired_batch(
     session: AsyncSession, stmt: Select[tuple[str, str, float]], now: datetime
-) -> tuple[int, int, int]:
+) -> tuple[int, int, int, list[str]]:
     """Claim and process one batch in a single transaction.
 
-    Returns (claimed, deleted, pruned). The thread-row DELETE must run in the
-    claim transaction: it cascades into the locked thread_ttl row, and a
-    separate session would wait forever on a lock this transaction holds.
+    Returns (claimed, deleted, pruned, failed_ids). The thread-row DELETE must
+    run in the claim transaction: it cascades into the locked thread_ttl row,
+    and a separate session would wait forever on a lock this transaction holds.
     """
     rows = (await session.execute(stmt)).all()
     if not rows:
-        return 0, 0, 0
+        return 0, 0, 0, []
 
     deleted = 0
     pruned = 0
+    failed_ids: list[str] = []
     for thread_id, strategy, ttl_minutes in rows:
         try:
             outcome = await _apply_strategy(session, thread_id, strategy, ttl_minutes, now)
@@ -249,6 +256,7 @@ async def _process_expired_batch(
             # untouched — skip the item, retry it on a later claim.
             THREAD_TTL_SWEPT.labels(outcome="error").inc()
             logger.exception("Thread TTL item failed", thread_id=thread_id, strategy=strategy)
+            failed_ids.append(thread_id)
             continue
         if outcome == "deleted":
             deleted += 1
@@ -257,7 +265,7 @@ async def _process_expired_batch(
         THREAD_TTL_SWEPT.labels(outcome=outcome).inc()
 
     await session.commit()
-    return len(rows), deleted, pruned
+    return len(rows), deleted, pruned, failed_ids
 
 
 async def prune_expired_threads_for_user(
@@ -275,21 +283,18 @@ async def prune_expired_threads_for_user(
     total_deleted = 0
     total_pruned = 0
     claimed_total = 0
+    failed: set[str] = set()
     while claimed_total < config.sweep_limit:
         now = datetime.now(UTC)
         limit = min(_CLAIM_BATCH, config.sweep_limit - claimed_total)
-        stmt = _expired_claim_stmt(now, limit, user_id=user_id, auth_filter=auth_filter)
-        claimed, deleted, pruned = await _process_expired_batch(session, stmt, now)
+        stmt = _expired_claim_stmt(now, limit, user_id=user_id, auth_filter=auth_filter, exclude_ids=failed)
+        claimed, deleted, pruned, failed_ids = await _process_expired_batch(session, stmt, now)
         if claimed == 0:
             break
         claimed_total += claimed
         total_deleted += deleted
         total_pruned += pruned
-        # A batch where every item failed would be re-claimed verbatim (its
-        # rows stay first in expiry order) and starve everything behind it —
-        # stop and let the next call retry.
-        if deleted + pruned == 0:
-            break
+        failed.update(failed_ids)
     return total_deleted, total_pruned
 
 
@@ -352,22 +357,19 @@ class ThreadTTLSweeper:
         claimed_total = 0
         deleted_total = 0
         pruned_total = 0
+        failed: set[str] = set()
         while claimed_total < config.sweep_limit:
             now = datetime.now(UTC)
             limit = min(_CLAIM_BATCH, config.sweep_limit - claimed_total)
-            stmt = _expired_claim_stmt(now, limit)
+            stmt = _expired_claim_stmt(now, limit, exclude_ids=failed)
             async with maker() as session:
-                claimed, deleted, pruned = await _process_expired_batch(session, stmt, now)
+                claimed, deleted, pruned, failed_ids = await _process_expired_batch(session, stmt, now)
             if claimed == 0:
                 break
             claimed_total += claimed
             deleted_total += deleted
             pruned_total += pruned
-            # A batch where every item failed would be re-claimed verbatim (its
-            # rows stay first in expiry order) and starve everything behind it
-            # for the rest of the tick — stop and retry next tick.
-            if deleted + pruned == 0:
-                break
+            failed.update(failed_ids)
 
         if claimed_total:
             logger.info(

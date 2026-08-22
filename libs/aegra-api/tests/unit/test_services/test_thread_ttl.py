@@ -211,7 +211,7 @@ class TestClaimQuery:
     """The claim statement locks thread_ttl and thread rows and skips busy threads."""
 
     def test_sweep_claim_shape(self) -> None:
-        stmt = _expired_claim_stmt(datetime.now(UTC), 10)
+        stmt = _expired_claim_stmt(now=datetime.now(UTC), limit=10)
         sql = str(stmt.compile(dialect=postgresql.dialect()))
 
         assert "FOR UPDATE OF thread_ttl, thread SKIP LOCKED" in sql
@@ -221,13 +221,13 @@ class TestClaimQuery:
         assert "runs" in sql  # active-run guard subquery
 
     def test_exclude_ids_renders_not_in(self) -> None:
-        stmt = _expired_claim_stmt(datetime.now(UTC), 10, exclude_ids={"failed-1"})
+        stmt = _expired_claim_stmt(now=datetime.now(UTC), limit=10, exclude_ids={"failed-1"})
         sql = str(stmt.compile(dialect=postgresql.dialect()))
 
         assert "NOT IN" in sql
 
     def test_prune_claim_is_user_scoped(self) -> None:
-        stmt = _expired_claim_stmt(datetime.now(UTC), 10, user_id="user-1")
+        stmt = _expired_claim_stmt(now=datetime.now(UTC), limit=10, user_id="user-1")
         sql = str(stmt.compile(dialect=postgresql.dialect()))
 
         assert "thread.user_id" in sql

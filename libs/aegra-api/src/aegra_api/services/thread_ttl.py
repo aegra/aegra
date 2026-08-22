@@ -186,9 +186,9 @@ async def _apply_strategy(
 
 
 def _expired_claim_stmt(
+    *,
     now: datetime,
     limit: int,
-    *,
     user_id: str | None = None,
     auth_filter: ColumnElement[bool] | None = None,
     exclude_ids: Collection[str] = (),
@@ -290,7 +290,7 @@ async def prune_expired_threads_for_user(
     while claimed_total < config.sweep_limit:
         now = datetime.now(UTC)
         limit = min(_CLAIM_BATCH, config.sweep_limit - claimed_total)
-        stmt = _expired_claim_stmt(now, limit, user_id=user_id, auth_filter=auth_filter, exclude_ids=failed)
+        stmt = _expired_claim_stmt(now=now, limit=limit, user_id=user_id, auth_filter=auth_filter, exclude_ids=failed)
         claimed, deleted, pruned, failed_ids = await _process_expired_batch(session, stmt, now)
         if claimed == 0:
             break
@@ -364,7 +364,7 @@ class ThreadTTLSweeper:
         while claimed_total < config.sweep_limit:
             now = datetime.now(UTC)
             limit = min(_CLAIM_BATCH, config.sweep_limit - claimed_total)
-            stmt = _expired_claim_stmt(now, limit, exclude_ids=failed)
+            stmt = _expired_claim_stmt(now=now, limit=limit, exclude_ids=failed)
             async with maker() as session:
                 claimed, deleted, pruned, failed_ids = await _process_expired_batch(session, stmt, now)
             if claimed == 0:

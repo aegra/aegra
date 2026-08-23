@@ -674,8 +674,16 @@ async def _heartbeat_loop(
 
     while True:
         await asyncio.sleep(interval)
-        # Never spend more than the lease has left, so the checks below are always reached.
-        rowcount = await _renew_lease(run_id, claim_token, timeout=max(1.0, expires_at - loop.time()))
+
+        # Past expiry the reaper may already have handed this run to a replacement,
+        # so a renewal must never be allowed to run beyond what the lease has left.
+        budget = expires_at - loop.time()
+        if budget <= 0:
+            logger.warning("Lease ran out before the heartbeat woke, abandoning run", run_id=run_id, worker=worker_name)
+            _abandon_run(run_id, job_task)
+            return
+
+        rowcount = await _renew_lease(run_id, claim_token, timeout=budget)
 
         if rowcount is None:
             if loop.time() < expires_at - interval:

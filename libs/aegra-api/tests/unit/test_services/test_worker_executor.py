@@ -1454,6 +1454,30 @@ class TestHeartbeatAuthorityLoss:
         await asyncio.gather(job_task, return_exceptions=True)
 
     @pytest.mark.asyncio
+    async def test_abandons_without_attempting_renewal_once_the_lease_is_gone(self) -> None:
+        """Regression: a floor on the renewal budget let the call run past expiry,
+        so the reaper could start a replacement while this graph was still live."""
+        run_id = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+        job_task = asyncio.create_task(self._never_finishes())
+
+        with (
+            patch(f"{MODULE}._renew_lease", new_callable=AsyncMock) as mock_renew,
+            patch(f"{MODULE}.settings") as mock_settings,
+        ):
+            # Real timings, no patched clock: sleeping a whole interval past a lease
+            # this short is what a stalled event loop looks like, and scheduling jitter
+            # can only push the wake-up later.
+            mock_settings.worker.HEARTBEAT_INTERVAL_SECONDS = 0.02
+            mock_settings.worker.LEASE_DURATION_SECONDS = 0.001
+            await _heartbeat_loop(run_id, "worker-0", TOKEN, job_task=job_task)
+
+        mock_renew.assert_not_awaited()
+        assert job_task.cancelled() or job_task.cancelling()
+        assert run_id in _lease_loss_cancellations
+        job_task.cancel()
+        await asyncio.gather(job_task, return_exceptions=True)
+
+    @pytest.mark.asyncio
     async def test_abandons_run_when_renewal_cannot_beat_lease_expiry(self) -> None:
         """Regression: an unreachable database used to be logged and ignored, so
         the graph kept running while the reaper handed the run to someone else."""

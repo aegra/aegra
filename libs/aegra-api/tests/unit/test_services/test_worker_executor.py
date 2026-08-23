@@ -709,6 +709,56 @@ class TestExecuteAndRelease:
         assert not semaphore.locked()
 
     @pytest.mark.asyncio
+    async def test_explicit_cancel_without_a_claim_leaves_the_write_to_the_owner(self) -> None:
+        """Cancelled before the lease was acquired, this task owns nothing: writing
+        anyway would let it stomp on whoever does hold the run (#502). The API-side
+        unowned-interrupt path and the reaper cover the row instead."""
+        run_id = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+        semaphore = asyncio.Semaphore(1)
+        await semaphore.acquire()
+        executor = WorkerExecutor()
+        executor._execute_with_lease = AsyncMock(side_effect=asyncio.CancelledError)  # type: ignore[method-assign]
+        explicit_run_cancellations.add(run_id)
+
+        with (
+            patch(f"{MODULE}.settings") as mock_settings,
+            patch(f"{MODULE}._get_run_identity", new_callable=AsyncMock) as mock_identity,
+            patch(f"{MODULE}.finalize_run", new_callable=AsyncMock) as mock_finalize,
+        ):
+            mock_settings.worker.BG_JOB_TIMEOUT_SECS = 60
+            with pytest.raises(asyncio.CancelledError):
+                await executor._execute_and_release(run_id, "worker-0", semaphore)
+
+        mock_finalize.assert_not_awaited()
+        mock_identity.assert_not_awaited()
+        assert run_id not in explicit_run_cancellations
+        assert run_id not in active_runs
+        assert not semaphore.locked()
+
+    @pytest.mark.asyncio
+    async def test_timeout_without_a_claim_leaves_recovery_to_the_reaper(self) -> None:
+        """No claim means no token to fence the write with, so the backstop stays out."""
+        run_id = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+        semaphore = asyncio.Semaphore(1)
+        await semaphore.acquire()
+        executor = WorkerExecutor()
+
+        async def slow_unclaimed(rid: str, wn: str, claim: _ClaimSlot) -> None:
+            await asyncio.sleep(9999)
+
+        executor._execute_with_lease = AsyncMock(side_effect=slow_unclaimed)  # type: ignore[method-assign]
+
+        with (
+            patch(f"{MODULE}.settings") as mock_settings,
+            patch(f"{MODULE}.finalize_run", new_callable=AsyncMock) as mock_finalize,
+        ):
+            mock_settings.worker.BG_JOB_TIMEOUT_SECS = 0.01
+            await executor._execute_and_release(run_id, "worker-0", semaphore)
+
+        mock_finalize.assert_not_awaited()
+        assert not semaphore.locked()
+
+    @pytest.mark.asyncio
     @pytest.mark.parametrize("failure_source", ["identity", "finalize"])
     async def test_cleanup_failure_preserves_cancellation(self, failure_source: str) -> None:
         run_id = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"

@@ -7,13 +7,13 @@ against a real database and assert which attempt is allowed to win.
 
 from collections.abc import AsyncIterator
 from contextlib import ExitStack, asynccontextmanager
-from datetime import UTC, datetime, timedelta
+from datetime import timedelta
 from unittest.mock import patch
 from uuid import uuid4
 
 import asyncpg
 import pytest
-from sqlalchemy import delete, select, text, update
+from sqlalchemy import Interval, delete, func, literal, select, text, update
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker, create_async_engine
 
@@ -113,12 +113,16 @@ async def _pending_run() -> AsyncIterator[tuple[async_sessionmaker, str, str]]:
 
 
 async def _expire_lease(maker: async_sessionmaker, run_id: str) -> None:
-    """Backdate the lease so the reaper treats the holder as crashed."""
+    """Backdate the lease so the reaper treats the holder as crashed.
+
+    Uses the database clock: the reaper compares against ``now()``, so a value
+    written from the test runner's clock could still be in Postgres's future.
+    """
     async with maker() as session:
         await session.execute(
             update(RunORM)
             .where(RunORM.run_id == run_id)
-            .values(lease_expires_at=datetime.now(UTC) - timedelta(seconds=1))
+            .values(lease_expires_at=func.now() - literal(timedelta(minutes=1), Interval))
         )
         await session.commit()
 

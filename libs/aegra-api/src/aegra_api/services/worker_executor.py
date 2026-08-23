@@ -627,7 +627,8 @@ async def _renew_lease(run_id: str, claim_token: str) -> int | None:
                 .values(lease_expires_at=_lease_deadline())
             )
             await session.commit()
-    except Exception:
+    except Exception as exc:
+        logger.warning("Lease renewal failed", run_id=run_id, error=str(exc), exc_info=True)
         return None
     return result.rowcount  # type: ignore[union-attr]
 

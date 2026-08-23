@@ -759,6 +759,31 @@ class TestExecuteAndRelease:
         assert not semaphore.locked()
 
     @pytest.mark.asyncio
+    async def test_timeout_skips_finalize_when_the_run_row_is_gone(self) -> None:
+        """A deleted thread cascades the run away; there is nothing left to mark."""
+        run_id = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+        semaphore = asyncio.Semaphore(1)
+        await semaphore.acquire()
+        executor = WorkerExecutor()
+
+        async def slow_claimed(rid: str, wn: str, claim: _ClaimSlot) -> None:
+            claim.token = TOKEN
+            await asyncio.sleep(9999)
+
+        executor._execute_with_lease = AsyncMock(side_effect=slow_claimed)  # type: ignore[method-assign]
+
+        with (
+            patch(f"{MODULE}.settings") as mock_settings,
+            patch(f"{MODULE}._get_run_identity", new_callable=AsyncMock, return_value=None),
+            patch(f"{MODULE}.finalize_run", new_callable=AsyncMock) as mock_finalize,
+        ):
+            mock_settings.worker.BG_JOB_TIMEOUT_SECS = 0.01
+            await executor._execute_and_release(run_id, "worker-0", semaphore)
+
+        mock_finalize.assert_not_awaited()
+        assert not semaphore.locked()
+
+    @pytest.mark.asyncio
     @pytest.mark.parametrize("failure_source", ["identity", "finalize"])
     async def test_cleanup_failure_preserves_cancellation(self, failure_source: str) -> None:
         run_id = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
@@ -1414,7 +1439,7 @@ class TestHeartbeatAuthorityLoss:
     async def test_abandon_run_is_a_noop_for_a_finished_job(self) -> None:
         run_id = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
         done: asyncio.Task[None] = asyncio.create_task(asyncio.sleep(0))
-        await done
+        await asyncio.wait_for(done, timeout=1)
 
         _abandon_run(run_id, done)
 

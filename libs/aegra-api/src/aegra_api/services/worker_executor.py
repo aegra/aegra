@@ -611,8 +611,12 @@ async def _release_lease(run_id: str, claim_token: str) -> None:
         await session.commit()
 
 
-async def _renew_lease(run_id: str, claim_token: str) -> int | None:
+async def _renew_lease(run_id: str, claim_token: str, *, timeout: float) -> int | None:
     """Extend one attempt's lease. Returns the matched row count, or None on failure.
+
+    ``timeout`` must not outlast the lease: a renewal that blocks on pool
+    acquisition or commit would otherwise keep the heartbeat parked inside this
+    call while the reaper hands the run to a replacement (#502).
 
     The catch is deliberately broad: every failure mode here (driver error,
     pool exhaustion, DNS, timeout) has the same consequence — the lease keeps
@@ -620,17 +624,23 @@ async def _renew_lease(run_id: str, claim_token: str) -> int | None:
     """
     maker = _get_session_maker()
     try:
-        async with maker() as session:
-            result = await session.execute(
-                update(RunORM)
-                .where(RunORM.run_id == run_id, RunORM.claim_token == claim_token)
-                .values(lease_expires_at=_lease_deadline())
-            )
-            await session.commit()
+        result = await asyncio.wait_for(_renew_lease_once(run_id, claim_token, maker), timeout=timeout)
     except Exception as exc:
         logger.warning("Lease renewal failed", run_id=run_id, error=str(exc), exc_info=True)
         return None
-    return result.rowcount  # type: ignore[union-attr]
+    return result
+
+
+async def _renew_lease_once(run_id: str, claim_token: str, maker: Any) -> int:
+    """Single fenced lease-extension round trip."""
+    async with maker() as session:
+        result = await session.execute(
+            update(RunORM)
+            .where(RunORM.run_id == run_id, RunORM.claim_token == claim_token)
+            .values(lease_expires_at=_lease_deadline())
+        )
+        await session.commit()
+    return result.rowcount
 
 
 def _abandon_run(run_id: str, job_task: asyncio.Task[None] | None) -> None:
@@ -664,7 +674,8 @@ async def _heartbeat_loop(
 
     while True:
         await asyncio.sleep(interval)
-        rowcount = await _renew_lease(run_id, claim_token)
+        # Never spend more than the lease has left, so the checks below are always reached.
+        rowcount = await _renew_lease(run_id, claim_token, timeout=max(1.0, expires_at - loop.time()))
 
         if rowcount is None:
             if loop.time() < expires_at - interval:

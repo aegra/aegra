@@ -163,7 +163,7 @@ async def test_reaped_attempt_cannot_renew_or_release_the_replacement_lease() ->
         live = await _acquire_and_load(run_id, _WORKER)
         assert live is not None
 
-        assert await _renew_lease(run_id, stale.claim_token) == 0
+        assert await _renew_lease(run_id, stale.claim_token, timeout=10) == 0
         await _release_lease(run_id, stale.claim_token)
 
         row = await _row(maker, run_id)

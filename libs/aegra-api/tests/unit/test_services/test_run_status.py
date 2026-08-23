@@ -378,6 +378,6 @@ class TestFinalizeRunClaimFencing:
                 claim_token="token-a",
             )
 
-        statement = session.execute.await_args_list[0].args[0]
-        cleared = {column.name for column, value in statement._values.items() if value.value is None}
+        compiled = session.execute.await_args_list[0].args[0].compile()
+        cleared = {name for name, value in compiled.params.items() if value is None}
         assert {"claimed_by", "claim_token", "lease_expires_at"} <= cleared

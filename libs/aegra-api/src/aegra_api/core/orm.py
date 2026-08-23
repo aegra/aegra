@@ -180,9 +180,8 @@ class Run(Base):
     claimed_by: Mapped[str | None] = mapped_column(Text, nullable=True)
     lease_expires_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True), nullable=True)
 
-    # Fencing token, regenerated on every acquisition. ``claimed_by`` is a
-    # reusable worker name, so it cannot distinguish two attempts by the same
-    # worker; every ownership-predicated write matches on this instead (#502).
+    # Regenerated on every acquisition because reusable worker names cannot
+    # distinguish attempts; ownership-predicated writes match this token (#502).
     claim_token: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     # Indexes for performance

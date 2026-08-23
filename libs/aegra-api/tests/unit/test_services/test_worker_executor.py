@@ -774,12 +774,14 @@ class TestExecuteAndRelease:
 
         with (
             patch(f"{MODULE}.settings") as mock_settings,
-            patch(f"{MODULE}._get_run_identity", new_callable=AsyncMock, return_value=None),
+            patch(f"{MODULE}._get_run_identity", new_callable=AsyncMock, return_value=None) as mock_identity,
             patch(f"{MODULE}.finalize_run", new_callable=AsyncMock) as mock_finalize,
         ):
             mock_settings.worker.BG_JOB_TIMEOUT_SECS = 0.01
             await executor._execute_and_release(run_id, "worker-0", semaphore)
 
+        # Asserting the lookup ran is what distinguishes this from the no-claim skip.
+        mock_identity.assert_awaited_once_with(run_id)
         mock_finalize.assert_not_awaited()
         assert not semaphore.locked()
 
@@ -1342,7 +1344,7 @@ class TestClaimTokenFencing:
         session.commit = AsyncMock()
 
         with patch(f"{MODULE}._get_session_maker", return_value=_make_session_maker(session)):
-            rowcount = await _renew_lease("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee", TOKEN)
+            rowcount = await _renew_lease("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee", TOKEN, timeout=5)
 
         assert rowcount == 1
         sql, params = _compiled(captured[0])
@@ -1351,13 +1353,28 @@ class TestClaimTokenFencing:
         assert TOKEN in params.values()
 
     @pytest.mark.asyncio
+    async def test_renew_lease_gives_up_when_the_round_trip_outlasts_its_budget(self) -> None:
+        """Regression: a renewal blocked on pool acquisition or commit used to park
+        the heartbeat, so it could not abandon the run before the reaper replaced it."""
+        session = AsyncMock()
+
+        async def never_returns(_statement: object) -> None:
+            await asyncio.sleep(9999)
+
+        session.execute = AsyncMock(side_effect=never_returns)
+        maker = _make_session_maker(session)
+
+        with patch(f"{MODULE}._get_session_maker", return_value=maker):
+            assert await _renew_lease("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee", TOKEN, timeout=0.01) is None
+
+    @pytest.mark.asyncio
     async def test_renew_lease_returns_none_on_database_failure(self) -> None:
         session = AsyncMock()
         session.execute = AsyncMock(side_effect=RuntimeError("connection reset"))
         maker = _make_session_maker(session)
 
         with patch(f"{MODULE}._get_session_maker", return_value=maker):
-            assert await _renew_lease("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee", TOKEN) is None
+            assert await _renew_lease("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee", TOKEN, timeout=5) is None
 
 
 class TestHeartbeatAuthorityLoss:
@@ -1409,6 +1426,30 @@ class TestHeartbeatAuthorityLoss:
         # Kept going through the failure, stopped only on the rejected renewal.
         assert mock_renew.await_count == 3
         assert run_id in _lease_loss_cancellations
+        job_task.cancel()
+        await asyncio.gather(job_task, return_exceptions=True)
+
+    @pytest.mark.asyncio
+    async def test_budgets_each_renewal_against_the_remaining_lease(self) -> None:
+        """The renewal must never be allowed to outlast the lease it is extending."""
+        run_id = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+        job_task = asyncio.create_task(self._never_finishes())
+        budgets: list[float] = []
+
+        async def record_budget(_run_id: str, _token: str, *, timeout: float) -> int:
+            budgets.append(timeout)
+            return 0
+
+        with (
+            patch(f"{MODULE}.asyncio.sleep", new_callable=AsyncMock),
+            patch(f"{MODULE}._renew_lease", side_effect=record_budget),
+            patch(f"{MODULE}.settings") as mock_settings,
+        ):
+            mock_settings.worker.HEARTBEAT_INTERVAL_SECONDS = 10
+            mock_settings.worker.LEASE_DURATION_SECONDS = 30
+            await _heartbeat_loop(run_id, "worker-0", TOKEN, job_task=job_task)
+
+        assert budgets and all(0 < b <= 30 for b in budgets)
         job_task.cancel()
         await asyncio.gather(job_task, return_exceptions=True)
 

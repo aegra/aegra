@@ -134,6 +134,7 @@ async def interrupt_unowned_run(
             .values(
                 status="interrupted",
                 claimed_by=None,
+                claim_token=None,
                 lease_expires_at=None,
                 updated_at=now,
             )
@@ -158,11 +159,18 @@ async def finalize_run(
     thread_status: str,
     output: Any = None,
     error: str | None = None,
+    claim_token: str | None = None,
 ) -> bool:
     """Conditionally update run and thread status in one transaction.
 
-    Returns false when another actor has already made the run terminal. This
-    prevents an expired worker from overwriting a reconciled cancellation.
+    Returns false when another actor has already made the run terminal, or when
+    ``claim_token`` no longer matches the acquisition that owns the run — a
+    reaped worker must not overwrite the output of the attempt that replaced it
+    (#502). Callers with no lease (LocalExecutor, API-side cancellation) pass no
+    token and are guarded by the active-status predicate alone.
+
+    Terminalizing clears the lease in the same statement, so a run can never be
+    left terminal while still advertising an owner.
     """
     validated_run = validate_run_status(status)
     validated_thread = validate_thread_status(thread_status)
@@ -171,26 +179,28 @@ async def finalize_run(
     run_values: dict[str, Any] = {
         "status": validated_run,
         "updated_at": datetime.now(UTC),
+        "claimed_by": None,
+        "claim_token": None,
+        "lease_expires_at": None,
     }
     if output is not None:
         run_values["output"] = _safe_serialize(output, run_id)
     if error is not None:
         run_values["error_message"] = error
 
+    predicates = [
+        RunORM.run_id == run_id,
+        RunORM.user_id == user_id,
+        RunORM.status.in_(ACTIVE_RUN_STATES),
+    ]
+    if claim_token is not None:
+        predicates.append(RunORM.claim_token == claim_token)
+
     async with maker() as session:
-        result = await session.execute(
-            update(RunORM)
-            .where(
-                RunORM.run_id == run_id,
-                RunORM.user_id == user_id,
-                RunORM.status.in_(ACTIVE_RUN_STATES),
-            )
-            .values(**run_values)
-            .returning(RunORM.run_id)
-        )
+        result = await session.execute(update(RunORM).where(*predicates).values(**run_values).returning(RunORM.run_id))
         if result.scalar_one_or_none() is None:
             await session.rollback()
-            logger.info("Skipped finalizing terminal run", run_id=run_id, status=validated_run)
+            logger.info("Skipped finalizing run without ownership", run_id=run_id, status=validated_run)
             return False
 
         await set_thread_status_if_no_active_runs(

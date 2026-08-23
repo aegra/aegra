@@ -137,7 +137,7 @@ sequenceDiagram
 Key details:
 
 1. **Execution params** are stored in PostgreSQL alongside the run, so any worker can reconstruct the full job context (user identity, config, trace metadata, interrupt settings, etc.).
-2. **Lease acquisition** is atomic — `UPDATE ... WHERE claimed_by IS NULL` ensures only one worker wins the race.
+2. **Lease acquisition** is atomic — `UPDATE ... WHERE claimed_by IS NULL` ensures only one worker wins the race. Each acquisition also mints a fresh `claim_token` (see [Claim tokens](#claim-tokens)).
 3. **Heartbeats** extend the lease every 10 seconds. If a worker crashes, the lease expires and the run becomes eligible for recovery.
 4. **OpenTelemetry trace context** propagates across the Redis queue boundary, so traces span the full request lifecycle.
 
@@ -145,7 +145,7 @@ Key details:
 
 The full picture — a streaming run shows how the client SSE connection, worker execution, and reaper recovery all interact:
 
-<a href="https://mermaid.live/view#pako:eNqdVE1r4zAQ_SuDTw5tScPSi9kUksbQQEhN7NDLglHsaaNNLLmSvGm29L_vyHK-ncv6ZEYz8-a9edKXl8kcvQA8jR8VigxHnL0rVvwSQF_JlOEZL5kw8LTmKMxlfBCNL4MzzLm-DL9KtUJ1GR8N21qw0ua6E4d-9_hIcAFEL3ECXVUJ3dVG4W5cOqOM0TCA8TQOZwlQBvjaMFPpfoki5-L9FvATs8pwKVKCY4XuHBfXgwcwi-bxsy1PeQ5Gwm-5ANKnwkMuJbuhAojjENwc4G8YNwQDb1LBQkmiC_iHsiyMK3YiHLCGk-glOiCA_6DB8AJlZZrR6kQL6EqDZrCzdpb3PBoNkhDiMIGGNqWKmna2ZtQ0Txfb_qYuuYU1Mo0pfpZcoU6Z6Qu5uflxr-H1OZyFcCqcQxsNT-aQm0xWwvR74NfNgGUfFXXLOy3DxeEkfEou9D_L3PV2aZgSAZ_E6cANLJH8sUBm0rWUpauzf1ZhtYXefdPrmiznfKEPDWNXR0TbVxTNh5MxGcJt0hrCrjxbMiFwfbajY1O4_BYp3rhga_63Zrd3qK6yDLXucmFQqao0mHfpR6rO9U0fbXU6n0xadmrD7aysS3IpEFa4BT9JJtBb7l06lQZBkq7NRQx2Ij_oHWEbPl2tvZGn5mnsB4Pp6FL-n1b-Y1_toDLF9JJYOZ-3ATb0z-_2mRz_N8sJEBeZwoLWCKlCo7ZpbXgKX_HxvrjtJfEV3qFw19w-EExIsySJ3YXseLfgFagKxnN6kr88OivqxzlnauV9f_8DKe3lLA==" target="_blank" rel="noopener">View fullscreen ↗</a>
+<a href="https://mermaid.live/view#pako:eNqVVF1r4zAQ_CuLn2za0oajL6YJNI2hhZCa2KEvB0axt40useRK8qW50v9-K8tpE8flOD-Z1X7MzI707uWyQC8ET-NrjSLHCWcvipU_BdBXMWV4zismDNxtOApzGr-NH06Dcyy4Pg0_SbVGdRqfjPtasMrmuhM3_WI0onEhxI9JCpeqFvpSG4V7uHRGGZNxCA-zJJqnQBnga8NMrYcVioKLl3PAN8xrw6XIaBwrdXBY3AAPYR4vkntbnvECjIRfcgmkT41fuZTsQIWQJBE4HOBvGTc0Bp6lgqWSRBfwN2XZMa7YifA1azyNH-OvCeBfazC8RFmbFlqTaAe60rAF1mlneS_iyW0aQRKl0NKmVNHQzjeMmhbZcjfcNiVtKDMEUgxvBG6hrnkxOocNMo0ZvlVcoc6YGQq59YOzH1canu6jeQTHkjock_ERQrnNZS3McAB-0w5Y_lpTvyLogZ1E0-guPdlMJ3Pf26VhRtR8ki2AM1ghOWeJzGQbKStXZ_-s9moHg6u213eCdRnDELqcD8SCkpl8hW1PEqF_sfFiPH0gG7n9WxtZo-QrJgRuOps9tJLL75HpmQu24X8a5ntfE3kySlUb-smJhnJcgn-h7oK1limkQFjjDvw0ncJg9WnZmTQIkqRsb2W41_Va73nY8PE27fU89kvrRbidTU4Vv7GKH1ppPypXTK_IuM70fQPbJXYv-oHjZ4vp9NjvNvK_6PygZzgXucKSNgaZQqN2WeN7Cn9j58_ivqfGV3iBwr0D9gVhQpoVye5ubOCdg1eiKhkv6M1-9-isbF7vgqm19_HxF1iN79E=" target="_blank" rel="noopener">View fullscreen ↗</a>
 
 ```mermaid
 sequenceDiagram
@@ -163,26 +163,58 @@ sequenceDiagram
 
     Worker->>Redis: BLPOP job queue (5s timeout)
     Redis-->>Worker: run_id
-    Worker->>DB: UPDATE SET status=running, claimed_by=worker, lease_expires_at=now+30s WHERE status=pending
+    Worker->>DB: UPDATE SET status=running, claimed_by=worker, claim_token=<new uuid>, lease_expires_at=now()+30s WHERE status=pending
     DB-->>Worker: rowcount=1 (lease acquired)
     Worker->>DB: SELECT execution_params
     Worker->>Worker: execute_run(job) + heartbeat_loop
     loop every 10s
-        Worker->>DB: UPDATE lease_expires_at = now+30s
+        Worker->>DB: UPDATE lease_expires_at = now()+30s WHERE claim_token matches
     end
     Worker->>Redis: PUBLISH events to SSE channel
     Redis-->>Client: SSE events
-    Worker->>DB: finalize_run (status=success/interrupted/error)
-    Worker->>DB: UPDATE claimed_by=NULL, lease_expires_at=NULL
+    Worker->>DB: finalize_run (status + output + clear lease) WHERE claim_token matches
     Worker->>Redis: SET done key (TTL 1h)
 
     Note over Reaper: every 15s
     Reaper->>DB: SELECT runs WHERE status=running AND lease_expires_at < now
     DB-->>Reaper: crashed_run_ids
-    Reaper->>DB: UPDATE status=pending, claimed_by=NULL WHERE status=running AND lease_expires_at < now
+    Reaper->>DB: UPDATE status=pending, claimed_by=NULL, claim_token=NULL WHERE status=running AND lease_expires_at < now()
     Reaper->>DB: increment _retry_count in execution_params
     Reaper->>Redis: RPUSH run_id (re-enqueue for another worker)
 ```
+
+## Claim tokens
+
+A lease keeps a crashed worker from blocking a run forever, but on its own it does not stop a
+*stalled* one. A worker paused past its lease — long GC pause, saturated event loop, unreachable
+database — wakes up believing it still owns the run, while the reaper has already handed that run to
+somebody else.
+
+`claimed_by` cannot tell those two attempts apart: it is a stable worker name
+(`host-pid-worker-idx`), so the same worker re-acquiring the same run reproduces the identity its
+abandoned attempt is still writing with. Every acquisition therefore also mints a **`claim_token`**,
+a fresh UUID that identifies that attempt and nothing else.
+
+Every ownership-predicated write matches on the token:
+
+| Operation | Predicate |
+| --- | --- |
+| Heartbeat (extend lease) | `run_id + claim_token` |
+| Terminalize (status, output, clear lease) | `run_id + user_id + active status + claim_token` |
+| Release leftover lease | `run_id + claim_token + terminal status` |
+| Reaper reclaim | clears `claim_token`, retiring the expired attempt |
+
+Two consequences worth knowing:
+
+- **A stalled worker stops itself.** If the heartbeat cannot renew before the lease would expire —
+  including when the database is unreachable, since an unrenewed lease expires on its own — the
+  worker cancels the graph instead of running on unowned. A single failed renewal with time left on
+  the lease is retried, so a brief blip does not abort in-flight runs.
+- **Terminalizing clears the lease in the same statement.** A run can never be left terminal while
+  still advertising an owner, and a superseded attempt can never strip the lease off its replacement.
+
+Lease expiry is evaluated by PostgreSQL (`now()`), not by the worker or reaper process, so clock
+skew between hosts cannot expire a live lease.
 
 ## Crash recovery
 
@@ -192,7 +224,7 @@ The reaper resets the run to `pending` and re-enqueues it.
 The new worker resumes from the last checkpoint.
 Once retries are exhausted, the reaper marks the run `error`, clears ownership, and marks the thread `error` in the same transaction when no other run is active.
 
-<a href="https://mermaid.live/view#pako:eNptk09PwkAQxb_K2FOJiCbeGjVpocIBpRZJLyZm3Y6wge7W_aMkxO_uLK2CQE9N9r3fezPtbgKuSgwiCAx-OJQcB4LNNateJNBTM20FFzWTFooYmIFC6SVqiI_Ps6E_z5Sxc43Tp_GxIkdWk5dU7VuoJCSdE8JGUwpzokayVyN5kY2iiC_u7rJhBP0VExVoJyFcITN4K9XX-fWV6ezpijiCdI3cWQSatV70er0DzAgp8g2ZhRDXFmUJW1rnN-9RkVd9UgUP6-fxdAThZPJwuRSrVeeUZkc0VtXmGORjxz4EcF0LjQZIa333X22ztbbhNB2n_WcoRmmeEpJZZ25pbCnkHOLHQdMXboDmD9tC2ZC8DSSCe-Voqiaq9As7OxEyywbx8x--pj0Qvguc4LpJODDlEeTZjJZBwFdRQqjxAiX9WW63uyJphMk4m2St33-VJGpdezJfIuYfjkqCxK_9zO25N-VoXIXwrlUFfIF8WSsh7QHk_yTGcY7GBF0IKtQVEyVdgU1gF1htL0PJ9DL4_v4BvGz9cA==" target="_blank" rel="noopener">View fullscreen ↗</a>
+<a href="https://mermaid.live/view#pako:eNptk19Po0AUxb_KlSfIancT34iaQMu2D12LtIYXk2Z2uLYTygzOH21i_O7eKbiybXkimXN_59wD8x5wVWEQQ2DwxaHkOBFso1nzJIGelmkruGiZtFAmwAyUSteoITk9z6f-PFfGbjQuH-anigJZS7Ok6t9CJSGNzgg7TSXMmRjpIEb6JDtFmVzd3eXTGMY7JhrQTkK4Q2bwVqq3H9e_TDTQlUkM2R65swi0a7sdjUZHmBmS5V9kFkLcW5QVHGjRl9-9oln1ShE8bFwkyxmEi8Wfn7XY7aJzmm-isao1pyBvO_cmgPtWaDRAWuuzf2m71vqEy2yejVdQzrIiIySzztzS2lLIDST3ky7vuketCXUDVEXYZ8unhOl4MfxWjhbspJXv7uKM32M-SVb_nFqqhJwugZOP7syAEYUf-reqxuPQRQxF_kg9kcFaVBBqvEJJP537rrVMO2E6zxd5P-8_WBr3UwOZD5XwF0ehQeJbnyF8pnW3wxjRYMaDCjSuQXjWqgG-RV63Skh7BP5_W-M4R2OCSwga1A0TFd2Y98BusTncnYrpOvj4-AROFg68" target="_blank" rel="noopener">View fullscreen ↗</a>
 
 ```mermaid
 sequenceDiagram
@@ -211,19 +243,19 @@ sequenceDiagram
 
     Note over PG: Lease expires at t+30s
 
-    Reaper->>PG: SELECT WHERE status=running AND lease < now()
+    Reaper->>PG: SELECT WHERE status=running AND lease_expires_at < now()
     PG->>Reaper: Found expired run!
-    Reaper->>PG: UPDATE status=pending, clear lease
+    Reaper->>PG: UPDATE status=pending, clear lease and claim token
     Reaper->>R: RPUSH run_id (re-enqueue)
 
     WB->>R: BLPOP
     R->>WB: run_id
-    WB->>PG: Acquire new lease
+    WB->>PG: Acquire new lease (fresh claim token)
     WB->>WB: Resume from checkpoint
     WB->>PG: UPDATE status=success
 ```
 
-The reaper runs on every instance (default every 15 seconds). This is safe — the atomic lease acquisition prevents duplicate execution.
+The reaper runs on every instance (default every 15 seconds). This is safe — the atomic lease acquisition prevents duplicate execution, and claim tokens keep the reaped attempt from writing a result after Worker B takes over.
 
 ## Graceful shutdown
 

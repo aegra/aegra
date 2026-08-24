@@ -25,6 +25,19 @@ def create_get_graph_mock(return_value=None, side_effect=None):
     return get_graph
 
 
+def _make_session_maker(session: AsyncMock) -> MagicMock:
+    """Build a mock async_sessionmaker that always yields the given session.
+
+    get_thread_state manages its session manually via _get_session_maker
+    (not Depends(get_session)) so the pooled connection is released before
+    any LangGraph checkpoint read starts.
+    """
+    ctx = MagicMock()
+    ctx.__aenter__ = AsyncMock(return_value=session)
+    ctx.__aexit__ = AsyncMock(return_value=False)
+    return MagicMock(return_value=ctx)
+
+
 class TestGetThreadState:
     """Exercise edge cases and success path for get_thread_state."""
 
@@ -35,8 +48,11 @@ class TestGetThreadState:
         session = AsyncMock()
         session.scalar.return_value = None
 
-        with pytest.raises(HTTPException) as exc_info:
-            await get_thread_state("thread-123", user=user, session=session)
+        with (
+            patch("aegra_api.api.threads._get_session_maker", return_value=_make_session_maker(session)),
+            pytest.raises(HTTPException) as exc_info,
+        ):
+            await get_thread_state("thread-123", user=user)
 
         assert exc_info.value.status_code == 404
         assert "not found" in exc_info.value.detail.lower()
@@ -50,7 +66,8 @@ class TestGetThreadState:
         thread_row.metadata_json = {}
         session.scalar.return_value = thread_row
 
-        result = await get_thread_state("thread-123", user=user, session=session)
+        with patch("aegra_api.api.threads._get_session_maker", return_value=_make_session_maker(session)):
+            result = await get_thread_state("thread-123", user=user)
 
         # get_thread_state returns ThreadState Pydantic model
         assert hasattr(result, "values")
@@ -66,11 +83,14 @@ class TestGetThreadState:
         thread_row.metadata_json = {"graph_id": "graph-123"}
         session.scalar.return_value = thread_row
 
-        with patch("aegra_api.services.langgraph_service.get_langgraph_service") as mock_service:
+        with (
+            patch("aegra_api.api.threads._get_session_maker", return_value=_make_session_maker(session)),
+            patch("aegra_api.services.langgraph_service.get_langgraph_service") as mock_service,
+        ):
             mock_service.return_value.get_graph = create_get_graph_mock(side_effect=Exception("boom"))
 
             with pytest.raises(HTTPException) as exc_info:
-                await get_thread_state("thread-123", user=user, session=session)
+                await get_thread_state("thread-123", user=user)
 
         assert exc_info.value.status_code == 500
         assert "failed to retrieve thread state" in exc_info.value.detail.lower()
@@ -89,6 +109,7 @@ class TestGetThreadState:
         mock_agent.aget_state = AsyncMock(return_value=None)
 
         with (
+            patch("aegra_api.api.threads._get_session_maker", return_value=_make_session_maker(session)),
             patch("aegra_api.services.langgraph_service.get_langgraph_service") as mock_service,
             patch(
                 "aegra_api.services.langgraph_service.create_thread_config",
@@ -98,7 +119,7 @@ class TestGetThreadState:
             mock_service.return_value.get_graph = create_get_graph_mock(return_value=mock_agent)
 
             with pytest.raises(HTTPException) as exc_info:
-                await get_thread_state("thread-123", user=user, session=session)
+                await get_thread_state("thread-123", user=user)
 
         assert exc_info.value.status_code == 404
         assert "no state found" in exc_info.value.detail.lower()
@@ -117,6 +138,7 @@ class TestGetThreadState:
         mock_agent.aget_state = AsyncMock(return_value={"values": {}})
 
         with (
+            patch("aegra_api.api.threads._get_session_maker", return_value=_make_session_maker(session)),
             patch("aegra_api.services.langgraph_service.get_langgraph_service") as mock_service,
             patch(
                 "aegra_api.services.langgraph_service.create_thread_config",
@@ -130,7 +152,7 @@ class TestGetThreadState:
             mock_service.return_value.get_graph = create_get_graph_mock(return_value=mock_agent)
 
             with pytest.raises(HTTPException) as exc_info:
-                await get_thread_state("thread-123", user=user, session=session)
+                await get_thread_state("thread-123", user=user)
 
         assert exc_info.value.status_code == 500
         assert "failed to retrieve thread state" in exc_info.value.detail.lower()
@@ -155,6 +177,7 @@ class TestGetThreadState:
         config = {"configurable": {}}
 
         with (
+            patch("aegra_api.api.threads._get_session_maker", return_value=_make_session_maker(session)),
             patch("aegra_api.services.langgraph_service.get_langgraph_service") as mock_service,
             patch(
                 "aegra_api.services.langgraph_service.create_thread_config",
@@ -172,7 +195,6 @@ class TestGetThreadState:
                 subgraphs=True,
                 checkpoint_ns="ns-1",
                 user=user,
-                session=session,
             )
 
         assert result is mock_thread_state
@@ -194,6 +216,7 @@ class TestGetThreadState:
         mock_agent.aget_state = AsyncMock(side_effect=HTTPException(status_code=418, detail="teapot"))
 
         with (
+            patch("aegra_api.api.threads._get_session_maker", return_value=_make_session_maker(session)),
             patch("aegra_api.services.langgraph_service.get_langgraph_service") as mock_service,
             patch(
                 "aegra_api.services.langgraph_service.create_thread_config",
@@ -203,7 +226,7 @@ class TestGetThreadState:
             mock_service.return_value.get_graph = create_get_graph_mock(return_value=mock_agent)
 
             with pytest.raises(HTTPException) as exc_info:
-                await get_thread_state("thread-123", user=user, session=session)
+                await get_thread_state("thread-123", user=user)
 
         assert exc_info.value.status_code == 418
         assert exc_info.value.detail == "teapot"
@@ -215,8 +238,11 @@ class TestGetThreadState:
         session = AsyncMock()
         session.scalar.side_effect = Exception("database down")
 
-        with pytest.raises(HTTPException) as exc_info:
-            await get_thread_state("thread-123", user=user, session=session)
+        with (
+            patch("aegra_api.api.threads._get_session_maker", return_value=_make_session_maker(session)),
+            pytest.raises(HTTPException) as exc_info,
+        ):
+            await get_thread_state("thread-123", user=user)
 
         assert exc_info.value.status_code == 500
         assert "error retrieving thread state" in exc_info.value.detail.lower()

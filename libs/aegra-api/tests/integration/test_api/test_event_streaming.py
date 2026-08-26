@@ -150,6 +150,19 @@ class TestStreamRoute:
         resp = client.post("/threads/t1/stream/events", json={"channels": ["messages"]})
         assert resp.status_code == 404
 
+    def test_stream_flushes_first_byte_before_any_event(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A quiet stream must emit a first byte at open, not one ping interval later.
+
+        Clients that gate readiness on the response's first byte (the LangGraph
+        SDK's shared-subscription rotation does) otherwise stall a full
+        keepalive interval on every subscribe against a thread with no events.
+        """
+        client = TestClient(_make_app(monkeypatch))
+        with client.stream("POST", "/threads/t1/stream/events", json={"channels": ["messages"]}) as resp:
+            assert resp.status_code == 200
+            first = next(resp.iter_text())
+        assert first.startswith(": hello")
+
     def test_stream_emits_v2_frames(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """A run on the thread streams content-block frames over SSE."""
         run_id = f"run-{uuid.uuid4().hex[:8]}"

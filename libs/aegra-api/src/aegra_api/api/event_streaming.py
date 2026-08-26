@@ -169,5 +169,16 @@ async def post_thread_command(
 
 async def _frame_events(session_stream: ThreadEventSession) -> AsyncGenerator[str, None]:
     """Frame v2 event envelopes as SSE messages (event=method, data=envelope, id=seq)."""
+    # Flush the response headers and a first byte the moment the stream opens.
+    # sse-starlette's first ping only fires after one full ping interval, and a
+    # quiet stream (fresh thread, no events yet) writes nothing until then. A
+    # client that gates on the response's first byte before treating the
+    # subscription as ready (the LangGraph SDK does this when rotating its
+    # shared /stream/events subscription) therefore stalls a full keepalive
+    # interval on every subscribe — on a new thread's first run that is long
+    # enough for the whole run to finish, so tokens arrive as one replay burst
+    # instead of streaming. An SSE comment is invisible to parsers and
+    # unblocks such clients immediately.
+    yield ": hello\n\n"
     async for envelope in session_stream.stream():
         yield format_sse_message(envelope["method"], envelope, str(envelope["seq"]))

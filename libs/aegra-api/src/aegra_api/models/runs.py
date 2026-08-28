@@ -35,11 +35,22 @@ class RunCreate(BaseModel):
         None,
         description="Input data for the run. Optional when resuming from a checkpoint.",
     )
-    config: dict[str, Any] | None = Field(default_factory=dict, description="Execution config")
+    config: dict[str, Any] | None = Field(
+        default_factory=dict,
+        description=(
+            "Execution config. A checkpoint-only resume may also be expressed here as "
+            "config.configurable.checkpoint_id (the LangGraph SDK's spelling) — "
+            "equivalent to the top-level 'checkpoint' field."
+        ),
+    )
     context: dict[str, Any] | None = Field(default_factory=dict, description="Execution context")
     checkpoint: dict[str, Any] | None = Field(
         None,
-        description="Checkpoint configuration (e.g., {'checkpoint_id': '...', 'checkpoint_ns': ''})",
+        description=(
+            "Checkpoint configuration (e.g., {'checkpoint_id': '...', 'checkpoint_ns': ''}). "
+            "Merged into config.configurable; config.configurable.checkpoint_id is an "
+            "equivalent spelling accepted for checkpoint-only resumes."
+        ),
     )
     stream: bool = Field(False, description="Enable streaming response")
     stream_mode: str | list[str] | None = Field(None, description="Requested stream mode(s)")

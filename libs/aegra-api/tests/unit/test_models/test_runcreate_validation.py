@@ -26,6 +26,27 @@ class TestRunCreateValidation:
         assert run_create.command is None
         assert run_create.checkpoint == {"checkpoint_id": "chk-1", "checkpoint_ns": ""}
 
+    def test_configurable_checkpoint_id_counts_as_checkpoint(self):
+        """config.configurable.checkpoint_id is the LangGraph SDK's spelling of a
+        checkpoint-only resume (ThreadStream folds forkFrom there). Execution
+        already honors it — create_run_config merges the top-level checkpoint
+        into configurable — so validation must accept it too, keeping input None.
+        """
+        run_create = RunCreate(
+            assistant_id="agent",
+            config={"configurable": {"checkpoint_id": "chk-1"}},
+        )
+
+        assert run_create.input is None
+        assert run_create.command is None
+        assert run_create.checkpoint is None
+
+    def test_empty_configurable_checkpoint_id_still_rejected(self):
+        """An empty/absent checkpoint_id in configurable must not satisfy the
+        input/command/checkpoint requirement."""
+        with pytest.raises(ValidationError, match="Must specify at least one"):
+            RunCreate(assistant_id="agent", config={"configurable": {"checkpoint_id": ""}})
+
     def test_rejects_payload_without_input_command_or_checkpoint(self):
         """Ensure payloads with no input, command, or checkpoint are rejected."""
         with pytest.raises(ValueError, match="Must specify at least one of 'input', 'command', or 'checkpoint'"):

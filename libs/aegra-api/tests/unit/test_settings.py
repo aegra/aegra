@@ -637,3 +637,116 @@ class TestCronSettingsValidation:
 
         with pytest.raises((ValueError, ValidationError), match="CRON_POLL_INTERVAL_SECONDS"):
             CronSettings(_env_file=None)
+
+
+class TestRedisSentinelURL:
+    """Test the optional redis+sentinel:// scheme on REDIS_URL."""
+
+    @pytest.mark.parametrize("url", ["redis://localhost:6379/0", "rediss://cache.example.com:6380/1"])
+    def test_direct_urls_have_no_sentinel_config(self, monkeypatch: pytest.MonkeyPatch, url: str) -> None:
+        """A non-sentinel scheme leaves the direct path completely untouched."""
+        monkeypatch.setenv("REDIS_URL", url)
+
+        assert RedisSettings(_env_file=None).sentinel is None
+
+    def test_default_url_has_no_sentinel_config(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Sentinel is opt-in: the default REDIS_URL does not enable it."""
+        monkeypatch.delenv("REDIS_URL", raising=False)
+
+        assert RedisSettings(_env_file=None).sentinel is None
+
+    def test_parses_hosts_and_master_name(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Comma-separated endpoints and the master name come off the URL."""
+        monkeypatch.setenv("REDIS_URL", "redis+sentinel://a.example:26379,b.example:26380/mymaster")
+
+        sentinel = RedisSettings(_env_file=None).sentinel
+
+        assert sentinel is not None
+        assert sentinel.hosts == (("a.example", 26379), ("b.example", 26380))
+        assert sentinel.master_name == "mymaster"
+        assert sentinel.db == 0
+
+    def test_host_without_port_defaults_to_26379(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A bare host takes the standard sentinel port."""
+        monkeypatch.setenv("REDIS_URL", "redis+sentinel://a.example,b.example:26380/mymaster")
+
+        sentinel = RedisSettings(_env_file=None).sentinel
+
+        assert sentinel is not None
+        assert sentinel.hosts == (("a.example", 26379), ("b.example", 26380))
+
+    def test_parses_database_index(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """The second path segment is the database index."""
+        monkeypatch.setenv("REDIS_URL", "redis+sentinel://a.example:26379/mymaster/3")
+
+        sentinel = RedisSettings(_env_file=None).sentinel
+
+        assert sentinel is not None
+        assert sentinel.db == 3
+
+    def test_parses_bracketed_ipv6(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """IPv6 literals need brackets to disambiguate the port separator."""
+        monkeypatch.setenv("REDIS_URL", "redis+sentinel://[::1]:26379,[fd00::2]/mymaster")
+
+        sentinel = RedisSettings(_env_file=None).sentinel
+
+        assert sentinel is not None
+        assert sentinel.hosts == (("::1", 26379), ("fd00::2", 26379))
+
+    def test_userinfo_is_the_data_node_credential(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Userinfo means what it means in a plain redis:// URL, and is decoded."""
+        password = quote_plus("p@ss:word")
+        monkeypatch.setenv("REDIS_URL", f"redis+sentinel://someuser:{password}@a.example:26379/mymaster")
+
+        sentinel = RedisSettings(_env_file=None).sentinel
+
+        assert sentinel is not None
+        assert sentinel.username == "someuser"
+        assert sentinel.password == "p@ss:word"
+        assert sentinel.sentinel_username is None
+        assert sentinel.sentinel_password is None
+
+    def test_password_only_userinfo(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """The common `:password@` form leaves the username unset."""
+        monkeypatch.setenv("REDIS_URL", "redis+sentinel://:secret@a.example:26379/mymaster")
+
+        sentinel = RedisSettings(_env_file=None).sentinel
+
+        assert sentinel is not None
+        assert sentinel.username is None
+        assert sentinel.password == "secret"
+
+    def test_sentinel_credentials_come_from_query_params(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Sentinels usually have their own AUTH, distinct from the data nodes'."""
+        monkeypatch.setenv(
+            "REDIS_URL",
+            "redis+sentinel://:datapass@a.example:26379/mymaster?sentinel_username=watcher&sentinel_password=spass",
+        )
+
+        sentinel = RedisSettings(_env_file=None).sentinel
+
+        assert sentinel is not None
+        assert sentinel.password == "datapass"
+        assert sentinel.sentinel_username == "watcher"
+        assert sentinel.sentinel_password == "spass"
+
+    @pytest.mark.parametrize(
+        ("url", "expected"),
+        [
+            ("redis+sentinel://a.example:26379", "missing the master name"),
+            ("redis+sentinel://a.example:26379/", "missing the master name"),
+            ("redis+sentinel://a.example:abc/mymaster", "Non-integer port"),
+            ("redis+sentinel://a.example:26379/mymaster/xyz", "Non-integer database index"),
+            ("redis+sentinel://a.example:26379/mymaster/0/extra", "too many path segments"),
+            ("redis+sentinel:///mymaster", "no sentinel endpoints"),
+            ("redis+sentinel://[::1:26379/mymaster", "REDIS_URL is not a valid URL"),
+            ("redis+sentinel://a.example:26379/mymaster?db=2", "Unsupported query parameters"),
+            ("rediss+sentinel://a.example:26379/mymaster", "TLS to Sentinel-managed nodes is not supported"),
+        ],
+    )
+    def test_malformed_urls_fail_at_startup(self, monkeypatch: pytest.MonkeyPatch, url: str, expected: str) -> None:
+        """A typo raises when settings are built, not at the first connection."""
+        monkeypatch.setenv("REDIS_URL", url)
+
+        with pytest.raises(ValidationError, match=expected):
+            RedisSettings(_env_file=None)

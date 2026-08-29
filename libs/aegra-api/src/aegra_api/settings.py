@@ -1,7 +1,7 @@
 import logging
 import re
-from typing import Annotated
-from urllib.parse import parse_qsl, quote_plus, urlencode
+from typing import Annotated, NamedTuple
+from urllib.parse import SplitResult, parse_qsl, quote_plus, unquote, urlencode, urlsplit
 
 from pydantic import BeforeValidator, Field, computed_field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -330,11 +330,147 @@ class ObservabilitySettings(EnvBase):
     PHOENIX_API_KEY: str | None = None
 
 
+SENTINEL_SCHEME = "redis+sentinel"
+DEFAULT_SENTINEL_PORT = 26379
+# Only these two are read off the query string. Anything else is a typo or an
+# assumption we do not honour, and silently ignoring it misconfigures the
+# client without a word.
+_SENTINEL_QUERY_PARAMS = frozenset({"sentinel_username", "sentinel_password"})
+
+
+class SentinelConfig(NamedTuple):
+    """A parsed ``redis+sentinel://`` URL."""
+
+    hosts: tuple[tuple[str, int], ...]
+    master_name: str
+    db: int
+    username: str | None
+    password: str | None
+    sentinel_username: str | None
+    sentinel_password: str | None
+
+
+def _split_redis_url(url: str) -> SplitResult:
+    """urlsplit REDIS_URL, naming the setting when the URL is unparseable.
+
+    Stdlib raises a bare "Invalid IPv6 URL" for an unbalanced bracket, which
+    does not say which setting is at fault.
+    """
+    try:
+        return urlsplit(url)
+    except ValueError as exc:
+        msg = f"REDIS_URL is not a valid URL: {exc}"
+        raise ValueError(msg) from exc
+
+
+def _split_sentinel_hosts(netloc_hosts: str) -> tuple[tuple[str, int], ...]:
+    """Split the comma-separated host list of a sentinel URL authority.
+
+    Accepts "host:port", bare "host" (defaulting to 26379), and bracketed IPv6
+    literals such as "[::1]:26379".
+    """
+    hosts: list[tuple[str, int]] = []
+    for entry in netloc_hosts.split(","):
+        spec = entry.strip()
+        if not spec:
+            continue
+        if spec.startswith("["):
+            if "]" not in spec:
+                msg = f"Malformed IPv6 sentinel endpoint in REDIS_URL: `{spec}` -- missing closing bracket"
+                raise ValueError(msg)
+            bracket_end = spec.index("]")
+            host = spec[1:bracket_end]
+            rest = spec[bracket_end + 1 :]
+            if rest and not rest.startswith(":"):
+                # urlsplit rejects unbalanced brackets before we get here, so
+                # this only guards direct callers of this helper.
+                msg = f"Malformed sentinel endpoint in REDIS_URL: `{spec}`"
+                raise ValueError(msg)
+            port_str = rest[1:] if rest.startswith(":") else ""
+        else:
+            host, separator, port_str = spec.rpartition(":")
+            if not separator:
+                host, port_str = port_str, ""
+        if not host:
+            msg = f"Sentinel endpoint in REDIS_URL is missing a host: `{spec}`"
+            raise ValueError(msg)
+        if port_str and not port_str.isdigit():
+            msg = f"Non-integer port in REDIS_URL sentinel endpoint: `{spec}` -- got `{port_str}`"
+            raise ValueError(msg)
+        hosts.append((host, int(port_str) if port_str else DEFAULT_SENTINEL_PORT))
+    if not hosts:
+        raise ValueError("REDIS_URL names no sentinel endpoints")
+    return tuple(hosts)
+
+
+def _parse_sentinel_url(url: str) -> SentinelConfig:
+    """Parse ``redis+sentinel://[user:pass@]host:port[,host:port]/master[/db]``.
+
+    Userinfo is the *data node's* credentials, matching what it means in a
+    plain ``redis://`` URL. The sentinels' own AUTH, which is usually
+    different, comes from the ``sentinel_username`` / ``sentinel_password``
+    query parameters.
+    """
+    split = _split_redis_url(url)
+
+    authority = split.netloc
+    userinfo, _, hostpart = authority.rpartition("@")
+    username: str | None = None
+    password: str | None = None
+    if userinfo:
+        raw_user, _, raw_password = userinfo.partition(":")
+        username = unquote(raw_user) or None
+        password = unquote(raw_password) or None
+
+    hosts = _split_sentinel_hosts(hostpart)
+
+    segments = [segment for segment in split.path.split("/") if segment]
+    if not segments:
+        raise ValueError(
+            f"REDIS_URL is missing the master name. Expected {SENTINEL_SCHEME}://host:port/<master_name>[/<db>]"
+        )
+    if len(segments) > 2:
+        msg = f"REDIS_URL has too many path segments: `{split.path}`. Expected /<master_name>[/<db>]"
+        raise ValueError(msg)
+    master_name = unquote(segments[0])
+    db = 0
+    if len(segments) == 2:
+        if not segments[1].isdigit():
+            msg = f"Non-integer database index in REDIS_URL: `{segments[1]}`"
+            raise ValueError(msg)
+        db = int(segments[1])
+
+    query = dict(parse_qsl(split.query, keep_blank_values=True))
+    unknown = sorted(set(query) - _SENTINEL_QUERY_PARAMS)
+    if unknown:
+        msg = f"Unsupported query parameters in REDIS_URL: {unknown}. Supported: {sorted(_SENTINEL_QUERY_PARAMS)}"
+        raise ValueError(msg)
+
+    return SentinelConfig(
+        hosts=hosts,
+        master_name=master_name,
+        db=db,
+        username=username,
+        password=password,
+        sentinel_username=query.get("sentinel_username") or None,
+        sentinel_password=query.get("sentinel_password") or None,
+    )
+
+
 class RedisSettings(EnvBase):
     """Redis settings for the event broker.
 
     When REDIS_BROKER_ENABLED is True, SSE streaming uses Redis pub/sub
     instead of in-memory queues, enabling multi-instance deployments.
+
+    REDIS_URL selects how the client connects. ``redis://`` and ``rediss://``
+    dial a single endpoint, as before. ``redis+sentinel://`` instead resolves
+    the current master through Sentinel and re-resolves it after a failover:
+
+        redis+sentinel://sentinel-a:26379,sentinel-b:26379/mymaster/0
+
+    Sentinel is entirely opt-in -- keep a ``redis://`` URL and nothing about
+    the existing behaviour changes.
     """
 
     REDIS_BROKER_ENABLED: bool = False
@@ -347,6 +483,26 @@ class RedisSettings(EnvBase):
     # Non-negative retries after the initial attempt (up to 4 calls total) on
     # connection and timeout errors, with exponential backoff 50ms..1s.
     REDIS_RETRY_ATTEMPTS: int = Field(default=3, ge=0)
+
+    @property
+    def sentinel(self) -> SentinelConfig | None:
+        """The parsed sentinel URL, or None for a direct connection."""
+        if _split_redis_url(self.REDIS_URL).scheme != SENTINEL_SCHEME:
+            return None
+        return _parse_sentinel_url(self.REDIS_URL)
+
+    @model_validator(mode="after")
+    def _validate_redis_url(self) -> "RedisSettings":
+        """Parse a sentinel URL at startup so a typo fails before first connect."""
+        scheme = _split_redis_url(self.REDIS_URL).scheme
+        if scheme == f"{SENTINEL_SCHEME}s" or scheme == "rediss+sentinel":
+            raise ValueError(
+                "TLS to Sentinel-managed nodes is not supported yet; use "
+                f"{SENTINEL_SCHEME}:// or open an issue if you need it"
+            )
+        if scheme == SENTINEL_SCHEME:
+            _parse_sentinel_url(self.REDIS_URL)
+        return self
 
 
 class WorkerSettings(EnvBase):

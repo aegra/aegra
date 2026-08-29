@@ -23,11 +23,11 @@ class RedisManager:
     initialized during app lifespan and closed on shutdown.
 
     Connects one of two ways, chosen by REDIS_URL's scheme. A ``redis://``
-    URL dials that endpoint directly. A ``redis+sentinel://`` URL goes through
-    Sentinel instead, which resolves the current master at connect time and
-    re-resolves it after a failover. Both paths hand back the same
-    ``redis.asyncio.Redis``, so nothing downstream of ``get_client()`` knows
-    the difference.
+    URL dials that endpoint directly. A ``redis+sentinel://`` URL (or
+    ``rediss+sentinel://`` for TLS) goes through Sentinel instead, which
+    resolves the current master at connect time and re-resolves it after a
+    failover. Both paths hand back the same ``redis.asyncio.Redis``, so
+    nothing downstream of ``get_client()`` knows the difference.
     """
 
     def __init__(self) -> None:
@@ -70,6 +70,11 @@ class RedisManager:
         credentials, so they get separate connection kwargs. ``master_for``
         returns a client whose pool re-queries the sentinels whenever it needs
         a connection, which is what makes it follow a failover.
+
+        On the TLS scheme both hops are wrapped: ``ssl=True`` makes
+        ``Redis`` pick ``SSLConnection`` for the sentinels, and
+        ``SentinelConnectionPool`` pick ``SentinelManagedSSLConnection`` for
+        the master.
         """
         sentinel_kwargs = self._connection_kwargs()
         if config.sentinel_username is not None:
@@ -83,6 +88,11 @@ class RedisManager:
             master_kwargs["username"] = config.username
         if config.password is not None:
             master_kwargs["password"] = config.password
+
+        if config.ssl:
+            for kwargs in (sentinel_kwargs, master_kwargs):
+                kwargs["ssl"] = True
+                kwargs.update(config.ssl_options)
 
         self._sentinel = Sentinel(
             list(config.hosts),
@@ -116,6 +126,7 @@ class RedisManager:
                 "Redis broker initialized via Sentinel",
                 sentinels=[f"{host}:{port}" for host, port in sentinel_config.hosts],
                 master_name=sentinel_config.master_name,
+                tls=sentinel_config.ssl,
             )
         else:
             parsed = urlparse(settings.redis.REDIS_URL)

@@ -148,11 +148,40 @@ redis+sentinel://[username:password@]host[:port][,host[:port]...]/<master_name>[
 | userinfo | Credentials for the **data nodes**, exactly as in a plain `redis://` URL |
 | `sentinel_username` / `sentinel_password` | Credentials for the **sentinels**, which usually differ from the data nodes' |
 
-Sentinel is opt-in and changes nothing else: a `redis://` or `rediss://` URL takes the direct path as before. A malformed `redis+sentinel://` URL is rejected at startup rather than at the first connection.
+Sentinel is opt-in and changes nothing else: a `redis://` or `rediss://` URL takes the direct path as before. A malformed sentinel URL is rejected at startup rather than at the first connection.
 
-<Note>
-  TLS to Sentinel-managed data nodes (`rediss+sentinel://`) is not supported yet, and is rejected with an explicit error rather than silently connecting in plaintext.
-</Note>
+#### TLS
+
+Use the `rediss+sentinel://` scheme. TLS then wraps **both** hops -- the sentinel discovery traffic and the connection to the master it returns. Wrapping only the master would leave the discovery exchange, and the sentinel AUTH that goes with it, in the clear.
+
+```bash
+REDIS_URL=rediss+sentinel://sentinel-a:26379,sentinel-b:26379/mymaster/0?ssl_ca_certs=/certs/ca.pem
+```
+
+The `ssl_*` query parameters are named as redis-py names them on a `rediss://` URL, so the two schemes stay consistent:
+
+| Parameter | Meaning |
+|-----------|---------|
+| `ssl_cert_reqs` | `none`, `optional` or `required`. Defaults to `required` |
+| `ssl_ca_certs` | Path to the CA bundle |
+| `ssl_ca_path` | Directory of CA certificates |
+| `ssl_certfile` / `ssl_keyfile` | Client certificate and key, for mutual TLS |
+| `ssl_password` | Password for an encrypted `ssl_keyfile` |
+| `ssl_check_hostname` | Verify the certificate against the hostname. Defaults to `true` |
+
+They are only accepted on `rediss+sentinel://`; passing them to the plaintext scheme is an error rather than a silent no-op.
+
+<Warning>
+  **Sentinel returns the master's IP address, not its hostname.** With the default `ssl_check_hostname=true`, TLS verification then compares the certificate against an IP and fails, typically with `certificate verify failed: IP address mismatch`.
+
+  Three ways out, best first:
+
+  1. Configure Redis with `sentinel announce-hostnames yes` and `sentinel resolve-hostnames yes` (Redis 6.2+) so the sentinels report names your certificate actually covers.
+  2. Issue the data-node certificates with IP SANs.
+  3. Set `ssl_check_hostname=false` and rely on CA verification alone. This is the weakest option -- it still proves the peer holds a certificate your CA signed, but no longer that it is the host you meant to reach.
+
+  Aegra keeps redis-py's secure defaults and does not pick for you.
+</Warning>
 
 ## Workers
 

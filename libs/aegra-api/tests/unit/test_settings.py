@@ -741,7 +741,9 @@ class TestRedisSentinelURL:
             ("redis+sentinel:///mymaster", "no sentinel endpoints"),
             ("redis+sentinel://[::1:26379/mymaster", "REDIS_URL is not a valid URL"),
             ("redis+sentinel://a.example:26379/mymaster?db=2", "Unsupported query parameters"),
-            ("rediss+sentinel://a.example:26379/mymaster", "TLS to Sentinel-managed nodes is not supported"),
+            ("rediss+sentinel://a.example:26379/mymaster?ssl_cert_reqs=bogus", "ssl_cert_reqs must be one of"),
+            ("rediss+sentinel://a.example:26379/mymaster?ssl_check_hostname=maybe", "must be a boolean"),
+            ("redis+sentinel://a.example:26379/mymaster?ssl_ca_certs=/ca.pem", "need the rediss\\+sentinel:// scheme"),
         ],
     )
     def test_malformed_urls_fail_at_startup(self, monkeypatch: pytest.MonkeyPatch, url: str, expected: str) -> None:
@@ -749,4 +751,68 @@ class TestRedisSentinelURL:
         monkeypatch.setenv("REDIS_URL", url)
 
         with pytest.raises(ValidationError, match=expected):
+            RedisSettings(_env_file=None)
+
+
+class TestRedisSentinelTLS:
+    """Test the rediss+sentinel:// scheme."""
+
+    def test_plain_sentinel_scheme_has_tls_off(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """redis+sentinel:// stays plaintext, with no ssl options."""
+        monkeypatch.setenv("REDIS_URL", "redis+sentinel://a.example:26379/mymaster")
+
+        sentinel = RedisSettings(_env_file=None).sentinel
+
+        assert sentinel is not None
+        assert sentinel.ssl is False
+        assert sentinel.ssl_options == {}
+
+    def test_tls_scheme_enables_ssl(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """rediss+sentinel:// turns TLS on for both hops."""
+        monkeypatch.setenv("REDIS_URL", "rediss+sentinel://a.example:26379/mymaster/2")
+
+        sentinel = RedisSettings(_env_file=None).sentinel
+
+        assert sentinel is not None
+        assert sentinel.ssl is True
+        assert sentinel.db == 2
+
+    def test_tls_options_are_collected(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """The ssl_* parameters use redis-py's own names and reach the config."""
+        monkeypatch.setenv(
+            "REDIS_URL",
+            "rediss+sentinel://a.example:26379/mymaster"
+            "?ssl_ca_certs=/certs/ca.pem&ssl_certfile=/certs/c.pem&ssl_keyfile=/certs/k.pem"
+            "&ssl_cert_reqs=required&ssl_check_hostname=true",
+        )
+
+        sentinel = RedisSettings(_env_file=None).sentinel
+
+        assert sentinel is not None
+        assert sentinel.ssl_options == {
+            "ssl_ca_certs": "/certs/ca.pem",
+            "ssl_cert_reqs": "required",
+            "ssl_certfile": "/certs/c.pem",
+            "ssl_check_hostname": True,
+            "ssl_keyfile": "/certs/k.pem",
+        }
+
+    @pytest.mark.parametrize(
+        ("raw", "expected"),
+        [("true", True), ("1", True), ("yes", True), ("false", False), ("0", False), ("off", False)],
+    )
+    def test_ssl_check_hostname_boolean_forms(self, monkeypatch: pytest.MonkeyPatch, raw: str, expected: bool) -> None:
+        """Hostname verification is a boolean, spelled the usual several ways."""
+        monkeypatch.setenv("REDIS_URL", f"rediss+sentinel://a.example:26379/mymaster?ssl_check_hostname={raw}")
+
+        sentinel = RedisSettings(_env_file=None).sentinel
+
+        assert sentinel is not None
+        assert sentinel.ssl_options["ssl_check_hostname"] is expected
+
+    def test_tls_options_rejected_on_plaintext_scheme(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Asking for TLS options without the TLS scheme is a misconfiguration."""
+        monkeypatch.setenv("REDIS_URL", "redis+sentinel://a.example:26379/mymaster?ssl_ca_certs=/ca.pem")
+
+        with pytest.raises(ValidationError, match=r"need the rediss\+sentinel:// scheme"):
             RedisSettings(_env_file=None)

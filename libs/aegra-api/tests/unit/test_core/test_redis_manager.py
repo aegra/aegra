@@ -4,8 +4,13 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 import redis.asyncio as aioredis
+from redis.asyncio.connection import SSLConnection
 from redis.asyncio.retry import Retry
-from redis.asyncio.sentinel import Sentinel
+from redis.asyncio.sentinel import (
+    Sentinel,
+    SentinelManagedConnection,
+    SentinelManagedSSLConnection,
+)
 from redis.backoff import ExponentialBackoff
 from redis.exceptions import ConnectionError as RedisConnectionError
 
@@ -322,3 +327,83 @@ class TestRedisManagerSentinel:
         assert manager._sentinel is None
         assert manager._client is None
         assert manager._pool is None
+
+
+class TestRedisManagerSentinelTLS:
+    """Test that rediss+sentinel:// wraps both hops in TLS.
+
+    These build genuine redis-py objects rather than mocks: the whole point is
+    that the connection classes and ssl options come out right, and a mock
+    would assert nothing about that.
+    """
+
+    @staticmethod
+    def _connect(monkeypatch: pytest.MonkeyPatch, url: str) -> RedisManager:
+        monkeypatch.setattr(
+            redis_manager_module.settings,
+            "redis",
+            RedisSettings(_env_file=None, REDIS_URL=url),
+        )
+        manager = RedisManager()
+        config = redis_manager_module.settings.redis.sentinel
+        assert config is not None
+        manager._connect_sentinel(config)
+        return manager
+
+    def test_plaintext_sentinel_uses_no_tls_connection_classes(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """redis+sentinel:// must not quietly acquire TLS."""
+        manager = self._connect(monkeypatch, "redis+sentinel://a.example:26379/mymaster")
+
+        assert manager._sentinel is not None
+        assert manager._pool is not None
+        assert manager._pool.connection_class is SentinelManagedConnection
+        assert manager._sentinel.sentinels[0].connection_pool.connection_class is not SSLConnection
+
+        manager._client = None
+        manager._pool = None
+        manager._sentinel = None
+
+    def test_tls_applies_to_sentinels_and_master(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Both hops get TLS: the sentinels and the master they point at.
+
+        Wrapping only the master would leave the discovery traffic -- and the
+        sentinel AUTH that goes with it -- in the clear.
+        """
+        manager = self._connect(
+            monkeypatch,
+            "rediss+sentinel://a.example:26379,b.example:26379/mymaster/1?ssl_ca_certs=/certs/ca.pem",
+        )
+
+        assert manager._sentinel is not None
+        assert manager._pool is not None
+        for sentinel_client in manager._sentinel.sentinels:
+            assert sentinel_client.connection_pool.connection_class is SSLConnection
+            assert sentinel_client.connection_pool.connection_kwargs["ssl_ca_certs"] == "/certs/ca.pem"
+        assert manager._pool.connection_class is SentinelManagedSSLConnection
+        assert manager._pool.connection_kwargs["ssl_ca_certs"] == "/certs/ca.pem"
+
+        manager._client = None
+        manager._pool = None
+        manager._sentinel = None
+
+    def test_tls_options_reach_a_real_connection(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Build an actual connection object off the master pool.
+
+        This is the assertion that would catch redis-py renaming or dropping
+        one of the ssl_* kwargs we forward.
+        """
+        manager = self._connect(
+            monkeypatch,
+            "rediss+sentinel://a.example:26379/mymaster?ssl_ca_certs=/certs/ca.pem&ssl_check_hostname=false",
+        )
+
+        assert manager._pool is not None
+        connection = manager._pool.make_connection()
+
+        assert isinstance(connection, SentinelManagedSSLConnection)
+        assert connection.ca_certs == "/certs/ca.pem"
+        assert connection.check_hostname is False
+
+        manager._client = None
+        manager._pool = None
+        manager._sentinel = None

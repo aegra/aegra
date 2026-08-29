@@ -331,15 +331,29 @@ class ObservabilitySettings(EnvBase):
 
 
 SENTINEL_SCHEME = "redis+sentinel"
+SENTINEL_TLS_SCHEME = "rediss+sentinel"
 DEFAULT_SENTINEL_PORT = 26379
-# Only these two are read off the query string. Anything else is a typo or an
-# assumption we do not honour, and silently ignoring it misconfigures the
-# client without a word.
-_SENTINEL_QUERY_PARAMS = frozenset({"sentinel_username", "sentinel_password"})
+_SENTINEL_AUTH_PARAMS = frozenset({"sentinel_username", "sentinel_password"})
+# TLS options, named as redis-py names them on a rediss:// URL so the two
+# schemes stay consistent. Only accepted on the TLS scheme.
+_SENTINEL_TLS_PARAMS = frozenset(
+    {
+        "ssl_cert_reqs",
+        "ssl_ca_certs",
+        "ssl_ca_path",
+        "ssl_certfile",
+        "ssl_keyfile",
+        "ssl_password",
+        "ssl_check_hostname",
+    }
+)
+_SSL_CERT_REQS = frozenset({"none", "optional", "required"})
+_TRUE_VALUES = frozenset({"1", "true", "yes", "on"})
+_FALSE_VALUES = frozenset({"0", "false", "no", "off"})
 
 
 class SentinelConfig(NamedTuple):
-    """A parsed ``redis+sentinel://`` URL."""
+    """A parsed ``redis+sentinel://`` or ``rediss+sentinel://`` URL."""
 
     hosts: tuple[tuple[str, int], ...]
     master_name: str
@@ -348,6 +362,32 @@ class SentinelConfig(NamedTuple):
     password: str | None
     sentinel_username: str | None
     sentinel_password: str | None
+    ssl: bool
+    ssl_options: dict[str, str | bool]
+
+
+def _parse_ssl_options(query: dict[str, str]) -> dict[str, str | bool]:
+    """Validate the ssl_* query parameters of a rediss+sentinel:// URL."""
+    options: dict[str, str | bool] = {}
+    for key in sorted(_SENTINEL_TLS_PARAMS & set(query)):
+        value = query[key]
+        if key == "ssl_check_hostname":
+            lowered = value.strip().lower()
+            if lowered in _TRUE_VALUES:
+                options[key] = True
+            elif lowered in _FALSE_VALUES:
+                options[key] = False
+            else:
+                msg = f"REDIS_URL ssl_check_hostname must be a boolean, got `{value}`"
+                raise ValueError(msg)
+        elif key == "ssl_cert_reqs":
+            if value not in _SSL_CERT_REQS:
+                msg = f"REDIS_URL ssl_cert_reqs must be one of {sorted(_SSL_CERT_REQS)}, got `{value}`"
+                raise ValueError(msg)
+            options[key] = value
+        else:
+            options[key] = value
+    return options
 
 
 def _split_redis_url(url: str) -> SplitResult:
@@ -410,8 +450,12 @@ def _parse_sentinel_url(url: str) -> SentinelConfig:
     plain ``redis://`` URL. The sentinels' own AUTH, which is usually
     different, comes from the ``sentinel_username`` / ``sentinel_password``
     query parameters.
+
+    The ``rediss+sentinel://`` scheme wraps both the sentinel and the data
+    node connections in TLS, configured by the ``ssl_*`` query parameters.
     """
     split = _split_redis_url(url)
+    ssl_enabled = split.scheme == SENTINEL_TLS_SCHEME
 
     authority = split.netloc
     userinfo, _, hostpart = authority.rpartition("@")
@@ -441,9 +485,16 @@ def _parse_sentinel_url(url: str) -> SentinelConfig:
         db = int(segments[1])
 
     query = dict(parse_qsl(split.query, keep_blank_values=True))
-    unknown = sorted(set(query) - _SENTINEL_QUERY_PARAMS)
+    supported = _SENTINEL_AUTH_PARAMS | (_SENTINEL_TLS_PARAMS if ssl_enabled else frozenset())
+    unknown = sorted(set(query) - supported)
     if unknown:
-        msg = f"Unsupported query parameters in REDIS_URL: {unknown}. Supported: {sorted(_SENTINEL_QUERY_PARAMS)}"
+        if not ssl_enabled and set(unknown) & _SENTINEL_TLS_PARAMS:
+            msg = (
+                f"TLS options {sorted(set(unknown) & _SENTINEL_TLS_PARAMS)} need the "
+                f"{SENTINEL_TLS_SCHEME}:// scheme; {SENTINEL_SCHEME}:// does not use TLS"
+            )
+            raise ValueError(msg)
+        msg = f"Unsupported query parameters in REDIS_URL: {unknown}. Supported: {sorted(supported)}"
         raise ValueError(msg)
 
     return SentinelConfig(
@@ -454,6 +505,8 @@ def _parse_sentinel_url(url: str) -> SentinelConfig:
         password=password,
         sentinel_username=query.get("sentinel_username") or None,
         sentinel_password=query.get("sentinel_password") or None,
+        ssl=ssl_enabled,
+        ssl_options=_parse_ssl_options(query),
     )
 
 
@@ -465,9 +518,11 @@ class RedisSettings(EnvBase):
 
     REDIS_URL selects how the client connects. ``redis://`` and ``rediss://``
     dial a single endpoint, as before. ``redis+sentinel://`` instead resolves
-    the current master through Sentinel and re-resolves it after a failover:
+    the current master through Sentinel and re-resolves it after a failover,
+    and ``rediss+sentinel://`` does the same over TLS:
 
         redis+sentinel://sentinel-a:26379,sentinel-b:26379/mymaster/0
+        rediss+sentinel://sentinel-a:26379/mymaster/0?ssl_ca_certs=/certs/ca.pem
 
     Sentinel is entirely opt-in -- keep a ``redis://`` URL and nothing about
     the existing behaviour changes.
@@ -487,20 +542,14 @@ class RedisSettings(EnvBase):
     @property
     def sentinel(self) -> SentinelConfig | None:
         """The parsed sentinel URL, or None for a direct connection."""
-        if _split_redis_url(self.REDIS_URL).scheme != SENTINEL_SCHEME:
+        if _split_redis_url(self.REDIS_URL).scheme not in (SENTINEL_SCHEME, SENTINEL_TLS_SCHEME):
             return None
         return _parse_sentinel_url(self.REDIS_URL)
 
     @model_validator(mode="after")
     def _validate_redis_url(self) -> "RedisSettings":
         """Parse a sentinel URL at startup so a typo fails before first connect."""
-        scheme = _split_redis_url(self.REDIS_URL).scheme
-        if scheme == f"{SENTINEL_SCHEME}s" or scheme == "rediss+sentinel":
-            raise ValueError(
-                "TLS to Sentinel-managed nodes is not supported yet; use "
-                f"{SENTINEL_SCHEME}:// or open an issue if you need it"
-            )
-        if scheme == SENTINEL_SCHEME:
+        if _split_redis_url(self.REDIS_URL).scheme in (SENTINEL_SCHEME, SENTINEL_TLS_SCHEME):
             _parse_sentinel_url(self.REDIS_URL)
         return self
 

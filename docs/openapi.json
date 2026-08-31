@@ -1546,6 +1546,28 @@
         }
       }
     },
+    "/threads/prune": {
+      "post": {
+        "tags": [
+          "Threads"
+        ],
+        "summary": "Prune Threads",
+        "description": "Immediately apply TTL policies to the caller's expired threads.\n\nThreads whose TTL has expired are deleted (strategy `delete`) or have\ntheir checkpoint history compacted (strategy `keep_latest`). Threads with\nactive runs are skipped and handled once their runs settle.",
+        "operationId": "prune_threads_threads_prune_post",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ThreadPruneResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/threads/search": {
       "post": {
         "tags": [
@@ -5372,6 +5394,17 @@
             "title": "Ifexists",
             "description": "Behavior when thread exists: 'raise' (default) or 'do_nothing'",
             "default": "raise"
+          },
+          "ttl": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ThreadTTLSpec"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Per-thread TTL override; requires TTL to be configured server-side or default_ttl set"
           }
         },
         "type": "object",
@@ -5488,6 +5521,25 @@
         ],
         "title": "ThreadList",
         "description": "Response model for listing threads"
+      },
+      "ThreadPruneResponse": {
+        "properties": {
+          "deleted": {
+            "type": "integer",
+            "title": "Deleted",
+            "description": "Expired threads fully deleted (strategy 'delete')",
+            "default": 0
+          },
+          "pruned": {
+            "type": "integer",
+            "title": "Pruned",
+            "description": "Expired threads whose history was pruned (strategy 'keep_latest')",
+            "default": 0
+          }
+        },
+        "type": "object",
+        "title": "ThreadPruneResponse",
+        "description": "Response model for POST /threads/prune"
       },
       "ThreadSearchRequest": {
         "properties": {
@@ -5803,6 +5855,43 @@
         ],
         "title": "ThreadStateUpdateResponse",
         "description": "Response model for thread state update"
+      },
+      "ThreadTTLSpec": {
+        "properties": {
+          "default_ttl": {
+            "anyOf": [
+              {
+                "type": "number",
+                "maximum": 1000000000.0,
+                "exclusiveMinimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Default Ttl",
+            "description": "Thread TTL in minutes; also accepted under the key \"ttl\" (LangGraph SDK compatibility). Falls back to the server default when omitted"
+          },
+          "strategy": {
+            "anyOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "delete",
+                  "keep_latest"
+                ]
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Strategy",
+            "description": "Expiry strategy: 'delete' removes the thread, 'keep_latest' prunes history"
+          }
+        },
+        "type": "object",
+        "title": "ThreadTTLSpec",
+        "description": "Per-thread TTL override supplied on thread creation.\n\nThe langgraph SDK sends the minutes value as \"ttl\" while issue #288 names\nit \"default_ttl\" \u2014 AliasChoices accepts both spellings."
       },
       "ThreadUpdate": {
         "properties": {

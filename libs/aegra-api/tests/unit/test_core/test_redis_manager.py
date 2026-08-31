@@ -407,3 +407,21 @@ class TestRedisManagerSentinelTLS:
         manager._client = None
         manager._pool = None
         manager._sentinel = None
+
+    def test_hostname_verification_on_by_default_on_a_real_connection(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Without ssl_check_hostname in the URL, the connection still verifies.
+
+        redis-py's async SSLConnection defaulted check_hostname to False before
+        6.0, so inheriting the default would silently weaken this on redis 5.x.
+        """
+        manager = self._connect(monkeypatch, "rediss+sentinel://a.example:26379/mymaster?ssl_ca_certs=/certs/ca.pem")
+
+        assert manager._pool is not None
+        connection = manager._pool.make_connection()
+
+        assert isinstance(connection, SentinelManagedSSLConnection)
+        assert connection.check_hostname is True
+
+        manager._client = None
+        manager._pool = None
+        manager._sentinel = None

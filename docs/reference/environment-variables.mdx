@@ -180,7 +180,7 @@ They are only accepted on `rediss+sentinel://`; passing them to the plaintext sc
   2. Issue the data-node certificates with IP SANs.
   3. Set `ssl_check_hostname=false` and rely on CA verification alone. This is the weakest option -- it still proves the peer holds a certificate your CA signed, but no longer that it is the host you meant to reach.
 
-  Aegra keeps redis-py's secure defaults and does not pick for you.
+  Aegra will not weaken verification for you. `ssl_check_hostname` is pinned to `true` unless you set it, because redis-py's *async* client defaulted it to `false` before 6.0 and Aegra supports redis-py from 5.0 -- inheriting that default would have turned hostname verification off silently on older installs.
 </Warning>
 
 ## Workers

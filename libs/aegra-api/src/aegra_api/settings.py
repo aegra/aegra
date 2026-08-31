@@ -333,6 +333,7 @@ class ObservabilitySettings(EnvBase):
 SENTINEL_SCHEME = "redis+sentinel"
 SENTINEL_TLS_SCHEME = "rediss+sentinel"
 DEFAULT_SENTINEL_PORT = 26379
+MAX_PORT = 65535
 _SENTINEL_AUTH_PARAMS = frozenset({"sentinel_username", "sentinel_password"})
 # TLS options, named as redis-py names them on a rediss:// URL so the two
 # schemes stay consistent. Only accepted on the TLS scheme.
@@ -437,7 +438,11 @@ def _split_sentinel_hosts(netloc_hosts: str) -> tuple[tuple[str, int], ...]:
         if port_str and not port_str.isdigit():
             msg = f"Non-integer port in REDIS_URL sentinel endpoint: `{spec}` -- got `{port_str}`"
             raise ValueError(msg)
-        hosts.append((host, int(port_str) if port_str else DEFAULT_SENTINEL_PORT))
+        port = int(port_str) if port_str else DEFAULT_SENTINEL_PORT
+        if not 1 <= port <= MAX_PORT:
+            msg = f"Port out of range in REDIS_URL sentinel endpoint: `{spec}` -- got `{port}`"
+            raise ValueError(msg)
+        hosts.append((host, port))
     if not hosts:
         raise ValueError("REDIS_URL names no sentinel endpoints")
     return tuple(hosts)
@@ -497,6 +502,12 @@ def _parse_sentinel_url(url: str) -> SentinelConfig:
         msg = f"Unsupported query parameters in REDIS_URL: {unknown}. Supported: {sorted(supported)}"
         raise ValueError(msg)
 
+    ssl_options = _parse_ssl_options(query)
+    if ssl_enabled:
+        # redis-py's *async* SSLConnection defaulted check_hostname to False
+        # before 6.0, and our floor is >=5.0.0. Pin it instead of inheriting.
+        ssl_options.setdefault("ssl_check_hostname", True)
+
     return SentinelConfig(
         hosts=hosts,
         master_name=master_name,
@@ -506,7 +517,7 @@ def _parse_sentinel_url(url: str) -> SentinelConfig:
         sentinel_username=query.get("sentinel_username") or None,
         sentinel_password=query.get("sentinel_password") or None,
         ssl=ssl_enabled,
-        ssl_options=_parse_ssl_options(query),
+        ssl_options=ssl_options,
     )
 
 

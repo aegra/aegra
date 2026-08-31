@@ -761,6 +761,8 @@ class TestRedisSentinelURL:
             ("redis+sentinel://a.example:26379", "missing the master name"),
             ("redis+sentinel://a.example:26379/", "missing the master name"),
             ("redis+sentinel://a.example:abc/mymaster", "Non-integer port"),
+            ("redis+sentinel://a.example:65536/mymaster", "Port out of range"),
+            ("redis+sentinel://a.example:0/mymaster", "Port out of range"),
             ("redis+sentinel://a.example:26379/mymaster/xyz", "Non-integer database index"),
             ("redis+sentinel://a.example:26379/mymaster/0/extra", "too many path segments"),
             ("redis+sentinel:///mymaster", "no sentinel endpoints"),
@@ -801,6 +803,24 @@ class TestRedisSentinelTLS:
         assert sentinel is not None
         assert sentinel.ssl is True
         assert sentinel.db == 2
+
+    def test_hostname_verification_defaults_on(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Pinned, not inherited: redis-py's async default was False before 6.0."""
+        monkeypatch.setenv("REDIS_URL", "rediss+sentinel://a.example:26379/mymaster")
+
+        sentinel = RedisSettings(_env_file=None).sentinel
+
+        assert sentinel is not None
+        assert sentinel.ssl_options["ssl_check_hostname"] is True
+
+    def test_explicit_hostname_verification_wins_over_default(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """The operator can still turn it off deliberately."""
+        monkeypatch.setenv("REDIS_URL", "rediss+sentinel://a.example:26379/mymaster?ssl_check_hostname=false")
+
+        sentinel = RedisSettings(_env_file=None).sentinel
+
+        assert sentinel is not None
+        assert sentinel.ssl_options["ssl_check_hostname"] is False
 
     def test_tls_options_are_collected(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """The ssl_* parameters use redis-py's own names and reach the config."""

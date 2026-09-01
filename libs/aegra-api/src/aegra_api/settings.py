@@ -327,6 +327,13 @@ class ObservabilitySettings(EnvBase):
     LANGFUSE_PUBLIC_KEY: str | None = None
     LANGFUSE_SECRET_KEY: str | None = None
 
+    # --- Native LangSmith tracing ---
+    LANGSMITH_TRACING: bool = False
+    LANGSMITH_ENDPOINT: str = "https://api.smith.langchain.com"
+    LANGSMITH_API_KEY: str | None = None
+    LANGSMITH_PROJECT: str | None = None
+    LANGSMITH_WORKSPACE_ID: str | None = None
+
     # --- Phoenix Specifics ---
     PHOENIX_COLLECTOR_ENDPOINT: str = "http://127.0.0.1:6006/v1/traces"
     PHOENIX_API_KEY: str | None = None

@@ -1,14 +1,15 @@
 ---
 title: "Observability"
-description: "Set up tracing with Langfuse, Arize Phoenix, or any OTLP-compatible backend."
+description: "Set up native LangSmith tracing or OpenTelemetry fan-out."
 ---
 
-Aegra uses OpenTelemetry for all observability. This means you can send traces to multiple backends simultaneously without changing your code — no vendor lock-in.
+Aegra supports native LangSmith tracing for Agent Protocol clients and LangGraph Studio, alongside OpenTelemetry fan-out for other observability backends.
 
 ## Supported backends
 
 Out of the box, Aegra supports:
 
+- **LangSmith** — Native LangChain traces with Agent Protocol run-session lookup
 - **Langfuse** — Production-grade LLM observability
 - **Arize Phoenix** — Local debugging and evaluation
 - **Generic OTLP** — Any compatible backend (Jaeger, Honeycomb, Datadog, etc.)
@@ -17,9 +18,26 @@ You can enable one, multiple, or all of these at the same time.
 
 ## Configuration
 
-Tracing is configured entirely through environment variables in your `.env` file.
+Tracing is configured entirely through environment variables in your `.env` file. Native LangSmith tracing and OpenTelemetry tracing are independent and can be enabled together.
 
-### Enable tracing
+### Native LangSmith tracing
+
+Enable native tracing when LangGraph Studio needs to open a run's trace:
+
+```bash
+LANGSMITH_TRACING=true
+LANGSMITH_ENDPOINT=https://api.smith.langchain.com
+LANGSMITH_API_KEY=lsv2_...
+LANGSMITH_PROJECT=my-aegra-project
+# Required for organization-scoped API keys
+LANGSMITH_WORKSPACE_ID=...
+```
+
+Aegra records the resolved project in each Agent Protocol run response as `langsmith_session_name`. A run request can select an additional project with `langsmith_tracer.project_name` and associate a dataset example with `langsmith_tracer.example_id`. If no per-run project is supplied, `LANGSMITH_PROJECT` is used.
+
+Set `LANGSMITH_TRACING=false` to disable native trace export. The run response then contains a null `langsmith_session_name`.
+
+### Enable OpenTelemetry tracing
 
 Set the `OTEL_TARGETS` variable to a comma-separated list of backends:
 
@@ -88,7 +106,7 @@ Each backend receives the same trace data through separate `BatchSpanProcessor` 
 
 ## How it works
 
-Aegra uses a pure OpenTelemetry approach:
+The OpenTelemetry path works as follows:
 
 1. **Auto-instrumentation** captures LangGraph steps automatically using `openinference-instrumentation-langchain`
 2. **Singleton provider** is initialized once during application startup
@@ -145,6 +163,11 @@ The main variables you'll need:
 
 | Variable | Description |
 |----------|-------------|
+| `LANGSMITH_TRACING` | Enable native LangSmith traces and run-session recording (`true`/`false`) |
+| `LANGSMITH_ENDPOINT` | LangSmith API endpoint |
+| `LANGSMITH_API_KEY` | LangSmith API key |
+| `LANGSMITH_PROJECT` | Default LangSmith project and run session name |
+| `LANGSMITH_WORKSPACE_ID` | Workspace ID required by organization-scoped API keys |
 | `OTEL_TARGETS` | Comma-separated list of backends: `LANGFUSE`, `PHOENIX`, `GENERIC` |
 | `OTEL_SERVICE_NAME` | Service name for traces (default: `aegra-backend`) |
 | `OTEL_CONSOLE_EXPORT` | Log traces to console (`true`/`false`) |

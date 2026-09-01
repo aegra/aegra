@@ -12,4 +12,8 @@ def test_info_reports_cron_flag_from_runtime_settings(monkeypatch) -> None:
     response = client.get("/info")
 
     assert response.status_code == 200
-    assert response.json()["flags"] == {"assistants": True, "crons": False}
+    assert response.json()["flags"] == {
+        "assistants": True,
+        "crons": False,
+        "langsmith_tracing_session_on_runs": True,
+    }

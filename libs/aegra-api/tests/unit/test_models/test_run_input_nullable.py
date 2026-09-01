@@ -23,3 +23,20 @@ def test_run_accepts_none_input() -> None:
         updated_at=now,
     )
     assert run.input is None
+
+
+def test_run_exposes_langsmith_session_name() -> None:
+    now = datetime.now(UTC)
+    run = Run(
+        run_id="r-1",
+        thread_id="t-1",
+        assistant_id="agent",
+        status="pending",
+        input={"message": "hello"},
+        user_id="u-1",
+        created_at=now,
+        updated_at=now,
+        langsmith_session_name="studio-project",
+    )
+
+    assert run.langsmith_session_name == "studio-project"

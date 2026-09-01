@@ -54,6 +54,7 @@ def _run_row(
     metadata=None,
     input_data=None,
     output_data=None,
+    langsmith_session_name=None,
 ):
     """Create a mock run ORM object"""
     run = DummyRun(
@@ -72,6 +73,7 @@ def _run_row(
     run.error_message = None
     run.config = {}
     run.context = {}
+    run.langsmith_session_name = langsmith_session_name
 
     class _Col:
         def __init__(self, name):
@@ -90,6 +92,7 @@ def _run_row(
             _Col("error_message"),
             _Col("config"),
             _Col("context"),
+            _Col("langsmith_session_name"),
             _Col("created_at"),
             _Col("updated_at"),
         ]
@@ -138,7 +141,7 @@ class TestGetRun:
         """Test getting an existing run"""
         app = create_test_app(include_runs=True, include_threads=False)
 
-        run = _run_row(status="success")
+        run = _run_row(status="success", langsmith_session_name="studio-default")
 
         class Session(DummySessionBase):
             async def scalar(self, _stmt):
@@ -154,6 +157,7 @@ class TestGetRun:
         assert data["run_id"] == "test-run-123"
         assert data["thread_id"] == "test-thread-123"
         assert data["status"] == "success"
+        assert data["langsmith_session_name"] == "studio-default"
 
     def test_get_run_not_found(self):
         """Test getting a non-existent run"""

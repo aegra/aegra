@@ -1,9 +1,11 @@
 """Unit tests for run_executor service."""
 
 import asyncio
+from collections.abc import AsyncIterator
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from langsmith import get_tracing_context
 
 from aegra_api.models.auth import User
 from aegra_api.models.run_job import RunExecution, RunIdentity, RunJob
@@ -18,6 +20,7 @@ from aegra_api.services.run_executor import (
     _timeout_cancellations,
     execute_run,
 )
+from aegra_api.settings import settings
 
 
 async def _empty_async_gen():  # type: ignore[no-untyped-def]
@@ -77,6 +80,62 @@ class TestExecuteRunSuccess:
         assert mock_finalize.await_args.kwargs["status"] == "success"
 
         mock_signal_end.assert_awaited_once_with("run-1", "success")
+
+    @pytest.mark.asyncio
+    async def test_graph_executes_inside_the_per_run_langsmith_context(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(settings.observability, "LANGSMITH_TRACING", True)
+        monkeypatch.setattr(settings.observability, "LANGSMITH_API_KEY", "test-key")
+        monkeypatch.setattr(settings.observability, "LANGSMITH_PROJECT", "studio-default")
+
+        captured_context: dict[str, object] = {}
+
+        async def traced_events() -> AsyncIterator[tuple[str, object]]:
+            captured_context.update(get_tracing_context())
+            return
+            yield
+
+        graph_context = MagicMock()
+        graph_context.__aenter__ = AsyncMock(return_value=MagicMock())
+        graph_context.__aexit__ = AsyncMock(return_value=False)
+        graph_service = MagicMock()
+        graph_service.get_graph.return_value = graph_context
+
+        job = RunJob(
+            identity=RunIdentity(run_id="run-1", thread_id="thread-1", graph_id="graph-1"),
+            user=User(identity="user-1"),
+            execution=RunExecution(
+                input_data={"msg": "hello"},
+                langsmith_tracer={"project_name": "studio-run", "example_id": "example-123"},
+            ),
+        )
+
+        with (
+            patch("aegra_api.services.run_executor.get_langgraph_service", return_value=graph_service),
+            patch("aegra_api.services.run_executor.start_run", new_callable=AsyncMock, return_value=True),
+            patch("aegra_api.services.run_executor.finalize_run", new_callable=AsyncMock, return_value=True),
+            patch("aegra_api.services.run_executor.streaming_service") as streaming_service,
+            patch("aegra_api.services.run_executor.stream_graph_events", return_value=traced_events()),
+            patch("aegra_api.services.run_executor._signal_end_event", new_callable=AsyncMock),
+            patch("aegra_api.services.run_executor._signal_run_done", new_callable=AsyncMock),
+            patch("aegra_api.services.run_executor.with_auth_ctx") as auth_context,
+        ):
+            entered_auth = AsyncMock()
+            entered_auth.__aenter__ = AsyncMock(return_value=None)
+            entered_auth.__aexit__ = AsyncMock(return_value=False)
+            auth_context.return_value = entered_auth
+            streaming_service.cleanup_run = AsyncMock()
+
+            await execute_run(job)
+
+        assert captured_context["enabled"] is True
+        assert captured_context["project_name"] == "studio-default"
+        assert captured_context["replicas"] == [
+            {
+                "project_name": "studio-run",
+                "updates": {"reference_example_id": "example-123"},
+            },
+            {"project_name": "studio-default", "updates": None},
+        ]
 
 
 class TestExecuteRunCancelledError:

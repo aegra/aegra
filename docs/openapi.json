@@ -4541,6 +4541,36 @@
         "title": "InfoResponse",
         "description": "Info endpoint response model"
       },
+      "LangSmithTracer": {
+        "properties": {
+          "project_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Project Name"
+          },
+          "example_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Example Id"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "title": "LangSmithTracer",
+        "description": "Additional LangSmith tracing destination for a run."
+      },
       "Run": {
         "properties": {
           "run_id": {
@@ -4627,6 +4657,18 @@
             ],
             "title": "Context",
             "description": "Context variables available during execution."
+          },
+          "langsmith_session_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Langsmith Session Name",
+            "description": "LangSmith tracing session (project) for this run when native tracing is enabled."
           },
           "user_id": {
             "type": "string",
@@ -4842,6 +4884,17 @@
             "title": "Stream Subgraphs",
             "description": "Whether to include subgraph events in streaming. When True, includes events from all subgraphs. When False (default when None), excludes subgraph events. Defaults to False for backwards compatibility.",
             "default": false
+          },
+          "langsmith_tracer": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/LangSmithTracer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Configuration for additional tracing with LangSmith."
           },
           "metadata": {
             "anyOf": [

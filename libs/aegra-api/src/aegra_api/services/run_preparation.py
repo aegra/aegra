@@ -21,6 +21,7 @@ from aegra_api.core.orm import Thread as ThreadORM
 from aegra_api.core.orm import _get_session_maker
 from aegra_api.models import Run, RunCreate, User
 from aegra_api.models.run_job import RunBehavior, RunExecution, RunIdentity, RunJob
+from aegra_api.observability.langsmith_tracing import resolve_langsmith_session_name
 from aegra_api.services.executor import executor
 from aegra_api.services.langgraph_service import get_langgraph_service
 from aegra_api.services.run_status import set_thread_status
@@ -261,6 +262,7 @@ async def _prepare_run(
             stream_mode=request.stream_mode,
             checkpoint=request.checkpoint,
             command=request.command,
+            langsmith_tracer=request.langsmith_tracer,
             event_streaming_v2=event_streaming_v2,
         ),
         behavior=RunBehavior(
@@ -284,6 +286,7 @@ async def _prepare_run(
     }
 
     now = datetime.now(UTC)
+    langsmith_session_name = resolve_langsmith_session_name(request.langsmith_tracer)
     run_orm = RunORM(
         run_id=run_id,
         thread_id=thread_id,
@@ -297,6 +300,7 @@ async def _prepare_run(
         updated_at=now,
         output=None,
         error_message=None,
+        langsmith_session_name=langsmith_session_name,
         execution_params=exec_params,
     )
     session.add(run_orm)

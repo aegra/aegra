@@ -27,6 +27,15 @@ _METADATA_MAX_KEYS = 32
 _METADATA_MAX_VALUE_LEN = 512
 
 
+class LangSmithTracer(BaseModel):
+    """Additional LangSmith tracing destination for a run."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    project_name: str | None = None
+    example_id: str | None = None
+
+
 class RunCreate(BaseModel):
     """Request model for creating runs"""
 
@@ -75,6 +84,10 @@ class RunCreate(BaseModel):
     stream_subgraphs: bool | None = Field(
         False,
         description="Whether to include subgraph events in streaming. When True, includes events from all subgraphs. When False (default when None), excludes subgraph events. Defaults to False for backwards compatibility.",
+    )
+    langsmith_tracer: LangSmithTracer | None = Field(
+        None,
+        description="Configuration for additional tracing with LangSmith.",
     )
 
     # Request metadata (top-level in payload).  Reaches OTEL trace
@@ -167,6 +180,10 @@ class Run(BaseModel):
     )
     context: dict[str, Any] | None = Field(
         default_factory=dict, description="Context variables available during execution."
+    )
+    langsmith_session_name: str | None = Field(
+        None,
+        description="LangSmith tracing session (project) for this run when native tracing is enabled.",
     )
     user_id: str = Field(..., description="Identifier of the user who owns this run.")
     created_at: datetime = Field(..., description="Timestamp when the run was created.")

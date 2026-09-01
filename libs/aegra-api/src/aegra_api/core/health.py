@@ -45,7 +45,11 @@ async def info(_request: Request) -> InfoResponse:
         version=__version__,
         description="Production-ready Agent Protocol server built on LangGraph",
         status="running",
-        flags={"assistants": True, "crons": settings.cron.CRON_ENABLED},
+        flags={
+            "assistants": True,
+            "crons": settings.cron.CRON_ENABLED,
+            "langsmith_tracing_session_on_runs": True,
+        },
     )
 
 

@@ -31,6 +31,28 @@ class TestRunCreateValidation:
         with pytest.raises(ValueError, match="Must specify at least one of 'input', 'command', or 'checkpoint'"):
             RunCreate(assistant_id="agent")
 
+    def test_preserves_langsmith_tracer_configuration(self) -> None:
+        run_create = RunCreate(
+            assistant_id="agent",
+            input={"message": "hello"},
+            langsmith_tracer={
+                "project_name": "studio-project",
+                "example_id": "example-123",
+            },
+        )
+
+        assert run_create.langsmith_tracer is not None
+        assert run_create.langsmith_tracer.project_name == "studio-project"
+        assert run_create.langsmith_tracer.example_id == "example-123"
+
+    def test_rejects_unknown_langsmith_tracer_fields(self) -> None:
+        with pytest.raises(ValidationError):
+            RunCreate(
+                assistant_id="agent",
+                input={"message": "hello"},
+                langsmith_tracer={"project_name": "studio-project", "unknown": True},
+            )
+
 
 class TestRunCreateMetadataValidation:
     """Tests for ``RunCreate.metadata`` shape enforcement.

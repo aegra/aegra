@@ -104,6 +104,25 @@ def test_default_project_does_not_create_replicas(monkeypatch: pytest.MonkeyPatc
 
 
 @pytest.mark.asyncio
+async def test_default_project_exports_requested_example_association(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(settings.observability, "LANGSMITH_TRACING", True)
+    monkeypatch.setattr(settings.observability, "LANGSMITH_PROJECT", "studio-default")
+    client = MagicMock()
+    monkeypatch.setattr(run_trees, "_CLIENT", client)
+
+    example_id = "11111111-1111-4111-8111-111111111111"
+
+    with native_langsmith_tracing_context(LangSmithTracer(example_id=example_id)):
+        await RunnableLambda(lambda value: value).ainvoke({"message": "hello"})
+
+    created = client.create_run.call_args.kwargs
+    assert created["session_name"] == "studio-default"
+    assert str(created["reference_example_id"]) == example_id
+
+
+@pytest.mark.asyncio
 async def test_default_project_trace_uses_agent_run_and_thread_ids(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

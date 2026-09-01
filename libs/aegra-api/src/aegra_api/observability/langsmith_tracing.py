@@ -3,6 +3,7 @@
 from collections.abc import Iterator
 from contextlib import contextmanager
 
+from langchain_core.tracers.context import tracing_v2_enabled
 from langsmith import tracing_context
 from langsmith.run_trees import WriteReplica
 from langsmith.utils import get_tracer_project
@@ -30,7 +31,6 @@ def native_langsmith_tracing_context(tracer: LangSmithTracer | None) -> Iterator
         return
 
     default_project = settings.observability.LANGSMITH_PROJECT or get_tracer_project()
-
     if tracer is not None and tracer.project_name:
         updates = {"reference_example_id": tracer.example_id} if tracer.example_id else None
         replicas: list[WriteReplica] = [
@@ -38,6 +38,14 @@ def native_langsmith_tracing_context(tracer: LangSmithTracer | None) -> Iterator
             {"project_name": default_project, "updates": None},
         ]
         with tracing_context(enabled=True, project_name=default_project, replicas=replicas):
+            yield
+        return
+
+    if tracer is not None and tracer.example_id:
+        with (
+            tracing_context(enabled=True, project_name=default_project),
+            tracing_v2_enabled(project_name=default_project, example_id=tracer.example_id),
+        ):
             yield
         return
 

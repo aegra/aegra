@@ -50,7 +50,7 @@ async def test_runs_crud_and_join_e2e() -> None:
                 "stream_mode": ["messages", "values"],
                 "langsmith_tracer": {
                     "project_name": "studio-run",
-                    "example_id": "example-123",
+                    "example_id": "11111111-1111-4111-8111-111111111111",
                 },
             },
         )

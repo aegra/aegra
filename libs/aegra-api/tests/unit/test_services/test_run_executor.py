@@ -82,7 +82,9 @@ class TestExecuteRunSuccess:
         mock_signal_end.assert_awaited_once_with("run-1", "success")
 
     @pytest.mark.asyncio
-    async def test_graph_executes_inside_the_per_run_langsmith_context(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    async def test_graph_executes_inside_the_per_run_langsmith_context(
+        self: "TestExecuteRunSuccess", monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         monkeypatch.setattr(settings.observability, "LANGSMITH_TRACING", True)
         monkeypatch.setattr(settings.observability, "LANGSMITH_API_KEY", "test-key")
         monkeypatch.setattr(settings.observability, "LANGSMITH_PROJECT", "studio-default")
@@ -105,7 +107,10 @@ class TestExecuteRunSuccess:
             user=User(identity="user-1"),
             execution=RunExecution(
                 input_data={"msg": "hello"},
-                langsmith_tracer={"project_name": "studio-run", "example_id": "example-123"},
+                langsmith_tracer={
+                    "project_name": "studio-run",
+                    "example_id": "11111111-1111-4111-8111-111111111111",
+                },
             ),
         )
 
@@ -132,7 +137,7 @@ class TestExecuteRunSuccess:
         assert captured_context["replicas"] == [
             {
                 "project_name": "studio-run",
-                "updates": {"reference_example_id": "example-123"},
+                "updates": {"reference_example_id": "11111111-1111-4111-8111-111111111111"},
             },
             {"project_name": "studio-default", "updates": None},
         ]

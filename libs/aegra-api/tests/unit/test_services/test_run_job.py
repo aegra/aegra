@@ -64,7 +64,10 @@ class TestRunJob:
                 stream_mode="values",
                 checkpoint={"thread_ts": "123"},
                 command=None,
-                langsmith_tracer={"project_name": "studio-run", "example_id": "example-123"},
+                langsmith_tracer={
+                    "project_name": "studio-run",
+                    "example_id": "11111111-1111-4111-8111-111111111111",
+                },
             ),
             behavior=RunBehavior(
                 interrupt_before=["review"],

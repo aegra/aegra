@@ -17,6 +17,10 @@ from aegra_api.services.langgraph_service import create_run_config
 from aegra_api.settings import settings
 
 
+def _identity(value: dict[str, str]) -> dict[str, str]:
+    return value
+
+
 def test_native_tracing_requires_explicit_flag(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(settings.observability, "LANGSMITH_TRACING", True)
     monkeypatch.setattr(settings.observability, "LANGSMITH_API_KEY", None)
@@ -74,7 +78,8 @@ def test_per_run_project_replicates_to_override_and_default(
     monkeypatch.setattr(settings.observability, "LANGSMITH_API_KEY", "test-key")
     monkeypatch.setattr(settings.observability, "LANGSMITH_PROJECT", "studio-default")
 
-    tracer = LangSmithTracer(project_name="studio-run", example_id="example-123")
+    example_id = "11111111-1111-4111-8111-111111111111"
+    tracer = LangSmithTracer(project_name="studio-run", example_id=example_id)
 
     with native_langsmith_tracing_context(tracer):
         context = get_tracing_context()
@@ -84,7 +89,7 @@ def test_per_run_project_replicates_to_override_and_default(
     assert context["replicas"] == [
         {
             "project_name": "studio-run",
-            "updates": {"reference_example_id": "example-123"},
+            "updates": {"reference_example_id": example_id},
         },
         {"project_name": "studio-default", "updates": None},
     ]
@@ -115,7 +120,7 @@ async def test_default_project_exports_requested_example_association(
     example_id = "11111111-1111-4111-8111-111111111111"
 
     with native_langsmith_tracing_context(LangSmithTracer(example_id=example_id)):
-        await RunnableLambda(lambda value: value).ainvoke({"message": "hello"})
+        await RunnableLambda(_identity).ainvoke({"message": "hello"})
 
     created = client.create_run.call_args.kwargs
     assert created["session_name"] == "studio-default"
@@ -134,7 +139,7 @@ async def test_default_project_trace_uses_agent_run_and_thread_ids(
     config = create_run_config(run_id, "thread-1", User(identity="user-1"))
 
     with native_langsmith_tracing_context(None):
-        await RunnableLambda(lambda value: value).ainvoke({"message": "hello"}, config=config)
+        await RunnableLambda(_identity).ainvoke({"message": "hello"}, config=config)
 
     created = client.create_run.call_args.kwargs
     assert str(created["id"]) == run_id

@@ -3,6 +3,7 @@
 import re
 from datetime import datetime
 from typing import Any, Literal, Self
+from uuid import UUID
 
 from pydantic import (
     BaseModel,
@@ -34,6 +35,17 @@ class LangSmithTracer(BaseModel):
 
     project_name: str | None = None
     example_id: str | None = None
+
+    @field_validator("example_id", mode="after")
+    @classmethod
+    def validate_example_id(cls, example_id: str | None) -> str | None:
+        if not example_id:
+            return None
+        try:
+            UUID(example_id)
+        except ValueError as error:
+            raise ValueError("example_id must be a valid UUID") from error
+        return example_id
 
 
 class RunCreate(BaseModel):

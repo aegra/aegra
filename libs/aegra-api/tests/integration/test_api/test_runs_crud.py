@@ -187,7 +187,7 @@ class TestCreateRun:
                     "input": {"message": "hello"},
                     "langsmith_tracer": {
                         "project_name": "studio-run",
-                        "example_id": "example-123",
+                        "example_id": "11111111-1111-4111-8111-111111111111",
                     },
                 },
             )
@@ -201,7 +201,7 @@ class TestCreateRun:
         assert isinstance(submitted_job, RunJob)
         assert submitted_job.execution.langsmith_tracer is not None
         assert submitted_job.execution.langsmith_tracer.project_name == "studio-run"
-        assert submitted_job.execution.langsmith_tracer.example_id == "example-123"
+        assert submitted_job.execution.langsmith_tracer.example_id == "11111111-1111-4111-8111-111111111111"
 
 
 class TestGetRun:

@@ -76,7 +76,10 @@ class TestRunsEndpoints:
             assistant_id="test-assistant",
             input={"message": "hello"},
             config={"configurable": {"key": "value"}},
-            langsmith_tracer={"project_name": "studio-run", "example_id": "example-123"},
+            langsmith_tracer={
+                "project_name": "studio-run",
+                "example_id": "11111111-1111-4111-8111-111111111111",
+            },
         )
 
         monkeypatch.setattr(settings.observability, "LANGSMITH_TRACING", True)

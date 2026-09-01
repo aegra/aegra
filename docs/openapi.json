@@ -3,7 +3,7 @@
   "info": {
     "title": "Aegra",
     "description": "Production-ready Agent Protocol server",
-    "version": "0.10.5"
+    "version": "0.11.0"
   },
   "paths": {
     "/info": {
@@ -4557,7 +4557,9 @@
           "example_id": {
             "anyOf": [
               {
-                "type": "string"
+                "type": "string",
+                "format": "uuid",
+                "description": "LangSmith dataset example UUID to associate with the trace."
               },
               {
                 "type": "null"

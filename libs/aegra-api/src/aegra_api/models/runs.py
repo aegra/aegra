@@ -2,7 +2,7 @@
 
 import re
 from datetime import datetime
-from typing import Any, Literal, Self
+from typing import Annotated, Any, Literal, Self
 from uuid import UUID
 
 from pydantic import (
@@ -34,7 +34,16 @@ class LangSmithTracer(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     project_name: str | None = None
-    example_id: str | None = None
+    example_id: (
+        Annotated[
+            str,
+            Field(
+                description="LangSmith dataset example UUID to associate with the trace.",
+                json_schema_extra={"format": "uuid"},
+            ),
+        ]
+        | None
+    ) = None
 
     @field_validator("example_id", mode="after")
     @classmethod

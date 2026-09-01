@@ -33,7 +33,7 @@ LANGSMITH_PROJECT=my-aegra-project
 LANGSMITH_WORKSPACE_ID=...
 ```
 
-Aegra records the resolved project in each Agent Protocol run response as `langsmith_session_name`. A run request can select an additional project with `langsmith_tracer.project_name` and associate a dataset example with `langsmith_tracer.example_id`. If no per-run project is supplied, `LANGSMITH_PROJECT` is used.
+Aegra records the resolved project in each Agent Protocol run response as `langsmith_session_name`. A run request can select an additional project with `langsmith_tracer.project_name` and associate a dataset example with `langsmith_tracer.example_id`, which must be a UUID string. If no per-run project is supplied, `LANGSMITH_PROJECT` is used.
 
 Set `LANGSMITH_TRACING=false` to disable native trace export. The run response then contains a null `langsmith_session_name`.
 

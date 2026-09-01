@@ -5,7 +5,7 @@ from typing import Self
 import pytest
 from pydantic import ValidationError
 
-from aegra_api.models.runs import RunCreate
+from aegra_api.models.runs import LangSmithTracer, RunCreate
 
 
 class TestRunCreateValidation:
@@ -55,6 +55,12 @@ class TestRunCreateValidation:
                 input={"message": "hello"},
                 langsmith_tracer={"example_id": "not-a-uuid"},
             )
+
+    def test_documents_langsmith_example_id_as_a_uuid(self: Self) -> None:
+        example_schema = LangSmithTracer.model_json_schema()["properties"]["example_id"]
+        string_schema = next(option for option in example_schema["anyOf"] if option.get("type") == "string")
+
+        assert string_schema["format"] == "uuid"
 
     def test_rejects_unknown_langsmith_tracer_fields(self: Self) -> None:
         with pytest.raises(ValidationError):

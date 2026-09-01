@@ -1,4 +1,5 @@
 import pytest
+from httpx import AsyncClient
 
 from aegra_api.settings import settings
 
@@ -40,8 +41,6 @@ async def test_runs_crud_and_join_e2e() -> None:
     # 3) Background run (non-streaming)
     # The currently pinned SDK has no langsmith_tracer keyword yet, so use the Agent Protocol
     # HTTP boundary directly to prove the server accepts the 0.11 request shape.
-    from httpx import AsyncClient
-
     async with AsyncClient(base_url=settings.app.SERVER_URL, timeout=120.0) as http_client:
         response = await http_client.post(
             f"/threads/{thread_id}/runs",

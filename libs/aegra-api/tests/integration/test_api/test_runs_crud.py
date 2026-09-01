@@ -2,6 +2,11 @@
 
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import pytest
+
+from aegra_api.core.orm import Run as RunORM
+from aegra_api.models.run_job import RunJob
+from aegra_api.settings import settings
 from tests.fixtures.clients import create_test_app, make_client
 from tests.fixtures.database import DummySessionBase
 from tests.fixtures.session_fixtures import BasicSession, override_session_dependency
@@ -132,6 +137,69 @@ class TestCreateRun:
 
         # Should get validation error (422) for missing input/command
         assert resp.status_code == 422
+
+    def test_create_run_with_langsmith_tracer_persists_session_and_submits_job(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The HTTP boundary carries Studio tracing through persistence and execution."""
+        app = create_test_app(include_runs=True, include_threads=False)
+        assistant = _assistant_row()
+
+        class Session(BasicSession):
+            scalar_calls: int = 0
+            added_run: RunORM | None = None
+
+            async def scalar(self, _stmt: object) -> object | None:
+                type(self).scalar_calls += 1
+                return None if self.scalar_calls == 1 else assistant
+
+            def add(self, obj: object) -> None:
+                if isinstance(obj, RunORM):
+                    type(self).added_run = obj
+
+        override_session_dependency(app, Session)
+        client = make_client(app)
+        monkeypatch.setattr(settings.observability, "LANGSMITH_TRACING", True)
+        monkeypatch.setattr(settings.observability, "LANGSMITH_PROJECT", "studio-default")
+
+        with (
+            patch("aegra_api.services.run_preparation._validate_resume_command", new_callable=AsyncMock),
+            patch("aegra_api.services.run_preparation.get_langgraph_service") as graph_service,
+            patch(
+                "aegra_api.services.run_preparation.resolve_assistant_id",
+                return_value="test-assistant-123",
+            ),
+            patch("aegra_api.services.run_preparation.update_thread_metadata", new_callable=AsyncMock),
+            patch("aegra_api.services.run_preparation.set_thread_status", new_callable=AsyncMock),
+            patch(
+                "aegra_api.services.run_preparation.executor.submit",
+                new_callable=AsyncMock,
+            ) as submit,
+        ):
+            graph_service.return_value.list_graphs.return_value = ["test-graph"]
+            response = client.post(
+                "/threads/test-thread-123/runs",
+                json={
+                    "assistant_id": "test-assistant-123",
+                    "input": {"message": "hello"},
+                    "langsmith_tracer": {
+                        "project_name": "studio-run",
+                        "example_id": "example-123",
+                    },
+                },
+            )
+
+        assert response.status_code == 200
+        assert response.json()["langsmith_session_name"] == "studio-run"
+        assert Session.added_run is not None
+        assert Session.added_run.langsmith_session_name == "studio-run"
+        submit.assert_awaited_once()
+        submitted_job = submit.await_args.args[0]
+        assert isinstance(submitted_job, RunJob)
+        assert submitted_job.execution.langsmith_tracer is not None
+        assert submitted_job.execution.langsmith_tracer.project_name == "studio-run"
+        assert submitted_job.execution.langsmith_tracer.example_id == "example-123"
 
 
 class TestGetRun:

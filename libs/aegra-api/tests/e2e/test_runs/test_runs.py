@@ -8,7 +8,7 @@ from tests.e2e._utils import await_terminal_run, check_and_skip_if_geo_blocked, 
 
 @pytest.mark.e2e
 @pytest.mark.asyncio
-async def test_runs_crud_and_join_e2e():
+async def test_runs_crud_and_join_e2e() -> None:
     """
     Mirrors existing e2e style using the typed SDK client (see test_chat_streaming, test_background_run_join).
     Validates the non-streaming "background run" flow and CRUD around it:
@@ -38,15 +38,25 @@ async def test_runs_crud_and_join_e2e():
     thread_id = thread["thread_id"]
 
     # 3) Background run (non-streaming)
-    run = await client.runs.create(
-        thread_id=thread_id,
-        assistant_id=assistant_id,
-        input={"messages": [{"role": "user", "content": "Say one short sentence."}]},
-        stream_mode=[
-            "messages",
-            "values",
-        ],  # ensure both modes are available for later stream
-    )
+    # The currently pinned SDK has no langsmith_tracer keyword yet, so use the Agent Protocol
+    # HTTP boundary directly to prove the server accepts the 0.11 request shape.
+    from httpx import AsyncClient
+
+    async with AsyncClient(base_url=settings.app.SERVER_URL, timeout=120.0) as http_client:
+        response = await http_client.post(
+            f"/threads/{thread_id}/runs",
+            json={
+                "assistant_id": assistant_id,
+                "input": {"messages": [{"role": "user", "content": "Say one short sentence."}]},
+                "stream_mode": ["messages", "values"],
+                "langsmith_tracer": {
+                    "project_name": "studio-run",
+                    "example_id": "example-123",
+                },
+            },
+        )
+    assert response.status_code == 200
+    run = response.json()
     elog("Runs.create", run)
     assert "run_id" in run
     assert run["langsmith_session_name"] is None

@@ -17,7 +17,7 @@ from aegra_api.services.langgraph_service import create_run_config
 from aegra_api.settings import settings
 
 
-def test_native_tracing_requires_explicit_flag(monkeypatch) -> None:
+def test_native_tracing_requires_explicit_flag(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(settings.observability, "LANGSMITH_TRACING", True)
     monkeypatch.setattr(settings.observability, "LANGSMITH_API_KEY", None)
 
@@ -28,7 +28,7 @@ def test_native_tracing_requires_explicit_flag(monkeypatch) -> None:
     assert is_native_langsmith_tracing_enabled() is False
 
 
-def test_default_project_is_the_session_name(monkeypatch) -> None:
+def test_default_project_is_the_session_name(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(settings.observability, "LANGSMITH_TRACING", True)
     monkeypatch.setattr(settings.observability, "LANGSMITH_API_KEY", "test-key")
     monkeypatch.setattr(settings.observability, "LANGSMITH_PROJECT", "studio-default")
@@ -36,7 +36,9 @@ def test_default_project_is_the_session_name(monkeypatch) -> None:
     assert resolve_langsmith_session_name(None) == "studio-default"
 
 
-def test_langsmith_default_project_is_used_when_unconfigured(monkeypatch) -> None:
+def test_langsmith_default_project_is_used_when_unconfigured(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     monkeypatch.setattr(settings.observability, "LANGSMITH_TRACING", True)
     monkeypatch.setattr(settings.observability, "LANGSMITH_PROJECT", None)
     monkeypatch.setattr(
@@ -47,7 +49,7 @@ def test_langsmith_default_project_is_used_when_unconfigured(monkeypatch) -> Non
     assert resolve_langsmith_session_name(None) == "default"
 
 
-def test_per_run_project_overrides_the_default(monkeypatch) -> None:
+def test_per_run_project_overrides_the_default(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(settings.observability, "LANGSMITH_TRACING", True)
     monkeypatch.setattr(settings.observability, "LANGSMITH_API_KEY", "test-key")
     monkeypatch.setattr(settings.observability, "LANGSMITH_PROJECT", "studio-default")
@@ -57,7 +59,7 @@ def test_per_run_project_overrides_the_default(monkeypatch) -> None:
     assert resolve_langsmith_session_name(tracer) == "studio-run"
 
 
-def test_disabled_tracing_has_no_session_name(monkeypatch) -> None:
+def test_disabled_tracing_has_no_session_name(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(settings.observability, "LANGSMITH_TRACING", False)
     monkeypatch.setattr(settings.observability, "LANGSMITH_API_KEY", "test-key")
     monkeypatch.setattr(settings.observability, "LANGSMITH_PROJECT", "studio-default")
@@ -65,7 +67,9 @@ def test_disabled_tracing_has_no_session_name(monkeypatch) -> None:
     assert resolve_langsmith_session_name(LangSmithTracer(project_name="studio-run")) is None
 
 
-def test_per_run_project_replicates_to_override_and_default(monkeypatch) -> None:
+def test_per_run_project_replicates_to_override_and_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     monkeypatch.setattr(settings.observability, "LANGSMITH_TRACING", True)
     monkeypatch.setattr(settings.observability, "LANGSMITH_API_KEY", "test-key")
     monkeypatch.setattr(settings.observability, "LANGSMITH_PROJECT", "studio-default")
@@ -86,7 +90,7 @@ def test_per_run_project_replicates_to_override_and_default(monkeypatch) -> None
     ]
 
 
-def test_default_project_does_not_create_replicas(monkeypatch) -> None:
+def test_default_project_does_not_create_replicas(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(settings.observability, "LANGSMITH_TRACING", True)
     monkeypatch.setattr(settings.observability, "LANGSMITH_API_KEY", "test-key")
     monkeypatch.setattr(settings.observability, "LANGSMITH_PROJECT", "studio-default")
@@ -100,7 +104,9 @@ def test_default_project_does_not_create_replicas(monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
-async def test_default_project_trace_uses_agent_run_and_thread_ids(monkeypatch) -> None:
+async def test_default_project_trace_uses_agent_run_and_thread_ids(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     monkeypatch.setattr(settings.observability, "LANGSMITH_TRACING", True)
     monkeypatch.setattr(settings.observability, "LANGSMITH_PROJECT", "studio-default")
     client = MagicMock()

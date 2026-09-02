@@ -33,8 +33,12 @@ from aegra_api.services.event_streaming.protocol import build_event
 
 __all__ = ["RunLister", "ThreadEventSession", "validate_channels"]
 
-# Grace window covering the SDK gap between stream open and run.start landing.
+# Bounds the wait for a same-thread follow-up run once one run has already
+# drained (e.g. a HITL resume). Short: the SDK is expected to respond fast.
 _IDLE_GRACE_SECONDS = 30.0
+# Bounds the wait for the thread's *first* run. Generous: covers a human
+# reading/typing before submitting, not just SDK round-trip latency.
+_INITIAL_RUN_GRACE_SECONDS = 300.0
 _POLL_INTERVAL_SECONDS = 0.25
 
 # Async callable returning the thread's (run_id, status, graph_name) rows,
@@ -61,6 +65,7 @@ class ThreadEventSession:
         namespaces: list[list[str]] | None = None,
         depth: int | None = None,
         idle_grace_seconds: float = _IDLE_GRACE_SECONDS,
+        initial_grace_seconds: float = _INITIAL_RUN_GRACE_SECONDS,
     ) -> None:
         self._thread_id = thread_id
         self._channels = channels
@@ -69,6 +74,7 @@ class ThreadEventSession:
         self._namespaces = [tuple(prefix) for prefix in namespaces] if namespaces else None
         self._depth = depth
         self._idle_grace = idle_grace_seconds
+        self._initial_grace = initial_grace_seconds
         self._seq = 0
         self._drained: set[str] = set()
         # One input.requested per interrupt per session — the same interrupt can
@@ -93,8 +99,13 @@ class ThreadEventSession:
         on the same SSE connection the SDK holds open. An interrupted run keeps
         the full grace window; a terminal run still waits one grace window so a
         same-thread follow-up run is not dropped, but never blocks forever.
+
+        Before the thread's first run, the shorter idle grace does not apply:
+        the SDK subscribes ahead of ``run.start`` and a client may take a while
+        to submit, so only the longer initial grace bounds that wait.
         """
         idle_deadline: float | None = None
+        saw_any_run = False
         loop = asyncio.get_running_loop()
 
         while True:
@@ -104,14 +115,18 @@ class ThreadEventSession:
                     progressed = True
                     yield envelope
                 self._drained.add(run_id)
+                if not saw_any_run:
+                    saw_any_run = True
+                idle_deadline = None
 
             if progressed:
                 idle_deadline = None
                 continue
 
             now = loop.time()
+            grace = self._idle_grace if saw_any_run else self._initial_grace
             if idle_deadline is None:
-                idle_deadline = now + self._idle_grace
+                idle_deadline = now + grace
             elif now >= idle_deadline:
                 return
             await asyncio.sleep(_POLL_INTERVAL_SECONDS)

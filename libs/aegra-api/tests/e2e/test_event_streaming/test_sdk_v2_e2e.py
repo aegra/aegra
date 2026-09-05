@@ -74,6 +74,39 @@ async def test_sdk_thread_stream_run_start_and_events() -> None:
 
 @pytest.mark.e2e
 @pytest.mark.asyncio
+async def test_run_start_persists_request_context() -> None:
+    """The v2 command path preserves context in the run execution request."""
+    if not await _v2_enabled():
+        pytest.skip("FF_V2_EVENT_STREAMING is disabled on the server under test")
+
+    assistant_id = await _ensure_assistant()
+    client = get_client(url=_base_url())
+    thread = await client.threads.create()
+    thread_id = thread["thread_id"]
+
+    async with httpx.AsyncClient(base_url=_base_url(), timeout=10.0) as http:
+        response = await http.post(
+            f"/threads/{thread_id}/commands",
+            json={
+                "id": 1,
+                "method": "run.start",
+                "params": {
+                    "assistant_id": assistant_id,
+                    "input": {"messages": [{"role": "user", "content": json.dumps({"steps": 1})}]},
+                    "context": {"tenant_id": "acme"},
+                },
+            },
+        )
+
+    assert response.status_code == 200
+    run_id = response.json()["result"]["run_id"]
+    run = await client.runs.get(thread_id, run_id)
+    assert run["context"] == {"tenant_id": "acme"}
+    await client.runs.join(thread_id, run_id)
+
+
+@pytest.mark.e2e
+@pytest.mark.asyncio
 async def test_sdk_receives_values_events() -> None:
     """The SDK receives values-channel events carrying the run's state."""
     if not await _v2_enabled():

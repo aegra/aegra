@@ -45,7 +45,12 @@ class TestRunStart:
             {
                 "id": 1,
                 "method": "run.start",
-                "params": {"assistant_id": "agent", "input": {"x": 1}, "config": {"c": 2}},
+                "params": {
+                    "assistant_id": "agent",
+                    "input": {"x": 1},
+                    "config": {"c": 2},
+                    "context": {"tenant_id": "acme"},
+                },
             },
             user,
         )
@@ -53,6 +58,7 @@ class TestRunStart:
         assert request.assistant_id == "agent"
         assert request.input == {"x": 1}
         assert request.config == {"c": 2}
+        assert request.context == {"tenant_id": "acme"}
         # v2 runs are flagged for the native v3 stream path.
         assert prepared_run.call_args.kwargs["event_streaming_v2"] is True
 
@@ -78,6 +84,17 @@ class TestRunStart:
     async def test_run_start_missing_assistant_id_is_invalid(self, prepared_run: AsyncMock, user: User) -> None:
         resp, run_id = await _dispatch({"id": 1, "method": "run.start", "params": {"input": {}}}, user)
         assert resp["type"] == "error"
+        assert resp["error"] == "invalid_argument"
+        assert run_id is None
+        prepared_run.assert_not_called()
+
+    @pytest.mark.parametrize("context", [[], False, 0, ""])
+    async def test_run_start_rejects_non_object_context(
+        self, prepared_run: AsyncMock, user: User, context: Any
+    ) -> None:
+        resp, run_id = await _dispatch(
+            {"id": 1, "method": "run.start", "params": {"assistant_id": "agent", "context": context}}, user
+        )
         assert resp["error"] == "invalid_argument"
         assert run_id is None
         prepared_run.assert_not_called()

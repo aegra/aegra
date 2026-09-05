@@ -2,7 +2,14 @@
 
 import dataclasses
 import inspect
+from base64 import b64encode
+from collections import deque
+from datetime import date, datetime
+from decimal import Decimal
+from enum import Enum
+from pathlib import PurePath
 from typing import Any
+from uuid import UUID
 
 from aegra_api.core.serializers.base import SerializationError, Serializer
 
@@ -28,37 +35,44 @@ class GeneralSerializer(Serializer):
 
         # Handle Pydantic v2 models (model_dump method)
         if hasattr(obj, "model_dump") and callable(obj.model_dump):
-            return obj.model_dump()
+            return self._serialize_object(obj.model_dump())
 
         # Handle LangChain objects and Pydantic v1 models (dict method)
         elif hasattr(obj, "dict") and callable(obj.dict):
-            return obj.dict()
+            return self._serialize_object(obj.dict())
 
         # Handle LangGraph Interrupt objects (they don't have .dict() method)
         elif obj.__class__.__name__ == "Interrupt" and hasattr(obj, "value") and hasattr(obj, "id"):
             return {"value": self._serialize_object(obj.value), "id": obj.id}
 
-        # Command (from tools like write_todos) is a dataclass with no model_dump/
-        # .dict()/_asdict; it would otherwise hit str() and reach consumers as an
-        # unparseable repr. Emit all fields to match orjson's native output on Platform.
-        elif obj.__class__.__name__ == "Command" and dataclasses.is_dataclass(obj):
+        # Dataclasses (including LangGraph Command) have no standard JSON form.
+        # Emit all fields recursively so nested values retain their structure.
+        elif dataclasses.is_dataclass(obj):
             return {field.name: self._serialize_object(getattr(obj, field.name)) for field in dataclasses.fields(obj)}
 
         # Handle NamedTuples (like PregelTask) - they have _asdict() method
         elif hasattr(obj, "_asdict") and callable(obj._asdict):
             return {k: self._serialize_object(v) for k, v in obj._asdict().items()}
 
-        # Handle sets and frozensets
-        elif isinstance(obj, (set, frozenset)):
-            return list(obj)
+        # Handle common scalar types that JSON does not encode natively.
+        elif isinstance(obj, bytes):
+            return b64encode(obj).decode("ascii")
+        elif isinstance(obj, Enum):
+            return self._serialize_object(obj.value)
+        elif isinstance(obj, (datetime, date)):
+            return obj.isoformat()
+        elif isinstance(obj, (UUID, Decimal, PurePath)):
+            return str(obj)
+        elif isinstance(obj, Exception):
+            return {"type": obj.__class__.__name__, "message": str(obj)}
 
-        # Handle tuples and lists recursively
-        elif isinstance(obj, (tuple, list)):
+        # Handle array-like containers recursively.
+        elif isinstance(obj, (set, frozenset, deque, tuple, list)):
             return [self._serialize_object(item) for item in obj]
 
         # Handle dictionaries recursively
         elif isinstance(obj, dict):
-            return {k: self._serialize_object(v) for k, v in obj.items()}
+            return self._serialize_mapping(obj)
 
         # Handle basic JSON-serializable types
         elif isinstance(obj, (str, int, float, bool, type(None))):
@@ -67,3 +81,29 @@ class GeneralSerializer(Serializer):
         # Fallback to string representation for unknown types
         else:
             return str(obj)
+
+    def _serialize_mapping_key(self, key: Any) -> str:
+        serialized_key = self._serialize_object(key)
+        if isinstance(serialized_key, str):
+            return serialized_key
+        if isinstance(serialized_key, bool):
+            return "true" if serialized_key else "false"
+        if serialized_key is None:
+            return "null"
+
+        return str(serialized_key)
+
+    def _serialize_mapping(self, mapping: dict[Any, Any]) -> dict[str, Any]:
+        result: dict[str, Any] = {}
+        original_keys: dict[str, Any] = {}
+
+        for key, value in mapping.items():
+            serialized_key = self._serialize_mapping_key(key)
+            original_key = original_keys.get(serialized_key)
+            if serialized_key in result and original_key != key:
+                raise ValueError(f"Mapping keys {original_key!r} and {key!r} serialize to the same key")
+
+            original_keys[serialized_key] = key
+            result[serialized_key] = self._serialize_object(value)
+
+        return result

@@ -314,7 +314,7 @@ Supported factory signatures: 0-arg (called once at startup), config-only (`dict
 - Run `make lint` (or `uv run ruff check .`) for linting
 - Include tests for new functionality
 - Update migrations if modifying database schema
-- Title format: `[component] Brief description`
+- Title format: Conventional Commits (`type(scope): subject`), e.g. `fix(api): raise search limit cap`
 
 ### Documentation Updates (STRICT)
 - **EVERY code change that affects user-facing behavior MUST include corresponding documentation updates.** This is NOT optional — treat docs as part of the implementation, not a follow-up task.

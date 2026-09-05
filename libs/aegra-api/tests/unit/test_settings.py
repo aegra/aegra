@@ -6,7 +6,14 @@ import pytest
 from pydantic import ValidationError
 from sqlalchemy.engine import make_url
 
-from aegra_api.settings import AppSettings, CronSettings, DatabaseSettings, RedisSettings, WorkerSettings
+from aegra_api.settings import (
+    AppSettings,
+    CronSettings,
+    DatabaseSettings,
+    RedisSettings,
+    ThreadTTLSettings,
+    WorkerSettings,
+)
 
 
 class TestAppSettingsServerURL:
@@ -25,6 +32,7 @@ class TestAppSettingsServerURL:
             "LOG_LEVEL",
             "LOG_VERBOSITY",
             "AEGRA_CONFIG",
+            "MAX_SEARCH_LIMIT",
         ):
             monkeypatch.delenv(var, raising=False)
 
@@ -637,3 +645,47 @@ class TestCronSettingsValidation:
 
         with pytest.raises((ValueError, ValidationError), match="CRON_POLL_INTERVAL_SECONDS"):
             CronSettings(_env_file=None)
+
+
+class TestThreadTTLSettings:
+    """AEGRA_THREAD_TTL is passed through raw; parsing lives in services.thread_ttl."""
+
+    def test_defaults_to_none(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv("AEGRA_THREAD_TTL", raising=False)
+        monkeypatch.delenv("LANGGRAPH_THREAD_TTL", raising=False)
+        ttl = ThreadTTLSettings(_env_file=None)
+
+        assert ttl.AEGRA_THREAD_TTL is None
+        assert ttl.LANGGRAPH_THREAD_TTL is None
+
+    def test_raw_string_passthrough(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("AEGRA_THREAD_TTL", '{"default_ttl": 60}')
+        ttl = ThreadTTLSettings(_env_file=None)
+
+        assert ttl.AEGRA_THREAD_TTL == '{"default_ttl": 60}'
+
+
+class TestMaxSearchLimit:
+    """MAX_SEARCH_LIMIT defaults to the LangGraph Platform threads.search max."""
+
+    def test_default_matches_langgraph_threads_search_max(
+        self: "TestMaxSearchLimit", monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.delenv("MAX_SEARCH_LIMIT", raising=False)
+        app = AppSettings(_env_file=None)
+        assert app.MAX_SEARCH_LIMIT == 1000
+
+    def test_reads_from_environment(self: "TestMaxSearchLimit", monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("MAX_SEARCH_LIMIT", "500")
+        app = AppSettings(_env_file=None)
+        assert app.MAX_SEARCH_LIMIT == 500
+
+    def test_rejects_zero(self: "TestMaxSearchLimit", monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("MAX_SEARCH_LIMIT", "0")
+        with pytest.raises(ValidationError):
+            AppSettings(_env_file=None)
+
+    def test_rejects_negative(self: "TestMaxSearchLimit", monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("MAX_SEARCH_LIMIT", "-1")
+        with pytest.raises(ValidationError):
+            AppSettings(_env_file=None)

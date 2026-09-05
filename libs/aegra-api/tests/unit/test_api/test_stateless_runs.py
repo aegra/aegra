@@ -1250,3 +1250,25 @@ class TestStatelessCreateRuns:
             await stateless_create_runs(requests, mock_user, mock_session)
 
         schedule_cleanup.assert_called_once_with("run-2", "thread-2", mock_user.identity)
+
+    @pytest.mark.asyncio
+    async def test_cleans_up_when_submission_is_cancelled(self, mock_user: User, mock_session: AsyncMock) -> None:
+        """Schedule cleanup when executor submission is cancelled."""
+        request = RunCreate(assistant_id="agent", input={"msg": "one"})
+        prepare = AsyncMock(return_value=("run-1", MagicMock(thread_id="thread-1"), MagicMock()))
+
+        with (
+            patch("aegra_api.api.stateless_runs.uuid4", return_value="thread-1"),
+            patch("aegra_api.api.stateless_runs._apply_create_run_auth", new_callable=AsyncMock),
+            patch("aegra_api.api.stateless_runs._prepare_run", prepare),
+            patch(
+                "aegra_api.api.stateless_runs.executor.submit",
+                new_callable=AsyncMock,
+                side_effect=asyncio.CancelledError,
+            ),
+            patch("aegra_api.api.stateless_runs.schedule_background_cleanup") as schedule_cleanup,
+            pytest.raises(asyncio.CancelledError),
+        ):
+            await stateless_create_runs([request], mock_user, mock_session)
+
+        schedule_cleanup.assert_called_once_with("run-1", "thread-1", mock_user.identity)

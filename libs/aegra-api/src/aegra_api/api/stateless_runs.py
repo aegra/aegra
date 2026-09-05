@@ -359,7 +359,18 @@ async def stateless_create_runs(
                 schedule_background_cleanup(run_id, run.thread_id, user.identity)
                 cleanup_scheduled.add(run_id)
             results.append(run)
+    except asyncio.CancelledError:
+        for index, (run_id, run, _job) in enumerate(prepared):
+            if run_id not in cleanup_scheduled and requests[index].on_completion != "keep":
+                schedule_background_cleanup(run_id, run.thread_id, user.identity)
+        raise
     except (RedisError, OSError, RuntimeError):
+        for index, (run_id, run, _job) in enumerate(prepared):
+            if run_id not in cleanup_scheduled and requests[index].on_completion != "keep":
+                schedule_background_cleanup(run_id, run.thread_id, user.identity)
+        raise
+    except Exception:
+        # Executor implementations may expose backend-specific failures.
         for index, (run_id, run, _job) in enumerate(prepared):
             if run_id not in cleanup_scheduled and requests[index].on_completion != "keep":
                 schedule_background_cleanup(run_id, run.thread_id, user.identity)

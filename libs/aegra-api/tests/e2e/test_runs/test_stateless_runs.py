@@ -12,7 +12,7 @@ import pytest
 from httpx import AsyncClient
 
 from aegra_api.settings import settings
-from tests.e2e._utils import elog, get_e2e_client
+from tests.e2e._utils import check_and_skip_if_geo_blocked, elog, get_e2e_client
 
 # ---------------------------------------------------------------------------
 # POST /runs/wait  (stateless wait)
@@ -247,6 +247,9 @@ async def test_stateless_batch_creates_ordered_runs() -> None:
 
     assert resp.status_code == 200, f"Expected 200, got {resp.status_code}: {resp.text}"
     runs = resp.json()
+    elog("POST /runs/batch", {"status": resp.status_code, "runs": runs})
+    for run in runs:
+        check_and_skip_if_geo_blocked(run)
     assert len(runs) == 2
     assert all(run["assistant_id"] == assistant["assistant_id"] for run in runs)
     assert runs[0]["thread_id"] != runs[1]["thread_id"]
@@ -275,6 +278,8 @@ async def test_stateless_batch_rejects_partial_invalid_request() -> None:
             ],
         )
 
+    elog("POST /runs/batch (invalid)", {"status": resp.status_code, "body": resp.json()})
+    check_and_skip_if_geo_blocked(resp.json())
     assert resp.status_code == 422, f"Expected 422, got {resp.status_code}: {resp.text}"
 
 

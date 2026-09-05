@@ -242,7 +242,7 @@ async def test_get_assistant_subgraphs_not_found():
 
 @pytest.mark.e2e
 @pytest.mark.asyncio
-async def test_get_assistant_subgraph_by_namespace():
+async def test_get_assistant_subgraph_by_namespace() -> None:
     """Test that we can retrieve a specific subgraph by namespace.
 
     Uses subgraph_agent which has actual subgraphs.
@@ -285,7 +285,7 @@ async def test_get_assistant_subgraph_by_namespace():
 
 @pytest.mark.e2e
 @pytest.mark.asyncio
-async def test_get_assistant_subgraph_by_namespace_not_found():
+async def test_get_assistant_subgraph_by_namespace_not_found() -> None:
     """Test that querying a non-existent subgraph namespace returns 404."""
     client = get_e2e_client()
 

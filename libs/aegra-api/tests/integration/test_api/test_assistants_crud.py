@@ -1,6 +1,7 @@
 """Integration tests for assistants CRUD operations"""
 
 import pytest
+from fastapi import HTTPException
 
 from aegra_api.services.assistant_service import get_assistant_service
 from tests.fixtures.clients import create_test_app, make_client
@@ -778,7 +779,7 @@ class TestGetAssistantSubgraphs:
 class TestGetAssistantSubgraphByNamespace:
     """Test GET /assistants/{assistant_id}/subgraphs/{namespace}"""
 
-    def test_get_assistant_subgraph_by_namespace(self, client, mock_assistant_service):
+    def test_get_assistant_subgraph_by_namespace(self, client, mock_assistant_service) -> None:
         """Test getting specific subgraph by namespace"""
         subgraphs = {
             "subgraph_1": {
@@ -795,7 +796,7 @@ class TestGetAssistantSubgraphByNamespace:
         assert "subgraph_1" in data
         mock_assistant_service.get_assistant_subgraph.assert_called_once_with("test-assistant-123", "subgraph_1", False)
 
-    def test_get_assistant_subgraph_by_namespace_with_recurse(self, client, mock_assistant_service):
+    def test_get_assistant_subgraph_by_namespace_with_recurse(self, client, mock_assistant_service) -> None:
         """Test getting specific subgraph by namespace with recurse=true"""
         subgraphs = {
             "subgraph_1": {"nodes": []},
@@ -810,10 +811,8 @@ class TestGetAssistantSubgraphByNamespace:
         assert "subgraph_1" in data
         mock_assistant_service.get_assistant_subgraph.assert_called_once_with("test-assistant-123", "subgraph_1", True)
 
-    def test_get_assistant_subgraph_by_namespace_not_found(self, client, mock_assistant_service):
+    def test_get_assistant_subgraph_by_namespace_not_found(self, client, mock_assistant_service) -> None:
         """Test 404 when namespace is not found"""
-        from fastapi import HTTPException
-
         mock_assistant_service.get_assistant_subgraph.side_effect = HTTPException(
             status_code=404, detail="Subgraph namespace 'missing' not found"
         )

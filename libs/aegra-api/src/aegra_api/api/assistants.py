@@ -11,6 +11,8 @@ Architecture:
 - Service Layer (assistant_service.py): Business logic, validation, orchestration
 """
 
+from typing import Any
+
 from fastapi import APIRouter, Body, Depends, Query
 
 from aegra_api.core.auth_deps import auth_dependency
@@ -245,7 +247,7 @@ async def get_assistant_subgraph_by_namespace(
     namespace: str,
     recurse: bool = Query(False, description="Recursively include nested subgraphs."),
     service: AssistantService = Depends(get_assistant_service),
-):
+) -> dict[str, Any]:
     """Get a specific subgraph of an assistant by namespace.
 
     Returns the subgraph definitions for the requested namespace. Set

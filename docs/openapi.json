@@ -3,7 +3,7 @@
   "info": {
     "title": "Aegra",
     "description": "Production-ready Agent Protocol server",
-    "version": "0.10.4"
+    "version": "0.10.5"
   },
   "paths": {
     "/info": {
@@ -817,7 +817,11 @@
             "description": "Successful Response",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "title": "Response Get Assistant Subgraph By Namespace Assistants  Assistant Id  Subgraphs  Namespace  Get"
+                }
               }
             }
           },

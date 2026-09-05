@@ -1210,7 +1210,7 @@ class TestGetAssistantSubgraph:
     """Test AssistantService.get_assistant_subgraph"""
 
     @pytest.mark.asyncio
-    async def test_get_assistant_subgraph_success(self, assistant_service: AssistantService):
+    async def test_get_assistant_subgraph_success(self, assistant_service: AssistantService) -> None:
         expected = {"agent:sub": {"input_schema": {}, "output_schema": {}}}
         with patch.object(
             assistant_service, "get_assistant_subgraphs", new=AsyncMock(return_value=expected)
@@ -1220,7 +1220,7 @@ class TestGetAssistantSubgraph:
             assert result == expected
 
     @pytest.mark.asyncio
-    async def test_get_assistant_subgraph_not_found_empty(self, assistant_service: AssistantService):
+    async def test_get_assistant_subgraph_not_found_empty(self, assistant_service: AssistantService) -> None:
         with patch.object(assistant_service, "get_assistant_subgraphs", new=AsyncMock(return_value={})):
             with pytest.raises(HTTPException) as exc_info:
                 await assistant_service.get_assistant_subgraph("asst-1", "missing_ns")
@@ -1228,7 +1228,7 @@ class TestGetAssistantSubgraph:
             assert "missing_ns" in exc_info.value.detail
 
     @pytest.mark.asyncio
-    async def test_get_assistant_subgraph_not_found_different_ns(self, assistant_service: AssistantService):
+    async def test_get_assistant_subgraph_not_found_different_ns(self, assistant_service: AssistantService) -> None:
         with patch.object(assistant_service, "get_assistant_subgraphs", new=AsyncMock(return_value={"other_ns": {}})):
             with pytest.raises(HTTPException) as exc_info:
                 await assistant_service.get_assistant_subgraph("asst-1", "target_ns")

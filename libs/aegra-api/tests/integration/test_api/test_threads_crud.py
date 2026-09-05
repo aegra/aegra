@@ -630,18 +630,28 @@ class TestSearchThreads:
         )
         assert resp.status_code == 422
 
-    def test_search_accepts_bool_metadata_filter(self, client):
+    def test_search_accepts_bool_metadata_filter(self, client: TestClient) -> None:
         """metadata={'active': True} is accepted end-to-end (real matching verified in E2E)."""
         resp = client.post("/threads/search", json={"metadata": {"active": True}})
         assert resp.status_code == 200
         assert isinstance(resp.json(), list)
 
+    def test_search_threads_with_values_rejects_with_400(self, client: TestClient) -> None:
+        """Filtering search by state values returns 400 because state is stored in checkpoints."""
+        resp = client.post(
+            "/threads/search",
+            json={"values": {"foo": "bar"}},
+        )
+        assert resp.status_code == 400
+        assert "not currently supported" in resp.json()["detail"]
+
 
 class TestCountThreads:
-    """Test POST /threads/count endpoint"""
+    """Test POST /threads/count endpoint."""
 
     @pytest.fixture
     def client(self) -> TestClient:
+        """Create test client with seeded threads in ThreadSession."""
         app = create_test_app(include_runs=False, include_threads=True)
 
         threads = [
@@ -654,42 +664,59 @@ class TestCountThreads:
         return make_client(app)
 
     def test_count_threads_no_filters(self, client: TestClient) -> None:
-        """Test counting without any filters"""
+        """Counting without filters returns total count of caller threads."""
         resp = client.post("/threads/count", json={})
         assert resp.status_code == 200
-        data = resp.json()
-        assert isinstance(data, int)
-        assert data == 3
+        assert resp.json() == 3
 
     def test_count_threads_with_status(self, client: TestClient) -> None:
-        """Test counting with status filter"""
-        resp = client.post("/threads/count", json={"status": "idle"})
-        assert resp.status_code == 200
-        data = resp.json()
-        assert isinstance(data, int)
+        """Counting with status filter returns count of matching threads."""
+        resp_idle = client.post("/threads/count", json={"status": "idle"})
+        assert resp_idle.status_code == 200
+        assert resp_idle.json() == 2
+
+        resp_busy = client.post("/threads/count", json={"status": "busy"})
+        assert resp_busy.status_code == 200
+        assert resp_busy.json() == 1
+
+        resp_interrupted = client.post("/threads/count", json={"status": "interrupted"})
+        assert resp_interrupted.status_code == 200
+        assert resp_interrupted.json() == 0
 
     def test_count_threads_with_metadata(self, client: TestClient) -> None:
-        """Test counting with metadata filter"""
-        resp = client.post(
+        """Counting with metadata filter returns count of matching threads."""
+        resp_prod = client.post(
             "/threads/count",
             json={"metadata": {"env": "prod"}},
         )
-        assert resp.status_code == 200
-        data = resp.json()
-        assert isinstance(data, int)
+        assert resp_prod.status_code == 200
+        assert resp_prod.json() == 2
 
-    def test_count_threads_with_values(self, client: TestClient) -> None:
-        """Test counting with values filter"""
+        resp_beta = client.post(
+            "/threads/count",
+            json={"metadata": {"team": "beta"}},
+        )
+        assert resp_beta.status_code == 200
+        assert resp_beta.json() == 2
+
+        resp_none = client.post(
+            "/threads/count",
+            json={"metadata": {"env": "prod", "team": "gamma"}},
+        )
+        assert resp_none.status_code == 200
+        assert resp_none.json() == 0
+
+    def test_count_threads_with_values_rejects_with_400(self, client: TestClient) -> None:
+        """Filtering by state values returns 400 because state is stored in checkpoints."""
         resp = client.post(
             "/threads/count",
             json={"values": {"foo": "bar"}},
         )
-        assert resp.status_code == 200
-        data = resp.json()
-        assert isinstance(data, int)
+        assert resp.status_code == 400
+        assert "not currently supported" in resp.json()["detail"]
 
     def test_count_threads_invalid_status(self, client: TestClient) -> None:
-        """Test counting with invalid status returns 422"""
+        """Counting with invalid status returns 422 validation error."""
         resp = client.post("/threads/count", json={"status": "nonexistent_status"})
         assert resp.status_code == 422
 

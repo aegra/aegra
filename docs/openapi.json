@@ -1620,7 +1620,7 @@
           "Threads"
         ],
         "summary": "Count Threads",
-        "description": "Count threads matching filters.",
+        "description": "Count threads matching filters.\n\nArgs:\n    request: Thread count filter parameters (status, metadata, values).\n    user: The authenticated user making the request.\n    session: Database async session.\n\nReturns:\n    The integer count of matching threads owned by the user.",
         "operationId": "count_threads_threads_count_post",
         "requestBody": {
           "content": {

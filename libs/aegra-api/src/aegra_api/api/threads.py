@@ -41,7 +41,7 @@ from aegra_api.models import (
     ThreadUpdate,
     User,
 )
-from aegra_api.models.errors import CONFLICT, NOT_FOUND, AgentProtocolError
+from aegra_api.models.errors import BAD_REQUEST, CONFLICT, NOT_FOUND, AgentProtocolError
 from aegra_api.services.streaming_service import streaming_service
 from aegra_api.services.thread_state_service import ThreadStateService
 from aegra_api.services.thread_ttl import get_thread_ttl_config, prune_expired_threads_for_user
@@ -994,7 +994,7 @@ def _build_thread_filter_clauses(
     return clauses
 
 
-@router.post("/threads/search", response_model=list[Thread])
+@router.post("/threads/search", response_model=list[Thread], responses={**BAD_REQUEST})
 async def search_threads(
     request: ThreadSearchRequest,
     user: User = Depends(get_current_user),
@@ -1032,7 +1032,7 @@ async def search_threads(
     return threads_models
 
 
-@router.post("/threads/count")
+@router.post("/threads/count", responses={**BAD_REQUEST})
 async def count_threads(
     request: ThreadCountRequest,
     user: User = Depends(get_current_user),

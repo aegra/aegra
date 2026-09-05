@@ -78,9 +78,7 @@ async def test_sdk_thread_stream_run_start_and_events() -> None:
 async def test_input_respond_update_lands_in_thread_state() -> None:
     """``input.respond`` with ``update`` writes state in the same superstep as the resume.
 
-    The stock SDK's ``respond()`` sends only the response, so the wire body is
-    posted directly. An ``ignore`` response ends the run without another model
-    call, which keeps the assertion on the update alone.
+    Raw wire body because the SDK's ``respond()`` has no ``update`` argument.
     """
     if not await _v2_enabled():
         pytest.skip("FF_V2_EVENT_STREAMING is disabled on the server under test")
@@ -108,6 +106,7 @@ async def test_input_respond_update_lands_in_thread_state() -> None:
                             "params": {
                                 "interrupt_id": data["interrupt_id"],
                                 "namespace": [],
+                                # ignore ends the run without another model call.
                                 "response": [{"type": "ignore"}],
                                 "update": {"messages": [{"role": "system", "content": marker}]},
                             },

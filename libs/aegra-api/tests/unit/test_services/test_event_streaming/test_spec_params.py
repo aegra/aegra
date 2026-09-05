@@ -1,9 +1,7 @@
 """Pin v2 command handlers to the Agent Protocol param shapes.
 
-The key sets below are copied from ``RunStartParams`` / ``InputRespondOne`` /
-``InputRespondMany`` in the public protocol spec (langchain-ai/agent-protocol,
-``streaming/js/protocol.ts``). When the spec grows a key, add it here first;
-the tests then fail until the handler forwards it or lists it as a no-op.
+Key sets mirror langchain-ai/agent-protocol ``streaming/js/protocol.ts``; a new
+spec key added here fails until the handler forwards it or lists it as a no-op.
 """
 
 from typing import Any

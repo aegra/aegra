@@ -1,6 +1,8 @@
 """Unit tests for run_executor service."""
 
 import asyncio
+from collections.abc import AsyncIterator
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -243,6 +245,39 @@ class TestStreamNativeV2InterruptDetection:
     async def test_no_interrupt_when_absent(self) -> None:
         event = {"params": {"data": {"messages": []}}}
         assert await self._run(("values", event)) is False
+
+    @pytest.mark.asyncio
+    async def test_forwards_interrupt_kwargs_to_native_stream(self) -> None:
+        captured_kwargs: dict[str, Any] = {}
+
+        async def stream_native_v3_events(
+            **kwargs: Any,
+        ) -> AsyncIterator[tuple[str, dict[str, Any]]]:
+            captured_kwargs.update(kwargs)
+            empty_events: tuple[tuple[str, dict[str, Any]], ...] = ()
+            for event in empty_events:
+                yield event
+
+        result = _GraphResult()
+        with (
+            patch.object(run_executor_module, "stream_native_v3_events", stream_native_v3_events),
+            patch.object(run_executor_module, "broker_manager") as bm,
+            patch.object(run_executor_module, "streaming_service") as ss,
+        ):
+            bm.allocate_event_id = AsyncMock(return_value="run-1_event_1")
+            ss.put_to_broker = AsyncMock()
+            await _stream_native_v2(
+                _make_job(),
+                MagicMock(),
+                {"msg": "x"},
+                {},
+                result,
+                interrupt_before=["agent"],
+                interrupt_after=["tools"],
+            )
+
+        assert captured_kwargs["interrupt_before"] == ["agent"]
+        assert captured_kwargs["interrupt_after"] == ["tools"]
 
 
 class TestSignalEndEvent:

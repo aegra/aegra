@@ -69,10 +69,9 @@ class RunJob(BaseModel):
     user: User
     execution: RunExecution = RunExecution()
     behavior: RunBehavior = RunBehavior()
-    # Scheduling metadata is kept on the job so local execution and workers
-    # apply the same API contract. Production workers use the persisted
-    # ``not_before`` column for crash-safe scheduling.
-    after_seconds: int = Field(default=0, ge=0)
+    # Scheduling metadata keeps local and worker API behavior aligned.
+    # Production workers use persisted ``not_before`` for crash-safe scheduling.
+    after_seconds: int = Field(default=0, ge=0, le=2_147_483_647)
     # JSONB-persisted; deliberately ``dict[str, Any]`` so legacy/drifted rows stay readable via
     # ``from_run_orm``. OTEL boundary in ``merge_run_metadata`` filters at emit. Do not narrow.
     run_metadata: dict[str, Any] = Field(default_factory=dict)

@@ -22,7 +22,7 @@ import structlog
 from asgi_correlation_id import correlation_id
 from redis import RedisError
 from redis import TimeoutError as RedisTimeoutError
-from sqlalchemy import select, update
+from sqlalchemy import or_, select, update
 
 from aegra_api.core.active_runs import active_runs, explicit_run_cancellations
 from aegra_api.core.orm import Run as RunORM
@@ -292,6 +292,7 @@ class WorkerExecutor(BaseExecutor):
     async def _dispatch_due_runs(self) -> None:
         maker = _get_session_maker()
         now = datetime.now(UTC)
+        retry_after = now - timedelta(seconds=settings.worker.STUCK_PENDING_THRESHOLD_SECONDS)
         async with maker() as session:
             result = await session.execute(
                 select(RunORM.run_id)
@@ -300,11 +301,24 @@ class WorkerExecutor(BaseExecutor):
                     RunORM.claimed_by.is_(None),
                     RunORM.not_before.isnot(None),
                     RunORM.not_before <= now,
+                    or_(RunORM.dispatched_at.is_(None), RunORM.dispatched_at < retry_after),
                 )
                 .order_by(RunORM.not_before.asc())
                 .limit(100)
+                .with_for_update(skip_locked=True)
             )
             run_ids = [row[0] for row in result.fetchall()]
+            if run_ids:
+                await session.execute(
+                    update(RunORM)
+                    .where(
+                        RunORM.run_id.in_(run_ids),
+                        RunORM.status == "pending",
+                        RunORM.claimed_by.is_(None),
+                    )
+                    .values(dispatched_at=now)
+                )
+                await session.commit()
 
         if not run_ids:
             return
@@ -314,8 +328,19 @@ class WorkerExecutor(BaseExecutor):
                 await client.rpush(settings.worker.WORKER_QUEUE_KEY, run_id)  # type: ignore[arg-type]
                 logger.info("Dispatched delayed run", run_id=run_id)
         except RedisError:
-            # Leave the row pending and unclaimed. The Postgres fallback below
-            # remains available, and the next dispatch tick retries Redis.
+            # Clear the marker so the next tick retries the push.
+            async with maker() as session:
+                await session.execute(
+                    update(RunORM)
+                    .where(
+                        RunORM.run_id.in_(run_ids),
+                        RunORM.status == "pending",
+                        RunORM.claimed_by.is_(None),
+                        RunORM.dispatched_at == now,
+                    )
+                    .values(dispatched_at=None)
+                )
+                await session.commit()
             logger.warning("Redis unavailable while dispatching delayed runs", run_ids=run_ids)
 
     async def _execute_and_release(
@@ -498,7 +523,8 @@ async def _acquire_and_load(run_id: str, worker_name: str) -> _LoadedRun | None:
     is missing execution_params (data corruption / pre-migration row),
     releases the claim and marks the run as errored.
     """
-    lease_until = datetime.now(UTC) + timedelta(seconds=settings.worker.LEASE_DURATION_SECONDS)
+    now = datetime.now(UTC)
+    lease_until = now + timedelta(seconds=settings.worker.LEASE_DURATION_SECONDS)
     maker = _get_session_maker()
     async with maker() as session:
         result = await session.execute(
@@ -507,6 +533,7 @@ async def _acquire_and_load(run_id: str, worker_name: str) -> _LoadedRun | None:
                 RunORM.run_id == run_id,
                 RunORM.status == "pending",
                 RunORM.claimed_by.is_(None),
+                or_(RunORM.not_before.is_(None), RunORM.not_before <= now),
             )
             .values(claimed_by=worker_name, lease_expires_at=lease_until, status="running")
         )

@@ -34,9 +34,14 @@ class LocalExecutor(BaseExecutor):
         )
 
         async def _run_after_delay() -> None:
-            if job.after_seconds:
-                await asyncio.sleep(job.after_seconds)
-            await execute_run(job)
+            try:
+                if job.after_seconds:
+                    await asyncio.sleep(job.after_seconds)
+                await execute_run(job)
+            finally:
+                current = asyncio.current_task()
+                if active_runs.get(job.identity.run_id) is current:
+                    active_runs.pop(job.identity.run_id, None)
 
         task = asyncio.create_task(_run_after_delay(), context=trace_ctx)
         active_runs[job.identity.run_id] = task

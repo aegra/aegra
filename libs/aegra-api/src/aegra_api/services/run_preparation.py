@@ -203,9 +203,8 @@ async def _prepare_run(
     """
     await _validate_resume_command(session, thread_id, request.command)
 
-    # FastAPI supplies a validated RunCreate, but keeping this boundary
-    # defensive preserves compatibility with internal callers and tests that
-    # provide request-like objects rather than a Pydantic instance.
+    # FastAPI provides RunCreate; this boundary also supports request-like
+    # internal and test callers without a Pydantic instance.
     after_seconds = getattr(request, "after_seconds", 0)
     if not isinstance(after_seconds, int):
         after_seconds = 0

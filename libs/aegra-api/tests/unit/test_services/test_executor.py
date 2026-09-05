@@ -57,9 +57,10 @@ class TestLocalExecutor:
             await asyncio.sleep(0.05)
 
             mock_execute.assert_not_awaited()
-            task = active_runs.pop("delayed-run")
+            task = active_runs["delayed-run"]
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
+            assert "delayed-run" not in active_runs
 
     @pytest.mark.asyncio
     async def test_wait_for_completion_returns_on_done(self) -> None:

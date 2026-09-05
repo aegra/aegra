@@ -34,6 +34,7 @@ class RunCreate(BaseModel):
     after_seconds: int = Field(
         0,
         ge=0,
+        le=2_147_483_647,
         description="Delay execution by this many seconds after creating the run.",
     )
     input: dict[str, Any] | None = Field(

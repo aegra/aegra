@@ -12,7 +12,7 @@ from datetime import UTC, datetime, timedelta
 
 import structlog
 from redis import RedisError
-from sqlalchemy import select, update
+from sqlalchemy import or_, select, update
 
 from aegra_api.core.orm import Run as RunORM
 from aegra_api.core.orm import _get_session_maker
@@ -110,6 +110,7 @@ class LeaseReaper:
                 select(RunORM.run_id).where(
                     RunORM.status == "pending",
                     RunORM.claimed_by.is_(None),
+                    or_(RunORM.not_before.is_(None), RunORM.not_before <= now),
                     RunORM.created_at < now - timedelta(seconds=settings.worker.STUCK_PENDING_THRESHOLD_SECONDS),
                 )
             )

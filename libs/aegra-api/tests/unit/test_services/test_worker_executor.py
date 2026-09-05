@@ -498,6 +498,7 @@ class TestDelayedRunDispatch:
             patch(f"{MODULE}.settings") as mock_settings,
         ):
             mock_settings.worker.WORKER_QUEUE_KEY = "aegra:jobs"
+            mock_settings.worker.STUCK_PENDING_THRESHOLD_SECONDS = 120
             await WorkerExecutor()._dispatch_due_runs()
 
         mock_client.rpush.assert_awaited_once_with("aegra:jobs", "run-due")

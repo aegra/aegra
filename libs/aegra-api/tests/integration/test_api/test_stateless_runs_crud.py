@@ -436,3 +436,19 @@ class TestStatelessRouteRegistration:
 
         resp = client.get("/runs")
         assert resp.status_code == 405
+
+    def test_runs_batch_route_exists(self) -> None:
+        app = create_test_app(include_runs=True)
+        override_session_dependency(app, BasicSession)
+        client = make_client(app)
+
+        resp = client.get("/runs/batch")
+        assert resp.status_code == 405
+
+    def test_runs_batch_requires_an_array(self) -> None:
+        app = create_test_app(include_runs=True)
+        override_session_dependency(app, BasicSession)
+        client = make_client(app)
+
+        resp = client.post("/runs/batch", json={"assistant_id": "agent", "input": {}})
+        assert resp.status_code == 422

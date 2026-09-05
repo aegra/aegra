@@ -292,7 +292,8 @@ class WorkerExecutor(BaseExecutor):
     async def _dispatch_due_runs(self) -> None:
         maker = _get_session_maker()
         now = datetime.now(UTC)
-        retry_after = now - timedelta(seconds=settings.worker.STUCK_PENDING_THRESHOLD_SECONDS)
+        dispatch_lease_seconds = max(5, min(30, settings.worker.POSTGRES_POLL_INTERVAL_SECONDS * 2))
+        retry_after = now - timedelta(seconds=dispatch_lease_seconds)
         async with maker() as session:
             result = await session.execute(
                 select(RunORM.run_id)
@@ -310,18 +311,6 @@ class WorkerExecutor(BaseExecutor):
             run_ids = [row[0] for row in result.fetchall()]
             if not run_ids:
                 return
-            try:
-                client = redis_manager.get_client()
-                for run_id in run_ids:
-                    await client.rpush(settings.worker.WORKER_QUEUE_KEY, run_id)  # type: ignore[arg-type]
-                    logger.info("Dispatched delayed run", run_id=run_id)
-            except RedisError:
-                await session.rollback()
-                logger.warning("Redis unavailable while dispatching delayed runs", run_ids=run_ids)
-                return
-
-            # Publish before committing the marker: a crash can duplicate a
-            # queue entry, but it cannot strand a run behind a committed marker.
             await session.execute(
                 update(RunORM)
                 .where(
@@ -332,6 +321,26 @@ class WorkerExecutor(BaseExecutor):
                 .values(dispatched_at=now)
             )
             await session.commit()
+
+        try:
+            client = redis_manager.get_client()
+            for run_id in run_ids:
+                await client.rpush(settings.worker.WORKER_QUEUE_KEY, run_id)  # type: ignore[arg-type]
+                logger.info("Dispatched delayed run", run_id=run_id)
+        except RedisError:
+            async with maker() as session:
+                await session.execute(
+                    update(RunORM)
+                    .where(
+                        RunORM.run_id.in_(run_ids),
+                        RunORM.status == "pending",
+                        RunORM.claimed_by.is_(None),
+                        RunORM.dispatched_at == now,
+                    )
+                    .values(dispatched_at=None)
+                )
+                await session.commit()
+            logger.warning("Redis unavailable while dispatching delayed runs", run_ids=run_ids)
 
     async def _execute_and_release(
         self,

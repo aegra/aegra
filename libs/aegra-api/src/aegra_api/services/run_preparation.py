@@ -203,11 +203,11 @@ async def _prepare_run(
     """
     await _validate_resume_command(session, thread_id, request.command)
 
-    # FastAPI provides RunCreate; this boundary also supports request-like
-    # internal and test callers without a Pydantic instance.
-    after_seconds = getattr(request, "after_seconds", 0)
-    if not isinstance(after_seconds, int):
-        after_seconds = 0
+    # FastAPI provides RunCreate; request-like callers may omit this field.
+    request_fields = getattr(request, "__dict__", {})
+    after_seconds = getattr(request, "after_seconds", 0) if "after_seconds" in request_fields else 0
+    if not isinstance(after_seconds, int) or not 0 <= after_seconds <= 2_147_483_647:
+        raise HTTPException(status_code=422, detail="`after_seconds` must be an integer between 0 and 2147483647")
 
     run_id = str(uuid4())
     langgraph_service = get_langgraph_service()

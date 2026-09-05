@@ -44,6 +44,14 @@ def _cron_response(**overrides: Any) -> CronResponse:
     return CronResponse(**defaults)
 
 
+def _cron_orm(**overrides: Any) -> Mock:
+    """Build a mock ORM row from the response defaults."""
+    cron = Mock()
+    for field, value in _cron_response(**overrides).model_dump().items():
+        setattr(cron, "metadata_dict" if field == "metadata" else field, value)
+    return cron
+
+
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
@@ -55,7 +63,14 @@ def mock_cron_service() -> AsyncMock:
 
 
 @pytest.fixture
-def client(mock_cron_service: AsyncMock) -> Iterator[TestClient]:
+def mock_db_session() -> AsyncMock:
+    session = AsyncMock()
+    session.scalar.return_value = _cron_orm()
+    return session
+
+
+@pytest.fixture
+def client(mock_cron_service: AsyncMock, mock_db_session: AsyncMock) -> Iterator[TestClient]:
     """TestClient with the crons router mounted and service mocked."""
     app = create_test_app(include_runs=False, include_threads=False)
 
@@ -65,16 +80,8 @@ def client(mock_cron_service: AsyncMock) -> Iterator[TestClient]:
     app.include_router(crons_module.router)
     app.dependency_overrides[get_cron_service] = lambda: mock_cron_service
 
-    # Override get_session so create endpoints don't require a real DB. scalar
-    # returns a thread owned by the test user so create_cron_for_thread's
-    # ownership gate passes in the happy path.
-    owned_thread = Mock()
-    owned_thread.user_id = "test-user"
-
     async def _mock_session() -> AsyncIterator[AsyncMock]:
-        sess = AsyncMock()
-        sess.scalar.return_value = owned_thread
-        yield sess
+        yield mock_db_session
 
     app.dependency_overrides[get_session] = _mock_session
 
@@ -163,17 +170,19 @@ class TestCreateCronForThread:
 class TestGetCron:
     """Test GET /runs/crons/{cron_id}."""
 
-    def test_gets_cron(self, client: TestClient, mock_cron_service: AsyncMock) -> None:
-        mock_cron_service.get_cron.return_value = _cron_response()
-
+    def test_gets_cron(self, client: TestClient, mock_db_session: AsyncMock) -> None:
         resp = client.get("/runs/crons/cron-001")
 
         assert resp.status_code == 200
         assert resp.json()["cron_id"] == "cron-001"
-        mock_cron_service.get_cron.assert_awaited_once_with("cron-001", "test-user")
+        assert resp.headers["cache-control"] == "no-store"
+        stmt = mock_db_session.scalar.await_args.args[0]
+        params = stmt.compile().params
+        assert params["cron_id_1"] == "cron-001"
+        assert params["user_id_1"] == "test-user"
 
-    def test_returns_404_when_not_found(self, client: TestClient, mock_cron_service: AsyncMock) -> None:
-        mock_cron_service.get_cron.side_effect = HTTPException(404, "Cron 'missing' not found")
+    def test_returns_404_when_not_found(self, client: TestClient, mock_db_session: AsyncMock) -> None:
+        mock_db_session.scalar.return_value = None
 
         resp = client.get("/runs/crons/missing")
 

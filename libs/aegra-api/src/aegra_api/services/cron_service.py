@@ -297,11 +297,6 @@ class CronService:
         logger.info("Created cron job", cron_id=cron_orm.cron_id, schedule=request.schedule)
         return cron_orm
 
-    async def get_cron(self, cron_id: str, user_identity: str) -> CronResponse:
-        """Return a cron job owned by the user."""
-        cron = await self._get_cron_or_404(cron_id, user_identity)
-        return _cron_to_response(cron)
-
     async def update_cron(
         self,
         cron_id: str,

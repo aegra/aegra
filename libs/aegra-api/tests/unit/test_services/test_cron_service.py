@@ -341,42 +341,6 @@ class TestCreateCron:
 
 
 # ---------------------------------------------------------------------------
-# CronService.get_cron
-# ---------------------------------------------------------------------------
-
-
-class TestGetCron:
-    """Test CronService.get_cron."""
-
-    @pytest.mark.asyncio
-    async def test_returns_owned_cron(
-        self,
-        cron_service: CronService,
-        mock_session: AsyncMock,
-    ) -> None:
-        mock_session.scalar.return_value = _make_cron_orm()
-
-        response = await cron_service.get_cron("cron-001", "test-user")
-
-        assert response.cron_id == "cron-001"
-        stmt = mock_session.scalar.await_args.args[0]
-        assert set(stmt.compile().params.values()) == {"cron-001", "test-user"}
-
-    @pytest.mark.asyncio
-    async def test_returns_404_when_not_owned_or_missing(
-        self,
-        cron_service: CronService,
-        mock_session: AsyncMock,
-    ) -> None:
-        mock_session.scalar.return_value = None
-
-        with pytest.raises(HTTPException) as exc:
-            await cron_service.get_cron("missing", "test-user")
-
-        assert exc.value.status_code == 404
-
-
-# ---------------------------------------------------------------------------
 # CronService.update_cron
 # ---------------------------------------------------------------------------
 

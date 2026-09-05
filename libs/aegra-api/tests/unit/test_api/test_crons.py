@@ -5,6 +5,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
+from fastapi import HTTPException, Response
 
 from aegra_api.api.crons import _authorize_cron_create, _trigger_first_run, get_cron
 from aegra_api.models import Run, User
@@ -206,20 +207,55 @@ class TestAuthorizeCronCreate:
 
 
 class TestGetCron:
-    """Regression tests for get-by-ID authorization dispatch."""
+    """Regression tests for get-by-ID authorization and ownership filtering."""
 
     @pytest.mark.asyncio
-    async def test_dispatches_crons_read_before_service_call(self) -> None:
+    async def test_applies_auth_filters_to_owned_cron_query(self) -> None:
         user = User(identity="alice", scopes=[])
-        service = AsyncMock()
+        session = AsyncMock()
+        cron = Mock()
+        session.scalar.return_value = cron
         expected = object()
-        service.get_cron.return_value = expected
+        response = Response()
 
-        with patch("aegra_api.api.crons.handle_event", new_callable=AsyncMock) as mock_handle:
-            result = await get_cron("cron-42", user, service)
+        with (
+            patch(
+                "aegra_api.api.crons.handle_event",
+                new_callable=AsyncMock,
+                return_value={"team_id": "eng"},
+            ) as mock_handle,
+            patch("aegra_api.api.crons._cron_to_response", return_value=expected),
+        ):
+            result = await get_cron("cron-42", response, user, session)
 
         context, value = mock_handle.await_args.args
         assert (context.resource, context.action) == ("crons", "read")
         assert value == {"cron_id": "cron-42"}
-        service.get_cron.assert_awaited_once_with("cron-42", "alice")
+        stmt = session.scalar.await_args.args[0]
+        compiled = stmt.compile()
+        assert "crons.cron_id" in str(compiled)
+        assert "crons.user_id" in str(compiled)
+        assert "crons.metadata" in str(compiled)
+        assert compiled.params["cron_id_1"] == "cron-42"
+        assert compiled.params["user_id_1"] == "alice"
+        assert compiled.params["metadata_1"] == {"team_id": "eng"}
         assert result is expected
+
+    @pytest.mark.asyncio
+    async def test_returns_404_when_cron_is_missing_or_filtered_out(self) -> None:
+        user = User(identity="alice", scopes=[])
+        session = AsyncMock()
+        session.scalar.return_value = None
+        response = Response()
+
+        with (
+            patch(
+                "aegra_api.api.crons.handle_event",
+                new_callable=AsyncMock,
+                return_value={"team_id": "eng"},
+            ),
+            pytest.raises(HTTPException) as exc_info,
+        ):
+            await get_cron("cron-42", response, user, session)
+
+        assert exc_info.value.status_code == 404

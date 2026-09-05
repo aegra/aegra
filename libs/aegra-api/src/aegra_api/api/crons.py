@@ -19,6 +19,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from aegra_api.core.auth_deps import auth_dependency, get_current_user
+from aegra_api.core.auth_filters import build_metadata_filter
 from aegra_api.core.auth_handlers import build_auth_context, handle_event
 from aegra_api.core.orm import Cron as CronORM
 from aegra_api.core.orm import Thread as ThreadORM
@@ -143,14 +144,24 @@ async def create_cron_for_thread(
 @router.get("/runs/crons/{cron_id}", response_model=CronResponse, responses={**NOT_FOUND})
 async def get_cron(
     cron_id: str,
+    response: Response,
     user: User = Depends(get_current_user),
-    service: CronService = Depends(get_cron_service),
+    session: AsyncSession = Depends(get_session),
 ) -> CronResponse:
     """Get a cron job by ID."""
     ctx = build_auth_context(user, "crons", "read")
-    await handle_event(ctx, {"cron_id": cron_id})
+    filters = await handle_event(ctx, {"cron_id": cron_id})
 
-    return await service.get_cron(cron_id, user.identity)
+    stmt = select(CronORM).where(CronORM.cron_id == cron_id, CronORM.user_id == user.identity)
+    auth_filter = build_metadata_filter(CronORM.metadata_dict, filters)
+    if auth_filter is not None:
+        stmt = stmt.where(auth_filter)
+    cron = await session.scalar(stmt)
+    if cron is None:
+        raise HTTPException(404, f"Cron '{cron_id}' not found")
+
+    response.headers["Cache-Control"] = "no-store"
+    return _cron_to_response(cron)
 
 
 # ---------------------------------------------------------------------------

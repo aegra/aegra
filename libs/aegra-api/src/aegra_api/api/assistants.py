@@ -237,3 +237,18 @@ async def get_assistant_subgraphs(
     namespace.
     """
     return await service.get_assistant_subgraphs(assistant_id, namespace, recurse)
+
+
+@router.get("/assistants/{assistant_id}/subgraphs/{namespace}", responses={**NOT_FOUND})
+async def get_assistant_subgraph_by_namespace(
+    assistant_id: str,
+    namespace: str,
+    recurse: bool = Query(False, description="Recursively include nested subgraphs."),
+    service: AssistantService = Depends(get_assistant_service),
+):
+    """Get a specific subgraph of an assistant by namespace.
+
+    Returns the subgraph definitions for the requested namespace. Set
+    `recurse=true` to include deeply nested subgraphs.
+    """
+    return await service.get_assistant_subgraph(assistant_id, namespace, recurse)

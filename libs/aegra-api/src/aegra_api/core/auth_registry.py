@@ -32,6 +32,7 @@ ROUTE_AUTH_MAP: Final[dict[tuple[str, str], tuple[str, str]]] = {
     ("GET", "/assistants/{assistant_id}/schemas"): ("assistants", "read"),
     ("GET", "/assistants/{assistant_id}/graph"): ("assistants", "read"),
     ("GET", "/assistants/{assistant_id}/subgraphs"): ("assistants", "read"),
+    ("GET", "/assistants/{assistant_id}/subgraphs/{namespace}"): ("assistants", "read"),
     # --- threads ------------------------------------------------------------
     ("POST", "/threads"): ("threads", "create"),
     ("GET", "/threads"): ("threads", "search"),
@@ -114,6 +115,7 @@ SELF_DISPATCHING: Final[frozenset[tuple[str, str]]] = frozenset(
         ("GET", "/assistants/{assistant_id}/schemas"),
         ("GET", "/assistants/{assistant_id}/graph"),
         ("GET", "/assistants/{assistant_id}/subgraphs"),
+        ("GET", "/assistants/{assistant_id}/subgraphs/{namespace}"),
         ("POST", "/threads"),
         ("GET", "/threads"),
         ("POST", "/threads/search"),

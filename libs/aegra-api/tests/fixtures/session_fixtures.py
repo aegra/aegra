@@ -30,9 +30,15 @@ class BasicSession(DummySessionBase):
 class ThreadSession(BasicSession):
     """Session for thread operations"""
 
-    def __init__(self, threads: list[Any] | None = None):
+    def __init__(self, threads: list[Any] | None = None, count: int | None = None) -> None:
         super().__init__()
         self.threads = threads or []
+        self.count = count
+
+    async def scalar(self, stmt: Any = None) -> Any:
+        if self.count is not None:
+            return self.count
+        return len(self.threads)
 
     async def scalars(self, stmt: Any = None) -> Any:
         # Inserts go to the base, which echoes the RETURNING row create paths read.

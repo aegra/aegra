@@ -106,6 +106,7 @@ class ThreadSearchRequest(BaseModel):
     """Request model for thread search"""
 
     metadata: dict[str, Any] | None = Field(None, description="Metadata filters")
+    values: dict[str, Any] | None = Field(None, description="State values filter (SDK compatibility)")
     status: str | None = Field(None, description="Thread status filter (idle, busy, interrupted, error)")
     limit: int | None = Field(20, le=100, ge=1, description="Maximum results")
     offset: int | None = Field(0, ge=0, description="Results offset")
@@ -122,6 +123,22 @@ class ThreadSearchRequest(BaseModel):
         None,
         description="Sort direction (SDK-compatible). Defaults to 'desc' when sort_by is set.",
     )
+
+    @field_validator("status")
+    @classmethod
+    def validate_status(cls, v: str | None) -> str | None:
+        """Validate status filter conforms to API specification."""
+        if v is not None:
+            return validate_thread_status(v)
+        return v
+
+
+class ThreadCountRequest(BaseModel):
+    """Request model for thread count"""
+
+    metadata: dict[str, Any] | None = Field(None, description="Metadata filters")
+    values: dict[str, Any] | None = Field(None, description="State values filter (SDK compatibility)")
+    status: str | None = Field(None, description="Thread status filter (idle, busy, interrupted, error)")
 
     @field_validator("status")
     @classmethod

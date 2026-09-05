@@ -19,7 +19,7 @@ from tests.fixtures.database import (
     DummySessionBase,
     override_get_session_dep,
 )
-from tests.fixtures.session_fixtures import BasicSession, override_session_dependency
+from tests.fixtures.session_fixtures import BasicSession, ThreadSession, override_session_dependency
 from tests.fixtures.test_helpers import DummyRun, DummyThread
 
 
@@ -526,8 +526,6 @@ class TestSearchThreads:
             _thread_row("thread-3", status="idle", metadata={"env": "prod", "team": "beta"}),
         ]
 
-        from tests.fixtures.session_fixtures import ThreadSession
-
         override_session_dependency(app, ThreadSession, threads=threads)
         return make_client(app)
 
@@ -637,6 +635,63 @@ class TestSearchThreads:
         resp = client.post("/threads/search", json={"metadata": {"active": True}})
         assert resp.status_code == 200
         assert isinstance(resp.json(), list)
+
+
+class TestCountThreads:
+    """Test POST /threads/count endpoint"""
+
+    @pytest.fixture
+    def client(self) -> TestClient:
+        app = create_test_app(include_runs=False, include_threads=True)
+
+        threads = [
+            _thread_row("thread-1", status="idle", metadata={"env": "prod", "team": "alpha"}),
+            _thread_row("thread-2", status="busy", metadata={"env": "dev", "team": "beta"}),
+            _thread_row("thread-3", status="idle", metadata={"env": "prod", "team": "beta"}),
+        ]
+
+        override_session_dependency(app, ThreadSession, threads=threads)
+        return make_client(app)
+
+    def test_count_threads_no_filters(self, client: TestClient) -> None:
+        """Test counting without any filters"""
+        resp = client.post("/threads/count", json={})
+        assert resp.status_code == 200
+        data = resp.json()
+        assert isinstance(data, int)
+        assert data == 3
+
+    def test_count_threads_with_status(self, client: TestClient) -> None:
+        """Test counting with status filter"""
+        resp = client.post("/threads/count", json={"status": "idle"})
+        assert resp.status_code == 200
+        data = resp.json()
+        assert isinstance(data, int)
+
+    def test_count_threads_with_metadata(self, client: TestClient) -> None:
+        """Test counting with metadata filter"""
+        resp = client.post(
+            "/threads/count",
+            json={"metadata": {"env": "prod"}},
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert isinstance(data, int)
+
+    def test_count_threads_with_values(self, client: TestClient) -> None:
+        """Test counting with values filter"""
+        resp = client.post(
+            "/threads/count",
+            json={"values": {"foo": "bar"}},
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert isinstance(data, int)
+
+    def test_count_threads_invalid_status(self, client: TestClient) -> None:
+        """Test counting with invalid status returns 422"""
+        resp = client.post("/threads/count", json={"status": "nonexistent_status"})
+        assert resp.status_code == 422
 
 
 class TestThreadGetState:

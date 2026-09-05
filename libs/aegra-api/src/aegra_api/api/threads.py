@@ -10,7 +10,7 @@ from uuid import uuid4
 
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -27,6 +27,7 @@ from aegra_api.models import (
     Thread,
     ThreadCheckpoint,
     ThreadCheckpointPostRequest,
+    ThreadCountRequest,
     ThreadCreate,
     ThreadHistoryRequest,
     ThreadList,
@@ -948,6 +949,31 @@ async def prune_threads(
     return ThreadPruneResponse(deleted=deleted, pruned=pruned)
 
 
+def _build_thread_filter_clauses(
+    user_id: str,
+    filters: Any,
+    status: str | None = None,
+    metadata: dict[str, Any] | None = None,
+) -> list[Any]:
+    """Build shared filter clauses for thread search and count queries."""
+    clauses: list[Any] = [ThreadORM.user_id == user_id]
+    # Compile the handler filter rather than merging only its "metadata" key:
+    # the flat shape and the $eq/$contains/$or/$and operators were dropped here.
+    auth_filter = build_metadata_filter(ThreadORM.metadata_json, filters)
+    if auth_filter is not None:
+        clauses.append(auth_filter)
+
+    if status:
+        clauses.append(ThreadORM.status == status)
+
+    if metadata:
+        # JSONB containment: type-correct, deep-nested, GIN-indexable. Mirrors
+        # AssistantService.search_assistants for cross-endpoint consistency.
+        clauses.append(ThreadORM.metadata_json.op("@>")(metadata))
+
+    return clauses
+
+
 @router.post("/threads/search", response_model=list[Thread])
 async def search_threads(
     request: ThreadSearchRequest,
@@ -964,20 +990,8 @@ async def search_threads(
     value = request.model_dump()
     filters = await handle_event(ctx, value)
 
-    stmt = select(ThreadORM).where(ThreadORM.user_id == user.identity)
-    # Compile the handler filter rather than merging only its "metadata" key:
-    # the flat shape and the $eq/$contains/$or/$and operators were dropped here.
-    auth_filter = build_metadata_filter(ThreadORM.metadata_json, filters)
-    if auth_filter is not None:
-        stmt = stmt.where(auth_filter)
-
-    if request.status:
-        stmt = stmt.where(ThreadORM.status == request.status)
-
-    if request.metadata:
-        # JSONB containment: type-correct, deep-nested, GIN-indexable. Mirrors
-        # AssistantService.search_assistants for cross-endpoint consistency.
-        stmt = stmt.where(ThreadORM.metadata_json.op("@>")(request.metadata))
+    clauses = _build_thread_filter_clauses(user.identity, filters, request.status, request.metadata)
+    stmt = select(ThreadORM).where(*clauses)
 
     offset = request.offset or 0
     limit = request.limit or 20
@@ -994,3 +1008,21 @@ async def search_threads(
     threads_models = [_serialize_thread(t) for t in rows]
 
     return threads_models
+
+
+@router.post("/threads/count")
+async def count_threads(
+    request: ThreadCountRequest,
+    user: User = Depends(get_current_user),
+    session: AsyncSession = Depends(get_session),
+) -> int:
+    """Count threads matching filters."""
+    ctx = build_auth_context(user, "threads", "search")
+    value = request.model_dump(exclude_none=True)
+    filters = await handle_event(ctx, value)
+
+    clauses = _build_thread_filter_clauses(user.identity, filters, request.status, request.metadata)
+    stmt = select(func.count()).select_from(ThreadORM).where(*clauses)
+
+    total = await session.scalar(stmt)
+    return total or 0

@@ -136,6 +136,22 @@ threads = await client.threads.search(
 )
 ```
 
+## Counting threads
+
+Count threads matching metadata, status, or state filters without transferring the full thread list:
+
+```python
+# Count by metadata
+count = await client.threads.count(
+    metadata={"user_name": "Alice"},
+)
+
+# Count by status
+count = await client.threads.count(
+    status="interrupted",
+)
+```
+
 ## Listing threads
 
 ```python

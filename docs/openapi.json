@@ -5411,7 +5411,7 @@
               }
             ],
             "title": "Values",
-            "description": "State values filter (SDK compatibility)"
+            "description": "State values filter (SDK compatibility; filtering by values is not supported and returns 400)"
           },
           "status": {
             "anyOf": [
@@ -5655,7 +5655,7 @@
               }
             ],
             "title": "Values",
-            "description": "State values filter (SDK compatibility)"
+            "description": "State values filter (SDK compatibility; filtering by values is not supported and returns 400)"
           },
           "status": {
             "anyOf": [

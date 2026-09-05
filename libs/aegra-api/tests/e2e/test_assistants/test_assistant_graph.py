@@ -1,4 +1,5 @@
 import pytest
+from langgraph_sdk.errors import NotFoundError
 
 from tests.e2e._utils import elog, get_e2e_client
 
@@ -270,7 +271,8 @@ async def test_get_assistant_subgraph_by_namespace() -> None:
         )
 
         assert isinstance(subgraph, dict)
-        assert target_namespace in subgraph
+        assert set(subgraph.keys()) == {target_namespace}
+        assert subgraph[target_namespace] == all_subgraphs[target_namespace]
 
         elog(
             "Single subgraph retrieved successfully by namespace",
@@ -297,12 +299,12 @@ async def test_get_assistant_subgraph_by_namespace_not_found() -> None:
     )
 
     try:
-        with pytest.raises(Exception) as exc_info:
+        with pytest.raises(NotFoundError) as exc_info:
             await client.assistants.get_subgraphs(
                 assistant_id=assistant["assistant_id"],
                 namespace="non_existent_namespace_xyz",
             )
-        assert "404" in str(exc_info.value) or "not found" in str(exc_info.value).lower()
+        assert exc_info.value.status_code == 404
         elog("Subgraphs endpoint correctly returns 404 for non-existent namespace", {})
     finally:
         await client.assistants.delete(assistant_id=assistant["assistant_id"])

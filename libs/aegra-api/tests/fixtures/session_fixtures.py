@@ -1,6 +1,6 @@
 """Shared session fixtures for testing"""
 
-from typing import Any
+from typing import Any, Self
 
 from sqlalchemy import Insert
 
@@ -30,13 +30,13 @@ class BasicSession(DummySessionBase):
 class ThreadSession(BasicSession):
     """Session test double for thread operations."""
 
-    def __init__(self, threads: list[Any] | None = None, count: int | None = None) -> None:
+    def __init__(self: Self, threads: list[Any] | None = None, count: int | None = None) -> None:
         """Initialize ThreadSession with optional threads list and count override."""
         super().__init__()
         self.threads = threads or []
         self.count = count
 
-    def _filter_threads(self, stmt: Any = None) -> list[Any]:
+    def _filter_threads(self: Self, stmt: Any = None) -> list[Any]:
         """Filter threads based on whereclause conditions in the statement."""
         if stmt is None or not hasattr(stmt, "whereclause") or stmt.whereclause is None:
             return list(self.threads)
@@ -60,14 +60,14 @@ class ThreadSession(BasicSession):
                 filtered = [t for t in filtered if getattr(t, "user_id", None) == right_val]
         return filtered
 
-    async def scalar(self, stmt: Any = None) -> Any:
+    async def scalar(self: Self, stmt: Any = None) -> Any:
         """Return scalar count or value, evaluating whereclause filters if present."""
         if self.count is not None:
             return self.count
         filtered = self._filter_threads(stmt)
         return len(filtered)
 
-    async def scalars(self, stmt: Any = None) -> Any:
+    async def scalars(self: Self, stmt: Any = None) -> Any:
         """Return scalar results, evaluating whereclause filters if present."""
         if isinstance(stmt, Insert):
             return await super().scalars(stmt)

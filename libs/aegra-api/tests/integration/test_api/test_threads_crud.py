@@ -1,7 +1,7 @@
 """Integration tests for threads CRUD operations"""
 
 from contextlib import asynccontextmanager
-from typing import Any
+from typing import Any, Self
 from unittest.mock import AsyncMock, MagicMock, Mock, patch
 
 import pytest
@@ -630,13 +630,13 @@ class TestSearchThreads:
         )
         assert resp.status_code == 422
 
-    def test_search_accepts_bool_metadata_filter(self, client: TestClient) -> None:
+    def test_search_accepts_bool_metadata_filter(self: Self, client: TestClient) -> None:
         """metadata={'active': True} is accepted end-to-end (real matching verified in E2E)."""
         resp = client.post("/threads/search", json={"metadata": {"active": True}})
         assert resp.status_code == 200
         assert isinstance(resp.json(), list)
 
-    def test_search_threads_with_values_rejects_with_400(self, client: TestClient) -> None:
+    def test_search_threads_with_values_rejects_with_400(self: Self, client: TestClient) -> None:
         """Filtering search by state values returns 400 because state is stored in checkpoints."""
         resp = client.post(
             "/threads/search",
@@ -650,7 +650,7 @@ class TestCountThreads:
     """Test POST /threads/count endpoint."""
 
     @pytest.fixture
-    def client(self) -> TestClient:
+    def client(self: Self) -> TestClient:
         """Create test client with seeded threads in ThreadSession."""
         app = create_test_app(include_runs=False, include_threads=True)
 
@@ -663,13 +663,13 @@ class TestCountThreads:
         override_session_dependency(app, ThreadSession, threads=threads)
         return make_client(app)
 
-    def test_count_threads_no_filters(self, client: TestClient) -> None:
+    def test_count_threads_no_filters(self: Self, client: TestClient) -> None:
         """Counting without filters returns total count of caller threads."""
         resp = client.post("/threads/count", json={})
         assert resp.status_code == 200
         assert resp.json() == 3
 
-    def test_count_threads_with_status(self, client: TestClient) -> None:
+    def test_count_threads_with_status(self: Self, client: TestClient) -> None:
         """Counting with status filter returns count of matching threads."""
         resp_idle = client.post("/threads/count", json={"status": "idle"})
         assert resp_idle.status_code == 200
@@ -683,7 +683,7 @@ class TestCountThreads:
         assert resp_interrupted.status_code == 200
         assert resp_interrupted.json() == 0
 
-    def test_count_threads_with_metadata(self, client: TestClient) -> None:
+    def test_count_threads_with_metadata(self: Self, client: TestClient) -> None:
         """Counting with metadata filter returns count of matching threads."""
         resp_prod = client.post(
             "/threads/count",
@@ -706,7 +706,7 @@ class TestCountThreads:
         assert resp_none.status_code == 200
         assert resp_none.json() == 0
 
-    def test_count_threads_with_values_rejects_with_400(self, client: TestClient) -> None:
+    def test_count_threads_with_values_rejects_with_400(self: Self, client: TestClient) -> None:
         """Filtering by state values returns 400 because state is stored in checkpoints."""
         resp = client.post(
             "/threads/count",
@@ -715,7 +715,7 @@ class TestCountThreads:
         assert resp.status_code == 400
         assert "not currently supported" in resp.json()["detail"]
 
-    def test_count_threads_invalid_status(self, client: TestClient) -> None:
+    def test_count_threads_invalid_status(self: Self, client: TestClient) -> None:
         """Counting with invalid status returns 422 validation error."""
         resp = client.post("/threads/count", json={"status": "nonexistent_status"})
         assert resp.status_code == 422

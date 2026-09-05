@@ -252,6 +252,15 @@ Aegra runs against user-managed Postgres including multi-host HA (PR #299). DB c
 - NEVER use `eval()`, `exec()`, or `pickle` on user input.
 - Use `subprocess.run([...], shell=False)` — never `shell=True` with user input.
 
+### API Compatibility (STRICT)
+Aegra is a drop-in replacement for LangSmith Deployments, so every request field the LangGraph SDK can send must be handled explicitly. Silent drops are the most common compatibility bug (see #452, #503, #537).
+
+- **Every field the SDK can send either changes behavior or returns 422.** Never accept a field and ignore it. If a feature is not implemented, declare the field and reject any value that differs from current behavior with a clear error.
+- **Declare accepted keys.** Request models list every SDK field. Command handlers (Agent Protocol v2) keep an explicit key set and log unknown keys at warning level. Do not use `extra="forbid"`: the Python SDK always sends default-valued booleans, so a new SDK field would break every client.
+- **Pin the contract with a drift test.** When you add a route or field, extend the test that compares the accepted key set against the SDK request body (v1) or the protocol param shapes (v2). A new SDK field must fail CI, not reach a user.
+- **Document no-ops.** A field that is accepted for wire compatibility but has no effect (for example LangSmith-only routing) is listed in `docs/feature-support.mdx` with the reason.
+- **Match public names and defaults.** Config keys, env vars and enum values follow the public LangGraph Platform docs where one exists, so users can move between deployments without changing payloads.
+
 ## Architecture
 
 ### Database Architecture

@@ -98,6 +98,18 @@ class TestRunJob:
         assert "run_id" not in params
         assert "thread_id" not in params
 
+    def test_after_seconds_roundtrips_in_execution_params(self, sample_job: RunJob) -> None:
+        delayed = sample_job.model_copy(update={"after_seconds": 30})
+        params = delayed.to_execution_params()
+
+        class FakeORM:
+            run_id = "run-1"
+            thread_id = "thread-1"
+            execution_params = params
+
+        restored = RunJob.from_run_orm(FakeORM())
+        assert restored.after_seconds == 30
+
     def test_extra_user_fields_preserved(self) -> None:
         """User model allows extra fields (ConfigDict extra='allow')."""
         job = RunJob(

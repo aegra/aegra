@@ -471,6 +471,37 @@ class TestWorkerExecutorSubmit:
 
         mock_client.rpush.assert_awaited_once_with("aegra:jobs", "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee")
 
+    @pytest.mark.asyncio
+    async def test_delayed_run_is_not_pushed_before_not_before(self) -> None:
+        mock_client = AsyncMock()
+        job = _make_run_job()
+        delayed_job = job.model_copy(update={"after_seconds": 30})
+
+        with patch(f"{MODULE}.redis_manager.get_client", return_value=mock_client):
+            await WorkerExecutor().submit(delayed_job)
+
+        mock_client.rpush.assert_not_awaited()
+
+
+class TestDelayedRunDispatch:
+    @pytest.mark.asyncio
+    async def test_dispatches_only_due_pending_rows(self) -> None:
+        session = AsyncMock()
+        result = MagicMock()
+        result.fetchall.return_value = [("run-due",)]
+        session.execute.return_value = result
+        mock_client = AsyncMock()
+
+        with (
+            patch(f"{MODULE}._get_session_maker", return_value=_make_session_maker(session)),
+            patch(f"{MODULE}.redis_manager.get_client", return_value=mock_client),
+            patch(f"{MODULE}.settings") as mock_settings,
+        ):
+            mock_settings.worker.WORKER_QUEUE_KEY = "aegra:jobs"
+            await WorkerExecutor()._dispatch_due_runs()
+
+        mock_client.rpush.assert_awaited_once_with("aegra:jobs", "run-due")
+
 
 # ------------------------------------------------------------------
 # WorkerExecutor.wait_for_completion

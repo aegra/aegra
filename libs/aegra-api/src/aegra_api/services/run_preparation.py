@@ -5,7 +5,7 @@ resume-command validation, and config/context merging logic.
 """
 
 import asyncio
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import uuid4
 
@@ -203,6 +203,13 @@ async def _prepare_run(
     """
     await _validate_resume_command(session, thread_id, request.command)
 
+    # FastAPI supplies a validated RunCreate, but keeping this boundary
+    # defensive preserves compatibility with internal callers and tests that
+    # provide request-like objects rather than a Pydantic instance.
+    after_seconds = getattr(request, "after_seconds", 0)
+    if not isinstance(after_seconds, int):
+        after_seconds = 0
+
     run_id = str(uuid4())
     langgraph_service = get_langgraph_service()
     logger.info(
@@ -270,6 +277,7 @@ async def _prepare_run(
             subgraphs=request.stream_subgraphs or False,
         ),
         run_metadata=request.metadata or {},
+        after_seconds=after_seconds,
     )
 
     # Persist run record with trace metadata for worker observability.
@@ -284,6 +292,7 @@ async def _prepare_run(
     }
 
     now = datetime.now(UTC)
+    not_before = now + timedelta(seconds=after_seconds) if after_seconds else None
     run_orm = RunORM(
         run_id=run_id,
         thread_id=thread_id,
@@ -298,6 +307,7 @@ async def _prepare_run(
         output=None,
         error_message=None,
         execution_params=exec_params,
+        not_before=not_before,
     )
     session.add(run_orm)
     await session.commit()

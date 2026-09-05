@@ -7,9 +7,10 @@ Single source of truth for executing a graph run. Both LocalExecutor
 """
 
 import asyncio
-from typing import Any
+from typing import Any, cast
 
 import structlog
+from langchain_core.runnables import RunnableConfig
 
 from aegra_api.core.active_runs import active_runs
 from aegra_api.core.auth_ctx import with_auth_ctx
@@ -30,6 +31,7 @@ _DEFAULT_STREAM_MODES = ["values"]
 
 # Cancellation provenance prevents infrastructure stops from looking user-initiated.
 _lease_loss_cancellations: set[str] = set()
+_shutdown_cancellations: set[str] = set()
 _timeout_cancellations: set[str] = set()
 
 _TIMEOUT_ERROR = "Job exceeded maximum execution time"
@@ -45,7 +47,7 @@ async def execute_run(job: RunJob) -> None:
     run_id = job.identity.run_id
     thread_id = job.identity.thread_id
     user_id = job.user.identity
-    is_lease_loss = False
+    resumes_elsewhere = False
     finalized = False
 
     try:
@@ -76,8 +78,13 @@ async def execute_run(job: RunJob) -> None:
 
     except asyncio.CancelledError:
         if run_id in _lease_loss_cancellations:
-            is_lease_loss = True
+            resumes_elsewhere = True
             logger.info("Lease-loss cancel, skipping finalize", run_id=run_id)
+        elif run_id in _shutdown_cancellations:
+            # Drain cancel: the run goes back to the queue, so finalizing here
+            # would destroy work a plain crash (SIGKILL) recovers (#474).
+            resumes_elsewhere = True
+            logger.info("Shutdown drain cancel, skipping finalize for requeue", run_id=run_id)
         elif run_id in _timeout_cancellations:
             finalized = await finalize_run(
                 run_id,
@@ -127,9 +134,10 @@ async def execute_run(job: RunJob) -> None:
             await _best_effort_signal(_signal_end_event, run_id, status)
     finally:
         _lease_loss_cancellations.discard(run_id)
+        _shutdown_cancellations.discard(run_id)
         _timeout_cancellations.discard(run_id)
         active_runs.pop(run_id, None)
-        if not is_lease_loss:
+        if not resumes_elsewhere:
             await streaming_service.cleanup_run(run_id)
             await _signal_run_done(run_id)
 
@@ -221,7 +229,7 @@ async def _stream_legacy(
     async for event_type, event_data in stream_graph_events(
         graph=graph,
         input_data=execution_input,
-        config=run_config,
+        config=cast("RunnableConfig", run_config),
         stream_mode=stream_modes,
         interrupt_before=interrupt_before,
         interrupt_after=interrupt_after,

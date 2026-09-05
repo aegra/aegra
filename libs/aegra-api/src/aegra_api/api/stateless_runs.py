@@ -12,9 +12,11 @@ from typing import Annotated
 from uuid import uuid4
 
 import structlog
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import Field
+from redis import RedisError
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sse_starlette import EventSourceResponse
 
@@ -342,7 +344,7 @@ async def stateless_create_runs(
                 )
             )
         await session.commit()
-    except Exception:
+    except (HTTPException, SQLAlchemyError, ValueError):
         await session.rollback()
         raise
 
@@ -357,9 +359,9 @@ async def stateless_create_runs(
                 schedule_background_cleanup(run_id, run.thread_id, user.identity)
                 cleanup_scheduled.add(run_id)
             results.append(run)
-    except Exception:
-        for run_id, run, _job in prepared:
-            if run_id not in cleanup_scheduled:
+    except (RedisError, OSError, RuntimeError):
+        for index, (run_id, run, _job) in enumerate(prepared):
+            if run_id not in cleanup_scheduled and requests[index].on_completion != "keep":
                 schedule_background_cleanup(run_id, run.thread_id, user.identity)
         raise
 

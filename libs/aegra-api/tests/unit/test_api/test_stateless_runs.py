@@ -1218,3 +1218,35 @@ class TestStatelessCreateRuns:
             await stateless_create_runs(requests, mock_user, mock_session)
 
         assert schedule_cleanup.call_count == 2
+
+    @pytest.mark.asyncio
+    async def test_preserves_keep_runs_when_a_later_submission_fails(
+        self, mock_user: User, mock_session: AsyncMock
+    ) -> None:
+        """Do not delete a retained run when a later batch submission fails."""
+        requests = [
+            RunCreate(assistant_id="agent-1", input={"msg": "one"}, on_completion="keep"),
+            RunCreate(assistant_id="agent-2", input={"msg": "two"}),
+        ]
+        prepare = AsyncMock(
+            side_effect=[
+                ("run-1", MagicMock(thread_id="thread-1"), MagicMock()),
+                ("run-2", MagicMock(thread_id="thread-2"), MagicMock()),
+            ]
+        )
+
+        with (
+            patch("aegra_api.api.stateless_runs.uuid4", side_effect=["thread-1", "thread-2"]),
+            patch("aegra_api.api.stateless_runs._apply_create_run_auth", new_callable=AsyncMock),
+            patch("aegra_api.api.stateless_runs._prepare_run", prepare),
+            patch(
+                "aegra_api.api.stateless_runs.executor.submit",
+                new_callable=AsyncMock,
+                side_effect=[None, RuntimeError("queue unavailable")],
+            ),
+            patch("aegra_api.api.stateless_runs.schedule_background_cleanup") as schedule_cleanup,
+            pytest.raises(RuntimeError, match="queue unavailable"),
+        ):
+            await stateless_create_runs(requests, mock_user, mock_session)
+
+        schedule_cleanup.assert_called_once_with("run-2", "thread-2", mock_user.identity)

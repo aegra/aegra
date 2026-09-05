@@ -167,7 +167,7 @@ Aegra is a drop-in replacement for LangSmith Deployments. Every request field th
 
 - Declare every SDK field on the request model, even ones Aegra does not implement yet; reject unsupported values with a clear error.
 - Extend the drift tests when you add a route or field, so a new SDK field fails CI instead of being dropped.
-- List accepted-but-inert fields in `docs/feature-support.mdx` with the reason.
+- The only fields allowed to be inert are ones that configure a system outside Aegra (LangSmith-side routing). List each in `docs/feature-support.mdx` with the reason.
 - Follow the public LangGraph Platform names and defaults for config keys, env vars and enum values.
 
 ## 🔒 Security

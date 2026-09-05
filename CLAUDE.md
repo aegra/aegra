@@ -256,9 +256,9 @@ Aegra runs against user-managed Postgres including multi-host HA (PR #299). DB c
 Aegra is a drop-in replacement for LangSmith Deployments, so every request field the LangGraph SDK can send must be handled explicitly. Silent drops are the most common compatibility bug (see #452, #503, #537).
 
 - **Every field the SDK can send either changes behavior or returns 422.** Never accept a field and ignore it. If a feature is not implemented, declare the field and reject any value that differs from current behavior with a clear error.
-- **Declare accepted keys.** Request models list every SDK field. Command handlers (Agent Protocol v2) keep an explicit key set and log unknown keys at warning level. Do not use `extra="forbid"`: the Python SDK always sends default-valued booleans, so a new SDK field would break every client.
-- **Pin the contract with a drift test.** When you add a route or field, extend the test that compares the accepted key set against the SDK request body (v1) or the protocol param shapes (v2). A new SDK field must fail CI, not reach a user.
-- **Document no-ops.** A field that is accepted for wire compatibility but has no effect (for example LangSmith-only routing) is listed in `docs/feature-support.mdx` with the reason.
+- **One exception: fields that configure a system outside Aegra.** A field whose only effect is on a LangSmith-side service (for example `langsmith_tracer`, `feedback_keys`) may be accepted and left inert. Each such field is listed in `docs/feature-support.mdx` with the reason. Nothing else may be inert.
+- **Declare accepted keys.** Request models list every SDK field. Agent Protocol v2 handlers keep an explicit key set (`RUN_START_KEYS`, `INPUT_RESPOND_KEYS` in `services/event_streaming/commands.py`) and log unknown keys at warning level. Do not use `extra="forbid"`: the Python SDK always sends default-valued booleans, so a new SDK field would break every client.
+- **Pin the contract with a drift test.** v2: `tests/unit/test_services/test_event_streaming/test_spec_params.py` vendors the protocol param shapes and asserts the handler key sets cover them. v1: the request-model drift test against the SDK request body is tracked in #503; until it lands, add explicit field tests with each new field. A new SDK field must fail CI, not reach a user.
 - **Match public names and defaults.** Config keys, env vars and enum values follow the public LangGraph Platform docs where one exists, so users can move between deployments without changing payloads.
 
 ## Architecture

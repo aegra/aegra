@@ -1,6 +1,9 @@
 """Integration tests for runs CRUD operations"""
 
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
+
+from fastapi.testclient import TestClient
 
 from tests.fixtures.clients import create_test_app, make_client
 from tests.fixtures.database import DummyScalarResult, DummySessionBase
@@ -351,23 +354,23 @@ class TestCancelRuns:
     """Test POST /runs/cancel (bulk cancel used by the SDK's cancel_many)."""
 
     @staticmethod
-    def _app_with_runs(runs, thread_exists=True):
+    def _app_with_runs(runs: list[Any], thread_exists: bool = True) -> TestClient:
         app = create_test_app(include_runs=True, include_threads=False)
 
         class Session(DummySessionBase):
-            async def scalar(self, _stmt):
+            async def scalar(self, _stmt: Any) -> str | None:
                 return "test-thread-123" if thread_exists else None
 
-            async def scalars(self, _stmt=None):
+            async def scalars(self, _stmt: Any = None) -> DummyScalarResult:
                 return DummyScalarResult(runs)
 
-            async def commit(self):
+            async def commit(self) -> None:
                 pass
 
         override_session_dependency(app, Session)
         return make_client(app)
 
-    def test_cancel_runs_by_status_cancels_each_active_run(self):
+    def test_cancel_runs_by_status_cancels_each_active_run(self) -> None:
         runs = [_run_row(run_id="run-a", status="running"), _run_row(run_id="run-b", status="pending")]
         client = self._app_with_runs(runs)
 
@@ -384,7 +387,7 @@ class TestCancelRuns:
             assert mock_streaming.interrupt_run.await_count == 2
             assert mock_streaming.signal_run_cancelled.await_count == 2
 
-    def test_cancel_runs_by_ids_skips_finished_runs(self):
+    def test_cancel_runs_by_ids_skips_finished_runs(self) -> None:
         runs = [_run_row(run_id="run-a", status="running"), _run_row(run_id="run-b", status="success")]
         client = self._app_with_runs(runs)
 
@@ -404,28 +407,28 @@ class TestCancelRuns:
             assert resp.status_code == 204
             mock_streaming.cancel_run.assert_awaited_once_with("run-a", emit_end_event=False)
 
-    def test_cancel_runs_by_ids_unknown_thread_is_404(self):
+    def test_cancel_runs_by_ids_unknown_thread_is_404(self) -> None:
         client = self._app_with_runs([], thread_exists=False)
 
         resp = client.post("/runs/cancel", json={"thread_id": "missing", "run_ids": ["run-a"]})
 
         assert resp.status_code == 404
 
-    def test_cancel_runs_without_selector_is_422(self):
+    def test_cancel_runs_without_selector_is_422(self) -> None:
         client = self._app_with_runs([])
 
         resp = client.post("/runs/cancel", json={})
 
         assert resp.status_code == 422
 
-    def test_cancel_runs_unsupported_action_is_422(self):
+    def test_cancel_runs_unsupported_action_is_422(self) -> None:
         client = self._app_with_runs([])
 
         resp = client.post("/runs/cancel", json={"status": "all"}, params={"action": "rollback"})
 
         assert resp.status_code == 422
 
-    def test_cancel_runs_no_matches_is_204(self):
+    def test_cancel_runs_no_matches_is_204(self) -> None:
         client = self._app_with_runs([])
 
         with patch("aegra_api.api.runs.streaming_service") as mock_streaming:

@@ -6,7 +6,7 @@ from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
 
-from aegra_api.api.crons import _authorize_cron_create, _trigger_first_run
+from aegra_api.api.crons import _authorize_cron_create, _trigger_first_run, get_cron
 from aegra_api.models import Run, User
 from aegra_api.models.crons import CronCreate
 
@@ -203,3 +203,23 @@ class TestAuthorizeCronCreate:
         assert exc_info.value.status_code == 403
         # Only crons.create and assistants.read should have run.
         assert mock_handle.await_count == 2
+
+
+class TestGetCron:
+    """Regression tests for get-by-ID authorization dispatch."""
+
+    @pytest.mark.asyncio
+    async def test_dispatches_crons_read_before_service_call(self) -> None:
+        user = User(identity="alice", scopes=[])
+        service = AsyncMock()
+        expected = object()
+        service.get_cron.return_value = expected
+
+        with patch("aegra_api.api.crons.handle_event", new_callable=AsyncMock) as mock_handle:
+            result = await get_cron("cron-42", user, service)
+
+        context, value = mock_handle.await_args.args
+        assert (context.resource, context.action) == ("crons", "read")
+        assert value == {"cron_id": "cron-42"}
+        service.get_cron.assert_awaited_once_with("cron-42", "alice")
+        assert result is expected

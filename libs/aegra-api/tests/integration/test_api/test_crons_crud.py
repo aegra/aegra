@@ -156,6 +156,31 @@ class TestCreateCronForThread:
 
 
 # ---------------------------------------------------------------------------
+# GET /runs/crons/{cron_id}  →  CronResponse
+# ---------------------------------------------------------------------------
+
+
+class TestGetCron:
+    """Test GET /runs/crons/{cron_id}."""
+
+    def test_gets_cron(self, client: TestClient, mock_cron_service: AsyncMock) -> None:
+        mock_cron_service.get_cron.return_value = _cron_response()
+
+        resp = client.get("/runs/crons/cron-001")
+
+        assert resp.status_code == 200
+        assert resp.json()["cron_id"] == "cron-001"
+        mock_cron_service.get_cron.assert_awaited_once_with("cron-001", "test-user")
+
+    def test_returns_404_when_not_found(self, client: TestClient, mock_cron_service: AsyncMock) -> None:
+        mock_cron_service.get_cron.side_effect = HTTPException(404, "Cron 'missing' not found")
+
+        resp = client.get("/runs/crons/missing")
+
+        assert resp.status_code == 404
+
+
+# ---------------------------------------------------------------------------
 # PATCH /runs/crons/{cron_id}  →  CronResponse
 # ---------------------------------------------------------------------------
 

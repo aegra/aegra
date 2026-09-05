@@ -148,9 +148,17 @@ The server stores the timezone alongside the cron record and converts to UTC int
   When updating a cron's schedule without changing its timezone, the existing timezone is preserved automatically.
 </Note>
 
-## Listing and searching
+## Retrieving, listing, and searching
 
 ```python
+import httpx
+
+# Get one cron by ID
+async with httpx.AsyncClient(base_url="http://localhost:2026") as http:
+    response = await http.get("/runs/crons/<cron_id>")
+    response.raise_for_status()
+    cron = response.json()
+
 # Search by assistant
 crons = await client.crons.search(assistant_id="agent")
 

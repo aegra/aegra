@@ -1,9 +1,10 @@
 """Cron job endpoints for Agent Protocol.
 
-Implements the six endpoints consumed by the LangGraph SDK ``CronsClient``:
+Implements the seven cron endpoints in the Agent Protocol:
 
 * ``POST  /runs/crons``                  → create (stateless, returns Run)
 * ``POST  /threads/{thread_id}/runs/crons`` → create for thread (returns Run)
+* ``GET   /runs/crons/{cron_id}``         → get (returns Cron)
 * ``PATCH /runs/crons/{cron_id}``         → update (returns Cron)
 * ``DELETE /runs/crons/{cron_id}``        → delete (204)
 * ``POST  /runs/crons/search``            → search (returns list[Cron])
@@ -132,6 +133,24 @@ async def create_cron_for_thread(
 
     await _authorize_cron_create(user, request, thread_id=thread_id)
     return await _create_cron_atomic(request, user, service, session, thread_id=thread_id)
+
+
+# ---------------------------------------------------------------------------
+# Get – GET /runs/crons/{cron_id} → returns Cron
+# ---------------------------------------------------------------------------
+
+
+@router.get("/runs/crons/{cron_id}", response_model=CronResponse, responses={**NOT_FOUND})
+async def get_cron(
+    cron_id: str,
+    user: User = Depends(get_current_user),
+    service: CronService = Depends(get_cron_service),
+) -> CronResponse:
+    """Get a cron job by ID."""
+    ctx = build_auth_context(user, "crons", "read")
+    await handle_event(ctx, {"cron_id": cron_id})
+
+    return await service.get_cron(cron_id, user.identity)
 
 
 # ---------------------------------------------------------------------------

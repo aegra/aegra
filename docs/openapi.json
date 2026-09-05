@@ -2682,6 +2682,57 @@
       }
     },
     "/runs/crons/{cron_id}": {
+      "get": {
+        "tags": [
+          "Crons"
+        ],
+        "summary": "Get Cron",
+        "description": "Get a cron job by ID.",
+        "operationId": "get_cron_runs_crons__cron_id__get",
+        "parameters": [
+          {
+            "name": "cron_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Cron Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CronResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Resource not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AgentProtocolError"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
       "patch": {
         "tags": [
           "Crons"

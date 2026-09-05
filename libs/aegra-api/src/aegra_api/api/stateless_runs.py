@@ -8,11 +8,13 @@ explicitly sets ``on_completion="keep"``).
 
 import asyncio
 from collections.abc import AsyncIterator, Mapping
+from typing import Annotated
 from uuid import uuid4
 
 import structlog
 from fastapi import APIRouter, Depends
 from fastapi.responses import StreamingResponse
+from pydantic import Field
 from sqlalchemy.ext.asyncio import AsyncSession
 from sse_starlette import EventSourceResponse
 
@@ -40,6 +42,7 @@ from aegra_api.services.run_preparation import _prepare_run
 
 router = APIRouter(tags=["Stateless Runs"], dependencies=auth_dependency)
 logger = structlog.getLogger(__name__)
+MAX_BATCH_RUNS = 100
 
 
 # ---------------------------------------------------------------------------
@@ -314,7 +317,7 @@ async def stateless_create_run(
 
 @router.post("/runs/batch", response_model=list[Run], responses={**NOT_FOUND, **CONFLICT})
 async def stateless_create_runs(
-    requests: list[RunCreate],
+    requests: Annotated[list[RunCreate], Field(max_length=MAX_BATCH_RUNS)],
     user: User = Depends(get_current_user),
     session: AsyncSession = Depends(get_session),
 ) -> list[Run]:
@@ -344,12 +347,20 @@ async def stateless_create_runs(
         raise
 
     results: list[Run] = []
-    for index, (run_id, run, job) in enumerate(prepared):
-        await executor.submit(job)
-        logger.info("Submitted batch run to executor", run_id=run_id)
-        request = requests[index]
-        if request.on_completion != "keep":
-            schedule_background_cleanup(run_id, run.thread_id, user.identity)
-        results.append(run)
+    cleanup_scheduled: set[str] = set()
+    try:
+        for index, (run_id, run, job) in enumerate(prepared):
+            await executor.submit(job)
+            logger.info("Submitted batch run to executor", run_id=run_id)
+            request = requests[index]
+            if request.on_completion != "keep":
+                schedule_background_cleanup(run_id, run.thread_id, user.identity)
+                cleanup_scheduled.add(run_id)
+            results.append(run)
+    except Exception:
+        for run_id, run, _job in prepared:
+            if run_id not in cleanup_scheduled:
+                schedule_background_cleanup(run_id, run.thread_id, user.identity)
+        raise
 
     return results

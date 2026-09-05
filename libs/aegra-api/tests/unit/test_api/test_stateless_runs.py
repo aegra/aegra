@@ -1132,6 +1132,7 @@ class TestStatelessCreateRuns:
 
     @pytest.mark.asyncio
     async def test_validates_all_runs_before_commit(self, mock_user: User, mock_session: AsyncMock) -> None:
+        """Prepare every run without committing or submitting early."""
         requests = [
             RunCreate(assistant_id="agent-1", input={"msg": "one"}),
             RunCreate(assistant_id="agent-2", input={"msg": "two"}),
@@ -1157,6 +1158,8 @@ class TestStatelessCreateRuns:
         assert result == [run_one, run_two]
         assert authorize.await_count == 2
         assert prepare.await_count == 2
+        for call in prepare.await_args_list:
+            assert call.kwargs == {"initial_status": "pending", "commit": False, "submit": False}
         mock_session.commit.assert_awaited_once()
         mock_session.rollback.assert_not_awaited()
         assert submit.await_count == 2
@@ -1164,6 +1167,7 @@ class TestStatelessCreateRuns:
 
     @pytest.mark.asyncio
     async def test_rolls_back_when_one_run_fails_validation(self, mock_user: User, mock_session: AsyncMock) -> None:
+        """Roll back the whole batch when a later run cannot be prepared."""
         requests = [
             RunCreate(assistant_id="agent-1", input={"msg": "one"}),
             RunCreate(assistant_id="missing", input={"msg": "two"}),
@@ -1182,3 +1186,35 @@ class TestStatelessCreateRuns:
         mock_session.commit.assert_not_awaited()
         mock_session.rollback.assert_awaited_once()
         submit.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_cleans_up_all_runs_when_submission_fails(self, mock_user: User, mock_session: AsyncMock) -> None:
+        """Schedule cleanup for every committed run after a queue failure."""
+        requests = [
+            RunCreate(assistant_id="agent-1", input={"msg": "one"}),
+            RunCreate(assistant_id="agent-2", input={"msg": "two"}),
+        ]
+        run_one = MagicMock(thread_id="thread-1")
+        run_two = MagicMock(thread_id="thread-2")
+        prepare = AsyncMock(
+            side_effect=[
+                ("run-1", run_one, MagicMock()),
+                ("run-2", run_two, MagicMock()),
+            ]
+        )
+
+        with (
+            patch("aegra_api.api.stateless_runs.uuid4", side_effect=["thread-1", "thread-2"]),
+            patch("aegra_api.api.stateless_runs._apply_create_run_auth", new_callable=AsyncMock),
+            patch("aegra_api.api.stateless_runs._prepare_run", prepare),
+            patch(
+                "aegra_api.api.stateless_runs.executor.submit",
+                new_callable=AsyncMock,
+                side_effect=[None, RuntimeError("queue unavailable")],
+            ),
+            patch("aegra_api.api.stateless_runs.schedule_background_cleanup") as schedule_cleanup,
+            pytest.raises(RuntimeError, match="queue unavailable"),
+        ):
+            await stateless_create_runs(requests, mock_user, mock_session)
+
+        assert schedule_cleanup.call_count == 2

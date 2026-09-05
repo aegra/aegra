@@ -2524,6 +2524,7 @@
                   "$ref": "#/components/schemas/RunCreate"
                 },
                 "type": "array",
+                "maxItems": 100,
                 "title": "Requests"
               }
             }

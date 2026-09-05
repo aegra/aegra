@@ -229,8 +229,9 @@ print(output)
 ### Create stateless runs in a batch
 
 For clients that need to start several independent stateless runs, send an
-array of normal run request objects to `POST /runs/batch`. The response is an
-array of run records in the same order as the requests. Validation is atomic:
+array of normal run request objects to `POST /runs/batch` (up to 100 runs per
+request). The response is an array of run records in the same order as the
+requests. Validation is atomic:
 if one request is invalid, no runs are created.
 
 ```bash

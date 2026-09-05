@@ -154,6 +154,11 @@ def test_stateless_runs_authorize_as_thread_run_creation() -> None:
         )
 
 
+def test_stateless_batch_run_dispatches_auth_internally() -> None:
+    """Keep per-item authorization in the batch handler."""
+    assert ("POST", "/runs/batch") in SELF_DISPATCHING
+
+
 def test_assistant_routes_are_all_covered() -> None:
     """Assistants dispatch via the service layer; the registry must still name them."""
     assistant_routes = [(method, path) for method, path in _protocol_routes() if path.startswith("/assistants")]

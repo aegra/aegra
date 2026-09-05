@@ -128,6 +128,7 @@ SELF_DISPATCHING: Final[frozenset[tuple[str, str]]] = frozenset(
         ("GET", "/threads/{thread_id}/runs/{run_id}"),
         ("DELETE", "/threads/{thread_id}/runs/{run_id}"),
         ("POST", "/runs"),
+        ("POST", "/runs/batch"),
         ("POST", "/runs/stream"),
         ("POST", "/runs/wait"),
         ("POST", "/runs/crons"),

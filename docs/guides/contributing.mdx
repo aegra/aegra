@@ -140,24 +140,26 @@ Visit `http://localhost:2026/docs` to see the API.
 
 ## Database migrations
 
-Aegra uses Alembic for database migrations. Migrations apply automatically on server startup — you only need these commands when creating or debugging migrations.
+Aegra uses Alembic for database migrations. In local and single-pod setups, migrations apply automatically on server startup — you only need these commands when creating or debugging migrations, or when operating a multi-pod deployment.
 
 ```bash
 # Create a new migration
 uv run --package aegra-api alembic revision --autogenerate -m "Add user preferences"
 
-# Apply migrations manually
-uv run --package aegra-api alembic upgrade head
+# Apply pending migrations (operator path; session lock is in alembic/env.py)
+aegra db upgrade
 
 # Rollback last migration
-uv run --package aegra-api alembic downgrade -1
+aegra db downgrade -1
 
 # Show migration history
-uv run --package aegra-api alembic history
+aegra db history -v
 
 # Show current version
-uv run --package aegra-api alembic current
+aegra db current
 ```
+
+Multi-pod deployments should run `aegra db upgrade` from a single operator/Job before rolling a new version, even when `RUN_MIGRATIONS_ON_STARTUP=false`. Do not let every replica run the upgrade independently. See [Migrations](/guides/deployment#migrations).
 
 ### Making database changes
 
@@ -169,7 +171,7 @@ uv run --package aegra-api alembic current
 ### Testing migrations
 
 ```bash
-# Test full upgrade/downgrade cycle
+# Test full upgrade/downgrade cycle (single process; online env.py still serializes)
 uv run --package aegra-api alembic downgrade base
 uv run --package aegra-api alembic upgrade head
 ```

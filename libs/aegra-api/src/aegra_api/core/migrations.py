@@ -1,14 +1,18 @@
 """Alembic migration helpers.
 
 Resolves the bundled alembic.ini from the installed package. Two entry points:
-- ``run_migrations()``: unconditional upgrade, takes advisory lock. Use for
-  out-of-band runs (``aegra db upgrade``, init container, Helm Job).
+- ``run_migrations()``: unconditional upgrade. Online ``env.py`` holds a
+  session ``pg_advisory_lock`` so concurrent upgrades serialize. Alembic itself
+  does not take this lock. For ``aegra db upgrade``.
 - ``run_migrations_if_needed()``: lock-free precheck, skips upgrade when
   already at head. FastAPI startup uses this to avoid multi-pod lock contention.
 """
 
 import asyncio
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
+from typing import LiteralString
 
 import psycopg
 import structlog
@@ -19,6 +23,13 @@ from aegra_api.settings import settings
 from alembic import command
 
 logger = structlog.get_logger(__name__)
+
+# Session-level pair (not pg_advisory_xact_lock): GIN rebuilds use
+# autocommit_block() / CREATE INDEX CONCURRENTLY, which would drop an xact lock.
+_AEGRA_MIGRATION_LOCK_KEY1: int = 0xAE6A
+_AEGRA_MIGRATION_LOCK_KEY2: int = 1
+_ADVISORY_LOCK_SQL: LiteralString = "SELECT pg_advisory_lock(%s, %s)"
+_ADVISORY_UNLOCK_SQL: LiteralString = "SELECT pg_advisory_unlock(%s, %s)"
 
 
 def find_alembic_ini() -> Path:
@@ -105,8 +116,43 @@ def _is_database_up_to_date(cfg: Config) -> bool:
     return current == head
 
 
+@contextmanager
+def migration_advisory_lock() -> Iterator[None]:
+    """Hold a session ``pg_advisory_lock`` on a dedicated psycopg connection.
+
+    Uses ``database_url_sync`` so SQLAlchemy never parses libpq comma-hosts.
+    """
+    lock_keys = (_AEGRA_MIGRATION_LOCK_KEY1, _AEGRA_MIGRATION_LOCK_KEY2)
+    conn = psycopg.connect(settings.db.database_url_sync, autocommit=True)
+    try:
+        with conn.cursor() as cur:
+            cur.execute(_ADVISORY_LOCK_SQL, lock_keys)
+            cur.fetchone()
+        body_error: BaseException | None = None
+        try:
+            yield
+        except BaseException as exc:
+            body_error = exc
+            raise
+        finally:
+            try:
+                with conn.cursor() as cur:
+                    cur.execute(_ADVISORY_UNLOCK_SQL, lock_keys)
+                    cur.fetchone()
+            except Exception:
+                if body_error is None:
+                    raise
+                logger.warning("failed to release migration advisory lock after upgrade error")
+    finally:
+        # Best-effort: a close error must not replace an upgrade or unlock error.
+        try:
+            conn.close()
+        except Exception:
+            logger.warning("failed to close migration lock connection")
+
+
 def run_migrations() -> None:
-    """Unconditional upgrade to head. Takes advisory lock."""
+    """Unconditional upgrade to head. Online env.py takes the session advisory lock."""
     cfg = get_alembic_config()
     logger.info("running database migrations")
     command.upgrade(cfg, "head")

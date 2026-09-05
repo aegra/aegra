@@ -192,13 +192,13 @@ Two ways to configure the database connection:
 
 ## Migrations
 
-By default, Aegra runs `alembic upgrade head` during FastAPI's lifespan startup. The fast path is lock-free: each pod first reads the current revision and skips the upgrade entirely if the database is already at head.
+By default, Aegra runs `alembic upgrade head` during FastAPI's lifespan startup. The fast path is lock-free: each pod first reads the current revision and skips the upgrade entirely if the database is already at head. When an upgrade does run (`aegra db upgrade`, startup when the database is behind head, or `alembic upgrade`), Aegra holds a PostgreSQL session advisory lock in `alembic/env.py` so concurrent upgrades serialize. Alembic itself does not take this lock.
 
 For single-pod and dev setups (`aegra dev`, `aegra up`, single docker-compose service) this is what you want and you do not need to run migrations manually.
 
 ### Multi-pod (Kubernetes, etc.)
 
-When several replicas boot at the same time and a real upgrade is pending, every pod queues on Alembic's advisory lock. Liveness or readiness probes can time out before pods finish startup, causing restart loops. To avoid this, run migrations out-of-band and disable the startup hook on app pods:
+When several replicas boot at the same time and a real upgrade is pending, every pod queues on Aegra's PostgreSQL session advisory lock (`alembic/env.py`, not an Alembic built-in). Liveness or readiness probes can time out before pods finish startup, causing restart loops. To avoid this, run migrations out-of-band and disable the startup hook on app pods:
 
 ```bash
 # .env (or pod env)
@@ -246,9 +246,9 @@ The generated `docker-compose.yml` uses `/health` to monitor the API container. 
     Migrations haven't been applied. This usually means the server couldn't connect to PostgreSQL during startup. Check the logs for connection errors, fix the connection, and restart.
   </Accordion>
   <Accordion title="Migrations hang on startup">
-    Check if another process holds a lock on the database, if the database is reachable but slow, or check server logs for specific migration errors.
+    A full upgrade waits on Aegra's PostgreSQL session advisory lock in `alembic/env.py` (not an Alembic built-in). Check whether another `aegra db upgrade` or starting replica still holds it, whether the database is reachable but slow, or server logs for a specific migration error.
   </Accordion>
   <Accordion title="Pods restart-loop on rolling deploy (Kubernetes)">
-    All replicas race for Alembic's advisory lock on boot. As fleet size grows, later pods queue past their probe deadline and the kubelet kills them. Set `RUN_MIGRATIONS_ON_STARTUP=false` and run `aegra db upgrade` once per release from a Helm pre-upgrade Job or init container.
+    All replicas race for Aegra's PostgreSQL session advisory lock on boot. As fleet size grows, later pods queue past their probe deadline and the kubelet kills them. Set `RUN_MIGRATIONS_ON_STARTUP=false` and run `aegra db upgrade` once per release from a Helm pre-upgrade Job or init container. The lock is session-level on a dedicated psycopg connection; transaction-mode PgBouncer cannot hold it — use session pooling or a direct Postgres connection for the upgrade Job.
   </Accordion>
 </AccordionGroup>

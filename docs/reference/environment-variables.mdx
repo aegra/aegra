@@ -17,6 +17,7 @@ cp .env.example .env
 | `VERSION` | `0.1.0` | Application version |
 | `DEBUG` | `false` | Enable debug mode |
 | `AEGRA_CONFIG` | `aegra.json` | Path to the configuration file |
+| `RUN_MIGRATIONS_ON_STARTUP` | `true` | Run Alembic on FastAPI startup (lock-free skip when already at head). Set `false` for multi-pod so replicas don't block on the session advisory lock; run `aegra db upgrade` out-of-band. |
 
 ## Database
 

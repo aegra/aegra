@@ -1,12 +1,20 @@
 """Tests for aegra_api.core.migrations module."""
 
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
 
 from aegra_api.core import migrations as migrations_mod
-from aegra_api.core.migrations import find_alembic_ini, get_alembic_config
+from aegra_api.core.migrations import (
+    _ADVISORY_LOCK_SQL,
+    _ADVISORY_UNLOCK_SQL,
+    _AEGRA_MIGRATION_LOCK_KEY1,
+    _AEGRA_MIGRATION_LOCK_KEY2,
+    find_alembic_ini,
+    get_alembic_config,
+)
 
 
 class TestFindAlembicIni:
@@ -129,6 +137,27 @@ class TestRunMigrations:
             args = mock_command.upgrade.call_args
             assert args[0][1] == "head"  # Second positional arg is "head"
 
+    def test_run_migrations_does_not_take_the_lock_itself(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Lock lives in env.py; wrapping command.upgrade would nested-deadlock."""
+        ini_file = tmp_path / "alembic.ini"
+        ini_file.write_text("[alembic]\nscript_location = alembic\n")
+        (tmp_path / "alembic").mkdir()
+        monkeypatch.setattr(migrations_mod, "find_alembic_ini", lambda: ini_file)
+
+        with (
+            patch("aegra_api.core.migrations.command"),
+            patch("aegra_api.core.migrations.migration_advisory_lock") as mock_lock,
+            patch("aegra_api.core.migrations.psycopg.connect") as mock_connect,
+        ):
+            from aegra_api.core.migrations import run_migrations
+
+            run_migrations()
+
+        mock_lock.assert_not_called()
+        mock_connect.assert_not_called()
+
     @pytest.mark.asyncio
     async def test_run_migrations_async_dispatches_to_lockfree_path(self):
         """run_migrations_async should hand off to the lock-free helper."""
@@ -151,13 +180,15 @@ class TestRunMigrationsIfNeeded:
         (tmp_path / "alembic").mkdir()
         monkeypatch.setattr(migrations_mod, "find_alembic_ini", lambda: ini_file)
 
-    def test_skips_upgrade_when_database_at_head(self, tmp_path, monkeypatch):
-        """When current revision matches head, no upgrade is invoked."""
+    def test_skips_upgrade_when_database_at_head(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """When current revision matches head, no upgrade and no advisory lock."""
         self._setup_alembic_ini(tmp_path, monkeypatch)
 
         with (
             patch("aegra_api.core.migrations._is_database_up_to_date", return_value=True) as mock_check,
             patch("aegra_api.core.migrations.command") as mock_command,
+            patch("aegra_api.core.migrations.migration_advisory_lock") as mock_lock,
+            patch("aegra_api.core.migrations.psycopg.connect") as mock_connect,
         ):
             from aegra_api.core.migrations import run_migrations_if_needed
 
@@ -165,14 +196,18 @@ class TestRunMigrationsIfNeeded:
 
             mock_check.assert_called_once()
             mock_command.upgrade.assert_not_called()
+            mock_lock.assert_not_called()
+            mock_connect.assert_not_called()
 
-    def test_runs_upgrade_when_database_behind_head(self, tmp_path, monkeypatch):
-        """When the precheck reports drift, upgrade is invoked."""
+    def test_runs_upgrade_when_database_behind_head(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Precheck drift falls through to upgrade; the helper itself does not lock."""
         self._setup_alembic_ini(tmp_path, monkeypatch)
 
         with (
             patch("aegra_api.core.migrations._is_database_up_to_date", return_value=False),
             patch("aegra_api.core.migrations.command") as mock_command,
+            patch("aegra_api.core.migrations.migration_advisory_lock") as mock_lock,
+            patch("aegra_api.core.migrations.psycopg.connect") as mock_connect,
         ):
             from aegra_api.core.migrations import run_migrations_if_needed
 
@@ -180,8 +215,10 @@ class TestRunMigrationsIfNeeded:
 
             mock_command.upgrade.assert_called_once()
             assert mock_command.upgrade.call_args[0][1] == "head"
+            mock_lock.assert_not_called()
+            mock_connect.assert_not_called()
 
-    def test_falls_back_to_upgrade_when_precheck_fails(self, tmp_path, monkeypatch):
+    def test_falls_back_to_upgrade_when_precheck_fails(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         """If the precheck raises (e.g. alembic_version missing on first install)
         the upgrade still runs so a fresh database can bootstrap.
         """
@@ -193,12 +230,16 @@ class TestRunMigrationsIfNeeded:
                 side_effect=RuntimeError("alembic_version table missing"),
             ),
             patch("aegra_api.core.migrations.command") as mock_command,
+            patch("aegra_api.core.migrations.migration_advisory_lock") as mock_lock,
+            patch("aegra_api.core.migrations.psycopg.connect") as mock_connect,
         ):
             from aegra_api.core.migrations import run_migrations_if_needed
 
             run_migrations_if_needed()
 
             mock_command.upgrade.assert_called_once()
+            mock_lock.assert_not_called()
+            mock_connect.assert_not_called()
 
 
 class TestIsDatabaseUpToDate:
@@ -327,3 +368,204 @@ class TestIsDatabaseUpToDate:
         from aegra_api.settings import settings
 
         assert passed_url == settings.db.database_url_sync
+
+    def test_precheck_does_not_take_advisory_lock(self) -> None:
+        """Startup precheck is a revision SELECT, never pg_advisory_lock."""
+        from aegra_api.core.migrations import _is_database_up_to_date
+
+        cfg = MagicMock()
+        connection, connect_cm = self._patch_psycopg("abc123")
+        script = MagicMock()
+        script.get_current_head.return_value = "abc123"
+
+        with (
+            patch("aegra_api.core.migrations.psycopg.connect", return_value=connect_cm),
+            patch("aegra_api.core.migrations.ScriptDirectory.from_config", return_value=script),
+        ):
+            assert _is_database_up_to_date(cfg) is True
+
+        cursor = connection.cursor.return_value.__enter__.return_value
+        sql = cursor.execute.call_args.args[0]
+        assert "alembic_version" in sql
+        assert "pg_advisory" not in sql
+
+
+def _advisory_lock_connection() -> tuple[MagicMock, MagicMock]:
+    """psycopg.connect mock for the dedicated session advisory-lock connection."""
+    cursor = MagicMock()
+    cursor_cm = MagicMock()
+    cursor_cm.__enter__.return_value = cursor
+    cursor_cm.__exit__.return_value = False
+
+    connection = MagicMock()
+    connection.cursor.return_value = cursor_cm
+    return connection, cursor
+
+
+def _lock_connection(
+    *,
+    unlock_error: Exception | None = None,
+    close_error: Exception | None = None,
+) -> tuple[MagicMock, list[str]]:
+    """Connection mock that records lock → unlock → close order."""
+    order: list[str] = []
+    connection, cursor = _advisory_lock_connection()
+
+    def execute_side_effect(sql: str, _params: object = None) -> MagicMock:
+        if sql == _ADVISORY_LOCK_SQL:
+            order.append("lock")
+        elif sql == _ADVISORY_UNLOCK_SQL:
+            order.append("unlock")
+            if unlock_error is not None:
+                raise unlock_error
+        return cursor
+
+    def close_side_effect() -> None:
+        order.append("close")
+        if close_error is not None:
+            raise close_error
+
+    cursor.execute.side_effect = execute_side_effect
+    connection.close.side_effect = close_side_effect
+    return connection, order
+
+
+class TestMigrationAdvisoryLock:
+    """Session advisory lock used by alembic/env.py around online upgrades."""
+
+    def test_uses_libpq_url_and_autocommit(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Lock connection is psycopg + database_url_sync, never SQLAlchemy."""
+        libpq_url = "postgresql://u:p@h1:5432,h2:5432/db"
+        monkeypatch.setattr(
+            migrations_mod.settings,
+            "db",
+            SimpleNamespace(database_url_sync=libpq_url),
+        )
+        connection, _cursor = _advisory_lock_connection()
+
+        with (
+            patch("aegra_api.core.migrations.psycopg.connect", return_value=connection) as mock_connect,
+            patch("sqlalchemy.create_engine") as mock_create_engine,
+            patch("sqlalchemy.ext.asyncio.async_engine_from_config") as mock_async_engine,
+            migrations_mod.migration_advisory_lock(),
+        ):
+            pass
+
+        assert mock_connect.call_count == 1
+        assert mock_connect.call_args.args[0] == libpq_url
+        assert "h1:5432,h2:5432" in mock_connect.call_args.args[0]
+        assert mock_connect.call_args.kwargs["autocommit"] is True
+        mock_create_engine.assert_not_called()
+        mock_async_engine.assert_not_called()
+        connection.close.assert_called_once()
+
+    def test_lock_then_body_then_unlock(self) -> None:
+        """pg_advisory_lock is taken before the body and released after."""
+        connection, order = _lock_connection()
+
+        with (
+            patch("aegra_api.core.migrations.psycopg.connect", return_value=connection),
+            migrations_mod.migration_advisory_lock(),
+        ):
+            order.append("body")
+
+        assert order == ["lock", "body", "unlock", "close"]
+        assert (_AEGRA_MIGRATION_LOCK_KEY1, _AEGRA_MIGRATION_LOCK_KEY2) == (0xAE6A, 1)
+        cursor = connection.cursor.return_value.__enter__.return_value
+        assert cursor.execute.call_args_list[0].args[1] == (0xAE6A, 1)
+        assert cursor.execute.call_args_list[0].args[0] == "SELECT pg_advisory_lock(%s, %s)"
+        assert "pg_advisory_xact_lock" not in cursor.execute.call_args_list[0].args[0]
+        connection.close.assert_called_once()
+
+    def test_unlocks_when_body_raises(self) -> None:
+        """A failed upgrade still releases the session lock."""
+        connection, order = _lock_connection()
+
+        with (
+            patch("aegra_api.core.migrations.psycopg.connect", return_value=connection),
+            pytest.raises(RuntimeError, match="boom"),
+            migrations_mod.migration_advisory_lock(),
+        ):
+            order.append("body")
+            raise RuntimeError("boom")
+
+        assert order == ["lock", "body", "unlock", "close"]
+        connection.close.assert_called_once()
+
+    def test_upgrade_and_unlock_failure_keeps_upgrade_error(self) -> None:
+        """Unlock failure after a failed upgrade must not replace the upgrade error."""
+        unlock_error = RuntimeError("postgresql://user:supersecret@host/db unlock failed")
+        connection, order = _lock_connection(unlock_error=unlock_error)
+
+        with (
+            patch("aegra_api.core.migrations.psycopg.connect", return_value=connection),
+            patch.object(migrations_mod.logger, "warning") as mock_warning,
+            pytest.raises(RuntimeError, match="upgrade boom"),
+            migrations_mod.migration_advisory_lock(),
+        ):
+            order.append("body")
+            raise RuntimeError("upgrade boom")
+
+        assert order == ["lock", "body", "unlock", "close"]
+        connection.close.assert_called_once()
+        mock_warning.assert_called()
+        logged = str(mock_warning.call_args)
+        assert "supersecret" not in logged
+        assert "postgresql://" not in logged
+
+    def test_unlock_failure_after_successful_upgrade_is_raised(self) -> None:
+        """A successful upgrade must not report success if unlock fails."""
+        connection, order = _lock_connection(unlock_error=RuntimeError("unlock boom"))
+
+        with (
+            patch("aegra_api.core.migrations.psycopg.connect", return_value=connection),
+            pytest.raises(RuntimeError, match="unlock boom"),
+            migrations_mod.migration_advisory_lock(),
+        ):
+            order.append("body")
+
+        assert order == ["lock", "body", "unlock", "close"]
+        connection.close.assert_called_once()
+
+    def test_close_failure_after_upgrade_failure_keeps_upgrade_error(self) -> None:
+        """Connection close is best-effort and must not hide the upgrade error."""
+        connection, order = _lock_connection(close_error=RuntimeError("close boom"))
+
+        with (
+            patch("aegra_api.core.migrations.psycopg.connect", return_value=connection),
+            patch.object(migrations_mod.logger, "warning") as mock_warning,
+            pytest.raises(RuntimeError, match="upgrade boom"),
+            migrations_mod.migration_advisory_lock(),
+        ):
+            order.append("body")
+            raise RuntimeError("upgrade boom")
+
+        assert order == ["lock", "body", "unlock", "close"]
+        connection.close.assert_called_once()
+        mock_warning.assert_called()
+
+    def test_close_failure_does_not_replace_unlock_failure(self) -> None:
+        """Close errors must not hide an unlock failure on the success path."""
+        connection, order = _lock_connection(
+            unlock_error=RuntimeError("unlock boom"),
+            close_error=RuntimeError("close boom"),
+        )
+
+        with (
+            patch("aegra_api.core.migrations.psycopg.connect", return_value=connection),
+            pytest.raises(RuntimeError, match="unlock boom"),
+            migrations_mod.migration_advisory_lock(),
+        ):
+            order.append("body")
+
+        assert order == ["lock", "body", "unlock", "close"]
+        connection.close.assert_called_once()
+
+    def test_online_env_wraps_upgrade_with_advisory_lock(self) -> None:
+        """Regression: #548 — lock must live in env.py so CLI and startup share it."""
+        env_path = Path(__file__).resolve().parents[2] / "alembic" / "env.py"
+        source = env_path.read_text()
+        assert "from aegra_api.core.migrations import migration_advisory_lock" in source
+        assert "with migration_advisory_lock():" in source
+        assert "pg_advisory_xact_lock" not in source
+        assert "database_url_sync" not in source

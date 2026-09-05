@@ -228,7 +228,7 @@ Aegra runs against user-managed Postgres including multi-host HA (PR #299). DB c
 
 - **Two URLs, do not cross drivers.**
   - `settings.db.database_url` → asyncpg query-param form. SQLAlchemy only.
-  - `settings.db.database_url_sync` → raw libpq, comma-host preserved. psycopg only (LangGraph pool, migrations precheck).
+  - `settings.db.database_url_sync` → raw libpq, comma-host preserved. psycopg only (LangGraph pool, migrations precheck, advisory lock).
   - Feeding `database_url_sync` to SQLAlchemy (`create_engine`, `async_engine_from_config`) silently breaks HA — SQLAlchemy's URL parser doesn't grok libpq comma-hosts. For sync DBAPI, use `psycopg.connect(database_url_sync)` directly.
 
 - **Pool ownership.** Long-lived pools belong in `db_manager` only. Short-lived helpers must close deterministically (`with` or `try/finally`). Code running before `db_manager.initialize()` cannot assume pools exist.
@@ -237,6 +237,7 @@ Aegra runs against user-managed Postgres including multi-host HA (PR #299). DB c
   - Schema changes go through alembic, never raw DDL from app code.
   - Linear `down_revision` chain. Idempotent + resumable.
   - Lifespan uses `run_migrations_if_needed()` (lock-free precheck). `run_migrations()` is for `aegra db upgrade` only. Don't regress the precheck.
+  - Online upgrades (`alembic/env.py`) take a session `pg_advisory_lock` via psycopg on `database_url_sync`. Alembic itself does not take an advisory lock — there is one lock, in `env.py`. Do not wrap `command.upgrade` with the same lock — nested acquire deadlocks. Precheck stays lock-free.
   - Multi-pod path: `RUN_MIGRATIONS_ON_STARTUP=false` + `aegra db upgrade` out-of-band. Changing startup behavior needs both `.env.example` files + `docs/guides/deployment.mdx` updated.
 
 - **SQL-layer authorization.** Every tenant-scoped read/write needs `user_id == user.identity` in the WHERE, even with `@auth.on` registered (default-allow when no handler — see GHSA-m98r-6667-4wq7). Routes taking `thread_id`/`assistant_id`/`cron_id` path params verify ownership + 404 at handler entry, not deeper.

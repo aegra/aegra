@@ -128,3 +128,50 @@ def test_convert_snapshots_to_thread_states_skips_failures():
 
     assert result == ["converted"]
     assert mock_convert.call_count == 2
+
+
+def test_project_snapshot_to_thread_fields_maps_task_keyed_interrupts() -> None:
+    service = ThreadStateService()
+    default_interrupt = make_interrupt(interrupt_id=TEST_INTERRUPT_ID)
+    snapshot = make_snapshot(
+        {"messages": [{"type": "human", "content": "hi"}]},
+        {
+            "configurable": {
+                "checkpoint_id": "checkpoint-1",
+                "checkpoint_ns": "",
+                "thread_id": "thread-123",
+            }
+        },
+        created_at="2024-01-01T00:00:00Z",
+        next_nodes=("node_1",),
+        tasks=(make_task(interrupts=(default_interrupt,)),),
+        interrupts=(default_interrupt,),
+    )
+
+    result = service.project_snapshot_to_thread_fields(snapshot, "thread-123")
+
+    assert result["values"] == {"messages": [{"type": "human", "content": "hi"}]}
+    assert result["interrupts"] == {"task-1": [{"value": "Provide value:", "id": TEST_INTERRUPT_ID}]}
+    assert result["state_updated_at"] == datetime(2024, 1, 1, tzinfo=UTC)
+    assert result["config"]["configurable"]["checkpoint_id"] == "checkpoint-1"
+    assert "next" not in result
+    assert "tasks" not in result
+    assert "checkpoint" not in result
+
+
+def test_project_snapshot_to_thread_fields_skips_tasks_without_interrupts() -> None:
+    service = ThreadStateService()
+    snapshot = make_snapshot(
+        {"foo": "bar"},
+        {"configurable": {"checkpoint_id": "cp-empty"}},
+        created_at=None,
+        tasks=(make_task(id="idle-task", interrupts=()),),
+        interrupts=(),
+    )
+
+    result = service.project_snapshot_to_thread_fields(snapshot, "thread-123")
+
+    assert result["values"] == {"foo": "bar"}
+    assert result["interrupts"] == {}
+    assert result["state_updated_at"] is None
+    assert result["config"]["configurable"]["checkpoint_id"] == "cp-empty"

@@ -6,6 +6,7 @@ from typing import Any
 import structlog
 
 from aegra_api.core.serializers import LangGraphSerializer
+from aegra_api.core.serializers.base import SerializationError
 from aegra_api.models.threads import ThreadCheckpoint, ThreadState
 
 logger = structlog.getLogger(__name__)
@@ -89,6 +90,37 @@ class ThreadStateService:
                 continue
 
         return thread_states
+
+    def project_snapshot_to_thread_fields(self, snapshot: Any, thread_id: str) -> dict[str, Any]:
+        """Project a checkpoint snapshot onto the Thread response contract.
+
+        Thread carries values, task-keyed interrupts, config, and state_updated_at.
+        It must not include ThreadState fields such as next, tasks, or checkpoint.
+        """
+        thread_state = self.convert_snapshot_to_thread_state(snapshot, thread_id)
+        interrupts: dict[str, Any] = {
+            str(task["id"]): task["interrupts"]
+            for task in thread_state.tasks
+            if task.get("id") and task.get("interrupts")
+        }
+        values = thread_state.values if isinstance(thread_state.values, dict) else {}
+        return {
+            "values": values,
+            "interrupts": interrupts,
+            "config": self._as_json_object(getattr(snapshot, "config", None)),
+            "state_updated_at": thread_state.created_at,
+        }
+
+    def _as_json_object(self, value: Any) -> dict[str, Any]:
+        """Best-effort JSON object for Thread.config; never raise to the caller."""
+        if not isinstance(value, dict):
+            return {}
+        try:
+            serialized = self.serializer.serialize(value)
+        except SerializationError:
+            logger.warning("Failed to serialize thread config to a JSON object")
+            return {}
+        return serialized if isinstance(serialized, dict) else {}
 
     def _extract_created_at(self, snapshot: Any) -> datetime | None:
         """Extract created_at timestamp from snapshot"""

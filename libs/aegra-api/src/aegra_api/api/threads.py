@@ -40,6 +40,10 @@ from aegra_api.models import (
     User,
 )
 from aegra_api.models.errors import CONFLICT, NOT_FOUND, AgentProtocolError
+from aegra_api.services.langgraph_service import (
+    create_thread_config,
+    get_langgraph_service,
+)
 from aegra_api.services.streaming_service import streaming_service
 from aegra_api.services.thread_state_service import ThreadStateService
 from aegra_api.services.thread_ttl import get_thread_ttl_config, prune_expired_threads_for_user
@@ -90,11 +94,20 @@ def _resolve_sort(request: ThreadSearchRequest) -> tuple[Any, bool]:
 # --- Helper for safe ORM -> Pydantic conversion (Test/Mock compatible) ---
 
 
-def _serialize_thread(thread_orm: ThreadORM, default_metadata: dict[str, Any] | None = None) -> Thread:
+def _serialize_thread(
+    thread_orm: ThreadORM,
+    default_metadata: dict[str, Any] | None = None,
+    *,
+    values: dict[str, Any] | None = None,
+    interrupts: dict[str, Any] | None = None,
+    config: dict[str, Any] | None = None,
+    state_updated_at: datetime | None = None,
+) -> Thread:
     """
     Safely converts ThreadORM to Thread model using dictionary construction.
     This handles None values and MagicMocks that appear in tests, preventing
-    Pydantic V2 ValidationErrors.
+    Pydantic V2 ValidationErrors. Checkpoint fields default to empty unless
+    the caller loaded them (GET /threads/{id} only).
     """
 
     def _coerce_str(val: Any, default: str) -> str:
@@ -150,8 +163,66 @@ def _serialize_thread(thread_orm: ThreadORM, default_metadata: dict[str, Any] | 
             "user_id": u_id,
             "created_at": c_at,
             "updated_at": u_at,
+            "state_updated_at": state_updated_at,
+            "config": config if isinstance(config, dict) else {},
+            "values": values if isinstance(values, dict) else {},
+            "interrupts": interrupts if isinstance(interrupts, dict) else {},
         }
     )
+
+
+def _empty_thread_state_fields() -> dict[str, Any]:
+    """Documented Thread state fields when no checkpoint exists."""
+    return {
+        "values": {},
+        "interrupts": {},
+        "config": {},
+        "state_updated_at": None,
+    }
+
+
+async def _load_thread_state_fields(thread: ThreadORM, user: User) -> dict[str, Any]:
+    """Load Thread-contract fields from the latest checkpoint.
+
+    A missing checkpoint or unresolvable graph is an empty projection, not a 404.
+    """
+    empty = _empty_thread_state_fields()
+    thread_metadata = getattr(thread, "metadata_json", None) or {}
+    if not isinstance(thread_metadata, dict):
+        return empty
+    graph_id = thread_metadata.get("graph_id")
+    if not isinstance(graph_id, str) or not graph_id:
+        return empty
+
+    thread_id = str(getattr(thread, "thread_id", ""))
+    langgraph_service = get_langgraph_service()
+    config: dict[str, Any] = create_thread_config(thread_id, user)
+    try:
+        async with langgraph_service.get_graph(
+            graph_id,
+            config=config,
+            access_context="threads.read",
+            user=user,
+        ) as agent:
+            agent = agent.with_config(config)
+            state_snapshot = await agent.aget_state(config, subgraphs=False)
+        if not state_snapshot:
+            return empty
+        return thread_state_service.project_snapshot_to_thread_fields(state_snapshot, thread_id)
+    except HTTPException as exc:
+        if exc.status_code == 404:
+            return empty
+        raise
+    except ValueError:
+        logger.info(
+            "Graph '%s' could not be resolved for thread '%s'; returning empty state fields",
+            graph_id,
+            thread_id,
+        )
+        return empty
+    except Exception as e:
+        logger.exception("Failed to retrieve latest state for thread '%s'", thread_id)
+        raise HTTPException(500, "Failed to retrieve thread state") from e
 
 
 # --- Endpoints ---
@@ -307,6 +378,9 @@ async def get_thread(
 ) -> Thread:
     """Get a thread by its ID.
 
+    Returns the thread record plus the latest checkpoint projection
+    (`values`, `interrupts`, `config`, `state_updated_at`). Distinct from
+    GET /threads/{thread_id}/state, which also includes next/tasks/checkpoint.
     Returns 404 if the thread does not exist or does not belong to the
     authenticated user.
     """
@@ -325,7 +399,8 @@ async def get_thread(
     if not thread:
         raise HTTPException(404, f"Thread '{thread_id}' not found")
 
-    return _serialize_thread(thread)
+    state_fields = await _load_thread_state_fields(thread, user)
+    return _serialize_thread(thread, **state_fields)
 
 
 @router.patch("/threads/{thread_id}", response_model=Thread, responses={**NOT_FOUND})

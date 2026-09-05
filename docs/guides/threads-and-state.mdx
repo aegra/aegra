@@ -47,7 +47,18 @@ Threads have a status that reflects their current state:
 ```python
 thread = await client.threads.get(thread_id)
 print(thread["status"])  # "idle", "busy", "interrupted", "error"
+print(thread["values"])  # latest checkpoint values, or {}
+print(thread["interrupts"])  # task-id → interrupt list, or {}
+print(thread.get("state_updated_at"))
 ```
+
+`GET /threads/{thread_id}` returns the thread record plus a projection of the
+latest checkpoint: `values`, `interrupts` (keyed by task id), `config`, and
+`state_updated_at`. This is distinct from [`GET /threads/{thread_id}/state`](#getting-thread-state),
+which also includes `next`, `tasks`, and checkpoint identifiers.
+
+For a thread with no checkpoint, `values`, `interrupts`, and `config` are empty
+objects and `state_updated_at` is null.
 
 <Note>
   The snippets below assume you are inside an `async def` function with an initialized `client` — see the example above.

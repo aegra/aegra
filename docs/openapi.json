@@ -850,7 +850,7 @@
           "Threads"
         ],
         "summary": "Get Thread",
-        "description": "Get a thread by its ID.\n\nReturns 404 if the thread does not exist or does not belong to the\nauthenticated user.",
+        "description": "Get a thread by its ID.\n\nReturns the thread record plus the latest checkpoint projection\n(`values`, `interrupts`, `config`, `state_updated_at`). Distinct from\nGET /threads/{thread_id}/state, which also includes next/tasks/checkpoint.\nReturns 404 if the thread does not exist or does not belong to the\nauthenticated user.",
         "operationId": "get_thread_threads__thread_id__get",
         "parameters": [
           {
@@ -5235,6 +5235,37 @@
             "format": "date-time",
             "title": "Updated At",
             "description": "Timestamp when the thread was last updated."
+          },
+          "state_updated_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "State Updated At",
+            "description": "Timestamp when the thread's checkpoint state was last updated."
+          },
+          "config": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Config",
+            "description": "Runnable config from the latest checkpoint."
+          },
+          "values": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Values",
+            "description": "Current checkpoint values (the thread's latest state)."
+          },
+          "interrupts": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Interrupts",
+            "description": "Current interrupts keyed by task id."
           }
         },
         "type": "object",

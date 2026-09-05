@@ -3,7 +3,7 @@
   "info": {
     "title": "Aegra",
     "description": "Production-ready Agent Protocol server",
-    "version": "0.10.4"
+    "version": "0.10.5"
   },
   "paths": {
     "/info": {
@@ -5135,7 +5135,7 @@
             "anyOf": [
               {
                 "type": "integer",
-                "maximum": 100.0,
+                "maximum": 1000.0,
                 "minimum": 1.0
               },
               {
@@ -5572,7 +5572,7 @@
             "anyOf": [
               {
                 "type": "integer",
-                "maximum": 100.0,
+                "maximum": 1000.0,
                 "minimum": 1.0
               },
               {

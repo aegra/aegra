@@ -388,7 +388,7 @@ curl -X POST http://localhost:8000/threads/$THREAD/commands   -H "Content-Type: 
 | `interrupt_id` | Targets one pending interrupt. Omit it only when a single interrupt is pending. |
 | `responses` | Batch form: a list of `{interrupt_id, response}` entries resumed in one run. Replaces `response` and `interrupt_id`. |
 | `update` | State update applied in the same superstep as the resume, as `Command(update=...)`. Must be an object. |
-| `goto` | Node name, `{node, input}` object, or a list of those, applied as `Command(goto=...)`. |
+| `goto` | Node name, `{node}` or `{node, input}` object, or a list of those, applied as `Command(goto=...)`. `input` is optional. |
 | `config`, `metadata` | Per-run overrides, same as `run.start`. |
 | `context` | Aegra extension, same semantics as on `run.start`. |
 | `namespace` | Accepted for protocol compatibility. Interrupt ids already encode the subgraph namespace, so the server does not read it. |

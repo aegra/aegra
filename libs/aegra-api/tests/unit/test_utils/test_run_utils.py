@@ -1,4 +1,7 @@
 import pytest
+from langgraph.types import Send
+
+from aegra_api.utils.run_utils import map_command_to_langgraph
 
 
 def test_merge_jsonb_and_should_skip_event():
@@ -85,20 +88,12 @@ async def test_filter_with_empty_properties_returns_context():
 
 class TestMapCommandToLangGraph:
     def test_goto_send_without_input_maps_to_none_input(self) -> None:
-        from langgraph.types import Send
-
-        from aegra_api.utils.run_utils import map_command_to_langgraph
-
         command = map_command_to_langgraph({"resume": 1, "goto": [{"node": "tool"}, "plain"]})
 
         assert command.resume == 1
         assert command.goto == [Send("tool", None), "plain"]
 
     def test_goto_send_with_input_keeps_input(self) -> None:
-        from langgraph.types import Send
-
-        from aegra_api.utils.run_utils import map_command_to_langgraph
-
         command = map_command_to_langgraph({"goto": {"node": "tool", "input": {"k": 1}}})
 
         assert command.goto == [Send("tool", {"k": 1})]

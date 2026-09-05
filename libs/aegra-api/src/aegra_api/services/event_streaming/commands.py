@@ -85,9 +85,8 @@ async def handle_command(
 
 _MULTITASK_STRATEGIES = frozenset({"reject", "rollback", "interrupt", "enqueue"})
 
-# Every key the protocol spec defines for each command, plus the aegra
-# extensions the handlers read. Anything outside these sets is logged, never
-# silently dropped (#452). tests/unit pins these against the spec key list.
+# Protocol keys plus Aegra extensions per handler. Unknown keys are logged, never
+# silently dropped (#452); test_spec_params.py pins these against the spec.
 RUN_START_KEYS: frozenset[str] = frozenset(
     {
         "assistant_id",
@@ -267,7 +266,7 @@ def _build_resume_command(params: dict[str, Any], resume: Any) -> tuple[dict[str
 def _is_goto_target(target: Any) -> bool:
     if isinstance(target, str):
         return bool(target)
-    return isinstance(target, dict) and isinstance(target.get("node"), str)
+    return isinstance(target, dict) and isinstance(target.get("node"), str) and bool(target["node"])
 
 
 def _build_resume(params: dict[str, Any]) -> tuple[Any, tuple[ErrorCode, str] | None]:

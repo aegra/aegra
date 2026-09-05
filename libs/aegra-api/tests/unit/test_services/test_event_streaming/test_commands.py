@@ -293,7 +293,7 @@ class TestInputRespondCommandFields:
         assert run_id is None
         prepared_run.assert_not_called()
 
-    @pytest.mark.parametrize("goto", [42, "", {"input": {}}, ["ok", 7]])
+    @pytest.mark.parametrize("goto", [42, "", {"input": {}}, {"node": ""}, ["ok", 7]])
     async def test_input_respond_malformed_goto_is_invalid(
         self, prepared_run: AsyncMock, user: User, goto: Any
     ) -> None:

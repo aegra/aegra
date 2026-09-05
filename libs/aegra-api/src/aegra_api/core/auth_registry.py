@@ -67,6 +67,7 @@ ROUTE_AUTH_MAP: Final[dict[tuple[str, str], tuple[str, str]]] = {
     # These mint an ephemeral thread, so they authorize as a thread create_run
     # exactly like their threaded counterparts.
     ("POST", "/runs"): ("threads", "create_run"),
+    ("POST", "/runs/cancel"): ("threads", "update"),
     ("POST", "/runs/stream"): ("threads", "create_run"),
     ("POST", "/runs/wait"): ("threads", "create_run"),
     # --- crons --------------------------------------------------------------

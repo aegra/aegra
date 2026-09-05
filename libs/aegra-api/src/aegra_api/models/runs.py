@@ -141,6 +141,24 @@ class RunCreate(BaseModel):
         return self
 
 
+class RunsCancel(BaseModel):
+    """Selector for ``POST /runs/cancel``: a status filter, or thread_id plus run_ids."""
+
+    status: Literal["pending", "running", "all"] | None = Field(
+        None, description="Cancel every active run of the caller in this status. 'all' means pending and running."
+    )
+    thread_id: str | None = Field(None, description="Thread that owns the runs listed in run_ids.")
+    run_ids: list[str] | None = Field(None, description="Runs to cancel; requires thread_id.")
+
+    @model_validator(mode="after")
+    def validate_exactly_one_selector(self) -> Self:
+        by_status = self.status is not None
+        by_ids = self.thread_id is not None and self.run_ids is not None
+        if by_status == by_ids:
+            raise ValueError("Provide either 'status' or both 'thread_id' and 'run_ids'")
+        return self
+
+
 class Run(BaseModel):
     """Run entity model
 

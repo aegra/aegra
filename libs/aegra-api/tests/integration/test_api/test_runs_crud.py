@@ -3,7 +3,7 @@
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from tests.fixtures.clients import create_test_app, make_client
-from tests.fixtures.database import DummySessionBase
+from tests.fixtures.database import DummyScalarResult, DummySessionBase
 from tests.fixtures.session_fixtures import BasicSession, override_session_dependency
 from tests.fixtures.test_helpers import DummyRun, DummyThread
 
@@ -345,6 +345,96 @@ class TestCancelRun:
             assert resp.status_code == 200
             mock_streaming.cancel_run.assert_awaited_once_with("test-run-123", emit_end_event=False)
             mock_streaming.signal_run_cancelled.assert_awaited_once_with("test-run-123")
+
+
+class TestCancelRuns:
+    """Test POST /runs/cancel (bulk cancel used by the SDK's cancel_many)."""
+
+    @staticmethod
+    def _app_with_runs(runs, thread_exists=True):
+        app = create_test_app(include_runs=True, include_threads=False)
+
+        class Session(DummySessionBase):
+            async def scalar(self, _stmt):
+                return "test-thread-123" if thread_exists else None
+
+            async def scalars(self, _stmt=None):
+                return DummyScalarResult(runs)
+
+            async def commit(self):
+                pass
+
+        override_session_dependency(app, Session)
+        return make_client(app)
+
+    def test_cancel_runs_by_status_cancels_each_active_run(self):
+        runs = [_run_row(run_id="run-a", status="running"), _run_row(run_id="run-b", status="pending")]
+        client = self._app_with_runs(runs)
+
+        with (
+            patch("aegra_api.api.runs.streaming_service") as mock_streaming,
+            patch("aegra_api.api.runs.interrupt_unowned_run", new_callable=AsyncMock, return_value=True),
+        ):
+            mock_streaming.interrupt_run = AsyncMock()
+            mock_streaming.signal_run_cancelled = AsyncMock()
+
+            resp = client.post("/runs/cancel", json={"status": "all"}, params={"action": "interrupt"})
+
+            assert resp.status_code == 204
+            assert mock_streaming.interrupt_run.await_count == 2
+            assert mock_streaming.signal_run_cancelled.await_count == 2
+
+    def test_cancel_runs_by_ids_skips_finished_runs(self):
+        runs = [_run_row(run_id="run-a", status="running"), _run_row(run_id="run-b", status="success")]
+        client = self._app_with_runs(runs)
+
+        with (
+            patch("aegra_api.api.runs.streaming_service") as mock_streaming,
+            patch("aegra_api.api.runs.interrupt_unowned_run", new_callable=AsyncMock, return_value=True),
+        ):
+            mock_streaming.cancel_run = AsyncMock()
+            mock_streaming.signal_run_cancelled = AsyncMock()
+
+            resp = client.post(
+                "/runs/cancel",
+                json={"thread_id": "test-thread-123", "run_ids": ["run-a", "run-b"]},
+                params={"action": "cancel"},
+            )
+
+            assert resp.status_code == 204
+            mock_streaming.cancel_run.assert_awaited_once_with("run-a", emit_end_event=False)
+
+    def test_cancel_runs_by_ids_unknown_thread_is_404(self):
+        client = self._app_with_runs([], thread_exists=False)
+
+        resp = client.post("/runs/cancel", json={"thread_id": "missing", "run_ids": ["run-a"]})
+
+        assert resp.status_code == 404
+
+    def test_cancel_runs_without_selector_is_422(self):
+        client = self._app_with_runs([])
+
+        resp = client.post("/runs/cancel", json={})
+
+        assert resp.status_code == 422
+
+    def test_cancel_runs_unsupported_action_is_422(self):
+        client = self._app_with_runs([])
+
+        resp = client.post("/runs/cancel", json={"status": "all"}, params={"action": "rollback"})
+
+        assert resp.status_code == 422
+
+    def test_cancel_runs_no_matches_is_204(self):
+        client = self._app_with_runs([])
+
+        with patch("aegra_api.api.runs.streaming_service") as mock_streaming:
+            mock_streaming.interrupt_run = AsyncMock()
+
+            resp = client.post("/runs/cancel", json={"status": "pending"})
+
+            assert resp.status_code == 204
+            mock_streaming.interrupt_run.assert_not_awaited()
 
 
 class TestDeleteRun:

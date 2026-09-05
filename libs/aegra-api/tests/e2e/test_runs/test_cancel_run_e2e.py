@@ -314,3 +314,64 @@ async def test_cancel_with_wait_flag():
     # If the run was still running when we cancelled, it should be interrupted
     # If it already completed, it would be success
     assert final_run["status"] in ("interrupted", "error", "success")
+
+
+async def _start_slow_run(client, assistant_id: str) -> tuple[str, str]:
+    thread = await client.threads.create()
+    run = await client.runs.create(
+        thread["thread_id"],
+        assistant_id,
+        input={"messages": [{"role": "user", "content": '{"delay": 1.0, "steps": 30}'}]},
+    )
+    return thread["thread_id"], run["run_id"]
+
+
+async def _wait_terminal(client, thread_id: str, run_id: str, timeout: float = 15.0) -> str:
+    deadline = asyncio.get_running_loop().time() + timeout
+    while asyncio.get_running_loop().time() < deadline:
+        run = await client.runs.get(thread_id, run_id)
+        if run["status"] not in ("pending", "running"):
+            return run["status"]
+        await asyncio.sleep(0.5)
+    return (await client.runs.get(thread_id, run_id))["status"]
+
+
+@pytest.mark.e2e
+@pytest.mark.asyncio
+async def test_cancel_many_by_thread_and_run_ids():
+    """``runs.cancel_many(thread_id, run_ids)`` hits POST /runs/cancel and stops the listed runs only."""
+    client = get_e2e_client()
+    assistant = await client.assistants.create(graph_id="stress_test", if_exists="do_nothing")
+    assistant_id = assistant["assistant_id"]
+
+    thread_id, run_a = await _start_slow_run(client, assistant_id)
+    other_thread, run_b = await _start_slow_run(client, assistant_id)
+    await asyncio.sleep(1.0)
+
+    await client.runs.cancel_many(thread_id=thread_id, run_ids=[run_a], action="interrupt")
+
+    status_a = await _wait_terminal(client, thread_id, run_a)
+    elog("cancel_many by ids", {"run_a": status_a})
+    assert status_a == "interrupted"
+
+    untouched = await client.runs.get(other_thread, run_b)
+    assert untouched["status"] in ("pending", "running"), untouched["status"]
+    await client.runs.cancel(other_thread, run_b, action="cancel")
+
+
+@pytest.mark.e2e
+@pytest.mark.asyncio
+async def test_cancel_many_by_status_cancels_all_active_runs():
+    """``runs.cancel_many(status="all")`` stops every active run the caller owns."""
+    client = get_e2e_client()
+    assistant = await client.assistants.create(graph_id="stress_test", if_exists="do_nothing")
+    assistant_id = assistant["assistant_id"]
+
+    started = [await _start_slow_run(client, assistant_id) for _ in range(2)]
+    await asyncio.sleep(1.0)
+
+    await client.runs.cancel_many(status="all", action="interrupt")
+
+    statuses = [await _wait_terminal(client, thread_id, run_id) for thread_id, run_id in started]
+    elog("cancel_many by status", statuses)
+    assert statuses == ["interrupted", "interrupted"]

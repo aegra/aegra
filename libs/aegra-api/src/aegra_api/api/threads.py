@@ -953,6 +953,7 @@ async def prune_threads(
 def _build_thread_filter_clauses(
     user_id: str,
     filters: Any,
+    *,
     status: str | None = None,
     metadata: dict[str, Any] | None = None,
     values: dict[str, Any] | None = None,

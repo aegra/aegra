@@ -10,6 +10,7 @@ Uses the ``stress_test`` graph (no LLM) so the run is hermetic.
 
 import asyncio
 import json
+import uuid
 from typing import Any
 
 import httpx
@@ -70,6 +71,63 @@ async def test_sdk_thread_stream_run_start_and_events() -> None:
     elog("sdk thread stream methods", methods)
     assert "lifecycle" in methods, f"no lifecycle event received; got {methods}"
     assert "completed" in lifecycle_events, f"run did not complete; lifecycle={lifecycle_events}"
+
+
+@pytest.mark.e2e
+@pytest.mark.asyncio
+async def test_input_respond_update_lands_in_thread_state() -> None:
+    """``input.respond`` with ``update`` writes state in the same superstep as the resume.
+
+    The stock SDK's ``respond()`` sends only the response, so the wire body is
+    posted directly. An ``ignore`` response ends the run without another model
+    call, which keeps the assertion on the update alone.
+    """
+    if not await _v2_enabled():
+        pytest.skip("FF_V2_EVENT_STREAMING is disabled on the server under test")
+
+    assistant_id = await _ensure_graph("agent_hitl")
+    client = get_client(url=_base_url())
+    marker = f"resume-marker-{uuid.uuid4()}"
+
+    lifecycle_after_resume: list[str] = []
+    resumed = False
+    async with client.threads.stream(assistant_id=assistant_id) as ts:
+        await ts.run.start(
+            input={"messages": [{"role": "user", "content": "Search the web for the latest LangGraph release."}]}
+        )
+        async for event in ts.events:
+            method = event.get("method")
+            data = event.get("params", {}).get("data") or {}
+            if method == "input.requested" and not resumed:
+                async with httpx.AsyncClient(base_url=_base_url(), timeout=10.0) as http:
+                    response = await http.post(
+                        f"/threads/{ts.thread_id}/commands",
+                        json={
+                            "id": 7,
+                            "method": "input.respond",
+                            "params": {
+                                "interrupt_id": data["interrupt_id"],
+                                "namespace": [],
+                                "response": [{"type": "ignore"}],
+                                "update": {"messages": [{"role": "system", "content": marker}]},
+                            },
+                        },
+                    )
+                assert response.status_code == 200
+                assert response.json()["type"] == "success", response.json()
+                resumed = True
+                continue
+            if resumed and method == "lifecycle":
+                lifecycle_after_resume.append(data.get("event"))
+                if data.get("event") in ("completed", "failed"):
+                    break
+        thread_id = ts.thread_id
+
+    elog("input.respond update lifecycle", lifecycle_after_resume)
+    assert "completed" in lifecycle_after_resume, lifecycle_after_resume
+    state = await client.threads.get_state(thread_id)
+    contents = [message.get("content") for message in state["values"]["messages"]]
+    assert marker in contents, contents
 
 
 @pytest.mark.e2e

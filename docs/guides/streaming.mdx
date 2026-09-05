@@ -311,7 +311,11 @@ curl -X POST http://localhost:8000/threads/$THREAD/commands \
 # → {"type": "success", "id": 1, "result": {"run_id": "..."}}
 ```
 
-`context` is forwarded to both the graph factory through `ServerRuntime[T]` and graph nodes through `Runtime[T]`.
+`context` is forwarded to both the graph factory through `ServerRuntime[T]` and graph nodes through `Runtime[T]`. It is an Aegra extension: the Agent Protocol `run.start` params are `assistant_id`, `input`, `config`, `metadata`, and `langsmith_tracer`. For a payload that also works against LangGraph Platform, put the same values under `config.configurable`; when `context` is absent the server copies `configurable` into it.
+
+`langsmith_tracer` is accepted and ignored. Aegra traces through OpenTelemetry, see [Observability](/guides/observability).
+
+Params outside the documented set are logged at warning level with their key names and otherwise ignored.
 
 ### Streaming events
 
@@ -359,6 +363,37 @@ When you subscribe to the `input` channel, a graph interrupt arrives as an `inpu
 ```
 
 `payload` is the Agent Protocol field consumed by the JavaScript SDK and Vue/React `useStream()` integrations. `value` mirrors it for current Python SDKs, including `ts.interrupts[].value`. If the source interrupt has no value, both content fields are omitted; explicit `null`, empty, and falsy values are preserved under both fields.
+
+### Responding to an interrupt
+
+`input.respond` resumes the interrupted run. Only `response` is required; `interrupt_id` targets one interrupt when several are pending.
+
+```bash
+curl -X POST http://localhost:8000/threads/$THREAD/commands   -H "Content-Type: application/json"   -d '{
+        "id": 2,
+        "method": "input.respond",
+        "params": {
+          "interrupt_id": "interrupt-id",
+          "namespace": [],
+          "response": {"action": "approve"},
+          "update": {"reviewed_by": "alice"},
+          "goto": "finalize"
+        }
+      }'
+```
+
+| Param | Effect |
+|:--|:--|
+| `response` | The value returned from `interrupt()` inside the graph. |
+| `interrupt_id` | Targets one pending interrupt. Omit it only when a single interrupt is pending. |
+| `responses` | Batch form: a list of `{interrupt_id, response}` entries resumed in one run. Replaces `response` and `interrupt_id`. |
+| `update` | State update applied in the same superstep as the resume, as `Command(update=...)`. Must be an object. |
+| `goto` | Node name, `{node, input}` object, or a list of those, applied as `Command(goto=...)`. |
+| `config`, `metadata` | Per-run overrides, same as `run.start`. |
+| `context` | Aegra extension, same semantics as on `run.start`. |
+| `namespace` | Accepted for protocol compatibility. Interrupt ids already encode the subgraph namespace, so the server does not read it. |
+
+`update` and `goto` fold into the same `Command` as the resume, so the resumed run writes a single checkpoint.
 
 <Note>
   This first release covers the HTTP SSE + commands path the JS/Python SDKs use, verified end-to-end against the stock `langgraph-sdk`. The WebSocket transport and the `agent.getTree` / `state.fork` / `subscription.*` commands are not yet implemented; SSE filtering via the POST body covers the `useStream()` path without them.

@@ -85,6 +85,54 @@ async def handle_command(
 
 _MULTITASK_STRATEGIES = frozenset({"reject", "rollback", "interrupt", "enqueue"})
 
+# Every key the protocol spec defines for each command, plus the aegra
+# extensions the handlers read. Anything outside these sets is logged, never
+# silently dropped (#452). tests/unit pins these against the spec key list.
+RUN_START_KEYS: frozenset[str] = frozenset(
+    {
+        "assistant_id",
+        "input",
+        "config",
+        "metadata",
+        "langsmith_tracer",
+        "context",
+        "interrupt_before",
+        "interrupt_after",
+        "multitaskStrategy",
+        "multitask_strategy",
+    }
+)
+INPUT_RESPOND_KEYS: frozenset[str] = frozenset(
+    {
+        "interrupt_id",
+        "namespace",
+        "response",
+        "responses",
+        "update",
+        "goto",
+        "config",
+        "metadata",
+        "context",
+        "assistant_id",
+    }
+)
+
+
+def _warn_unknown_keys(method: str, params: dict[str, Any], known: frozenset[str]) -> None:
+    unknown = sorted(set(params) - known)
+    if unknown:
+        logger.warning("Ignoring unknown v2 command params", method=method, keys=unknown)
+
+
+def _context_from_params(params: dict[str, Any]) -> tuple[dict[str, Any] | None, str | None]:
+    """Returns ``(context, None)`` or ``(None, error_message)``."""
+    context = params.get("context")
+    if context is None:
+        return {}, None
+    if not isinstance(context, dict):
+        return None, "context must be an object."
+    return context, None
+
 
 async def _run_start(
     command_id: int,
@@ -95,6 +143,7 @@ async def _run_start(
     user: User,
 ) -> tuple[dict[str, Any], str | None]:
     """Start a run on the thread from ``RunStartParams``."""
+    _warn_unknown_keys("run.start", params, RUN_START_KEYS)
     assistant_id = params.get("assistant_id")
     if not isinstance(assistant_id, str) or not assistant_id:
         return build_error(command_id, "invalid_argument", "run.start requires a string assistant_id."), None
@@ -103,11 +152,9 @@ async def _run_start(
     if multitask is not None and multitask not in _MULTITASK_STRATEGIES:
         return build_error(command_id, "invalid_argument", f"Unknown multitaskStrategy {multitask!r}."), None
 
-    context = params.get("context")
+    context, error_message = _context_from_params(params)
     if context is None:
-        context = {}
-    elif not isinstance(context, dict):
-        return build_error(command_id, "invalid_argument", "context must be an object."), None
+        return build_error(command_id, "invalid_argument", error_message or "invalid params"), None
 
     # run.start with input on an interrupted thread means "answer the pending
     # interrupt" — resume with the input instead of starting a fresh turn that
@@ -166,10 +213,19 @@ async def _input_respond(
     form that works with multiple pending interrupts); the batch ``responses``
     form merges several targets into one resume.
     """
+    _warn_unknown_keys("input.respond", params, INPUT_RESPOND_KEYS)
     resume, error = _build_resume(params)
     if error is not None:
         code, message = error
         return build_error(command_id, code, message), None
+
+    command, error_message = _build_resume_command(params, resume)
+    if command is None:
+        return build_error(command_id, "invalid_argument", error_message or "invalid params"), None
+
+    context, error_message = _context_from_params(params)
+    if context is None:
+        return build_error(command_id, "invalid_argument", error_message or "invalid params"), None
 
     assistant_id = params.get("assistant_id")
     if not isinstance(assistant_id, str) or not assistant_id:
@@ -180,11 +236,38 @@ async def _input_respond(
     request = RunCreate(
         assistant_id=assistant_id,
         config=params.get("config") or {},
+        context=context,
         metadata=params.get("metadata"),
-        command={"resume": resume},
+        command=command,
     )
     run_id = await _start(session, thread_id, request, user)
     return build_success(command_id, {"run_id": run_id}, applied_through_seq=0), run_id
+
+
+def _build_resume_command(params: dict[str, Any], resume: Any) -> tuple[dict[str, Any] | None, str | None]:
+    """Fold ``update`` / ``goto`` into the resume so the run writes one checkpoint.
+
+    Returns ``(command, None)`` or ``(None, error_message)``.
+    """
+    command: dict[str, Any] = {"resume": resume}
+    update = params.get("update")
+    if update is not None:
+        if not isinstance(update, dict):
+            return None, "update must be an object."
+        command["update"] = update
+    goto = params.get("goto")
+    if goto is not None:
+        targets = goto if isinstance(goto, list) else [goto]
+        if not all(_is_goto_target(target) for target in targets):
+            return None, "goto must be a node name, a {node, input} object, or a list of those."
+        command["goto"] = goto
+    return command, None
+
+
+def _is_goto_target(target: Any) -> bool:
+    if isinstance(target, str):
+        return bool(target)
+    return isinstance(target, dict) and isinstance(target.get("node"), str)
 
 
 def _build_resume(params: dict[str, Any]) -> tuple[Any, tuple[ErrorCode, str] | None]:

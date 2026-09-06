@@ -310,7 +310,6 @@ async def test_cron_search_and_count() -> None:
 @pytest.mark.e2e
 @pytest.mark.asyncio
 async def test_cron_search_and_count_filter_by_metadata() -> None:
-    """Metadata filters select only matching crons for the current user."""
     client = get_e2e_client()
     assistant = await client.assistants.create(
         graph_id="agent",

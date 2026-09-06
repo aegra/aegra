@@ -247,7 +247,7 @@ class TestSearchCrons:
         assert resp.status_code == 200
         mock_cron_service.search_crons.assert_called_once()
 
-    def test_passes_metadata_filter(self, client, mock_cron_service: AsyncMock) -> None:
+    def test_passes_metadata_filter(self, client: TestClient, mock_cron_service: AsyncMock) -> None:
         mock_cron_service.search_crons.return_value = []
 
         resp = client.post("/runs/crons/search", json={"metadata": {"team": "research"}})
@@ -288,7 +288,7 @@ class TestCountCrons:
         assert resp.status_code == 200
         assert resp.json() == 3
 
-    def test_passes_metadata_filter(self, client, mock_cron_service: AsyncMock) -> None:
+    def test_passes_metadata_filter(self, client: TestClient, mock_cron_service: AsyncMock) -> None:
         mock_cron_service.count_crons.return_value = 1
 
         resp = client.post("/runs/crons/count", json={"metadata": {"team": "research"}})

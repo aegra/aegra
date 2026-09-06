@@ -461,6 +461,21 @@ class TestSearchCrons:
         assert result[0].cron_id == "c1"
         assert result[1].cron_id == "c2"
 
+    @pytest.mark.asyncio
+    async def test_filters_by_metadata(
+        self,
+        cron_service: CronService,
+        mock_session: AsyncMock,
+    ) -> None:
+        scalars = Mock()
+        scalars.all.return_value = []
+        mock_session.scalars.return_value = scalars
+
+        await cron_service.search_crons(CronSearchRequest(metadata={"team": "research"}), "test-user")
+
+        statement = mock_session.scalars.call_args.args[0]
+        assert "@>" in str(statement)
+
 
 class TestCountCrons:
     """Test CronService.count_crons."""
@@ -505,6 +520,20 @@ class TestCountCrons:
         mock_session.scalar.return_value = 1
         result = await cron_service.count_crons(CronCountRequest(thread_id="t-1"), "test-user")
         assert result == 1
+
+    @pytest.mark.asyncio
+    async def test_filters_by_metadata(
+        self,
+        cron_service: CronService,
+        mock_session: AsyncMock,
+    ) -> None:
+        mock_session.scalar.return_value = 1
+
+        result = await cron_service.count_crons(CronCountRequest(metadata={"team": "research"}), "test-user")
+
+        assert result == 1
+        statement = mock_session.scalar.call_args.args[0]
+        assert "@>" in str(statement)
 
 
 # ---------------------------------------------------------------------------

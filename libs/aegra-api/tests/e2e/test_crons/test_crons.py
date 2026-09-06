@@ -333,9 +333,18 @@ async def test_cron_search_and_count_filter_by_metadata() -> None:
             )
             cron_ids.append(created["cron_id"])
 
-        filtered = await client.crons.search(metadata={"team": "research"})
+        filtered = await client.crons.search(
+            assistant_id=assistant_id,
+            metadata={"team": "research"},
+        )
         assert {cron["cron_id"] for cron in filtered} == {cron_ids[0]}
-        assert await client.crons.count(metadata={"team": "research"}) == 1
+        assert (
+            await client.crons.count(
+                assistant_id=assistant_id,
+                metadata={"team": "research"},
+            )
+            == 1
+        )
     finally:
         for cron_id in cron_ids:
             await client.crons.delete(cron_id)

@@ -71,7 +71,9 @@ class TestFindRecoverable:
             await LeaseReaper._find_recoverable()
 
         stuck_query = session.execute.await_args_list[1].args[0]
-        assert "runs.dispatched_at" in str(stuck_query.compile())
+        compiled = str(stuck_query.compile())
+        assert "runs.dispatched_at IS NULL" in compiled
+        assert "runs.dispatched_at <" in compiled
 
 
 class TestRecoverCrashedRuns:

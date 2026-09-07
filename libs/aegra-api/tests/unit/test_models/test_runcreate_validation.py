@@ -26,7 +26,9 @@ class TestRunCreateValidation:
             RunCreate(assistant_id="assistant", input={"value": 1}, after_seconds=2_147_483_648)
 
     @pytest.mark.parametrize("value", ["30", 30.0])
-    def test_after_seconds_rejects_non_integer_values(self, value: int | float | str) -> None:
+    def test_after_seconds_rejects_non_integer_values(
+        self: "TestRunCreateValidation", value: int | float | str
+    ) -> None:
         with pytest.raises(ValidationError):
             RunCreate(assistant_id="assistant", input={"value": 1}, after_seconds=value)
 

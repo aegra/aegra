@@ -131,7 +131,7 @@ class TestSecondsScheduleGate:
         mock_session: AsyncMock,
     ) -> None:
         mock_session.scalar.return_value = _make_assistant_orm()
-        req = CronCreate(assistant_id="asst-001", schedule="*/30 * * * * *")
+        req = CronCreate(input={"q": 1}, assistant_id="asst-001", schedule="*/30 * * * * *")
         with pytest.raises(HTTPException) as exc:
             await cron_service.create_cron(req, "tenant-A")
         assert exc.value.status_code == 422
@@ -147,7 +147,7 @@ class TestSecondsScheduleGate:
 
         monkeypatch.setattr(_cs.settings.cron, "CRON_ALLOW_SECONDS_SCHEDULE", True)
         mock_session.scalar.return_value = _make_assistant_orm()
-        req = CronCreate(assistant_id="asst-001", schedule="*/30 * * * * *")
+        req = CronCreate(input={"q": 1}, assistant_id="asst-001", schedule="*/30 * * * * *")
         await cron_service.create_cron(req, "tenant-A")
         mock_session.add.assert_called_once()
 

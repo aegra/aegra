@@ -10,10 +10,12 @@ Uses the ``stress_test`` graph (no LLM) so the run is hermetic.
 
 import asyncio
 import json
+from typing import Any
 
 import httpx
 import pytest
 from langgraph_sdk import get_client
+from langgraph_sdk._async.stream import AsyncThreadStream, InterruptPayload
 
 from aegra_api.settings import settings
 from tests.e2e._utils import elog
@@ -68,6 +70,39 @@ async def test_sdk_thread_stream_run_start_and_events() -> None:
     elog("sdk thread stream methods", methods)
     assert "lifecycle" in methods, f"no lifecycle event received; got {methods}"
     assert "completed" in lifecycle_events, f"run did not complete; lifecycle={lifecycle_events}"
+
+
+@pytest.mark.e2e
+@pytest.mark.asyncio
+async def test_run_start_persists_request_context() -> None:
+    """The v2 command path preserves context in the run execution request."""
+    if not await _v2_enabled():
+        pytest.skip("FF_V2_EVENT_STREAMING is disabled on the server under test")
+
+    assistant_id = await _ensure_assistant()
+    client = get_client(url=_base_url())
+    thread = await client.threads.create()
+    thread_id = thread["thread_id"]
+
+    async with httpx.AsyncClient(base_url=_base_url(), timeout=10.0) as http:
+        response = await http.post(
+            f"/threads/{thread_id}/commands",
+            json={
+                "id": 1,
+                "method": "run.start",
+                "params": {
+                    "assistant_id": assistant_id,
+                    "input": {"messages": [{"role": "user", "content": json.dumps({"steps": 1})}]},
+                    "context": {"tenant_id": "acme"},
+                },
+            },
+        )
+
+    assert response.status_code == 200
+    run_id = response.json()["result"]["run_id"]
+    run = await client.runs.get(thread_id, run_id)
+    assert run["context"] == {"tenant_id": "acme"}
+    await client.runs.join(thread_id, run_id)
 
 
 @pytest.mark.e2e
@@ -180,7 +215,8 @@ async def test_sdk_hitl_interrupt_surfaces_on_input_channel_and_resumes() -> Non
     assistant_id = await _ensure_graph("agent_hitl")
     client = get_client(url=_base_url())
 
-    input_requested: list[dict] = []
+    input_requested: list[dict[str, Any]] = []
+    sdk_interrupt: InterruptPayload | None = None
     resumed = False
     lifecycle_after_resume: list[str] = []
     async with client.threads.stream(assistant_id=assistant_id) as ts:
@@ -197,7 +233,7 @@ async def test_sdk_hitl_interrupt_surfaces_on_input_channel_and_resumes() -> Non
                 # Resume on the SAME open stream — the SDK does not reopen it.
                 # Proves the session keeps the stream alive across the run gap
                 # and that resume works without re-supplying an assistant.
-                await _resume_via_sdk(ts, data["interrupt_id"])
+                sdk_interrupt = await _resume_via_sdk(ts, data["interrupt_id"], {"action": "approve"})
                 resumed = True
                 continue
             if resumed and method == "lifecycle":
@@ -209,8 +245,9 @@ async def test_sdk_hitl_interrupt_surfaces_on_input_channel_and_resumes() -> Non
     elog("hitl lifecycle after resume", lifecycle_after_resume)
     assert input_requested, "interrupt did not surface on the input channel"
     assert isinstance(input_requested[0].get("interrupt_id"), str)
-    # value (not payload) is the SDK's InterruptPayload field.
-    assert "value" in input_requested[0], "interrupt value missing from input.requested"
+    assert input_requested[0]["payload"] == input_requested[0]["value"]
+    assert sdk_interrupt is not None
+    assert sdk_interrupt["value"] == input_requested[0]["value"]
     assert "completed" in lifecycle_after_resume, (
         f"resume did not run to completion on the same stream; got {lifecycle_after_resume}"
     )
@@ -387,17 +424,19 @@ async def test_sdk_subgraph_emits_nested_lifecycle_events() -> None:
     assert root_terminal == ["completed"], f"run did not reach root completed; got {root_terminal}"
 
 
-async def _resume_via_sdk(ts: object, interrupt_id: str, response: object = {"action": "approve"}) -> None:  # noqa: B006
+async def _resume_via_sdk(ts: AsyncThreadStream, interrupt_id: str, response: object) -> InterruptPayload:
     """Call ``ts.run.respond`` once the SDK's lifecycle watcher has registered the
     interrupt. The watcher runs on a separate SSE, so the main stream can surface
     ``input.requested`` a beat before ``ts.interrupts`` is populated."""
     for _ in range(50):
-        if any(p.get("interrupt_id") == interrupt_id for p in ts.interrupts):  # type: ignore[attr-defined]
+        interrupt = next((payload for payload in ts.interrupts if payload.get("interrupt_id") == interrupt_id), None)
+        if interrupt is not None:
             break
         await asyncio.sleep(0.1)
     else:
-        raise AssertionError(f"SDK never registered interrupt {interrupt_id}: {ts.interrupts!r}")  # type: ignore[attr-defined]
-    await ts.run.respond(response, interrupt_id=interrupt_id)  # type: ignore[attr-defined]
+        raise AssertionError(f"SDK never registered interrupt {interrupt_id}: {ts.interrupts!r}")
+    await ts.run.respond(response, interrupt_id=interrupt_id)
+    return interrupt
 
 
 @pytest.mark.e2e

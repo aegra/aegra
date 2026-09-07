@@ -103,6 +103,12 @@ async def _run_start(
     if multitask is not None and multitask not in _MULTITASK_STRATEGIES:
         return build_error(command_id, "invalid_argument", f"Unknown multitaskStrategy {multitask!r}."), None
 
+    context = params.get("context")
+    if context is None:
+        context = {}
+    elif not isinstance(context, dict):
+        return build_error(command_id, "invalid_argument", "context must be an object."), None
+
     # run.start with input on an interrupted thread means "answer the pending
     # interrupt" — resume with the input instead of starting a fresh turn that
     # would discard the pending tasks.
@@ -121,6 +127,7 @@ async def _run_start(
         input=input_data,
         command=command,
         config=params.get("config") or {},
+        context=context,
         metadata=params.get("metadata"),
         interrupt_before=params.get("interrupt_before"),
         interrupt_after=params.get("interrupt_after"),

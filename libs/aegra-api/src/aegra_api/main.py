@@ -22,6 +22,7 @@ from aegra_api.api.threads import router as threads_router
 from aegra_api.config import CorsConfig, HttpConfig, get_config_dir, load_http_config
 from aegra_api.core.app_loader import load_custom_app
 from aegra_api.core.auth_deps import auth_dependency
+from aegra_api.core.auth_enforcement import apply_auth_enforcement
 from aegra_api.core.database import db_manager
 from aegra_api.core.health import router as health_router
 from aegra_api.core.migrations import run_migrations_async
@@ -39,6 +40,7 @@ from aegra_api.services.cron_scheduler import cron_scheduler
 from aegra_api.services.executor import executor
 from aegra_api.services.langgraph_service import get_langgraph_service
 from aegra_api.services.lease_reaper import lease_reaper
+from aegra_api.services.thread_ttl import get_thread_ttl_config, thread_ttl_sweeper
 from aegra_api.settings import settings
 from aegra_api.utils.setup_logging import setup_logging
 
@@ -138,9 +140,16 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     if settings.cron.CRON_ENABLED:
         await cron_scheduler.start()
 
+    # Start thread TTL sweeper (deletes/compacts expired threads); resolving
+    # the config here also fails fast on an invalid retention policy.
+    if get_thread_ttl_config() is not None:
+        await thread_ttl_sweeper.start()
+
     yield
 
-    # Shutdown order: cron → reaper → executor (drains jobs) → broker → Redis → DB
+    # Shutdown order: ttl sweeper → cron → reaper → executor (drains jobs) → broker → Redis → DB
+    if get_thread_ttl_config() is not None:
+        await thread_ttl_sweeper.stop()
     if settings.cron.CRON_ENABLED:
         await cron_scheduler.stop()
     if settings.redis.REDIS_BROKER_ENABLED:
@@ -311,6 +320,10 @@ def _include_core_routers(app: FastAPI) -> None:
     app.include_router(crons_router)
     app.include_router(store_router)
     app.include_router(event_streaming_router)
+
+    # Attach @auth.on dispatch from the route registry. Routes must opt out
+    # explicitly; forgetting the in-body call no longer disables authorization.
+    apply_auth_enforcement(app)
 
 
 def create_app() -> FastAPI:

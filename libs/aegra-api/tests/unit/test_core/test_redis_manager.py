@@ -8,6 +8,7 @@ from redis.asyncio.retry import Retry
 from redis.backoff import ExponentialBackoff
 from redis.exceptions import ConnectionError as RedisConnectionError
 
+from aegra_api.core import redis_manager as redis_manager_module
 from aegra_api.core.redis_manager import RedisManager
 
 
@@ -42,15 +43,12 @@ class TestRedisManager:
     async def test_initialize_configures_retry_and_health_checks(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Pooled connections must survive server-side idle disconnects (#505).
 
-        Every connection — including the one created by initialize()'s own
-        PING — must carry a retry that covers ConnectionError, plus a
-        health-check interval. Non-default settings prove the values come
-        from RedisSettings rather than literals.
+        Non-default settings prove the values come from RedisSettings rather
+        than literals. Patched through the settings object redis_manager
+        holds, since a sibling test reloads aegra_api.settings.
         """
-        from aegra_api.settings import settings
-
-        monkeypatch.setattr(settings.redis, "REDIS_HEALTH_CHECK_INTERVAL", 45)
-        monkeypatch.setattr(settings.redis, "REDIS_RETRY_ATTEMPTS", 5)
+        monkeypatch.setattr(redis_manager_module.settings.redis, "REDIS_HEALTH_CHECK_INTERVAL", 45)
+        monkeypatch.setattr(redis_manager_module.settings.redis, "REDIS_RETRY_ATTEMPTS", 5)
         manager = RedisManager()
         mock_client = AsyncMock()
 
@@ -76,10 +74,8 @@ class TestRedisManager:
     async def test_real_pool_connections_carry_retry(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """End-to-end through the real ConnectionPool: connections built from
         the pool's kwargs must have retries (asyncio default is 0)."""
-        from aegra_api.settings import settings
-
-        monkeypatch.setattr(settings.redis, "REDIS_HEALTH_CHECK_INTERVAL", 45)
-        monkeypatch.setattr(settings.redis, "REDIS_RETRY_ATTEMPTS", 5)
+        monkeypatch.setattr(redis_manager_module.settings.redis, "REDIS_HEALTH_CHECK_INTERVAL", 45)
+        monkeypatch.setattr(redis_manager_module.settings.redis, "REDIS_RETRY_ATTEMPTS", 5)
         manager = RedisManager()
         mock_client = AsyncMock()
         real_from_url = aioredis.ConnectionPool.from_url

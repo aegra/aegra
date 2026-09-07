@@ -267,11 +267,17 @@ class TestRunsStreamingEndpoints:
             response = await create_and_stream_run(thread_id, request, mock_user)
 
         assert response.status_code == 200
-        mock_handle.assert_awaited_once()
-        ctx, value = mock_handle.call_args[0]
+        # Two events per run creation: threads.create_run, then assistants.read
+        # for the assistant the run uses.
+        assert mock_handle.await_count == 2
+        ctx, value = mock_handle.await_args_list[0].args
         assert ctx.resource == "threads"
         assert ctx.action == "create_run"
         assert value["thread_id"] == thread_id
+        ctx, value = mock_handle.await_args_list[1].args
+        assert ctx.resource == "assistants"
+        assert ctx.action == "read"
+        assert value["assistant_id"] == "test-assistant"
 
     @pytest.mark.asyncio
     async def test_create_and_stream_run_auth_handler_denies_with_403(

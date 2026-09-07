@@ -65,7 +65,7 @@ Docker is required for local development (`aegra dev` starts a PostgreSQL contai
 
 ### Windows
 
-`aegra dev` and `aegra up` work on Windows. However, `aegra serve` (production mode without Docker) is not supported on Windows because psycopg requires `SelectorEventLoop` while Windows defaults to `ProactorEventLoop`. For production deployments, use Docker or a Linux server.
+`aegra dev`, `aegra up`, and `aegra serve` work on Windows. The CLI passes uvicorn a `SelectorEventLoop` factory on Windows, since psycopg cannot connect on the `ProactorEventLoop` that uvicorn otherwise defaults to without `--reload`. For production deployments we still recommend Docker or a Linux server.
 
 ## Project structure
 

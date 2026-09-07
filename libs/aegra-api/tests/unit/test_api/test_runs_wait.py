@@ -411,11 +411,17 @@ class TestWaitForRunAuthHandlers:
         from fastapi.responses import StreamingResponse
 
         assert isinstance(response, StreamingResponse)
-        mock_handle.assert_awaited_once()
-        ctx, value = mock_handle.call_args[0]
+        # Two events per run creation: threads.create_run, then assistants.read
+        # for the assistant the run uses.
+        assert mock_handle.await_count == 2
+        ctx, value = mock_handle.await_args_list[0].args
         assert ctx.resource == "threads"
         assert ctx.action == "create_run"
         assert value["thread_id"] == thread_id
+        ctx, value = mock_handle.await_args_list[1].args
+        assert ctx.resource == "assistants"
+        assert ctx.action == "read"
+        assert value["assistant_id"] == request.assistant_id
 
     @pytest.mark.asyncio
     async def test_wait_for_run_auth_handler_denies_with_403(self) -> None:

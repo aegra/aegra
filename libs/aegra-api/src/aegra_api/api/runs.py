@@ -100,6 +100,13 @@ async def _apply_create_run_auth(user: User, thread_id: str, request: RunCreate)
     if isinstance(context_overrides, dict):
         request.context = {**(request.context or {}), **context_overrides}
 
+    # Creating a run also reads its assistant, so per-assistant handler rules
+    # apply here exactly as they do in the cron-create chain.
+    await handle_event(
+        build_auth_context(user, "assistants", "read"),
+        {"assistant_id": request.assistant_id},
+    )
+
 
 @router.post("/threads/{thread_id}/runs", response_model=Run, responses={**NOT_FOUND, **CONFLICT})
 async def create_run(
@@ -196,8 +203,9 @@ async def get_run(
     Returns the current state of the run including its status, input, output,
     and error information.
     """
-    # Authorization check (read action on runs resource)
-    ctx = build_auth_context(user, "runs", "read")
+    # Reading a run authorizes as a thread read (Agent Protocol has no `runs`
+    # resource); @auth.on.threads.read covers it.
+    ctx = build_auth_context(user, "threads", "read")
     value = {"run_id": run_id, "thread_id": thread_id}
     await handle_event(ctx, value)
 
@@ -539,8 +547,9 @@ async def delete_run(
     Conflict. Set `force=1` to cancel the run first (best-effort) and then
     delete it. Returns 204 No Content on success.
     """
-    # Authorization check (delete action on runs resource)
-    ctx = build_auth_context(user, "runs", "delete")
+    # Deleting a run authorizes as a thread delete (Agent Protocol has no `runs`
+    # resource); @auth.on.threads.delete covers it.
+    ctx = build_auth_context(user, "threads", "delete")
     value = {"run_id": run_id, "thread_id": thread_id}
     await handle_event(ctx, value)
     logger.info(f"[delete_run] fetch run run_id={run_id} thread_id={thread_id} user={user.identity}")

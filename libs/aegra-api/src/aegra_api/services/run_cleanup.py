@@ -7,11 +7,13 @@ that need cleanup after the underlying run finishes.
 import asyncio
 
 import structlog
+from psycopg import Error as PsycopgError
 from redis import RedisError
 from sqlalchemy import select
 from sqlalchemy.exc import SQLAlchemyError
 
 from aegra_api.core.active_runs import active_runs
+from aegra_api.core.database import db_manager
 from aegra_api.core.orm import Run as RunORM
 from aegra_api.core.orm import Thread as ThreadORM
 from aegra_api.core.orm import _get_session_maker
@@ -25,7 +27,7 @@ _background_cleanup_tasks: set[asyncio.Task[None]] = set()
 
 # Transient infra failures we tolerate during cleanup. Programmer errors
 # (TypeError, AttributeError, ...) propagate.
-_CLEANUP_ERRORS: tuple[type[BaseException], ...] = (RedisError, SQLAlchemyError, OSError)
+_CLEANUP_ERRORS: tuple[type[BaseException], ...] = (RedisError, SQLAlchemyError, OSError, PsycopgError)
 
 
 async def delete_thread_by_id(thread_id: str, user_id: str) -> None:
@@ -64,6 +66,8 @@ async def delete_thread_by_id(thread_id: str, user_id: str) -> None:
             )
         )
         if thread:
+            # Checkpoints first — same ordering rationale as the delete_thread route.
+            await db_manager.get_checkpointer().adelete_thread(thread_id)
             await session.delete(thread)
             await session.commit()
 

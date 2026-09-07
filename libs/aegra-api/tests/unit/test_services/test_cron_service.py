@@ -128,10 +128,13 @@ class TestBuildPayload:
         assert payload["webhook"] == "https://example.com"
 
     def test_skips_none_fields(self) -> None:
-        req = CronCreate(assistant_id="a", schedule="* * * * *")
+        # input is required at the API boundary (#514); only the other run
+        # fields can be None, so those are what the skip covers now.
+        req = CronCreate(input={"q": 1}, assistant_id="a", schedule="* * * * *")
         payload = _build_payload(req)
-        assert "input" not in payload
+        assert payload["input"] == {"q": 1}
         assert "config" not in payload
+        assert "webhook" not in payload
 
 
 class TestComputeNextRun:
@@ -200,7 +203,7 @@ class TestCreateCron:
         self,
         cron_service: CronService,
     ) -> None:
-        req = CronCreate(assistant_id="a", schedule="not-a-cron")
+        req = CronCreate(input={"q": 1}, assistant_id="a", schedule="not-a-cron")
         with pytest.raises(HTTPException) as exc:
             await cron_service.create_cron(req, "test-user")
         assert exc.value.status_code == 422
@@ -666,6 +669,7 @@ class TestCreateCronExtended:
     ) -> None:
         mock_session.scalar.return_value = _make_assistant_orm()
         req = CronCreate(
+            input={"q": 1},
             assistant_id="asst-001",
             schedule="*/5 * * * *",
             enabled=False,
@@ -685,6 +689,7 @@ class TestCreateCronExtended:
         mock_session.scalar.return_value = _make_assistant_orm()
         end = datetime.now(UTC) + timedelta(days=365)
         req = CronCreate(
+            input={"q": 1},
             assistant_id="asst-001",
             schedule="*/5 * * * *",
             end_time=end,
@@ -703,6 +708,7 @@ class TestCreateCronExtended:
     ) -> None:
         mock_session.scalar.return_value = _make_assistant_orm()
         req = CronCreate(
+            input={"q": 1},
             assistant_id="asst-001",
             schedule="*/5 * * * *",
             on_run_completed="keep",
@@ -747,7 +753,7 @@ class TestCreateCronExtended:
         should therefore start from the SECOND occurrence to avoid a double-fire.
         """
         mock_session.scalar.return_value = _make_assistant_orm()
-        req = CronCreate(assistant_id="asst-001", schedule="*/5 * * * *")
+        req = CronCreate(input={"q": 1}, assistant_id="asst-001", schedule="*/5 * * * *")
 
         before = datetime.now(UTC)
         await cron_service.create_cron(req, "test-user")
@@ -765,6 +771,7 @@ class TestCreateCronExtended:
     ) -> None:
         mock_session.scalar.return_value = _make_assistant_orm()
         req = CronCreate(
+            input={"q": 1},
             assistant_id="asst-001",
             schedule="*/5 * * * *",
             metadata={"team": "backend", "priority": "high"},
@@ -782,7 +789,7 @@ class TestCreateCronExtended:
         mock_session: AsyncMock,
     ) -> None:
         mock_session.scalar.return_value = _make_assistant_orm()
-        req = CronCreate(assistant_id="asst-001", schedule="*/5 * * * *")
+        req = CronCreate(input={"q": 1}, assistant_id="asst-001", schedule="*/5 * * * *")
 
         await cron_service.create_cron(req, "test-user")
 
@@ -1188,6 +1195,7 @@ class TestCreateCronTimezone:
     ) -> None:
         mock_session.scalar.return_value = _make_assistant_orm()
         req = CronCreate(
+            input={"q": 1},
             assistant_id="asst-001",
             schedule="0 9 * * *",
             timezone="America/New_York",
@@ -1206,6 +1214,7 @@ class TestCreateCronTimezone:
     ) -> None:
         mock_session.scalar.return_value = _make_assistant_orm()
         req = CronCreate(
+            input={"q": 1},
             assistant_id="asst-001",
             schedule="0 9 * * *",
             timezone="Not/Valid",
@@ -1224,6 +1233,7 @@ class TestCreateCronTimezone:
         """next_run_date should reflect the timezone-shifted schedule."""
         mock_session.scalar.return_value = _make_assistant_orm()
         req = CronCreate(
+            input={"q": 1},
             assistant_id="asst-001",
             schedule="0 9 * * *",
             timezone="America/New_York",

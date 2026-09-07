@@ -43,9 +43,22 @@ class TestNormalizeUpdates:
 class TestNormalizeInputRequested:
     def test_interrupt_entry_to_request(self) -> None:
         entries = [{"id": "int-1", "value": {"question": "ok?"}}]
-        assert normalize_input_requested(entries) == [{"interrupt_id": "int-1", "value": {"question": "ok?"}}]
+        assert normalize_input_requested(entries) == [
+            {"interrupt_id": "int-1", "value": {"question": "ok?"}, "payload": {"question": "ok?"}}
+        ]
 
-    def test_entry_without_value_omits_value(self) -> None:
+    def test_explicit_none_is_preserved_in_both_fields(self) -> None:
+        entries = [{"id": "int-none", "value": None}]
+        assert normalize_input_requested(entries) == [{"interrupt_id": "int-none", "value": None, "payload": None}]
+
+    def test_falsy_values_are_preserved_in_both_fields(self) -> None:
+        for value in (False, 0, "", []):
+            entries = [{"id": "int-falsy", "value": value}]
+            assert normalize_input_requested(entries) == [
+                {"interrupt_id": "int-falsy", "value": value, "payload": value}
+            ]
+
+    def test_entry_without_value_omits_content_fields(self) -> None:
         assert normalize_input_requested([{"id": "int-2"}]) == [{"interrupt_id": "int-2"}]
 
     def test_entry_without_string_id_skipped(self) -> None:
@@ -53,7 +66,7 @@ class TestNormalizeInputRequested:
 
     def test_dunder_interrupt_wrapper_accepted(self) -> None:
         wrapped = {"__interrupt__": [{"id": "int-3", "value": "v"}]}
-        assert normalize_input_requested(wrapped) == [{"interrupt_id": "int-3", "value": "v"}]
+        assert normalize_input_requested(wrapped) == [{"interrupt_id": "int-3", "value": "v", "payload": "v"}]
 
     def test_non_interrupt_value_yields_nothing(self) -> None:
         assert normalize_input_requested({"messages": []}) == []
@@ -63,7 +76,7 @@ class TestStripInterrupts:
     def test_separates_interrupt_from_values(self) -> None:
         payload = {"messages": [], "__interrupt__": [{"id": "int-1", "value": "v"}]}
         requests, cleaned = strip_interrupts(payload)
-        assert requests == [{"interrupt_id": "int-1", "value": "v"}]
+        assert requests == [{"interrupt_id": "int-1", "value": "v", "payload": "v"}]
         assert cleaned == {"messages": []}
         assert "__interrupt__" not in cleaned
 

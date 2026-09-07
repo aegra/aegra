@@ -158,6 +158,44 @@ The `ctx` parameter provides:
 | `dict` | Allow with filters (e.g., `{"metadata": {"team_id": "123"}}`) |
 | Modified `value` | Allow with modified request data |
 
+### Which routes a handler covers
+
+Every Agent Protocol route dispatches to your handlers. Sub-resources authorize
+as their parent, so one rule covers a whole family of endpoints:
+
+| Handler | Also covers |
+|---------|-------------|
+| `@auth.on.threads.read` | `GET /threads/{id}`, `/state`, `/state/{checkpoint_id}`, `/history`, `GET` a run, its `/join` and `/stream` |
+| `@auth.on.threads.update` | `PATCH /threads/{id}`, `POST /threads/{id}/state`, `PATCH` a run, `POST .../runs/{id}/cancel` |
+| `@auth.on.threads.delete` | `DELETE /threads/{id}`, `DELETE` a run |
+| `@auth.on.threads.create_run` | `POST /threads/{id}/runs`, `/runs/stream`, `/runs/wait`, `/threads/{id}/commands`, and the stateless `POST /runs`, `/runs/stream`, `/runs/wait` |
+| `@auth.on.threads.search` | `GET /threads`, `POST /threads/search`, `GET /threads/{id}/runs` |
+
+There is no `runs` resource: the Agent Protocol authorizes run operations under
+the thread that owns them, and the SDK's `@auth.on` has no `runs` attribute.
+
+Stateless runs create an ephemeral thread, so they authorize as
+`threads.create_run`. Omitting the `thread_id` does not bypass your thread rules.
+
+A filter dict returned from a `threads` handler is applied to thread queries,
+including by-id reads and deletes, not only to search.
+
+Your handler runs **once per event**. A request that legitimately touches
+several resources still checks each one: creating a cron authorizes
+`crons.create`, then `assistants.read`, then the thread, so you can deny at any
+layer. Creating a run likewise authorizes `threads.create_run`, then
+`assistants.read` for the assistant it uses.
+
+Handlers may also inject data by mutating `value` in place. Setting
+`value["metadata"]["team_id"]` in an `@auth.on.threads.create` handler stores
+that metadata on the new thread.
+
+<Note>
+Route-to-handler mapping lives in `core/auth_registry.py`. A route that is not
+registered there fails the test suite, so a new endpoint cannot silently skip
+your handlers.
+</Note>
+
 ## Accessing user data in your graph
 
 When auth is enabled, Aegra automatically injects the authenticated user's data into

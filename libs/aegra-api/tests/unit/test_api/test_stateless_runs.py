@@ -1131,7 +1131,9 @@ class TestStatelessCreateRuns:
         return AsyncMock()
 
     @pytest.mark.asyncio
-    async def test_validates_all_runs_before_commit(self, mock_user: User, mock_session: AsyncMock) -> None:
+    async def test_validates_all_runs_before_commit(
+        self: "TestStatelessCreateRuns", mock_user: User, mock_session: AsyncMock
+    ) -> None:
         """Prepare every run without committing or submitting early."""
         requests = [
             RunCreate(assistant_id="agent-1", input={"msg": "one"}),
@@ -1166,7 +1168,9 @@ class TestStatelessCreateRuns:
         assert schedule_cleanup.call_count == 2
 
     @pytest.mark.asyncio
-    async def test_rolls_back_when_one_run_fails_validation(self, mock_user: User, mock_session: AsyncMock) -> None:
+    async def test_rolls_back_when_one_run_fails_validation(
+        self: "TestStatelessCreateRuns", mock_user: User, mock_session: AsyncMock
+    ) -> None:
         """Roll back the whole batch when a later run cannot be prepared."""
         requests = [
             RunCreate(assistant_id="agent-1", input={"msg": "one"}),
@@ -1189,7 +1193,7 @@ class TestStatelessCreateRuns:
 
     @pytest.mark.asyncio
     async def test_cleans_up_all_ephemeral_runs_when_submission_fails(
-        self, mock_user: User, mock_session: AsyncMock
+        self: "TestStatelessCreateRuns", mock_user: User, mock_session: AsyncMock
     ) -> None:
         """Delete every ephemeral run after a queue failure."""
         requests = [
@@ -1228,7 +1232,7 @@ class TestStatelessCreateRuns:
 
     @pytest.mark.asyncio
     async def test_preserves_keep_runs_when_a_later_submission_fails(
-        self, mock_user: User, mock_session: AsyncMock
+        self: "TestStatelessCreateRuns", mock_user: User, mock_session: AsyncMock
     ) -> None:
         """Do not delete a retained run when a later batch submission fails."""
         requests = [
@@ -1261,7 +1265,9 @@ class TestStatelessCreateRuns:
         delete_thread.assert_awaited_once_with("thread-2", mock_user.identity)
 
     @pytest.mark.asyncio
-    async def test_cleans_up_when_submission_is_cancelled(self, mock_user: User, mock_session: AsyncMock) -> None:
+    async def test_cleans_up_when_submission_is_cancelled(
+        self: "TestStatelessCreateRuns", mock_user: User, mock_session: AsyncMock
+    ) -> None:
         """Schedule cleanup when executor submission is cancelled."""
         request = RunCreate(assistant_id="agent", input={"msg": "one"})
         prepare = AsyncMock(return_value=("run-1", MagicMock(thread_id="thread-1"), MagicMock()))

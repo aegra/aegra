@@ -15,7 +15,6 @@ import structlog
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import Field
-from redis import RedisError
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sse_starlette import EventSourceResponse
@@ -349,31 +348,33 @@ async def stateless_create_runs(
         raise
 
     results: list[Run] = []
-    cleanup_scheduled: set[str] = set()
     try:
-        for index, (run_id, run, job) in enumerate(prepared):
+        for _index, (run_id, run, job) in enumerate(prepared):
             await executor.submit(job)
             logger.info("Submitted batch run to executor", run_id=run_id)
-            request = requests[index]
-            if request.on_completion != "keep":
-                schedule_background_cleanup(run_id, run.thread_id, user.identity)
-                cleanup_scheduled.add(run_id)
             results.append(run)
+
+        for index, (run_id, run, _job) in enumerate(prepared):
+            if requests[index].on_completion != "keep":
+                schedule_background_cleanup(run_id, run.thread_id, user.identity)
     except asyncio.CancelledError:
-        for index, (run_id, run, _job) in enumerate(prepared):
-            if run_id not in cleanup_scheduled and requests[index].on_completion != "keep":
-                schedule_background_cleanup(run_id, run.thread_id, user.identity)
-        raise
-    except (RedisError, OSError, RuntimeError):
-        for index, (run_id, run, _job) in enumerate(prepared):
-            if run_id not in cleanup_scheduled and requests[index].on_completion != "keep":
-                schedule_background_cleanup(run_id, run.thread_id, user.identity)
+        for index, (_run_id, run, _job) in enumerate(prepared):
+            if requests[index].on_completion != "keep":
+                await _delete_thread_with_log(
+                    run.thread_id,
+                    user.identity,
+                    reason="Failed to delete ephemeral batch run after cancellation",
+                )
         raise
     except Exception:
-        # Executor implementations may expose backend-specific failures.
-        for index, (run_id, run, _job) in enumerate(prepared):
-            if run_id not in cleanup_scheduled and requests[index].on_completion != "keep":
-                schedule_background_cleanup(run_id, run.thread_id, user.identity)
+        # Executor failures can happen after the batch transaction commits.
+        for index, (_run_id, run, _job) in enumerate(prepared):
+            if requests[index].on_completion != "keep":
+                await _delete_thread_with_log(
+                    run.thread_id,
+                    user.identity,
+                    reason="Failed to delete ephemeral batch run after submission failure",
+                )
         raise
 
     return results

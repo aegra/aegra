@@ -224,9 +224,14 @@ async def test_stateless_create_run_returns_run_object() -> None:
 async def test_stateless_batch_creates_ordered_runs() -> None:
     """POST /runs/batch creates multiple stateless runs in input order."""
     sdk = get_e2e_client()
-    assistant = await sdk.assistants.create(
+    first_assistant = await sdk.assistants.create(
         graph_id="agent",
-        config={"tags": ["stateless", "batch"]},
+        config={"tags": ["stateless", "batch", "first"]},
+        if_exists="do_nothing",
+    )
+    second_assistant = await sdk.assistants.create(
+        graph_id="agent",
+        config={"tags": ["stateless", "batch", "second"]},
         if_exists="do_nothing",
     )
 
@@ -235,11 +240,11 @@ async def test_stateless_batch_creates_ordered_runs() -> None:
             "/runs/batch",
             json=[
                 {
-                    "assistant_id": assistant["assistant_id"],
+                    "assistant_id": first_assistant["assistant_id"],
                     "input": {"messages": [{"role": "user", "content": "First"}]},
                 },
                 {
-                    "assistant_id": assistant["assistant_id"],
+                    "assistant_id": second_assistant["assistant_id"],
                     "input": {"messages": [{"role": "user", "content": "Second"}]},
                 },
             ],
@@ -251,7 +256,10 @@ async def test_stateless_batch_creates_ordered_runs() -> None:
     for run in runs:
         check_and_skip_if_geo_blocked(run)
     assert len(runs) == 2
-    assert all(run["assistant_id"] == assistant["assistant_id"] for run in runs)
+    assert [run["assistant_id"] for run in runs] == [
+        first_assistant["assistant_id"],
+        second_assistant["assistant_id"],
+    ]
     assert runs[0]["thread_id"] != runs[1]["thread_id"]
 
 

@@ -5,6 +5,10 @@ from typing import Any, Literal
 
 from pydantic import AliasChoices, BaseModel, ConfigDict, Field, field_validator
 
+from aegra_api.models.search_limit import (
+    resolve_search_limit,
+    search_limit_json_schema_extra,
+)
 from aegra_api.utils.status_compat import validate_thread_status
 
 # Upper bound keeping now + timedelta(minutes=ttl) finite and timedelta-safe
@@ -111,7 +115,14 @@ class ThreadSearchRequest(BaseModel):
         description="State values filter (SDK compatibility; filtering by values is not supported and returns 400)",
     )
     status: str | None = Field(None, description="Thread status filter (idle, busy, interrupted, error)")
-    limit: int | None = Field(20, le=100, ge=1, description="Maximum results")
+    # None default + validate_default so omitted and JSON null share one resolver.
+    limit: int | None = Field(
+        default=None,
+        ge=1,
+        validate_default=True,
+        description="Maximum results",
+        json_schema_extra=search_limit_json_schema_extra,
+    )
     offset: int | None = Field(0, ge=0, description="Results offset")
     order_by: str | None = Field(
         "created_at DESC",
@@ -126,6 +137,11 @@ class ThreadSearchRequest(BaseModel):
         None,
         description="Sort direction (SDK-compatible). Defaults to 'desc' when sort_by is set.",
     )
+
+    @field_validator("limit")
+    @classmethod
+    def validate_limit(cls: type["ThreadSearchRequest"], v: int | None) -> int:
+        return resolve_search_limit(v)
 
     @field_validator("status")
     @classmethod

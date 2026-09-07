@@ -42,6 +42,7 @@ from aegra_api.models import (
     User,
 )
 from aegra_api.models.errors import BAD_REQUEST, CONFLICT, NOT_FOUND, AgentProtocolError
+from aegra_api.models.search_limit import effective_search_limit
 from aegra_api.services.streaming_service import streaming_service
 from aegra_api.services.thread_state_service import ThreadStateService
 from aegra_api.services.thread_ttl import get_thread_ttl_config, prune_expired_threads_for_user
@@ -1020,9 +1021,11 @@ async def search_threads(
     stmt = select(ThreadORM).where(*clauses)
 
     offset = request.offset or 0
-    limit = request.limit or 20
+    limit = request.limit if request.limit is not None else effective_search_limit()
     column, asc = _resolve_sort(request)
     direction = column.asc() if asc else column.desc()
+    # Secondary sort on thread_id keeps offset pagination stable when the
+    # primary sort key has duplicates (status buckets, microsecond ties).
     stmt = stmt.order_by(direction, ThreadORM.thread_id.asc()).offset(offset).limit(limit)
 
     result = await session.scalars(stmt)

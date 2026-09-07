@@ -226,3 +226,37 @@ async def test_threads_count_e2e() -> None:
     finally:
         for tid in created:
             await client.threads.delete(tid)
+
+
+@pytest.mark.e2e
+@pytest.mark.asyncio
+async def test_search_accepts_sdk_page_size_500_e2e() -> None:
+    """LangGraph SDK clients page with limit=500; must not 422."""
+    tag = f"limit-500-{uuid.uuid4().hex[:8]}"
+    created = await _seed_three_threads(tag)
+    try:
+        async with AsyncClient(base_url=settings.app.SERVER_URL, timeout=30.0) as http_client:
+            resp = await http_client.post(
+                "/threads/search",
+                json={"metadata": {"search_test_tag": tag}, "limit": 500},
+            )
+        assert resp.status_code == 200, resp.text
+        returned = {t["thread_id"] for t in resp.json()}
+        assert returned == set(created)
+    finally:
+        client = get_e2e_client()
+        for thread_id in created:
+            await client.threads.delete(thread_id)
+
+
+@pytest.mark.e2e
+@pytest.mark.asyncio
+async def test_search_returns_422_when_limit_exceeds_cap_e2e() -> None:
+    """limit above MAX_SEARCH_LIMIT is rejected before the query runs."""
+    async with AsyncClient(base_url=settings.app.SERVER_URL, timeout=30.0) as http_client:
+        resp = await http_client.post(
+            "/threads/search",
+            json={"limit": settings.app.MAX_SEARCH_LIMIT + 1},
+        )
+    assert resp.status_code == 422, resp.text
+    assert "limit" in resp.text

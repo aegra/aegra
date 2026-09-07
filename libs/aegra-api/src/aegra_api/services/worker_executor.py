@@ -322,17 +322,22 @@ class WorkerExecutor(BaseExecutor):
             )
             await session.commit()
 
+        pushed_ids: list[str] = []
         try:
             client = redis_manager.get_client()
             for run_id in run_ids:
                 await client.rpush(settings.worker.WORKER_QUEUE_KEY, run_id)  # type: ignore[arg-type]
+                pushed_ids.append(run_id)
                 logger.info("Dispatched delayed run", run_id=run_id)
         except RedisError:
+            unpushed_ids = [run_id for run_id in run_ids if run_id not in pushed_ids]
+            if not unpushed_ids:
+                return
             async with maker() as session:
                 await session.execute(
                     update(RunORM)
                     .where(
-                        RunORM.run_id.in_(run_ids),
+                        RunORM.run_id.in_(unpushed_ids),
                         RunORM.status == "pending",
                         RunORM.claimed_by.is_(None),
                         RunORM.dispatched_at == now,

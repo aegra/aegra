@@ -108,9 +108,9 @@ async def test_delayed_run_starts_after_requested_delay_e2e() -> None:
     client = get_e2e_client()
     thread = await client.threads.create()
     thread_id = thread["thread_id"]
-    started = asyncio.get_running_loop().time()
 
     async with AsyncClient(base_url=settings.app.SERVER_URL, timeout=120.0) as http:
+        started = asyncio.get_running_loop().time()
         response = await http.post(
             f"/threads/{thread_id}/runs",
             json={

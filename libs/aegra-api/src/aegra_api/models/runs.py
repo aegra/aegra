@@ -33,6 +33,7 @@ class RunCreate(BaseModel):
     assistant_id: str = Field(..., description="Assistant to execute")
     after_seconds: int = Field(
         0,
+        strict=True,
         ge=0,
         le=2_147_483_647,
         description="Delay execution by this many seconds after creating the run.",

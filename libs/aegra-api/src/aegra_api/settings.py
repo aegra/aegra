@@ -451,6 +451,14 @@ class ThreadTTLSettings(EnvBase):
     LANGGRAPH_THREAD_TTL: str | None = None
 
 
+class EphemeralThreadSettings(EnvBase):
+    """Retention policy for orphaned threads created by stateless runs."""
+
+    EPHEMERAL_THREAD_RETENTION_SECONDS: int = Field(default=86400, gt=0)
+    EPHEMERAL_THREAD_SWEEP_INTERVAL_SECONDS: int = Field(default=300, gt=0)
+    EPHEMERAL_THREAD_SWEEP_LIMIT: int = Field(default=100, gt=0)
+
+
 class EventStreamingSettings(EnvBase):
     """Agent Protocol v2 event streaming (/threads/{id}/stream/events + /commands).
 
@@ -477,6 +485,7 @@ class Settings:
         self.worker = WorkerSettings()
         self.cron = CronSettings()
         self.thread_ttl = ThreadTTLSettings()
+        self.ephemeral_thread = EphemeralThreadSettings()
         self.event_streaming = EventStreamingSettings()
 
 

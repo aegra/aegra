@@ -5,6 +5,8 @@ resume-command validation, and config/context merging logic.
 """
 
 import asyncio
+from contextlib import contextmanager
+from contextvars import ContextVar
 from datetime import UTC, datetime
 from typing import Any
 from uuid import uuid4
@@ -28,6 +30,18 @@ from aegra_api.utils.assistants import resolve_assistant_id
 from aegra_api.utils.run_utils import _merge_jsonb
 
 logger = structlog.getLogger(__name__)
+
+_EPHEMERAL_RUN = ContextVar("aegra_ephemeral_run", default=False)
+
+
+@contextmanager
+def ephemeral_run_context():
+    """Mark the next run prepared in this task as a stateless ephemeral run."""
+    token = _EPHEMERAL_RUN.set(True)
+    try:
+        yield
+    finally:
+        _EPHEMERAL_RUN.reset(token)
 
 
 # The interrupt reaches the client (via the broker/SSE) before the run executor
@@ -246,7 +260,13 @@ async def _prepare_run(
 
     # Mark thread as busy and update metadata
     await update_thread_metadata(
-        session, thread_id, assistant.assistant_id, assistant.graph_id, user_id=user.identity, input_data=request.input
+        session,
+        thread_id,
+        assistant.assistant_id,
+        assistant.graph_id,
+        user_id=user.identity,
+        input_data=request.input,
+        is_ephemeral=_EPHEMERAL_RUN.get(),
     )
     await set_thread_status(session, thread_id, "busy")
 

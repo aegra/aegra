@@ -10,6 +10,7 @@ from aegra_api.settings import (
     AppSettings,
     CronSettings,
     DatabaseSettings,
+    EphemeralThreadSettings,
     RedisSettings,
     ThreadTTLSettings,
     WorkerSettings,
@@ -44,6 +45,7 @@ class TestAppSettingsServerURL:
         assert app.HOST == "0.0.0.0"
         assert app.PORT == 2026
         assert app.SERVER_URL == "http://localhost:2026"
+
 
     def test_derives_localhost_when_host_is_loopback(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """SERVER_URL uses localhost when HOST=127.0.0.1."""
@@ -689,3 +691,12 @@ class TestMaxSearchLimit:
         monkeypatch.setenv("MAX_SEARCH_LIMIT", "-1")
         with pytest.raises(ValidationError):
             AppSettings(_env_file=None)
+
+
+def test_ephemeral_thread_settings_have_safe_defaults() -> None:
+    """Orphan cleanup is bounded and enabled with conservative defaults."""
+    config = EphemeralThreadSettings(_env_file=None)
+
+    assert config.EPHEMERAL_THREAD_RETENTION_SECONDS == 86400
+    assert config.EPHEMERAL_THREAD_SWEEP_INTERVAL_SECONDS == 300
+    assert config.EPHEMERAL_THREAD_SWEEP_LIMIT == 100

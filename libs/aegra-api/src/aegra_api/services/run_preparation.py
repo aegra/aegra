@@ -151,6 +151,7 @@ async def update_thread_metadata(
     *,
     user_id: str | None = None,
     input_data: dict[str, Any] | None = None,
+    is_ephemeral: bool = False,
 ) -> None:
     """Update thread metadata with assistant and graph information (dialect agnostic).
 
@@ -181,6 +182,7 @@ async def update_thread_metadata(
             status="idle",
             metadata_json=metadata,
             user_id=user_id,
+            is_ephemeral=is_ephemeral,
         )
         session.add(thread_orm)
         return
@@ -195,9 +197,10 @@ async def update_thread_metadata(
     # Only set thread_name if empty and we have a name from the input
     if thread_name and not md.get("thread_name"):
         md["thread_name"] = thread_name
-    await session.execute(
-        update(ThreadORM).where(ThreadORM.thread_id == thread_id).values(metadata_json=md, updated_at=datetime.now(UTC))
-    )
+    values: dict[str, object] = {"metadata_json": md, "updated_at": datetime.now(UTC)}
+    if is_ephemeral:
+        values["is_ephemeral"] = True
+    await session.execute(update(ThreadORM).where(ThreadORM.thread_id == thread_id).values(**values))
 
 
 async def _prepare_run(

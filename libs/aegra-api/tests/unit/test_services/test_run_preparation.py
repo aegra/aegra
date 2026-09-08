@@ -76,3 +76,24 @@ class TestValidateResumeCommand:
         session = _session_returning(_thread("idle"))
         await _validate_resume_command(session, "t1", None)
         session.scalar.assert_not_awaited()
+
+
+async def test_update_thread_metadata_persists_ephemeral_marker() -> None:
+    """Stateless preparation marks newly auto-created threads in the same transaction."""
+    session = AsyncMock()
+    session.scalar.return_value = None
+    session.add = MagicMock()
+
+    await mod.update_thread_metadata(
+        session,
+        "thread-1",
+        "assistant-1",
+        "graph-1",
+        user_id="user-1",
+        is_ephemeral=True,
+    )
+
+    created_thread = session.add.call_args.args[0]
+    assert created_thread.thread_id == "thread-1"
+    assert created_thread.user_id == "user-1"
+    assert created_thread.is_ephemeral is True

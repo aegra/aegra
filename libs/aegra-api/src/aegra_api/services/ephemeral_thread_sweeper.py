@@ -7,7 +7,6 @@ explicitly marked as ephemeral and old enough to be safely reclaimed.
 """
 
 import asyncio
-import contextlib
 from datetime import UTC, datetime, timedelta
 
 import structlog
@@ -70,19 +69,30 @@ async def sweep_orphaned_threads() -> tuple[int, int, int]:
         ).all()
         deleted = 0
         errors = 0
+        deleted_threads: list[ThreadORM] = []
         for thread in rows:
             try:
                 # Checkpoints are in the LangGraph pool, so delete them first.
                 # A failure leaves the thread row available for a later retry.
                 await db_manager.get_checkpointer().adelete_thread(thread.thread_id)
                 await session.delete(thread)
-                deleted += 1
-                EPHEMERAL_THREAD_SWEPT.labels(outcome="deleted").inc()
+                deleted_threads.append(thread)
             except _SWEEP_ERRORS:
                 errors += 1
                 EPHEMERAL_THREAD_SWEPT.labels(outcome="error").inc()
                 logger.exception("Failed to reclaim orphaned ephemeral thread", thread_id=thread.thread_id)
-        await session.commit()
+        try:
+            await session.commit()
+        except _SWEEP_ERRORS:
+            await session.rollback()
+            errors += len(deleted_threads)
+            for _ in deleted_threads:
+                EPHEMERAL_THREAD_SWEPT.labels(outcome="error").inc()
+            logger.exception("Failed to commit orphaned ephemeral thread sweep")
+        else:
+            deleted = len(deleted_threads)
+            for _ in deleted_threads:
+                EPHEMERAL_THREAD_SWEPT.labels(outcome="deleted").inc()
     return len(rows), deleted, errors
 
 
@@ -109,10 +119,10 @@ class EphemeralThreadSweeper:
         """Stop the background task."""
         self._running = False
         if self._task is not None:
-            self._task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await self._task
+            task = self._task
             self._task = None
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
         logger.info("Ephemeral thread sweeper stopped")
 
     async def _loop(self) -> None:

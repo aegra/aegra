@@ -452,7 +452,11 @@ class ThreadTTLSettings(EnvBase):
 
 
 class EphemeralThreadSettings(EnvBase):
-    """Retention policy for orphaned threads created by stateless runs."""
+    """Retention policy for orphaned stateless-run threads.
+
+    The sweeper starts with the application and only reclaims explicitly
+    marked, stale threads without pending or running runs.
+    """
 
     EPHEMERAL_THREAD_RETENTION_SECONDS: int = Field(default=86400, gt=0)
     EPHEMERAL_THREAD_SWEEP_INTERVAL_SECONDS: int = Field(default=300, gt=0)

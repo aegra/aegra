@@ -71,3 +71,27 @@ async def test_sweep_keeps_thread_when_checkpoint_delete_fails(monkeypatch: pyte
     assert (claimed, deleted, errors) == (1, 0, 1)
     session.delete.assert_not_awaited()
     session.commit.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_sweep_does_not_count_rows_when_commit_fails(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A rolled-back metadata transaction is reported as an error, not a deletion."""
+    thread = SimpleNamespace(thread_id="t1")
+    session = AsyncMock()
+    result = MagicMock()
+    result.all.return_value = [thread]
+    session.scalars.return_value = result
+    session.commit.side_effect = OSError("database unavailable")
+    context = MagicMock()
+    context.__aenter__ = AsyncMock(return_value=session)
+    context.__aexit__ = AsyncMock(return_value=False)
+    monkeypatch.setattr(mod, "_get_session_maker", lambda: MagicMock(return_value=context))
+
+    checkpointer = MagicMock()
+    checkpointer.adelete_thread = AsyncMock()
+    monkeypatch.setattr(mod.db_manager, "get_checkpointer", lambda: checkpointer)
+
+    claimed, deleted, errors = await mod.sweep_orphaned_threads()
+
+    assert (claimed, deleted, errors) == (1, 0, 1)
+    session.rollback.assert_awaited_once()

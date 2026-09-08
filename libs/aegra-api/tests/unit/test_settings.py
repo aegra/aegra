@@ -46,7 +46,6 @@ class TestAppSettingsServerURL:
         assert app.PORT == 2026
         assert app.SERVER_URL == "http://localhost:2026"
 
-
     def test_derives_localhost_when_host_is_loopback(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """SERVER_URL uses localhost when HOST=127.0.0.1."""
         self._clear_app_env(monkeypatch)

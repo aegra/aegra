@@ -5,6 +5,7 @@ resume-command validation, and config/context merging logic.
 """
 
 import asyncio
+from collections.abc import Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
 from datetime import UTC, datetime
@@ -35,7 +36,7 @@ _EPHEMERAL_RUN = ContextVar("aegra_ephemeral_run", default=False)
 
 
 @contextmanager
-def ephemeral_run_context():
+def ephemeral_run_context() -> Iterator[None]:
     """Mark the next run prepared in this task as a stateless ephemeral run."""
     token = _EPHEMERAL_RUN.set(True)
     try:

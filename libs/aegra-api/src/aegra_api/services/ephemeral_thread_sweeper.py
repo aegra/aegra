@@ -33,20 +33,11 @@ def _orphaned_threads_stmt(*, cutoff: datetime, limit: int) -> Select[tuple[Thre
     checkpoint/thread deletion. The run foreign key takes a key-share lock and
     therefore waits for this claim transaction to finish.
     """
-    active_runs_exist = (
-        select(RunORM.run_id)
-        .where(
-            RunORM.thread_id == ThreadORM.thread_id,
-            RunORM.status.in_(("pending", "running")),
-        )
-        .exists()
-    )
     return (
         select(ThreadORM)
         .where(
             ThreadORM.is_ephemeral.is_(True),
             ThreadORM.updated_at <= cutoff,
-            ~active_runs_exist,
         )
         .order_by(ThreadORM.updated_at.asc())
         .limit(limit)
@@ -71,6 +62,16 @@ async def sweep_orphaned_threads() -> tuple[int, int, int]:
         errors = 0
         deleted_threads: list[ThreadORM] = []
         for thread in rows:
+            active_run = await session.scalar(
+                select(RunORM.run_id)
+                .where(
+                    RunORM.thread_id == thread.thread_id,
+                    RunORM.status.in_(("pending", "running")),
+                )
+                .limit(1)
+            )
+            if active_run is not None:
+                continue
             try:
                 # Checkpoints are in the LangGraph pool, so delete them first.
                 # A failure leaves the thread row available for a later retry.

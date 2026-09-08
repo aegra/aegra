@@ -20,7 +20,6 @@ def test_orphan_claim_requires_ephemeral_old_and_terminal_threads() -> None:
 
     assert "thread.is_ephemeral IS true" in sql
     assert "thread.updated_at <=" in sql
-    assert "runs.status IN ('pending', 'running')" in sql
     assert "FOR UPDATE OF thread SKIP LOCKED" in sql
 
 
@@ -29,6 +28,7 @@ async def test_sweep_deletes_checkpoints_before_thread(monkeypatch: pytest.Monke
     """A reclaimed row deletes LangGraph state before its metadata row."""
     thread = SimpleNamespace(thread_id="t1")
     session = AsyncMock()
+    session.scalar.return_value = None
     result = MagicMock()
     result.all.return_value = [thread]
     session.scalars.return_value = result
@@ -54,6 +54,7 @@ async def test_sweep_keeps_thread_when_checkpoint_delete_fails(monkeypatch: pyte
     """Checkpoint failures leave the row available for a later retry."""
     thread = SimpleNamespace(thread_id="t1")
     session = AsyncMock()
+    session.scalar.return_value = None
     result = MagicMock()
     result.all.return_value = [thread]
     session.scalars.return_value = result
@@ -78,6 +79,7 @@ async def test_sweep_does_not_count_rows_when_commit_fails(monkeypatch: pytest.M
     """A rolled-back metadata transaction is reported as an error, not a deletion."""
     thread = SimpleNamespace(thread_id="t1")
     session = AsyncMock()
+    session.scalar.return_value = None
     result = MagicMock()
     result.all.return_value = [thread]
     session.scalars.return_value = result
@@ -95,3 +97,24 @@ async def test_sweep_does_not_count_rows_when_commit_fails(monkeypatch: pytest.M
 
     assert (claimed, deleted, errors) == (1, 0, 1)
     session.rollback.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_sweep_skips_thread_with_active_run_after_lock(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A fresh active-run check protects a thread committed during lock wait."""
+    thread = SimpleNamespace(thread_id="t1")
+    session = AsyncMock()
+    session.scalar.return_value = "active-run"
+    result = MagicMock()
+    result.all.return_value = [thread]
+    session.scalars.return_value = result
+    context = MagicMock()
+    context.__aenter__ = AsyncMock(return_value=session)
+    context.__aexit__ = AsyncMock(return_value=False)
+    monkeypatch.setattr(mod, "_get_session_maker", lambda: MagicMock(return_value=context))
+
+    claimed, deleted, errors = await mod.sweep_orphaned_threads()
+
+    assert (claimed, deleted, errors) == (1, 0, 0)
+    session.delete.assert_not_awaited()
+    session.commit.assert_awaited_once()

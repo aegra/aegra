@@ -31,7 +31,9 @@ async def test_sweep_deletes_checkpoints_before_thread(monkeypatch: pytest.Monke
     session.scalar.return_value = None
     result = MagicMock()
     result.all.return_value = [thread]
-    session.scalars.return_value = result
+    empty = MagicMock()
+    empty.all.return_value = []
+    session.scalars.side_effect = [result, empty]
     context = MagicMock()
     context.__aenter__ = AsyncMock(return_value=session)
     context.__aexit__ = AsyncMock(return_value=False)
@@ -57,7 +59,9 @@ async def test_sweep_keeps_thread_when_checkpoint_delete_fails(monkeypatch: pyte
     session.scalar.return_value = None
     result = MagicMock()
     result.all.return_value = [thread]
-    session.scalars.return_value = result
+    empty = MagicMock()
+    empty.all.return_value = []
+    session.scalars.side_effect = [result, empty]
     context = MagicMock()
     context.__aenter__ = AsyncMock(return_value=session)
     context.__aexit__ = AsyncMock(return_value=False)
@@ -82,7 +86,9 @@ async def test_sweep_does_not_count_rows_when_commit_fails(monkeypatch: pytest.M
     session.scalar.return_value = None
     result = MagicMock()
     result.all.return_value = [thread]
-    session.scalars.return_value = result
+    empty = MagicMock()
+    empty.all.return_value = []
+    session.scalars.side_effect = [result, empty]
     session.commit.side_effect = OSError("database unavailable")
     context = MagicMock()
     context.__aenter__ = AsyncMock(return_value=session)
@@ -107,7 +113,9 @@ async def test_sweep_skips_thread_with_active_run_after_lock(monkeypatch: pytest
     session.scalar.return_value = "active-run"
     result = MagicMock()
     result.all.return_value = [thread]
-    session.scalars.return_value = result
+    empty = MagicMock()
+    empty.all.return_value = []
+    session.scalars.side_effect = [result, empty]
     context = MagicMock()
     context.__aenter__ = AsyncMock(return_value=session)
     context.__aexit__ = AsyncMock(return_value=False)
@@ -118,3 +126,33 @@ async def test_sweep_skips_thread_with_active_run_after_lock(monkeypatch: pytest
     assert (claimed, deleted, errors) == (1, 0, 0)
     session.delete.assert_not_awaited()
     session.commit.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_sweep_continues_after_active_batch_row(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Active rows do not starve later reclaimable rows in a bounded pass."""
+    monkeypatch.setattr(mod.settings.ephemeral_thread, "EPHEMERAL_THREAD_SWEEP_LIMIT", 1)
+    active_thread = SimpleNamespace(thread_id="active")
+    orphan_thread = SimpleNamespace(thread_id="orphan")
+    session = AsyncMock()
+    session.scalar.side_effect = ["active-run", None]
+    first = MagicMock()
+    first.all.return_value = [active_thread]
+    second = MagicMock()
+    second.all.return_value = [orphan_thread]
+    empty = MagicMock()
+    empty.all.return_value = []
+    session.scalars.side_effect = [first, second, empty]
+    context = MagicMock()
+    context.__aenter__ = AsyncMock(return_value=session)
+    context.__aexit__ = AsyncMock(return_value=False)
+    monkeypatch.setattr(mod, "_get_session_maker", lambda: MagicMock(return_value=context))
+
+    checkpointer = MagicMock()
+    checkpointer.adelete_thread = AsyncMock()
+    monkeypatch.setattr(mod.db_manager, "get_checkpointer", lambda: checkpointer)
+
+    claimed, deleted, errors = await mod.sweep_orphaned_threads()
+
+    assert (claimed, deleted, errors) == (2, 1, 0)
+    checkpointer.adelete_thread.assert_awaited_once_with("orphan")

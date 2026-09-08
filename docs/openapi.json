@@ -3,7 +3,7 @@
   "info": {
     "title": "Aegra",
     "description": "Production-ready Agent Protocol server",
-    "version": "0.10.5"
+    "version": "0.10.6"
   },
   "paths": {
     "/info": {
@@ -5567,6 +5567,21 @@
             ],
             "title": "Status",
             "description": "Thread status filter (idle, busy, interrupted, error)"
+          },
+          "select": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Select",
+            "description": "Response projection fields. Currently unsupported; non-null values return 422."
           },
           "limit": {
             "anyOf": [

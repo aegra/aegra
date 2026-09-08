@@ -138,6 +138,9 @@ threads = await client.threads.search(
 
 `limit` accepts 1 through `MAX_SEARCH_LIMIT` (default 1000, matching LangGraph Platform). Omitted or null `limit` uses `min(20, MAX_SEARCH_LIMIT)`. Values above the cap return 422.
 
+Response projection with `select` is not implemented yet. Sending a non-null
+`select` value returns 422 instead of silently returning the default thread shape.
+
 ## Listing threads
 
 ```python

@@ -20,6 +20,7 @@ def test_orphan_claim_requires_ephemeral_old_and_terminal_threads() -> None:
 
     assert "thread.is_ephemeral IS true" in sql
     assert "thread.updated_at <=" in sql
+    assert "NOT (EXISTS (SELECT" in sql
     assert "runs.status IN ('pending', 'running')" in sql
     assert "FOR UPDATE OF thread SKIP LOCKED" in sql
 

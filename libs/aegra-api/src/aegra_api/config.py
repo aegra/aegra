@@ -68,6 +68,26 @@ class StoreConfig(TypedDict, total=False):
     """Map of namespace prefix -> list of User attributes used for configurable store scoping."""
 
 
+class CheckpointerTTLConfig(TypedDict, total=False):
+    """Thread TTL configuration nested under the checkpointer section."""
+
+    strategy: str
+    """Expiry strategy: 'delete' (thread + checkpoints) or 'keep_latest' (prune history)."""
+    default_ttl: float
+    """Default thread TTL in minutes applied to newly created threads."""
+    sweep_interval_minutes: float
+    """How often the background sweep runs."""
+    sweep_limit: int
+    """Max threads processed per sweep iteration."""
+
+
+class CheckpointerConfig(TypedDict, total=False):
+    """Checkpointer configuration options."""
+
+    ttl: CheckpointerTTLConfig | None
+    """Thread TTL / retention policy."""
+
+
 class AuthConfig(TypedDict, total=False):
     """Auth configuration options."""
 
@@ -173,6 +193,27 @@ def load_store_config() -> StoreConfig | None:
         config_path = _resolve_config_path()
         logger.info(f"Loaded store config from {config_path}")
         return store_config
+
+    return None
+
+
+def load_checkpointer_config() -> CheckpointerConfig | None:
+    """Load checkpointer config from aegra.json or langgraph.json.
+
+    Uses standard config resolution order.
+
+    Returns:
+        Checkpointer configuration dict or None if not found
+    """
+    config = load_config()
+    if config is None:
+        return None
+
+    checkpointer_config = config.get("checkpointer")
+    if checkpointer_config:
+        config_path = _resolve_config_path()
+        logger.info(f"Loaded checkpointer config from {config_path}")
+        return checkpointer_config
 
     return None
 

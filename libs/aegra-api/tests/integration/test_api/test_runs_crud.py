@@ -354,13 +354,15 @@ class TestCancelRun:
         runs = [
             _run_row(run_id="run-1", thread_id="thread-1", status="running"),
             _run_row(run_id="run-2", thread_id="thread-1", status="pending"),
+            _run_row(run_id="other-user-run", thread_id="thread-1", user_id="other-user"),
         ]
 
         class Session(DummySessionBase):
-            async def scalars(self, _stmt: Any) -> Any:
+            async def scalars(self: "Session", _stmt: Any) -> Any:
                 class Result:
-                    def all(self) -> list[Any]:
-                        return runs
+                    def all(self: "Result") -> list[Any]:
+                        assert "runs.user_id" in str(_stmt)
+                        return [run for run in runs if run.user_id == "test-user"]
 
                 return Result()
 
@@ -397,9 +399,9 @@ class TestCancelRun:
         terminal_run = _run_row(run_id="run-success", status="success")
 
         class Session(DummySessionBase):
-            async def scalars(self, _stmt: Any) -> Any:
+            async def scalars(self: "Session", _stmt: Any) -> Any:
                 class Result:
-                    def all(self) -> list[Any]:
+                    def all(self: "Result") -> list[Any]:
                         return [terminal_run]
 
                 return Result()
@@ -440,9 +442,9 @@ class TestCancelRun:
         run = _run_row(run_id="run-rollback", status="running")
 
         class Session(DummySessionBase):
-            async def scalars(self, _stmt: Any) -> Any:
+            async def scalars(self: "Session", _stmt: Any) -> Any:
                 class Result:
-                    def all(self) -> list[Any]:
+                    def all(self: "Result") -> list[Any]:
                         return [run]
 
                 return Result()

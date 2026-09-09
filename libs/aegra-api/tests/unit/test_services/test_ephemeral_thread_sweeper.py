@@ -20,6 +20,7 @@ def test_orphan_claim_requires_ephemeral_old_and_terminal_threads() -> None:
 
     assert "thread.is_ephemeral IS true" in sql
     assert "thread.updated_at <=" in sql
+    assert "runs.status IN ('pending', 'running')" in sql
     assert "FOR UPDATE OF thread SKIP LOCKED" in sql
 
 
@@ -126,33 +127,3 @@ async def test_sweep_skips_thread_with_active_run_after_lock(monkeypatch: pytest
     assert (claimed, deleted, errors) == (1, 0, 0)
     session.delete.assert_not_awaited()
     session.commit.assert_awaited_once()
-
-
-@pytest.mark.asyncio
-async def test_sweep_continues_after_active_batch_row(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Active rows do not starve later reclaimable rows in a bounded pass."""
-    monkeypatch.setattr(mod.settings.ephemeral_thread, "EPHEMERAL_THREAD_SWEEP_LIMIT", 1)
-    active_thread = SimpleNamespace(thread_id="active")
-    orphan_thread = SimpleNamespace(thread_id="orphan")
-    session = AsyncMock()
-    session.scalar.side_effect = ["active-run", None]
-    first = MagicMock()
-    first.all.return_value = [active_thread]
-    second = MagicMock()
-    second.all.return_value = [orphan_thread]
-    empty = MagicMock()
-    empty.all.return_value = []
-    session.scalars.side_effect = [first, second, empty]
-    context = MagicMock()
-    context.__aenter__ = AsyncMock(return_value=session)
-    context.__aexit__ = AsyncMock(return_value=False)
-    monkeypatch.setattr(mod, "_get_session_maker", lambda: MagicMock(return_value=context))
-
-    checkpointer = MagicMock()
-    checkpointer.adelete_thread = AsyncMock()
-    monkeypatch.setattr(mod.db_manager, "get_checkpointer", lambda: checkpointer)
-
-    claimed, deleted, errors = await mod.sweep_orphaned_threads()
-
-    assert (claimed, deleted, errors) == (2, 1, 0)
-    checkpointer.adelete_thread.assert_awaited_once_with("orphan")

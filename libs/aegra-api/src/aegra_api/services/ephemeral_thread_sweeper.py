@@ -7,7 +7,6 @@ explicitly marked as ephemeral and old enough to be safely reclaimed.
 """
 
 import asyncio
-from collections.abc import Collection
 from datetime import UTC, datetime, timedelta
 
 import structlog
@@ -27,9 +26,7 @@ logger = structlog.getLogger(__name__)
 _SWEEP_ERRORS: tuple[type[BaseException], ...] = (PsycopgError, SQLAlchemyError, OSError)
 
 
-def _orphaned_threads_stmt(
-    *, cutoff: datetime, limit: int, exclude_ids: Collection[str] = ()
-) -> Select[tuple[ThreadORM]]:
+def _orphaned_threads_stmt(*, cutoff: datetime, limit: int) -> Select[tuple[ThreadORM]]:
     """Claim old ephemeral threads that have no active run.
 
     Locking the thread row prevents a concurrent run insert from racing the
@@ -39,9 +36,13 @@ def _orphaned_threads_stmt(
     conditions = [
         ThreadORM.is_ephemeral.is_(True),
         ThreadORM.updated_at <= cutoff,
+        ~select(RunORM.run_id)
+        .where(
+            RunORM.thread_id == ThreadORM.thread_id,
+            RunORM.status.in_(("pending", "running")),
+        )
+        .exists(),
     ]
-    if exclude_ids:
-        conditions.append(ThreadORM.thread_id.not_in(exclude_ids))
     return (
         select(ThreadORM)
         .where(*conditions)
@@ -59,46 +60,38 @@ async def sweep_orphaned_threads() -> tuple[int, int, int]:
         deleted = 0
         errors = 0
         deleted_threads: list[ThreadORM] = []
-        excluded_ids: set[str] = set()
-        claimed = 0
-        while len(deleted_threads) < settings.ephemeral_thread.EPHEMERAL_THREAD_SWEEP_LIMIT:
-            rows = (
-                await session.scalars(
-                    _orphaned_threads_stmt(
-                        cutoff=cutoff,
-                        limit=settings.ephemeral_thread.EPHEMERAL_THREAD_SWEEP_LIMIT,
-                        exclude_ids=excluded_ids,
-                    )
+        rows = (
+            await session.scalars(
+                _orphaned_threads_stmt(
+                    cutoff=cutoff,
+                    limit=settings.ephemeral_thread.EPHEMERAL_THREAD_SWEEP_LIMIT,
                 )
-            ).all()
-            if not rows:
-                break
-            claimed += len(rows)
-            for thread in rows:
-                active_run = await session.scalar(
-                    select(RunORM.run_id)
-                    .where(
-                        RunORM.thread_id == thread.thread_id,
-                        RunORM.status.in_(("pending", "running")),
-                    )
-                    .limit(1)
+            )
+        ).all()
+        claimed = len(rows)
+        for thread in rows:
+            # Recheck after locking because the claim query's snapshot may predate
+            # a run committed while this transaction waited for the thread lock.
+            active_run = await session.scalar(
+                select(RunORM.run_id)
+                .where(
+                    RunORM.thread_id == thread.thread_id,
+                    RunORM.status.in_(("pending", "running")),
                 )
-                if active_run is not None:
-                    excluded_ids.add(thread.thread_id)
-                    continue
-                try:
-                    # Checkpoints are in the LangGraph pool, so delete them first.
-                    # A failure leaves the thread row available for a later retry.
-                    await db_manager.get_checkpointer().adelete_thread(thread.thread_id)
-                    await session.delete(thread)
-                    deleted_threads.append(thread)
-                except _SWEEP_ERRORS:
-                    excluded_ids.add(thread.thread_id)
-                    errors += 1
-                    EPHEMERAL_THREAD_SWEPT.labels(outcome="error").inc()
-                    logger.exception("Failed to reclaim orphaned ephemeral thread", thread_id=thread.thread_id)
-                if len(deleted_threads) >= settings.ephemeral_thread.EPHEMERAL_THREAD_SWEEP_LIMIT:
-                    break
+                .limit(1)
+            )
+            if active_run is not None:
+                continue
+            try:
+                # Checkpoints are in the LangGraph pool, so delete them first.
+                # A failure leaves the thread row available for a later retry.
+                await db_manager.get_checkpointer().adelete_thread(thread.thread_id)
+                await session.delete(thread)
+                deleted_threads.append(thread)
+            except _SWEEP_ERRORS:
+                errors += 1
+                EPHEMERAL_THREAD_SWEPT.labels(outcome="error").inc()
+                logger.exception("Failed to reclaim orphaned ephemeral thread", thread_id=thread.thread_id)
         try:
             await session.commit()
         except _SWEEP_ERRORS:

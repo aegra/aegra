@@ -3,9 +3,40 @@
 from datetime import datetime
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field, field_validator
 
+from aegra_api.models.search_limit import (
+    resolve_search_limit,
+    search_limit_json_schema_extra,
+)
 from aegra_api.utils.status_compat import validate_thread_status
+
+# Upper bound keeping now + timedelta(minutes=ttl) finite and timedelta-safe
+# (timedelta.max is ~1.44e9 minutes); rejects inf/1e308 at validation time.
+MAX_TTL_MINUTES = 1_000_000_000
+
+
+class ThreadTTLSpec(BaseModel):
+    """Per-thread TTL override supplied on thread creation.
+
+    The langgraph SDK sends the minutes value as "ttl" while issue #288 names
+    it "default_ttl" — AliasChoices accepts both spellings.
+    """
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    default_ttl: float | None = Field(
+        None,
+        gt=0,
+        le=MAX_TTL_MINUTES,
+        validation_alias=AliasChoices("default_ttl", "ttl"),
+        description='Thread TTL in minutes; also accepted under the key "ttl" (LangGraph SDK '
+        "compatibility). Falls back to the server default when omitted",
+    )
+    strategy: Literal["delete", "keep_latest"] | None = Field(
+        None,
+        description="Expiry strategy: 'delete' removes the thread, 'keep_latest' prunes history",
+    )
 
 
 class ThreadCreate(BaseModel):
@@ -25,12 +56,23 @@ class ThreadCreate(BaseModel):
         alias="ifExists",
         description="Behavior when thread exists: 'raise' (default) or 'do_nothing'",
     )
+    ttl: ThreadTTLSpec | None = Field(
+        None,
+        description="Per-thread TTL override; requires TTL to be configured server-side or default_ttl set",
+    )
 
 
 class ThreadUpdate(BaseModel):
     """Request model for updating threads"""
 
     metadata: dict[str, Any] | None = Field(None, description="Thread metadata to update")
+
+
+class ThreadPruneResponse(BaseModel):
+    """Response model for POST /threads/prune"""
+
+    deleted: int = Field(0, description="Expired threads fully deleted (strategy 'delete')")
+    pruned: int = Field(0, description="Expired threads whose history was pruned (strategy 'keep_latest')")
 
 
 class Thread(BaseModel):
@@ -69,7 +111,14 @@ class ThreadSearchRequest(BaseModel):
 
     metadata: dict[str, Any] | None = Field(None, description="Metadata filters")
     status: str | None = Field(None, description="Thread status filter (idle, busy, interrupted, error)")
-    limit: int | None = Field(20, le=100, ge=1, description="Maximum results")
+    # None default + validate_default so omitted and JSON null share one resolver.
+    limit: int | None = Field(
+        default=None,
+        ge=1,
+        validate_default=True,
+        description="Maximum results",
+        json_schema_extra=search_limit_json_schema_extra,
+    )
     offset: int | None = Field(0, ge=0, description="Results offset")
     order_by: str | None = Field(
         "created_at DESC",
@@ -84,6 +133,11 @@ class ThreadSearchRequest(BaseModel):
         None,
         description="Sort direction (SDK-compatible). Defaults to 'desc' when sort_by is set.",
     )
+
+    @field_validator("limit")
+    @classmethod
+    def validate_limit(cls: type["ThreadSearchRequest"], v: int | None) -> int:
+        return resolve_search_limit(v)
 
     @field_validator("status")
     @classmethod

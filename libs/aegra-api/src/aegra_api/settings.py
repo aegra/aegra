@@ -96,6 +96,8 @@ class AppSettings(EnvBase):
     AUTH_TYPE: LowerStr = "noop"
     ENV_MODE: UpperStr = "LOCAL"
     DEBUG: bool = False
+    # Default 1000 matches LangGraph Platform threads.search (Agent Server OpenAPI max).
+    MAX_SEARCH_LIMIT: int = Field(default=1000, ge=1)
 
     # Run alembic upgrade head on startup. Default True (dev / single-pod).
     # Set False for multi-pod K8s to avoid advisory-lock probe timeouts;
@@ -434,6 +436,21 @@ class CronSettings(EnvBase):
         return self
 
 
+class ThreadTTLSettings(EnvBase):
+    """Thread TTL sweeper configuration.
+
+    AEGRA_THREAD_TTL is either a bare number (default_ttl in minutes) or a
+    JSON object with any of: strategy, default_ttl, sweep_interval_minutes,
+    sweep_limit. When set it replaces the aegra.json checkpointer.ttl block
+    entirely. LANGGRAPH_THREAD_TTL is accepted as a fallback alias so env
+    files migrated from LangGraph Platform work unchanged; AEGRA_THREAD_TTL
+    wins when both are set. Parsed and validated in services.thread_ttl.
+    """
+
+    AEGRA_THREAD_TTL: str | None = None
+    LANGGRAPH_THREAD_TTL: str | None = None
+
+
 class EventStreamingSettings(EnvBase):
     """Agent Protocol v2 event streaming (/threads/{id}/stream/events + /commands).
 
@@ -459,6 +476,7 @@ class Settings:
         self.redis = RedisSettings()
         self.worker = WorkerSettings()
         self.cron = CronSettings()
+        self.thread_ttl = ThreadTTLSettings()
         self.event_streaming = EventStreamingSettings()
 
 

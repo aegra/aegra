@@ -81,12 +81,13 @@ def _parse_graph_config_entry(graph_id: str, graph_config: object) -> GraphRegis
         if "path" not in graph_config_data:
             raise ValueError(f"Graph '{graph_id}' configuration is missing required 'path'")
         graph_path = graph_config_data["path"]
-        raw_description = graph_config_data.get("description")
         if not isinstance(graph_path, str):
             raise ValueError(f"Graph '{graph_id}' field 'path' must be a string")
-        if raw_description is not None and not isinstance(raw_description, str):
-            raise ValueError(f"Graph '{graph_id}' field 'description' must be a string")
-        description = raw_description
+        if "description" in graph_config_data:
+            raw_description = graph_config_data["description"]
+            if not isinstance(raw_description, str):
+                raise ValueError(f"Graph '{graph_id}' field 'description' must be a string")
+            description = raw_description
     else:
         raise ValueError(f"Graph '{graph_id}' configuration must be a string or object")
 
@@ -94,6 +95,8 @@ def _parse_graph_config_entry(graph_id: str, graph_config: object) -> GraphRegis
         raise ValueError(f"Invalid graph path format for '{graph_id}': {graph_path}")
 
     file_path, export_name = graph_path.split(":", 1)
+    if not file_path or not export_name:
+        raise ValueError(f"Invalid graph path format for '{graph_id}': {graph_path}")
     registry_entry = GraphRegistryEntry(file_path=file_path, export_name=export_name)
     if description is not None:
         registry_entry["description"] = description

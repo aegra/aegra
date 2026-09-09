@@ -239,8 +239,11 @@ class TestLoadGraphRegistry:
             ({"description": "Missing path"}, "missing required 'path'"),
             ({"path": 42}, "field 'path' must be a string"),
             ({"path": "./agent.py:graph", "description": 42}, "field 'description' must be a string"),
+            ({"path": "./agent.py:graph", "description": None}, "field 'description' must be a string"),
             (42, "configuration must be a string or object"),
             ({"path": "./agent.py"}, "Invalid graph path format"),
+            ({"path": ":graph"}, "Invalid graph path format"),
+            ({"path": "./agent.py:"}, "Invalid graph path format"),
         ],
     )
     def test_rejects_invalid_graph_entry(self, graph_config: object, message: str) -> None:

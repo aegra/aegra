@@ -108,6 +108,9 @@ class RunBroker(BaseRunBroker):
 class BrokerManager(BaseBrokerManager):
     """Manages multiple RunBroker instances with periodic cleanup."""
 
+    CLEANUP_INTERVAL_SECONDS: float = 60.0
+    FINISHED_BROKER_TTL_SECONDS: float = 300.0
+
     def __init__(self) -> None:
         self._brokers: dict[str, RunBroker] = {}
         self._event_counters: dict[str, int] = {}
@@ -177,19 +180,24 @@ class BrokerManager(BaseBrokerManager):
         """Return the current event sequence from the in-memory counter."""
         return self._event_counters.get(run_id, 0)
 
+    def cleanup_finished_brokers(self, max_age_seconds: float = FINISHED_BROKER_TTL_SECONDS) -> list[str]:
+        """Remove finished and empty brokers older than max_age_seconds."""
+        to_remove = [
+            run_id
+            for run_id, broker in self._brokers.items()
+            if broker.is_finished() and broker.is_empty() and broker.get_age() > max_age_seconds
+        ]
+        for run_id in to_remove:
+            self.remove_broker(run_id)
+            logger.info(f"Cleaned up old broker for run {run_id}")
+        return to_remove
+
     async def _cleanup_old_brokers(self) -> None:
-        """Remove finished brokers older than 1 hour every 5 minutes."""
+        """Periodically remove finished brokers older than retention window."""
         while True:
             try:
-                await asyncio.sleep(300)
-                to_remove = [
-                    run_id
-                    for run_id, broker in self._brokers.items()
-                    if broker.is_finished() and broker.is_empty() and broker.get_age() > 3600
-                ]
-                for run_id in to_remove:
-                    self.remove_broker(run_id)
-                    logger.info(f"Cleaned up old broker for run {run_id}")
+                await asyncio.sleep(self.CLEANUP_INTERVAL_SECONDS)
+                self.cleanup_finished_brokers(self.FINISHED_BROKER_TTL_SECONDS)
             except asyncio.CancelledError:
                 break
             except Exception:

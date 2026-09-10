@@ -380,10 +380,12 @@ class TestStreamingService:
 
     @pytest.mark.asyncio
     async def test_cleanup_run(self) -> None:
-        """Test run cleanup"""
+        """Test run cleanup removes event_counters and delegates to broker_manager."""
         service = StreamingService()
         run_id = "run-123"
+        service.event_counters[run_id] = 5
 
         with patch("aegra_api.services.streaming_service.broker_manager") as mock_manager:
             await service.cleanup_run(run_id)
+            assert run_id not in service.event_counters
             mock_manager.cleanup_broker.assert_called_with(run_id)

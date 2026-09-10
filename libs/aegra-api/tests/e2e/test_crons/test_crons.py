@@ -309,6 +309,48 @@ async def test_cron_search_and_count() -> None:
 
 @pytest.mark.e2e
 @pytest.mark.asyncio
+async def test_cron_search_and_count_filter_by_metadata() -> None:
+    client = get_e2e_client()
+    assistant = await client.assistants.create(
+        graph_id="agent",
+        config={"tags": ["e2e-cron-metadata-filter"]},
+        if_exists="do_nothing",
+    )
+    assistant_id = assistant["assistant_id"]
+    cron_ids: list[str] = []
+
+    try:
+        for schedule, team in (("0 11 * * *", "research"), ("0 12 * * *", "support")):
+            created = await _create_cron_via_http(
+                {
+                    "assistant_id": assistant_id,
+                    "schedule": schedule,
+                    "enabled": False,
+                    "metadata": {"team": team},
+                    "input": {},
+                }
+            )
+            cron_ids.append(created["cron_id"])
+
+        filtered = await client.crons.search(
+            assistant_id=assistant_id,
+            metadata={"team": "research"},
+        )
+        assert {cron["cron_id"] for cron in filtered} == {cron_ids[0]}
+        assert (
+            await client.crons.count(
+                assistant_id=assistant_id,
+                metadata={"team": "research"},
+            )
+            == 1
+        )
+    finally:
+        for cron_id in cron_ids:
+            await client.crons.delete(cron_id)
+
+
+@pytest.mark.e2e
+@pytest.mark.asyncio
 async def test_cron_update() -> None:
     """Create a cron, update its schedule and enabled flag, verify the response."""
     client = get_e2e_client()

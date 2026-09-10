@@ -540,6 +540,22 @@ class TestSearchThreads:
         assert isinstance(data, list)
         assert len(data) == 3
 
+    def test_search_threads_rejects_unsupported_select(self: "TestSearchThreads", client: TestClient) -> None:
+        resp = client.post(
+            "/threads/search",
+            json={
+                "status": "interrupted",
+                "limit": 10,
+                "select": ["thread_id", "status", "interrupts"],
+            },
+        )
+        assert resp.status_code == 422
+        detail = resp.json()["detail"]
+        assert any(
+            error.get("loc") == ["body", "select"] and "select projection is not supported" in error.get("msg", "")
+            for error in detail
+        )
+
     def test_search_threads_with_status(self, client):
         """Test searching with status filter"""
         resp = client.post("/threads/search", json={"status": "idle"})

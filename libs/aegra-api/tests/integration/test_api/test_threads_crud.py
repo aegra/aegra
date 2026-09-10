@@ -1,8 +1,10 @@
 """Integration tests for threads CRUD operations"""
 
+import secrets
 from contextlib import asynccontextmanager
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, Mock, patch
+from uuid import uuid4
 
 import pytest
 from fastapi import FastAPI
@@ -200,6 +202,33 @@ class TestCreateThread:
         assert resp.status_code == 200
         data = resp.json()
         assert data["thread_id"] == custom_id
+
+    def test_create_thread_rejects_oversized_random_id(self, client: TestClient) -> None:
+        """Oversized ids 422 at validation; they must not reach Postgres btree."""
+        resp = client.post("/threads", json={"thread_id": secrets.token_hex(2500)})
+        assert resp.status_code == 422
+        assert "thread_id" in resp.text
+
+    def test_create_thread_rejects_empty_id(self, client: TestClient) -> None:
+        resp = client.post("/threads", json={"thread_id": ""})
+        assert resp.status_code == 422
+        assert "thread_id" in resp.text
+
+    def test_create_thread_rejects_blank_id(self, client: TestClient) -> None:
+        resp = client.post("/threads", json={"thread_id": "   "})
+        assert resp.status_code == 422
+        assert "thread_id" in resp.text
+
+    def test_create_thread_accepts_uuid(self, client: TestClient) -> None:
+        thread_id = str(uuid4())
+        resp = client.post("/threads", json={"thread_id": thread_id})
+        assert resp.status_code == 200
+        assert resp.json()["thread_id"] == thread_id
+
+    def test_create_thread_omitted_id_still_200(self, client: TestClient) -> None:
+        resp = client.post("/threads", json={})
+        assert resp.status_code == 200
+        assert resp.json()["thread_id"]
 
     def test_create_thread_if_exists_do_nothing(self):
         """Test ifExists='do_nothing' returns existing thread"""

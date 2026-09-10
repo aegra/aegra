@@ -33,6 +33,10 @@ async def main():
 asyncio.run(main())
 ```
 
+<Note>
+  A client-provided `thread_id` must be 1–255 non-blank characters. Omit the field (or send `null`) to let the server generate a UUID. Longer or blank values are rejected with 422 before they hit PostgreSQL's btree key limit (~2704 bytes).
+</Note>
+
 ## Thread status
 
 Threads have a status that reflects their current state:

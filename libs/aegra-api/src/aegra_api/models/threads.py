@@ -15,6 +15,10 @@ from aegra_api.utils.status_compat import validate_thread_status
 # (timedelta.max is ~1.44e9 minutes); rejects inf/1e308 at validation time.
 MAX_TTL_MINUTES = 1_000_000_000
 
+# Stay well under PostgreSQL btree's ~2704-byte index tuple cap even uncompressed.
+# LangGraph SDK has no cap; PostgresSaver docs recommend 255 characters.
+MAX_THREAD_ID_LENGTH = 255
+
 
 class ThreadTTLSpec(BaseModel):
     """Per-thread TTL override supplied on thread creation.
@@ -49,7 +53,14 @@ class ThreadCreate(BaseModel):
     thread_id: str | None = Field(
         None,
         alias="threadId",
-        description="Optional client-provided thread ID for idempotent creation",
+        min_length=1,
+        max_length=MAX_THREAD_ID_LENGTH,
+        description=(
+            "Optional client-provided thread ID for idempotent creation. "
+            "Omit or null to let the server generate a UUID. "
+            f"When set, 1–{MAX_THREAD_ID_LENGTH} characters and not blank "
+            "(must fit PostgreSQL btree keys uncompressed)."
+        ),
     )
     if_exists: str | None = Field(
         "raise",
@@ -60,6 +71,13 @@ class ThreadCreate(BaseModel):
         None,
         description="Per-thread TTL override; requires TTL to be configured server-side or default_ttl set",
     )
+
+    @field_validator("thread_id")
+    @classmethod
+    def _thread_id_not_blank(cls, v: str | None) -> str | None:
+        if v is not None and not v.strip():
+            raise ValueError("thread_id must not be blank")
+        return v
 
 
 class ThreadUpdate(BaseModel):

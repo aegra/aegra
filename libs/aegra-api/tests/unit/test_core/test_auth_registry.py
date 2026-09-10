@@ -214,6 +214,7 @@ _SPEC_TUPLES: dict[tuple[str, str], tuple[str, str]] = {
     # crons
     ("POST", "/runs/crons"): ("crons", "create"),
     ("POST", "/threads/{thread_id}/runs/crons"): ("crons", "create"),
+    ("GET", "/runs/crons/{cron_id}"): ("crons", "read"),
     ("PATCH", "/runs/crons/{cron_id}"): ("crons", "update"),
     ("DELETE", "/runs/crons/{cron_id}"): ("crons", "delete"),
     ("POST", "/runs/crons/search"): ("crons", "search"),

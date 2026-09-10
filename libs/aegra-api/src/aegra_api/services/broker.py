@@ -35,6 +35,7 @@ class RunBroker(BaseRunBroker):
         self._replay_buffer: list[tuple[str, Any]] = []
         self._subscribers: set[asyncio.Queue[tuple[str, Any]]] = set()
         self._created_at = asyncio.get_running_loop().time()
+        self._finished_at: float | None = None
 
     async def put(self, event_id: str, payload: Any, *, resumable: bool = True) -> None:
         if self.finished.is_set():
@@ -92,8 +93,10 @@ class RunBroker(BaseRunBroker):
         return list(self._replay_buffer)
 
     def mark_finished(self) -> None:
-        self.finished.set()
-        logger.debug(f"Broker for run {self.run_id} marked as finished")
+        if not self.finished.is_set():
+            self._finished_at = asyncio.get_running_loop().time()
+            self.finished.set()
+            logger.debug(f"Broker for run {self.run_id} marked as finished")
 
     def is_finished(self) -> bool:
         return self.finished.is_set()
@@ -103,6 +106,14 @@ class RunBroker(BaseRunBroker):
 
     def get_age(self) -> float:
         return asyncio.get_running_loop().time() - self._created_at
+
+    def get_finished_age(self) -> float | None:
+        """Return elapsed seconds since finish, or None if unfinished."""
+        if not self.finished.is_set():
+            return None
+        if self._finished_at is None:
+            return self.get_age()
+        return asyncio.get_running_loop().time() - self._finished_at
 
 
 class BrokerManager(BaseBrokerManager):
@@ -181,11 +192,14 @@ class BrokerManager(BaseBrokerManager):
         return self._event_counters.get(run_id, 0)
 
     def cleanup_finished_brokers(self, max_age_seconds: float = FINISHED_BROKER_TTL_SECONDS) -> list[str]:
-        """Remove finished and empty brokers older than max_age_seconds."""
+        """Remove finished and empty brokers older than max_age_seconds since completion."""
         to_remove = [
             run_id
             for run_id, broker in self._brokers.items()
-            if broker.is_finished() and broker.is_empty() and broker.get_age() > max_age_seconds
+            if broker.is_finished()
+            and broker.is_empty()
+            and (finished_age := broker.get_finished_age()) is not None
+            and finished_age > max_age_seconds
         ]
         for run_id in to_remove:
             self.remove_broker(run_id)

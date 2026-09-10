@@ -129,6 +129,17 @@ class TestRunBroker:
         assert got_a == got_b
         assert [eid for eid, _ in got_a] == ["evt-1", "evt-2", "evt-end"]
 
+    @pytest.mark.asyncio
+    async def test_get_finished_age(self: Self) -> None:
+        """Test finished age is None until marked finished and tracks completion time."""
+        broker = RunBroker("run-123")
+        assert broker.get_finished_age() is None
+
+        broker.mark_finished()
+        finished_age = broker.get_finished_age()
+        assert finished_age is not None
+        assert finished_age >= 0.0
+
 
 class TestBrokerManager:
     """Test BrokerManager class"""
@@ -247,11 +258,11 @@ class TestBrokerManager:
 
     @pytest.mark.asyncio
     async def test_cleanup_finished_brokers_removes_old_empty_broker(self: Self) -> None:
-        """Test that finished and empty brokers older than TTL are purged."""
+        """Test that brokers whose finish time exceeds TTL are purged."""
         manager = BrokerManager()
         broker = manager.get_or_create_broker("run-old")
         broker.mark_finished()
-        broker._created_at = asyncio.get_running_loop().time() - 301.0
+        broker._finished_at = asyncio.get_running_loop().time() - 301.0
         manager._event_counters["run-old"] = 42
 
         removed = manager.cleanup_finished_brokers()
@@ -265,11 +276,25 @@ class TestBrokerManager:
         manager = BrokerManager()
         broker = manager.get_or_create_broker("run-recent")
         broker.mark_finished()
-        broker._created_at = asyncio.get_running_loop().time() - 100.0
+        broker._finished_at = asyncio.get_running_loop().time() - 100.0
 
         removed = manager.cleanup_finished_brokers()
         assert removed == []
         assert manager.get_broker("run-recent") is not None
+
+    @pytest.mark.asyncio
+    async def test_cleanup_finished_brokers_retains_long_running_run_finished_recently(self: Self) -> None:
+        """Test that long-running runs finished recently retain their full replay TTL."""
+        manager = BrokerManager()
+        broker = manager.get_or_create_broker("run-long")
+        # Run was created 600s ago but completed only 10s ago
+        broker._created_at = asyncio.get_running_loop().time() - 600.0
+        broker.mark_finished()
+        broker._finished_at = asyncio.get_running_loop().time() - 10.0
+
+        removed = manager.cleanup_finished_brokers()
+        assert removed == []
+        assert manager.get_broker("run-long") is not None
 
     @pytest.mark.asyncio
     async def test_cleanup_finished_brokers_retains_unfinished_broker(self: Self) -> None:
@@ -288,7 +313,7 @@ class TestBrokerManager:
         manager = BrokerManager()
         broker = manager.get_or_create_broker("run-busy")
         broker.mark_finished()
-        broker._created_at = asyncio.get_running_loop().time() - 400.0
+        broker._finished_at = asyncio.get_running_loop().time() - 400.0
         sub_queue: asyncio.Queue[tuple[str, object]] = asyncio.Queue()
         sub_queue.put_nowait(("evt-1", {"status": "ok"}))
         broker._subscribers.add(sub_queue)

@@ -663,6 +663,39 @@ class TestLangGraphServiceConfigs:
 
         assert result["configurable"]["checkpoint_key"] == "checkpoint_value"
 
+    def test_create_run_config_sets_graph_id_when_absent(self) -> None:
+        mock_user = Mock()
+        mock_user.identity = "user-123"
+        mock_user.display_name = "Test User"
+
+        with patch(
+            "aegra_api.services.langgraph_service.get_tracing_callbacks",
+            return_value=[],
+        ):
+            result = create_run_config("run-789", "thread-456", mock_user, graph_id="agent")
+
+        assert result["configurable"]["graph_id"] == "agent"
+
+    def test_create_run_config_preserves_client_graph_id(self) -> None:
+        mock_user = Mock()
+        mock_user.identity = "user-123"
+        mock_user.display_name = "Test User"
+        additional_config = {"configurable": {"graph_id": "client-agent"}}
+
+        with patch(
+            "aegra_api.services.langgraph_service.get_tracing_callbacks",
+            return_value=[],
+        ):
+            result = create_run_config(
+                "run-789",
+                "thread-456",
+                mock_user,
+                graph_id="server-agent",
+                additional_config=additional_config,
+            )
+
+        assert result["configurable"]["graph_id"] == "client-agent"
+
     def test_create_run_config_ignores_client_thread_id_override(self):
         """A client-supplied configurable.thread_id must not redirect execution.
 

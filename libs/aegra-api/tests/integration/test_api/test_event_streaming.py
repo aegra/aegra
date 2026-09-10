@@ -8,6 +8,7 @@ import uuid
 from collections.abc import Iterator
 from functools import partial
 from typing import Any
+from unittest.mock import AsyncMock
 
 import pytest
 from fastapi import FastAPI
@@ -112,6 +113,60 @@ class TestCommandRoute:
             "meta": {"applied_through_seq": 0},
         }
         assert captured_requests[0].context == {"tenant_id": "acme"}
+
+    def test_input_respond_forwards_update_goto_and_context(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        captured_requests: list[RunCreate] = []
+
+        async def fake_prepare(*_args: Any, **_kwargs: Any) -> tuple[str, object, object]:
+            captured_requests.append(_args[2])
+            return "run-2", object(), object()
+
+        monkeypatch.setattr(cmd_module, "_prepare_run", fake_prepare)
+        client = TestClient(_make_app(monkeypatch))
+
+        resp = client.post(
+            "/threads/t1/commands",
+            json={
+                "id": 2,
+                "method": "input.respond",
+                "params": {
+                    "assistant_id": "agent",
+                    "interrupt_id": "a" * 32,
+                    "namespace": [],
+                    "response": {"approved": True},
+                    "update": {"reviewed_by": "alice"},
+                    "goto": "finalize",
+                    "context": {"reasoning_effort": "high"},
+                },
+            },
+        )
+        assert resp.status_code == 200
+        assert resp.json()["type"] == "success"
+        request = captured_requests[0]
+        assert request.command == {
+            "resume": {"a" * 32: {"approved": True}},
+            "update": {"reviewed_by": "alice"},
+            "goto": "finalize",
+        }
+        assert request.context == {"reasoning_effort": "high"}
+
+    def test_input_respond_rejects_non_object_update(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        prepare = AsyncMock()
+        monkeypatch.setattr(cmd_module, "_prepare_run", prepare)
+        client = TestClient(_make_app(monkeypatch))
+
+        resp = client.post(
+            "/threads/t1/commands",
+            json={
+                "id": 3,
+                "method": "input.respond",
+                "params": {"assistant_id": "agent", "response": 1, "update": ["not", "an", "object"]},
+            },
+        )
+        assert resp.status_code == 200
+        assert resp.json()["type"] == "error"
+        assert resp.json()["error"] == "invalid_argument"
+        prepare.assert_not_called()
 
     def test_unknown_command_returns_error_envelope_on_200(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Protocol errors ride HTTP 200 so envelope-parsing clients see the code."""

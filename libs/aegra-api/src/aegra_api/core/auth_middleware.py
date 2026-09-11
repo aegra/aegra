@@ -5,12 +5,15 @@ This module integrates authentication system with FastAPI
 using Starlette's AuthenticationMiddleware.
 """
 
+import asyncio
 import functools
 import importlib
 import importlib.util
 import sys
+import threading
+from concurrent.futures import Future
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
 
 import structlog
 from langgraph_sdk import Auth
@@ -29,6 +32,29 @@ from aegra_api.models.errors import AgentProtocolError
 from aegra_api.settings import settings
 
 logger = structlog.getLogger(__name__)
+
+# Thread callers (lru_cache concurrent misses). Never acquired on a running loop.
+_auth_thread_lock = threading.RLock()
+# Shared in-flight backend fill. Callers join through get_auth_backend().
+_auth_fill_guard = threading.Lock()
+_auth_backend_fill: Future[AuthenticationBackend] | None = None
+
+
+class _LruCachedFn[T](Protocol):
+    def __call__(self) -> T: ...
+    def cache_info(self) -> Any: ...
+
+
+def _lru_fill_once[T](cached_fn: _LruCachedFn[T]) -> T:
+    """Single-flight an lru_cache fill without blocking a running event loop."""
+    if cached_fn.cache_info().currsize:
+        return cached_fn()
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        with _auth_thread_lock:
+            return cached_fn()
+    return cached_fn()
 
 
 class LangGraphUser(BaseUser):
@@ -63,6 +89,135 @@ class LangGraphUser(BaseUser):
         return self._user_data.copy()
 
 
+def _load_auth_from_file(file_path: Path, var_name: str) -> Auth | None:
+    """Load auth instance from a file path.
+
+    Args:
+        file_path: Path to the Python file
+        var_name: Name of the variable to load
+
+    Returns:
+        Auth instance or None if loading fails
+    """
+    try:
+        if not file_path.exists():
+            logger.warning(f"Auth file not found: {file_path}")
+            return None
+
+        if not file_path.is_file():
+            logger.warning(f"Auth path is not a file: {file_path} (is directory: {file_path.is_dir()})")
+            return None
+
+        # Create a unique module name based on the file path
+        module_name = f"auth_module_{file_path.stem}"
+
+        spec = importlib.util.spec_from_file_location(module_name, str(file_path))
+        if spec is None or spec.loader is None:
+            logger.error(f"Could not load auth module from {file_path}")
+            return None
+
+        auth_module = importlib.util.module_from_spec(spec)
+        sys.modules[module_name] = auth_module
+        spec.loader.exec_module(auth_module)
+
+        auth_instance = getattr(auth_module, var_name, None)
+        if not isinstance(auth_instance, Auth):
+            logger.error(f"Variable '{var_name}' in {file_path} is not an Auth instance")
+            return None
+
+        logger.info(f"Successfully loaded auth instance from {file_path}:{var_name}")
+        return auth_instance
+
+    except Exception as e:
+        logger.error(f"Error loading auth from {file_path}: {e}", exc_info=True)
+        return None
+
+
+def _load_auth_from_module(module_path: str, var_name: str) -> Auth | None:
+    """Load auth instance from an installed module.
+
+    Args:
+        module_path: Dotted module path (e.g., 'mypackage.auth')
+        var_name: Name of the variable to load
+
+    Returns:
+        Auth instance or None if loading fails
+    """
+    try:
+        module = importlib.import_module(module_path)
+        auth_instance = getattr(module, var_name, None)
+
+        if not isinstance(auth_instance, Auth):
+            logger.error(f"Variable '{var_name}' in module {module_path} is not an Auth instance")
+            return None
+
+        logger.info(f"Successfully loaded auth instance from {module_path}:{var_name}")
+        return auth_instance
+
+    except ImportError as e:
+        logger.error(f"Could not import module {module_path}: {e}")
+        return None
+    except Exception as e:
+        logger.error(f"Error loading auth from {module_path}: {e}", exc_info=True)
+        return None
+
+
+@functools.lru_cache(maxsize=32)
+def _load_auth_from_path(path: str) -> Auth | None:
+    """Load Auth from './file.py:var' or 'module:var'. Cached per config path.
+
+    `aegra dev` reload starts a new process, so this does not hot-reload on disk edits.
+    """
+    if ":" not in path:
+        logger.error(f"Invalid auth path format (missing ':'): {path}")
+        return None
+
+    module_path, var_name = path.rsplit(":", 1)
+
+    # Handle file path format: ./file.py or ./path/to/file.py or ../file.py
+    is_file_path = module_path.endswith(".py") or module_path.startswith("./") or module_path.startswith("../")
+    if is_file_path:
+        file_path = Path(module_path)
+
+        # Resolve relative paths from config directory
+        if not file_path.is_absolute():
+            config_dir = get_config_dir()
+            if config_dir:
+                file_path = (config_dir / file_path).resolve()
+            else:
+                # Fallback to CWD if no config found
+                file_path = (Path.cwd() / file_path).resolve()
+
+        return _load_auth_from_file(file_path, var_name)
+
+    # Handle module format: module.path
+    return _load_auth_from_module(module_path, var_name)
+
+
+@functools.lru_cache(maxsize=1)
+def _load_auth_from_config_cached() -> Auth | None:
+    """Read auth.path from config and load. Cached for the process lifetime."""
+    try:
+        auth_config = load_auth_config()
+        if auth_config and "path" in auth_config:
+            auth_path = auth_config["path"]
+            logger.info(f"Loading auth from config path: {auth_path}")
+            auth_instance = _load_auth_from_path(auth_path)
+            if auth_instance:
+                return auth_instance
+            logger.warning(f"Failed to load auth from config path: {auth_path}")
+    except Exception as e:
+        logger.warning(f"Error loading auth config: {e}")
+
+    logger.debug("No auth instance found from config")
+    return None
+
+
+def _cached_load_auth_from_config() -> Auth | None:
+    """Load Auth from aegra.json; concurrent first-misses share one read."""
+    return _lru_fill_once(_load_auth_from_config_cached)
+
+
 class LangGraphAuthBackend(AuthenticationBackend):
     """
     Authentication backend that uses the auth system.
@@ -91,128 +246,7 @@ class LangGraphAuthBackend(AuthenticationBackend):
         Returns:
             Auth instance or None if not found (noop handled in authenticate() method)
         """
-        # 1. Try loading from config
-        try:
-            auth_config = load_auth_config()
-            if auth_config and "path" in auth_config:
-                auth_path = auth_config["path"]
-                logger.info(f"Loading auth from config path: {auth_path}")
-                auth_instance = self._load_from_path(auth_path)
-                if auth_instance:
-                    return auth_instance
-                logger.warning(f"Failed to load auth from config path: {auth_path}")
-        except Exception as e:
-            logger.warning(f"Error loading auth config: {e}")
-
-        logger.debug("No auth instance found from config")
-        return None
-
-    def _load_from_path(self, path: str) -> Auth | None:
-        """Load auth instance from path in format './file.py:var' or 'module:var'.
-
-        Relative paths are resolved from the config file directory.
-
-        Args:
-            path: Import path in format './file.py:variable' or 'module.path:variable'
-
-        Returns:
-            Auth instance or None if loading fails
-        """
-        if ":" not in path:
-            logger.error(f"Invalid auth path format (missing ':'): {path}")
-            return None
-
-        module_path, var_name = path.rsplit(":", 1)
-
-        # Handle file path format: ./file.py or ./path/to/file.py or ../file.py
-        is_file_path = module_path.endswith(".py") or module_path.startswith("./") or module_path.startswith("../")
-        if is_file_path:
-            file_path = Path(module_path)
-
-            # Resolve relative paths from config directory
-            if not file_path.is_absolute():
-                config_dir = get_config_dir()
-                if config_dir:
-                    file_path = (config_dir / file_path).resolve()
-                else:
-                    # Fallback to CWD if no config found
-                    file_path = (Path.cwd() / file_path).resolve()
-
-            return self._load_from_file(file_path, var_name)
-
-        # Handle module format: module.path
-        return self._load_from_module(module_path, var_name)
-
-    def _load_from_file(self, file_path: Path, var_name: str) -> Auth | None:
-        """Load auth instance from a file path.
-
-        Args:
-            file_path: Path to the Python file
-            var_name: Name of the variable to load
-
-        Returns:
-            Auth instance or None if loading fails
-        """
-        try:
-            if not file_path.exists():
-                logger.warning(f"Auth file not found: {file_path}")
-                return None
-
-            if not file_path.is_file():
-                logger.warning(f"Auth path is not a file: {file_path} (is directory: {file_path.is_dir()})")
-                return None
-
-            # Create a unique module name based on the file path
-            module_name = f"auth_module_{file_path.stem}"
-
-            spec = importlib.util.spec_from_file_location(module_name, str(file_path))
-            if spec is None or spec.loader is None:
-                logger.error(f"Could not load auth module from {file_path}")
-                return None
-
-            auth_module = importlib.util.module_from_spec(spec)
-            sys.modules[module_name] = auth_module
-            spec.loader.exec_module(auth_module)
-
-            auth_instance = getattr(auth_module, var_name, None)
-            if not isinstance(auth_instance, Auth):
-                logger.error(f"Variable '{var_name}' in {file_path} is not an Auth instance")
-                return None
-
-            logger.info(f"Successfully loaded auth instance from {file_path}:{var_name}")
-            return auth_instance
-
-        except Exception as e:
-            logger.error(f"Error loading auth from {file_path}: {e}", exc_info=True)
-            return None
-
-    def _load_from_module(self, module_path: str, var_name: str) -> Auth | None:
-        """Load auth instance from an installed module.
-
-        Args:
-            module_path: Dotted module path (e.g., 'mypackage.auth')
-            var_name: Name of the variable to load
-
-        Returns:
-            Auth instance or None if loading fails
-        """
-        try:
-            module = importlib.import_module(module_path)
-            auth_instance = getattr(module, var_name, None)
-
-            if not isinstance(auth_instance, Auth):
-                logger.error(f"Variable '{var_name}' in module {module_path} is not an Auth instance")
-                return None
-
-            logger.info(f"Successfully loaded auth instance from {module_path}:{var_name}")
-            return auth_instance
-
-        except ImportError as e:
-            logger.error(f"Could not import module {module_path}: {e}")
-            return None
-        except Exception as e:
-            logger.error(f"Error loading auth from {module_path}: {e}", exc_info=True)
-            return None
+        return _cached_load_auth_from_config()
 
     async def authenticate(self, conn: HTTPConnection) -> tuple[AuthCredentials, BaseUser] | None:
         """
@@ -286,7 +320,54 @@ class LangGraphAuthBackend(AuthenticationBackend):
             raise AuthenticationError("Authentication system error") from e
 
 
+def _claim_auth_backend_fill() -> tuple[Future[AuthenticationBackend], bool]:
+    """Return the in-flight fill future and whether the caller must populate it."""
+    global _auth_backend_fill
+    with _auth_fill_guard:
+        if _get_auth_backend_cached.cache_info().currsize:
+            done: Future[AuthenticationBackend] = Future()
+            done.set_result(_get_auth_backend_cached())
+            return done, False
+        if _auth_backend_fill is None or _auth_backend_fill.done():
+            _auth_backend_fill = Future()
+            return _auth_backend_fill, True
+        return _auth_backend_fill, False
+
+
+def _fail_auth_backend_fill(fut: Future[AuthenticationBackend], exc: BaseException) -> None:
+    """Publish a joinable error; never attach CancelledError to waiters."""
+    if fut.done():
+        return
+    if isinstance(exc, Exception):
+        fut.set_exception(exc)
+        return
+    fut.set_exception(RuntimeError("auth backend initialization failed"))
+
+
+def _complete_auth_backend_fill(fut: Future[AuthenticationBackend]) -> AuthenticationBackend:
+    """Run the cached constructor and publish the result to joiners."""
+    try:
+        result = _get_auth_backend_cached()
+    except BaseException as exc:
+        _fail_auth_backend_fill(fut, exc)
+        raise
+    if not fut.done():
+        fut.set_result(result)
+    return result
+
+
 @functools.lru_cache(maxsize=1)
+def _get_auth_backend_cached() -> AuthenticationBackend:
+    auth_type = settings.app.AUTH_TYPE
+
+    if auth_type in ["noop", "custom"]:
+        logger.debug(f"Using auth backend with type: {auth_type}")
+        return LangGraphAuthBackend()
+    else:
+        logger.warning(f"Unknown AUTH_TYPE: {auth_type}, using noop")
+        return LangGraphAuthBackend()
+
+
 def get_auth_backend() -> AuthenticationBackend:
     """
     Get authentication backend based on AUTH_TYPE environment variable.
@@ -296,14 +377,30 @@ def get_auth_backend() -> AuthenticationBackend:
     Returns:
         AuthenticationBackend instance
     """
-    auth_type = settings.app.AUTH_TYPE
+    if _get_auth_backend_cached.cache_info().currsize:
+        return _get_auth_backend_cached()
+    fut, owner = _claim_auth_backend_fill()
+    if not owner:
+        return fut.result()
+    return _complete_auth_backend_fill(fut)
 
-    if auth_type in ["noop", "custom"]:
-        logger.debug(f"Using auth backend with type: {auth_type}")
-        return LangGraphAuthBackend()
-    else:
-        logger.warning(f"Unknown AUTH_TYPE: {auth_type}, using noop")
-        return LangGraphAuthBackend()
+
+async def get_auth_backend_async() -> AuthenticationBackend:
+    """Join get_auth_backend() off-loop so a sync waiter cannot deadlock this loop."""
+    if _get_auth_backend_cached.cache_info().currsize:
+        return _get_auth_backend_cached()
+    # shield: cancelling one waiter must not cancel the worker running the shared fill.
+    return await asyncio.shield(asyncio.to_thread(get_auth_backend))
+
+
+def _clear_auth_loader_caches() -> None:
+    """Drop process-level auth loader caches. Tests call this for isolation."""
+    global _auth_backend_fill
+    with _auth_fill_guard:
+        _load_auth_from_config_cached.cache_clear()
+        _load_auth_from_path.cache_clear()
+        _get_auth_backend_cached.cache_clear()
+        _auth_backend_fill = None
 
 
 def on_auth_error(conn: HTTPConnection, exc: AuthenticationError) -> JSONResponse:

@@ -39,7 +39,10 @@ class TestRequireAuth:
         mock_request.scope = {}
         mock_request.user = None
 
-        with patch("aegra_api.core.auth_deps.get_auth_backend", return_value=mock_backend):
+        with patch(
+            "aegra_api.core.auth_deps.get_auth_backend_async",
+            AsyncMock(return_value=mock_backend),
+        ):
             user = await require_auth(mock_request)
 
             assert isinstance(user, User)
@@ -58,7 +61,10 @@ class TestRequireAuth:
         mock_request = Mock(spec=Request)
         mock_request.scope = {}
 
-        with patch("aegra_api.core.auth_deps.get_auth_backend", return_value=mock_backend):
+        with patch(
+            "aegra_api.core.auth_deps.get_auth_backend_async",
+            AsyncMock(return_value=mock_backend),
+        ):
             with pytest.raises(HTTPException) as exc_info:
                 await require_auth(mock_request)
 
@@ -74,7 +80,10 @@ class TestRequireAuth:
         mock_request = Mock(spec=Request)
         mock_request.scope = {}
 
-        with patch("aegra_api.core.auth_deps.get_auth_backend", return_value=mock_backend):
+        with patch(
+            "aegra_api.core.auth_deps.get_auth_backend_async",
+            AsyncMock(return_value=mock_backend),
+        ):
             with pytest.raises(HTTPException) as exc_info:
                 await require_auth(mock_request)
 
@@ -101,7 +110,10 @@ class TestRequireAuth:
         mock_request.scope = {}
         mock_request.user = None
 
-        with patch("aegra_api.core.auth_deps.get_auth_backend", return_value=mock_backend):
+        with patch(
+            "aegra_api.core.auth_deps.get_auth_backend_async",
+            AsyncMock(return_value=mock_backend),
+        ):
             user = await require_auth(mock_request)
 
             assert user.identity == "user-123"

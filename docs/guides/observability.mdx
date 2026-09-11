@@ -35,7 +35,13 @@ LANGSMITH_WORKSPACE_ID=...
 
 Aegra records the resolved project in each Agent Protocol run response as `langsmith_session_name`. A run request can select an additional project with `langsmith_tracer.project_name` and associate a dataset example with `langsmith_tracer.example_id`, which must be a UUID string. If no per-run project is supplied, `LANGSMITH_PROJECT` is used.
 
+Both fields are independent, matching the LangGraph SDK's `langsmith_tracing` argument: `example_id` alone associates the trace with a dataset example in the default project, without needing `project_name`. Unknown fields are ignored rather than rejected, so a newer SDK can talk to an older Aegra.
+
 Set `LANGSMITH_TRACING=false` to disable native trace export. The run response then contains a null `langsmith_session_name`.
+
+<Note>
+`/info` advertises `flags.langsmith_tracing_session_on_runs` so Studio knows the server returns `langsmith_session_name`. The flag only states the capability — that Studio then opens the session is a manual acceptance step against a real deployment. To prove traces actually reach LangSmith, run the opt-in export test with a real key: `LANGSMITH_API_KEY=lsv2_... uv run --package aegra-api pytest libs/aegra-api/tests/e2e/test_runs/test_langsmith_export_live.py`.
+</Note>
 
 ### Enable OpenTelemetry tracing
 

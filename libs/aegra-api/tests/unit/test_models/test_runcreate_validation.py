@@ -61,13 +61,16 @@ class TestRunCreateValidation:
 
         assert string_schema["format"] == "uuid"
 
-    def test_rejects_unknown_langsmith_tracer_fields(self) -> None:
-        with pytest.raises(ValidationError):
-            RunCreate(
-                assistant_id="agent",
-                input={"message": "hello"},
-                langsmith_tracer={"project_name": "studio-project", "unknown": True},
-            )
+    def test_ignores_unknown_langsmith_tracer_fields(self) -> None:
+        """Forward compatibility: a newer SDK may send fields this server predates."""
+        run_create = RunCreate(
+            assistant_id="agent",
+            input={"message": "hello"},
+            langsmith_tracer={"project_name": "studio-project", "unknown": True},
+        )
+
+        assert run_create.langsmith_tracer is not None
+        assert run_create.langsmith_tracer.project_name == "studio-project"
 
 
 class TestRunCreateMetadataValidation:

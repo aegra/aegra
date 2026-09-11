@@ -1,5 +1,4 @@
 import pytest
-from httpx import AsyncClient
 
 from aegra_api.settings import settings
 
@@ -39,23 +38,16 @@ async def test_runs_crud_and_join_e2e() -> None:
     thread_id = thread["thread_id"]
 
     # 3) Background run (non-streaming)
-    # The currently pinned SDK has no langsmith_tracer keyword yet, so use the Agent Protocol
-    # HTTP boundary directly to prove the server accepts the 0.11 request shape.
-    async with AsyncClient(base_url=settings.app.SERVER_URL, timeout=120.0) as http_client:
-        response = await http_client.post(
-            f"/threads/{thread_id}/runs",
-            json={
-                "assistant_id": assistant_id,
-                "input": {"messages": [{"role": "user", "content": "Say one short sentence."}]},
-                "stream_mode": ["messages", "values"],
-                "langsmith_tracer": {
-                    "project_name": "studio-run",
-                    "example_id": "11111111-1111-4111-8111-111111111111",
-                },
-            },
-        )
-    assert response.status_code == 200
-    run = response.json()
+    run = await client.runs.create(
+        thread_id=thread_id,
+        assistant_id=assistant_id,
+        input={"messages": [{"role": "user", "content": "Say one short sentence."}]},
+        stream_mode=["messages", "values"],  # ensure both modes are available for later stream
+        langsmith_tracing={
+            "project_name": "studio-run",
+            "example_id": "11111111-1111-4111-8111-111111111111",
+        },
+    )
     elog("Runs.create", run)
     assert "run_id" in run
     assert run["langsmith_session_name"] is None

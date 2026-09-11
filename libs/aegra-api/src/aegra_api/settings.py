@@ -328,11 +328,9 @@ class ObservabilitySettings(EnvBase):
     LANGFUSE_SECRET_KEY: str | None = None
 
     # --- Native LangSmith tracing ---
+    # Only the gate is read here; endpoint/key/project/workspace are read from
+    # the environment by the langsmith SDK itself.
     LANGSMITH_TRACING: bool = False
-    LANGSMITH_ENDPOINT: str = "https://api.smith.langchain.com"
-    LANGSMITH_API_KEY: str | None = None
-    LANGSMITH_PROJECT: str | None = None
-    LANGSMITH_WORKSPACE_ID: str | None = None
 
     # --- Phoenix Specifics ---
     PHOENIX_COLLECTOR_ENDPOINT: str = "http://127.0.0.1:6006/v1/traces"

@@ -34,6 +34,8 @@ class LangSmithTracer(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     project_name: str | None = None
+    # Annotated so format/description land on the string branch of the anyOf,
+    # not on the nullable wrapper.
     example_id: (
         Annotated[
             str,
@@ -48,13 +50,7 @@ class LangSmithTracer(BaseModel):
     @field_validator("example_id", mode="after")
     @classmethod
     def validate_example_id(cls, example_id: str | None) -> str | None:
-        if not example_id:
-            return None
-        try:
-            UUID(example_id)
-        except ValueError as error:
-            raise ValueError("example_id must be a valid UUID") from error
-        return example_id
+        return str(UUID(example_id)) if example_id else None
 
 
 class RunCreate(BaseModel):

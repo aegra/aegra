@@ -1,7 +1,5 @@
 """Tests for RunCreate model validation."""
 
-from typing import Self
-
 import pytest
 from pydantic import ValidationError
 
@@ -33,7 +31,7 @@ class TestRunCreateValidation:
         with pytest.raises(ValueError, match="Must specify at least one of 'input', 'command', or 'checkpoint'"):
             RunCreate(assistant_id="agent")
 
-    def test_preserves_langsmith_tracer_configuration(self: Self) -> None:
+    def test_preserves_langsmith_tracer_configuration(self) -> None:
         example_id = "11111111-1111-4111-8111-111111111111"
         run_create = RunCreate(
             assistant_id="agent",
@@ -48,21 +46,22 @@ class TestRunCreateValidation:
         assert run_create.langsmith_tracer.project_name == "studio-project"
         assert run_create.langsmith_tracer.example_id == example_id
 
-    def test_rejects_malformed_langsmith_example_id_before_execution(self: Self) -> None:
-        with pytest.raises(ValidationError, match="example_id must be a valid UUID"):
+    def test_rejects_malformed_langsmith_example_id_before_execution(self) -> None:
+        with pytest.raises(ValidationError, match="badly formed hexadecimal UUID string"):
             RunCreate(
                 assistant_id="agent",
                 input={"message": "hello"},
                 langsmith_tracer={"example_id": "not-a-uuid"},
             )
 
-    def test_documents_langsmith_example_id_as_a_uuid(self: Self) -> None:
+    def test_documents_langsmith_example_id_as_a_uuid(self) -> None:
+        """format/description must sit on the string branch, not the nullable wrapper."""
         example_schema = LangSmithTracer.model_json_schema()["properties"]["example_id"]
         string_schema = next(option for option in example_schema["anyOf"] if option.get("type") == "string")
 
         assert string_schema["format"] == "uuid"
 
-    def test_rejects_unknown_langsmith_tracer_fields(self: Self) -> None:
+    def test_rejects_unknown_langsmith_tracer_fields(self) -> None:
         with pytest.raises(ValidationError):
             RunCreate(
                 assistant_id="agent",

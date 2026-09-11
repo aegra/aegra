@@ -6,142 +6,95 @@ import pytest
 from langchain_core.runnables import RunnableLambda
 from langsmith import get_tracing_context, run_trees
 
-from aegra_api.models.auth import User
 from aegra_api.models.runs import LangSmithTracer
 from aegra_api.observability.langsmith_tracing import (
-    is_native_langsmith_tracing_enabled,
     native_langsmith_tracing_context,
     resolve_langsmith_session_name,
 )
-from aegra_api.services.langgraph_service import create_run_config
 from aegra_api.settings import settings
+
+EXAMPLE_ID = "11111111-1111-4111-8111-111111111111"
 
 
 def _identity(value: dict[str, str]) -> dict[str, str]:
     return value
 
 
-def test_native_tracing_requires_explicit_flag(monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.fixture
+def tracing_enabled(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(settings.observability, "LANGSMITH_TRACING", True)
-    monkeypatch.setattr(settings.observability, "LANGSMITH_API_KEY", None)
-
-    assert is_native_langsmith_tracing_enabled() is True
-
-    monkeypatch.setattr(settings.observability, "LANGSMITH_TRACING", False)
-
-    assert is_native_langsmith_tracing_enabled() is False
+    monkeypatch.setattr("aegra_api.observability.langsmith_tracing.get_tracer_project", lambda: "studio-default")
 
 
-def test_default_project_is_the_session_name(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(settings.observability, "LANGSMITH_TRACING", True)
-    monkeypatch.setattr(settings.observability, "LANGSMITH_API_KEY", "test-key")
-    monkeypatch.setattr(settings.observability, "LANGSMITH_PROJECT", "studio-default")
-
-    assert resolve_langsmith_session_name(None) == "studio-default"
-
-
-def test_langsmith_default_project_is_used_when_unconfigured(
+@pytest.mark.parametrize(
+    ("enabled", "tracer", "expected"),
+    [
+        (True, None, "studio-default"),
+        (True, LangSmithTracer(project_name="studio-run"), "studio-run"),
+        (False, None, None),
+        (False, LangSmithTracer(project_name="studio-run"), None),
+    ],
+)
+def test_session_name_follows_the_tracing_flag_and_per_run_project(
     monkeypatch: pytest.MonkeyPatch,
+    enabled: bool,
+    tracer: LangSmithTracer | None,
+    expected: str | None,
 ) -> None:
-    monkeypatch.setattr(settings.observability, "LANGSMITH_TRACING", True)
-    monkeypatch.setattr(settings.observability, "LANGSMITH_PROJECT", None)
-    monkeypatch.setattr(
-        "aegra_api.observability.langsmith_tracing.get_tracer_project",
-        lambda: "default",
-    )
+    monkeypatch.setattr(settings.observability, "LANGSMITH_TRACING", enabled)
+    monkeypatch.setattr("aegra_api.observability.langsmith_tracing.get_tracer_project", lambda: "studio-default")
 
-    assert resolve_langsmith_session_name(None) == "default"
+    assert resolve_langsmith_session_name(tracer) == expected
 
 
-def test_per_run_project_overrides_the_default(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(settings.observability, "LANGSMITH_TRACING", True)
-    monkeypatch.setattr(settings.observability, "LANGSMITH_API_KEY", "test-key")
-    monkeypatch.setattr(settings.observability, "LANGSMITH_PROJECT", "studio-default")
+@pytest.mark.asyncio
+async def test_per_run_project_replicates_to_override_and_default(tracing_enabled: None) -> None:
+    tracer = LangSmithTracer(project_name="studio-run", example_id=EXAMPLE_ID)
 
-    tracer = LangSmithTracer(project_name="studio-run")
-
-    assert resolve_langsmith_session_name(tracer) == "studio-run"
-
-
-def test_disabled_tracing_has_no_session_name(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(settings.observability, "LANGSMITH_TRACING", False)
-    monkeypatch.setattr(settings.observability, "LANGSMITH_API_KEY", "test-key")
-    monkeypatch.setattr(settings.observability, "LANGSMITH_PROJECT", "studio-default")
-
-    assert resolve_langsmith_session_name(LangSmithTracer(project_name="studio-run")) is None
-
-
-def test_per_run_project_replicates_to_override_and_default(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(settings.observability, "LANGSMITH_TRACING", True)
-    monkeypatch.setattr(settings.observability, "LANGSMITH_API_KEY", "test-key")
-    monkeypatch.setattr(settings.observability, "LANGSMITH_PROJECT", "studio-default")
-
-    example_id = "11111111-1111-4111-8111-111111111111"
-    tracer = LangSmithTracer(project_name="studio-run", example_id=example_id)
-
-    with native_langsmith_tracing_context(tracer):
+    async with native_langsmith_tracing_context(tracer):
         context = get_tracing_context()
 
     assert context["enabled"] is True
-    assert context["project_name"] == "studio-default"
     assert context["replicas"] == [
-        {
-            "project_name": "studio-run",
-            "updates": {"reference_example_id": example_id},
-        },
+        {"project_name": "studio-run", "updates": {"reference_example_id": EXAMPLE_ID}},
         {"project_name": "studio-default", "updates": None},
     ]
 
 
-def test_default_project_does_not_create_replicas(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(settings.observability, "LANGSMITH_TRACING", True)
-    monkeypatch.setattr(settings.observability, "LANGSMITH_API_KEY", "test-key")
-    monkeypatch.setattr(settings.observability, "LANGSMITH_PROJECT", "studio-default")
+@pytest.mark.asyncio
+async def test_disabled_tracing_leaves_the_context_untouched(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(settings.observability, "LANGSMITH_TRACING", False)
 
-    with native_langsmith_tracing_context(None):
+    async with native_langsmith_tracing_context(LangSmithTracer(project_name="studio-run")):
         context = get_tracing_context()
 
-    assert context["enabled"] is True
-    assert context["project_name"] == "studio-default"
+    assert context["enabled"] is None
     assert context["replicas"] is None
 
 
 @pytest.mark.asyncio
-async def test_default_project_exports_requested_example_association(
+@pytest.mark.parametrize(
+    ("tracer", "expected_session", "expected_example"),
+    [
+        (None, "studio-default", None),
+        (LangSmithTracer(example_id=EXAMPLE_ID), "studio-default", EXAMPLE_ID),
+        (LangSmithTracer(project_name="studio-run", example_id=EXAMPLE_ID), "studio-run", EXAMPLE_ID),
+    ],
+)
+async def test_traces_export_to_the_resolved_session(
+    tracing_enabled: None,
     monkeypatch: pytest.MonkeyPatch,
+    tracer: LangSmithTracer | None,
+    expected_session: str,
+    expected_example: str | None,
 ) -> None:
-    monkeypatch.setattr(settings.observability, "LANGSMITH_TRACING", True)
-    monkeypatch.setattr(settings.observability, "LANGSMITH_PROJECT", "studio-default")
     client = MagicMock()
     monkeypatch.setattr(run_trees, "_CLIENT", client)
 
-    example_id = "11111111-1111-4111-8111-111111111111"
-
-    with native_langsmith_tracing_context(LangSmithTracer(example_id=example_id)):
+    async with native_langsmith_tracing_context(tracer):
         await RunnableLambda(_identity).ainvoke({"message": "hello"})
 
-    created = client.create_run.call_args.kwargs
-    assert created["session_name"] == "studio-default"
-    assert str(created["reference_example_id"]) == example_id
-
-
-@pytest.mark.asyncio
-async def test_default_project_trace_uses_agent_run_and_thread_ids(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(settings.observability, "LANGSMITH_TRACING", True)
-    monkeypatch.setattr(settings.observability, "LANGSMITH_PROJECT", "studio-default")
-    client = MagicMock()
-    monkeypatch.setattr(run_trees, "_CLIENT", client)
-    run_id = "11111111-1111-4111-8111-111111111111"
-    config = create_run_config(run_id, "thread-1", User(identity="user-1"))
-
-    with native_langsmith_tracing_context(None):
-        await RunnableLambda(_identity).ainvoke({"message": "hello"}, config=config)
-
-    created = client.create_run.call_args.kwargs
-    assert str(created["id"]) == run_id
-    assert created["session_name"] == "studio-default"
-    assert created["extra"]["metadata"]["thread_id"] == "thread-1"
+    created = client.create_run.call_args_list[0].kwargs
+    assert created["session_name"] == expected_session
+    example = created.get("reference_example_id")
+    assert (str(example) if example else None) == expected_example

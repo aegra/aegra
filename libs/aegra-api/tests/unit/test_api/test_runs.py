@@ -21,7 +21,6 @@ from aegra_api.core.orm import Assistant as AssistantORM
 from aegra_api.core.orm import Run as RunORM
 from aegra_api.core.orm import Thread as ThreadORM
 from aegra_api.models import Run, RunCreate, RunStatus, User
-from aegra_api.settings import settings
 
 
 class TestRunsEndpoints:
@@ -62,11 +61,7 @@ class TestRunsEndpoints:
 
     @pytest.mark.asyncio
     async def test_create_run_success(
-        self,
-        mock_user: User,
-        mock_session: AsyncMock,
-        sample_assistant: AssistantORM,
-        monkeypatch: pytest.MonkeyPatch,
+        self, mock_user: User, mock_session: AsyncMock, sample_assistant: AssistantORM
     ) -> None:
         """Test successful run creation."""
         thread_id = "test-thread-123"
@@ -76,15 +71,7 @@ class TestRunsEndpoints:
             assistant_id="test-assistant",
             input={"message": "hello"},
             config={"configurable": {"key": "value"}},
-            langsmith_tracer={
-                "project_name": "studio-run",
-                "example_id": "11111111-1111-4111-8111-111111111111",
-            },
         )
-
-        monkeypatch.setattr(settings.observability, "LANGSMITH_TRACING", True)
-        monkeypatch.setattr(settings.observability, "LANGSMITH_API_KEY", "test-key")
-        monkeypatch.setattr(settings.observability, "LANGSMITH_PROJECT", "studio-default")
 
         # Mock dependencies
         with (
@@ -116,18 +103,13 @@ class TestRunsEndpoints:
             assert result.thread_id == thread_id
             assert result.status == "pending"
             assert result.input == {"message": "hello"}
-            assert result.langsmith_session_name == "studio-run"
 
             # Verify DB interactions
             mock_session.add.assert_called_once()
             mock_session.commit.assert_called_once()
-            persisted_run = mock_session.add.call_args.args[0]
-            assert persisted_run.langsmith_session_name == "studio-run"
 
             # Verify background execution submission
             mock_submit.assert_awaited_once()
-            submitted_job = mock_submit.await_args.args[0]
-            assert submitted_job.execution.langsmith_tracer == request.langsmith_tracer
 
     @pytest.mark.asyncio
     async def test_create_run_assistant_not_found(

@@ -1,6 +1,5 @@
 """Integration tests for runs CRUD operations"""
 
-from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -52,17 +51,16 @@ def _assistant_row(assistant_id="test-assistant-123", graph_id="test-graph", use
 
 
 def _run_row(
-    run_id: str = "test-run-123",
-    *,
-    thread_id: str = "test-thread-123",
-    assistant_id: str = "test-assistant-123",
-    status: str = "running",
-    user_id: str = "test-user",
-    metadata: dict[str, Any] | None = None,
-    input_data: dict[str, Any] | None = None,
-    output_data: dict[str, Any] | None = None,
-    langsmith_session_name: str | None = None,
-) -> DummyRun:
+    run_id="test-run-123",
+    thread_id="test-thread-123",
+    assistant_id="test-assistant-123",
+    status="running",
+    user_id="test-user",
+    metadata=None,
+    input_data=None,
+    output_data=None,
+    langsmith_session_name=None,
+):
     """Create a mock run ORM object"""
     run = DummyRun(
         run_id,
@@ -163,7 +161,6 @@ class TestCreateRun:
         override_session_dependency(app, Session)
         client = make_client(app)
         monkeypatch.setattr(settings.observability, "LANGSMITH_TRACING", True)
-        monkeypatch.setattr(settings.observability, "LANGSMITH_PROJECT", "studio-default")
 
         with (
             patch("aegra_api.services.run_preparation._validate_resume_command", new_callable=AsyncMock),

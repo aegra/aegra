@@ -178,21 +178,21 @@ async def _stream_graph(job: RunJob) -> _GraphResult:
     langgraph_service = get_langgraph_service()
     result = _GraphResult()
 
-    with native_langsmith_tracing_context(job.execution.langsmith_tracer):
-        async with (
-            langgraph_service.get_graph(
-                job.identity.graph_id,
-                config=run_config,
-                access_context="threads.create_run",
-                user=job.user,
-                context=job.execution.context,
-            ) as graph,
-            with_auth_ctx(job.user, job.user.permissions),  # type: ignore[arg-type]
-        ):
-            if job.execution.event_streaming_v2:
-                await _stream_native_v2(job, graph, execution_input, run_config, result)
-            else:
-                await _stream_legacy(job, graph, execution_input, run_config, stream_modes, result)
+    async with (
+        native_langsmith_tracing_context(job.execution.langsmith_tracer),
+        langgraph_service.get_graph(
+            job.identity.graph_id,
+            config=run_config,
+            access_context="threads.create_run",
+            user=job.user,
+            context=job.execution.context,
+        ) as graph,
+        with_auth_ctx(job.user, job.user.permissions),  # type: ignore[arg-type]
+    ):
+        if job.execution.event_streaming_v2:
+            await _stream_native_v2(job, graph, execution_input, run_config, result)
+        else:
+            await _stream_legacy(job, graph, execution_input, run_config, stream_modes, result)
 
     return result
 

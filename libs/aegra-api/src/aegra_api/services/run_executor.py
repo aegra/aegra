@@ -15,6 +15,7 @@ from aegra_api.core.active_runs import active_runs
 from aegra_api.core.auth_ctx import with_auth_ctx
 from aegra_api.core.redis_manager import redis_manager
 from aegra_api.models.run_job import RunJob
+from aegra_api.observability.langsmith_tracing import native_langsmith_tracing_context
 from aegra_api.services.broker import broker_manager
 from aegra_api.services.event_streaming.native_stream import stream_native_v3_events
 from aegra_api.services.graph_streaming import stream_graph_events
@@ -178,6 +179,7 @@ async def _stream_graph(job: RunJob) -> _GraphResult:
     result = _GraphResult()
 
     async with (
+        native_langsmith_tracing_context(job.execution.langsmith_tracer),
         langgraph_service.get_graph(
             job.identity.graph_id,
             config=run_config,

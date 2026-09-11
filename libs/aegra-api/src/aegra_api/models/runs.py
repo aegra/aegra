@@ -2,7 +2,8 @@
 
 import re
 from datetime import datetime
-from typing import Any, Literal, Self
+from typing import Annotated, Any, Literal, Self
+from uuid import UUID
 
 from pydantic import (
     BaseModel,
@@ -25,6 +26,29 @@ from aegra_api.utils.status_compat import validate_run_status
 _METADATA_KEY_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 _METADATA_MAX_KEYS = 32
 _METADATA_MAX_VALUE_LEN = 512
+
+
+class LangSmithTracer(BaseModel):
+    """Additional LangSmith tracing destination for a run."""
+
+    project_name: str | None = None
+    # Annotated so format/description land on the string branch of the anyOf,
+    # not on the nullable wrapper.
+    example_id: (
+        Annotated[
+            str,
+            Field(
+                description="LangSmith dataset example UUID to associate with the trace.",
+                json_schema_extra={"format": "uuid"},
+            ),
+        ]
+        | None
+    ) = None
+
+    @field_validator("example_id", mode="after")
+    @classmethod
+    def validate_example_id(cls, example_id: str | None) -> str | None:
+        return str(UUID(example_id)) if example_id else None
 
 
 class RunCreate(BaseModel):
@@ -75,6 +99,10 @@ class RunCreate(BaseModel):
     stream_subgraphs: bool | None = Field(
         False,
         description="Whether to include subgraph events in streaming. When True, includes events from all subgraphs. When False (default when None), excludes subgraph events. Defaults to False for backwards compatibility.",
+    )
+    langsmith_tracer: LangSmithTracer | None = Field(
+        None,
+        description="Configuration for additional tracing with LangSmith.",
     )
 
     # Request metadata (top-level in payload).  Reaches OTEL trace
@@ -167,6 +195,10 @@ class Run(BaseModel):
     )
     context: dict[str, Any] | None = Field(
         default_factory=dict, description="Context variables available during execution."
+    )
+    langsmith_session_name: str | None = Field(
+        None,
+        description="LangSmith tracing session (project) for this run when native tracing is enabled.",
     )
     user_id: str = Field(..., description="Identifier of the user who owns this run.")
     created_at: datetime = Field(..., description="Timestamp when the run was created.")

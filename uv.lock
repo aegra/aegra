@@ -15,7 +15,7 @@ members = [
 
 [[package]]
 name = "aegra-api"
-version = "0.10.5"
+version = "0.11.0"
 source = { editable = "libs/aegra-api" }
 dependencies = [
     { name = "alembic" },
@@ -24,9 +24,11 @@ dependencies = [
     { name = "croniter" },
     { name = "fastapi" },
     { name = "greenlet" },
+    { name = "langchain-core" },
     { name = "langgraph" },
     { name = "langgraph-checkpoint-postgres" },
     { name = "langgraph-sdk" },
+    { name = "langsmith" },
     { name = "openinference-instrumentation-langchain" },
     { name = "opentelemetry-api" },
     { name = "opentelemetry-exporter-otlp" },
@@ -65,9 +67,11 @@ requires-dist = [
     { name = "croniter", specifier = ">=6.0.0" },
     { name = "fastapi", specifier = ">=0.110.1" },
     { name = "greenlet", specifier = ">=3.1.0" },
+    { name = "langchain-core", specifier = ">=1.0.0" },
     { name = "langgraph", specifier = ">=1.0.3" },
     { name = "langgraph-checkpoint-postgres", specifier = ">=2.0.23" },
     { name = "langgraph-sdk", specifier = ">=0.3.5" },
+    { name = "langsmith", specifier = ">=0.6.3" },
     { name = "openinference-instrumentation-langchain", specifier = ">=0.1.58" },
     { name = "opentelemetry-api", specifier = ">=1.39.1" },
     { name = "opentelemetry-exporter-otlp", specifier = ">=1.39.1" },
@@ -100,7 +104,7 @@ dev = [
 
 [[package]]
 name = "aegra-cli"
-version = "0.10.5"
+version = "0.11.0"
 source = { editable = "libs/aegra-cli" }
 dependencies = [
     { name = "aegra-api" },

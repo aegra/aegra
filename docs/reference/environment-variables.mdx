@@ -199,6 +199,22 @@ When enabled, a `/metrics` endpoint serves standard HTTP request metrics (reques
 
 ## Observability (OpenTelemetry)
 
+### Native LangSmith tracing
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `LANGSMITH_TRACING` | `false` | Enable native LangSmith tracing and record the project on Agent Protocol run responses |
+| `LANGSMITH_ENDPOINT` | `https://api.smith.langchain.com` | LangSmith API endpoint |
+| `LANGSMITH_API_KEY` | — | LangSmith API key |
+| `LANGSMITH_PROJECT` | `default` | Default LangSmith project and run session name |
+| `LANGSMITH_WORKSPACE_ID` | — | Workspace ID required by organization-scoped API keys |
+
+Aegra reads only `LANGSMITH_TRACING`; the rest are consumed directly by the LangSmith SDK.
+
+The request-level `langsmith_tracer.project_name` selects an additional project for that run. See the [observability guide](/guides/observability#native-langsmith-tracing) for details.
+
+### OpenTelemetry fan-out
+
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `OTEL_SERVICE_NAME` | `aegra-backend` | Service name for traces |

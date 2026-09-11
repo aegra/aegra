@@ -3,7 +3,7 @@
 import pytest
 from pydantic import ValidationError
 
-from aegra_api.models.runs import RunCreate
+from aegra_api.models.runs import LangSmithTracer, RunCreate
 
 
 class TestRunCreateValidation:
@@ -30,6 +30,32 @@ class TestRunCreateValidation:
         """Ensure payloads with no input, command, or checkpoint are rejected."""
         with pytest.raises(ValueError, match="Must specify at least one of 'input', 'command', or 'checkpoint'"):
             RunCreate(assistant_id="agent")
+
+    def test_rejects_malformed_langsmith_example_id_before_execution(self) -> None:
+        with pytest.raises(ValidationError, match="badly formed hexadecimal UUID string"):
+            RunCreate(
+                assistant_id="agent",
+                input={"message": "hello"},
+                langsmith_tracer={"example_id": "not-a-uuid"},
+            )
+
+    def test_documents_langsmith_example_id_as_a_uuid(self) -> None:
+        """format/description must sit on the string branch, not the nullable wrapper."""
+        example_schema = LangSmithTracer.model_json_schema()["properties"]["example_id"]
+        string_schema = next(option for option in example_schema["anyOf"] if option.get("type") == "string")
+
+        assert string_schema["format"] == "uuid"
+
+    def test_ignores_unknown_langsmith_tracer_fields(self) -> None:
+        """Forward compatibility: a newer SDK may send fields this server predates."""
+        run_create = RunCreate(
+            assistant_id="agent",
+            input={"message": "hello"},
+            langsmith_tracer={"project_name": "studio-project", "unknown": True},
+        )
+
+        assert run_create.langsmith_tracer is not None
+        assert run_create.langsmith_tracer.project_name == "studio-project"
 
 
 class TestRunCreateMetadataValidation:

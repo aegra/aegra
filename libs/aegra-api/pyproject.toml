@@ -1,6 +1,6 @@
 [project]
 name = "aegra-api"
-version = "0.10.5"
+version = "0.11.0"
 description = "Aegra core API - Self-hosted Agent Protocol server"
 readme = "README.md"
 requires-python = ">=3.12"
@@ -27,8 +27,10 @@ dependencies = [
 
     # LangGraph
     "langgraph>=1.0.3",
+    "langchain-core>=1.0.0",
     "langgraph-sdk>=0.3.5",
     "langgraph-checkpoint-postgres>=2.0.23",
+    "langsmith>=0.6.3",
 
     # Database
     "sqlalchemy>=2.0.0",

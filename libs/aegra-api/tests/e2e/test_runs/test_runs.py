@@ -8,7 +8,7 @@ from tests.e2e._utils import await_terminal_run, check_and_skip_if_geo_blocked, 
 
 @pytest.mark.e2e
 @pytest.mark.asyncio
-async def test_runs_crud_and_join_e2e():
+async def test_runs_crud_and_join_e2e() -> None:
     """
     Mirrors existing e2e style using the typed SDK client (see test_chat_streaming, test_background_run_join).
     Validates the non-streaming "background run" flow and CRUD around it:
@@ -42,10 +42,11 @@ async def test_runs_crud_and_join_e2e():
         thread_id=thread_id,
         assistant_id=assistant_id,
         input={"messages": [{"role": "user", "content": "Say one short sentence."}]},
-        stream_mode=[
-            "messages",
-            "values",
-        ],  # ensure both modes are available for later stream
+        stream_mode=["messages", "values"],  # ensure both modes are available for later stream
+        langsmith_tracing={
+            "project_name": "studio-run",
+            "example_id": "11111111-1111-4111-8111-111111111111",
+        },
     )
     elog("Runs.create", run)
     assert "run_id" in run

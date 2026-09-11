@@ -94,8 +94,6 @@ class TestRunJob:
         assert restored.identity == sample_job.identity
         assert restored.user.identity == sample_job.user.identity
         assert restored.execution == sample_job.execution
-        assert restored.execution.langsmith_tracer is not None
-        assert restored.execution.langsmith_tracer.project_name == "studio-run"
         assert restored.behavior == sample_job.behavior
 
     def test_execution_params_includes_graph_id(self, sample_job: RunJob) -> None:

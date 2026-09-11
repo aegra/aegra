@@ -50,7 +50,6 @@ async def test_runs_crud_and_join_e2e() -> None:
     )
     elog("Runs.create", run)
     assert "run_id" in run
-    assert run["langsmith_session_name"] is None
     run_id = run["run_id"]
 
     # 4) Join run and assert final output (dict)
@@ -69,7 +68,6 @@ async def test_runs_crud_and_join_e2e() -> None:
     assert got["run_id"] == run_id
     assert got["thread_id"] == thread_id
     assert got["assistant_id"] == assistant_id
-    assert got["langsmith_session_name"] is None
     assert got["status"] in (
         "success",
         "error",

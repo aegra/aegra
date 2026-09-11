@@ -48,20 +48,6 @@ def test_session_name_follows_the_tracing_flag_and_per_run_project(
 
 
 @pytest.mark.asyncio
-async def test_per_run_project_replicates_to_override_and_default(tracing_enabled: None) -> None:
-    tracer = LangSmithTracer(project_name="studio-run", example_id=EXAMPLE_ID)
-
-    async with native_langsmith_tracing_context(tracer):
-        context = get_tracing_context()
-
-    assert context["enabled"] is True
-    assert context["replicas"] == [
-        {"project_name": "studio-run", "updates": {"reference_example_id": EXAMPLE_ID}},
-        {"project_name": "studio-default", "updates": None},
-    ]
-
-
-@pytest.mark.asyncio
 async def test_disabled_tracing_leaves_the_context_untouched(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(settings.observability, "LANGSMITH_TRACING", False)
 
@@ -74,19 +60,22 @@ async def test_disabled_tracing_leaves_the_context_untouched(monkeypatch: pytest
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("tracer", "expected_session", "expected_example"),
+    ("tracer", "expected_writes"),
     [
-        (None, "studio-default", None),
-        (LangSmithTracer(example_id=EXAMPLE_ID), "studio-default", EXAMPLE_ID),
-        (LangSmithTracer(project_name="studio-run", example_id=EXAMPLE_ID), "studio-run", EXAMPLE_ID),
+        (None, [("studio-default", None)]),
+        (LangSmithTracer(example_id=EXAMPLE_ID), [("studio-default", EXAMPLE_ID)]),
+        # A per-run project also keeps writing to the default one, so Studio still finds the run.
+        (
+            LangSmithTracer(project_name="studio-run", example_id=EXAMPLE_ID),
+            [("studio-run", EXAMPLE_ID), ("studio-default", None)],
+        ),
     ],
 )
-async def test_traces_export_to_the_resolved_session(
+async def test_traces_export_to_every_resolved_session(
     tracing_enabled: None,
     monkeypatch: pytest.MonkeyPatch,
     tracer: LangSmithTracer | None,
-    expected_session: str,
-    expected_example: str | None,
+    expected_writes: list[tuple[str, str | None]],
 ) -> None:
     client = MagicMock()
     monkeypatch.setattr(run_trees, "_CLIENT", client)
@@ -94,7 +83,8 @@ async def test_traces_export_to_the_resolved_session(
     async with native_langsmith_tracing_context(tracer):
         await RunnableLambda(_identity).ainvoke({"message": "hello"})
 
-    created = client.create_run.call_args_list[0].kwargs
-    assert created["session_name"] == expected_session
-    example = created.get("reference_example_id")
-    assert (str(example) if example else None) == expected_example
+    writes = [
+        (call.kwargs["session_name"], str(example) if (example := call.kwargs.get("reference_example_id")) else None)
+        for call in client.create_run.call_args_list
+    ]
+    assert writes == expected_writes

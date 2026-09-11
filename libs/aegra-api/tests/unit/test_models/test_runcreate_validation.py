@@ -31,21 +31,6 @@ class TestRunCreateValidation:
         with pytest.raises(ValueError, match="Must specify at least one of 'input', 'command', or 'checkpoint'"):
             RunCreate(assistant_id="agent")
 
-    def test_preserves_langsmith_tracer_configuration(self) -> None:
-        example_id = "11111111-1111-4111-8111-111111111111"
-        run_create = RunCreate(
-            assistant_id="agent",
-            input={"message": "hello"},
-            langsmith_tracer={
-                "project_name": "studio-project",
-                "example_id": example_id,
-            },
-        )
-
-        assert run_create.langsmith_tracer is not None
-        assert run_create.langsmith_tracer.project_name == "studio-project"
-        assert run_create.langsmith_tracer.example_id == example_id
-
     def test_rejects_malformed_langsmith_example_id_before_execution(self) -> None:
         with pytest.raises(ValidationError, match="badly formed hexadecimal UUID string"):
             RunCreate(

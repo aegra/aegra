@@ -31,9 +31,6 @@ _METADATA_MAX_VALUE_LEN = 512
 class LangSmithTracer(BaseModel):
     """Additional LangSmith tracing destination for a run."""
 
-    # Extras are ignored, not rejected: the SDK's LangSmithTracing TypedDict may
-    # grow fields, and RunCreate itself ignores extras.
-
     project_name: str | None = None
     # Annotated so format/description land on the string branch of the anyOf,
     # not on the nullable wrapper.

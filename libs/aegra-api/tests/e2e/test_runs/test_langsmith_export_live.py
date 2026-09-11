@@ -57,7 +57,10 @@ async def test_run_exports_to_the_requested_project_with_the_example_association
 
     await await_terminal_run(client, thread["thread_id"], run["run_id"])
 
-    traced = await _await_exported_run(LangSmithClient(), run["run_id"])
+    langsmith = LangSmithClient()
+    traced = await _await_exported_run(langsmith, run["run_id"])
     elog("LangSmith.read_run", {"id": str(traced.id), "example": str(traced.reference_example_id)})
     assert str(traced.reference_example_id) == EXAMPLE_ID
-    assert traced.session_id is not None
+
+    session = await asyncio.to_thread(langsmith.read_project, project_id=str(traced.session_id))
+    assert session.name == project

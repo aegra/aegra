@@ -5,6 +5,7 @@ from pathlib import Path
 from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
+from langgraph_sdk import Auth
 from starlette.authentication import AuthCredentials, AuthenticationError
 from starlette.requests import HTTPConnection
 from starlette.responses import JSONResponse
@@ -360,27 +361,49 @@ class TestLangGraphAuthBackend:
             await backend.authenticate(mock_conn)
 
     @pytest.mark.asyncio
-    async def test_authenticate_http_exception(self):
-        """Test authentication with HTTP exception"""
+    @pytest.mark.parametrize(
+        ("status_code", "detail"),
+        [
+            (401, "Invalid token"),
+            (403, "account disabled"),
+            (429, "too many attempts"),
+        ],
+    )
+    async def test_authenticate_http_exception_is_not_rewritten(self, status_code: int, detail: str) -> None:
+        """Handler HTTPException must keep its status_code; do not wrap as AuthenticationError."""
         mock_auth_instance = Mock()
-
-        # Create a mock exception with detail attribute
-        mock_http_exception = Exception("Auth failed")
-        mock_http_exception.detail = "Invalid token"
-        mock_auth_instance._authenticate_handler = AsyncMock(side_effect=mock_http_exception)
+        mock_auth_instance._authenticate_handler = AsyncMock(
+            side_effect=Auth.exceptions.HTTPException(status_code=status_code, detail=detail)
+        )
 
         backend = LangGraphAuthBackend()
         backend.auth_instance = mock_auth_instance
 
-        # Mock the Auth.exceptions.HTTPException to be the same as our exception
-        with patch("aegra_api.core.auth_middleware.Auth") as mock_auth:
-            mock_auth.exceptions.HTTPException = Exception
+        mock_conn = Mock(spec=HTTPConnection)
+        mock_conn.headers = {"authorization": b"Bearer token123"}
 
-            mock_conn = Mock(spec=HTTPConnection)
-            mock_conn.headers = {"authorization": b"Bearer token123"}
+        with pytest.raises(Auth.exceptions.HTTPException) as exc_info:
+            await backend.authenticate(mock_conn)
 
-            with pytest.raises(AuthenticationError, match="Invalid token"):
-                await backend.authenticate(mock_conn)
+        assert exc_info.value.status_code == status_code
+        assert exc_info.value.detail == detail
+
+    @pytest.mark.asyncio
+    async def test_authenticate_unexpected_exception_stays_generic(self) -> None:
+        """Non-HTTPException handler bugs must not leak internals or invent a status."""
+        mock_auth_instance = Mock()
+        mock_auth_instance._authenticate_handler = AsyncMock(side_effect=RuntimeError("postgres://secret@internal/db"))
+
+        backend = LangGraphAuthBackend()
+        backend.auth_instance = mock_auth_instance
+
+        mock_conn = Mock(spec=HTTPConnection)
+        mock_conn.headers = {"authorization": b"Bearer token123"}
+
+        with pytest.raises(AuthenticationError, match="Authentication system error") as exc_info:
+            await backend.authenticate(mock_conn)
+
+        assert "secret" not in str(exc_info.value)
 
     @pytest.mark.asyncio
     async def test_authenticate_headers_conversion(self):

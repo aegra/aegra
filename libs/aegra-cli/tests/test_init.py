@@ -4,9 +4,13 @@ from __future__ import annotations
 
 import json
 import sys
+from collections.abc import Callable
 from pathlib import Path
-from typing import TYPE_CHECKING
+from types import ModuleType
+from typing import TYPE_CHECKING, cast
+from unittest.mock import Mock
 
+import pytest
 from click.testing import CliRunner
 
 import aegra_cli.commands.init  # noqa: F401 — ensure module is loaded
@@ -117,6 +121,55 @@ class TestTemplateRegistry:
         content = render_env_example({"slug": "test_app"})
         assert "test_app" in content
         assert "POSTGRES_USER" in content
+
+    def test_generated_model_loader_supports_atlas_cloud(
+        self: TestTemplateRegistry, monkeypatch: MonkeyPatch
+    ) -> None:
+        init_chat_model = Mock()
+        chat_openai = Mock()
+
+        langchain = ModuleType("langchain")
+        setattr(langchain, "__path__", [])
+        chat_models = ModuleType("langchain.chat_models")
+        setattr(chat_models, "init_chat_model", init_chat_model)
+        langchain_core = ModuleType("langchain_core")
+        setattr(langchain_core, "__path__", [])
+        language_models = ModuleType("langchain_core.language_models")
+        setattr(language_models, "BaseChatModel", object)
+        langchain_openai = ModuleType("langchain_openai")
+        setattr(langchain_openai, "ChatOpenAI", chat_openai)
+
+        monkeypatch.setitem(sys.modules, "langchain", langchain)
+        monkeypatch.setitem(sys.modules, "langchain.chat_models", chat_models)
+        monkeypatch.setitem(sys.modules, "langchain_core", langchain_core)
+        monkeypatch.setitem(sys.modules, "langchain_core.language_models", language_models)
+        monkeypatch.setitem(sys.modules, "langchain_openai", langchain_openai)
+        monkeypatch.setenv("ATLASCLOUD_API_KEY", "test-atlas-key")
+
+        content = render_shared_template_file(
+            "utils.py.template", {"project_name": "Atlas Agent", "slug": "atlas_agent"}
+        )
+        namespace: dict[str, object] = {}
+        # Execute repository-controlled generated source for this rendering test.
+        exec(compile(content, "generated_utils.py", "exec"), namespace)  # noqa: S102
+        load_chat_model = cast(Callable[[str], object], namespace["load_chat_model"])
+
+        load_chat_model(" atlascloud/qwen/qwen3.8-max ")
+
+        chat_openai.assert_called_once_with(
+            model="qwen/qwen3.8-max",
+            api_key="test-atlas-key",
+            base_url="https://api.atlascloud.ai/v1",
+        )
+        init_chat_model.assert_not_called()
+
+        monkeypatch.delenv("ATLASCLOUD_API_KEY")
+        with pytest.raises(ValueError, match="ATLASCLOUD_API_KEY is required"):
+            load_chat_model("atlascloud/qwen/qwen3.8-max")
+
+        for invalid_name in ("atlascloud", "atlascloud/", "/qwen/qwen3.8-max"):
+            with pytest.raises(ValueError, match="provider/model"):
+                load_chat_model(invalid_name)
 
     def test_load_shared_gitignore(self: TestTemplateRegistry) -> None:
         content = load_shared_file("gitignore")
@@ -459,7 +512,13 @@ class TestInitFileContents:
         assert result.exit_code == 0
 
         content = (project_dir / ".env.example").read_text()
-        for var in ["POSTGRES_USER", "POSTGRES_PASSWORD", "AUTH_TYPE", "OPENAI_API_KEY"]:
+        for var in [
+            "POSTGRES_USER",
+            "POSTGRES_PASSWORD",
+            "AUTH_TYPE",
+            "OPENAI_API_KEY",
+            "ATLASCLOUD_API_KEY",
+        ]:
             assert var in content
 
     def test_env_example_uses_slug(

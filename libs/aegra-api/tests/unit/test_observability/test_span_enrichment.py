@@ -570,3 +570,136 @@ class TestSpanEnrichmentEndToEnd:
             assert attrs["langfuse.session.id"] == "thread-1"
             assert attrs["langfuse.trace.name"] == "my_graph"
             assert attrs["langfuse.trace.metadata.run_id"] == "run-1"
+
+
+class TestSpanEnrichers:
+    """Enrichers registered on the processor reach every exporter."""
+
+    def _provider(self) -> tuple[TracerProvider, SpanEnrichmentProcessor, InMemorySpanExporter]:
+        processor = SpanEnrichmentProcessor()
+        exporter = InMemorySpanExporter()
+        provider = TracerProvider()
+        provider.add_span_processor(processor)
+        provider.add_span_processor(SimpleSpanProcessor(exporter))
+        return provider, processor, exporter
+
+    def test_enricher_attributes_reach_the_exporter(self) -> None:
+        provider, processor, exporter = self._provider()
+        processor.add_enricher(lambda span: {"cost.usd": 0.42})
+
+        with provider.get_tracer("t").start_as_current_span("s") as span:
+            span.set_attribute("model", "gpt")
+
+        exported = exporter.get_finished_spans()[0]
+        assert exported.attributes["model"] == "gpt"
+        assert exported.attributes["cost.usd"] == 0.42
+
+    def test_enricher_sees_the_ended_span(self) -> None:
+        """Response-time data is the point: the enricher reads the finished span."""
+        provider, processor, exporter = self._provider()
+        processor.add_enricher(lambda span: {"derived.name": span.name})
+
+        with provider.get_tracer("t").start_as_current_span("llm-call"):
+            pass
+
+        assert exporter.get_finished_spans()[0].attributes["derived.name"] == "llm-call"
+
+    def test_every_enricher_runs_in_registration_order(self) -> None:
+        provider, processor, exporter = self._provider()
+        processor.add_enricher(lambda span: {"first": 1, "shared": "a"})
+        processor.add_enricher(lambda span: {"second": 2, "shared": "b"})
+
+        with provider.get_tracer("t").start_as_current_span("s"):
+            pass
+
+        attrs = exporter.get_finished_spans()[0].attributes
+        assert attrs["first"] == 1
+        assert attrs["second"] == 2
+        assert attrs["shared"] == "b"
+
+    def test_a_raising_enricher_does_not_block_the_others_or_the_export(self) -> None:
+        provider, processor, exporter = self._provider()
+
+        def boom(span: object) -> dict[str, int]:
+            raise RuntimeError("enricher is broken")
+
+        processor.add_enricher(boom)
+        processor.add_enricher(lambda span: {"survived": True})
+
+        with provider.get_tracer("t").start_as_current_span("s"):
+            pass
+
+        exported = exporter.get_finished_spans()
+        assert len(exported) == 1
+        assert exported[0].attributes["survived"] is True
+
+    def test_non_primitive_values_are_dropped_with_a_warning(self, caplog: pytest.LogCaptureFixture) -> None:
+        provider, processor, exporter = self._provider()
+        processor.add_enricher(lambda span: {"bad": {"nested": 1}, "good": "kept"})
+
+        with caplog.at_level(logging.WARNING), provider.get_tracer("t").start_as_current_span("s"):
+            pass
+
+        attrs = exporter.get_finished_spans()[0].attributes
+        assert "bad" not in attrs
+        assert attrs["good"] == "kept"
+        assert "non-primitive" in caplog.text
+
+    def test_enricher_returning_a_non_mapping_is_skipped_with_a_warning(self, caplog: pytest.LogCaptureFixture) -> None:
+        """A callback can return anything at runtime; .items() must not blow up on_end."""
+        provider, processor, exporter = self._provider()
+        processor.add_enricher(lambda span: "not-a-mapping")
+        processor.add_enricher(lambda span: {"survived": True})
+
+        with caplog.at_level(logging.WARNING), provider.get_tracer("t").start_as_current_span("s"):
+            pass
+
+        exported = exporter.get_finished_spans()
+        assert len(exported) == 1
+        assert exported[0].attributes["survived"] is True
+        assert "expected a mapping" in caplog.text
+
+    def test_enricher_returning_none_is_a_no_op(self) -> None:
+        provider, processor, exporter = self._provider()
+        processor.add_enricher(lambda span: None)
+
+        with provider.get_tracer("t").start_as_current_span("s") as span:
+            span.set_attribute("only", 1)
+
+        assert dict(exporter.get_finished_spans()[0].attributes) == {"only": 1}
+
+    def test_span_without_its_own_attributes_is_still_enriched(self) -> None:
+        provider, processor, exporter = self._provider()
+        processor.add_enricher(lambda span: {"added": 1})
+
+        with provider.get_tracer("t").start_as_current_span("bare"):
+            pass
+
+        assert exporter.get_finished_spans()[0].attributes["added"] == 1
+
+    def test_clear_enrichers_stops_enrichment(self) -> None:
+        provider, processor, exporter = self._provider()
+        processor.add_enricher(lambda span: {"gone": 1})
+        processor.clear_enrichers()
+
+        with provider.get_tracer("t").start_as_current_span("s"):
+            pass
+
+        assert "gone" not in exporter.get_finished_spans()[0].attributes
+
+    def test_sdk_still_hands_the_processor_the_span_own_attributes(self) -> None:
+        """Contract canary: on_end enrichment relies on the SDK not copying attributes.
+
+        If a future opentelemetry-sdk release passes a copy to on_end, enrichment
+        would silently stop reaching exporters. This test fails first.
+        """
+        provider, processor, exporter = self._provider()
+        seen: list[int] = []
+        processor.add_enricher(lambda span: seen.append(id(span._attributes)) or {"x": 1})
+
+        with provider.get_tracer("t").start_as_current_span("s"):
+            pass
+
+        exported = exporter.get_finished_spans()[0]
+        assert id(exported._attributes) == seen[0]
+        assert exported.attributes["x"] == 1

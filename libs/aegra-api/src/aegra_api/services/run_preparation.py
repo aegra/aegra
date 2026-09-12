@@ -5,6 +5,9 @@ resume-command validation, and config/context merging logic.
 """
 
 import asyncio
+from collections.abc import Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
 from datetime import UTC, datetime
 from typing import Any
 from uuid import uuid4
@@ -28,6 +31,18 @@ from aegra_api.utils.assistants import resolve_assistant_id
 from aegra_api.utils.run_utils import _merge_jsonb
 
 logger = structlog.getLogger(__name__)
+
+_EPHEMERAL_RUN = ContextVar("aegra_ephemeral_run", default=False)
+
+
+@contextmanager
+def ephemeral_run_context() -> Iterator[None]:
+    """Mark the next run prepared in this task as a stateless ephemeral run."""
+    token = _EPHEMERAL_RUN.set(True)
+    try:
+        yield
+    finally:
+        _EPHEMERAL_RUN.reset(token)
 
 
 # The interrupt reaches the client (via the broker/SSE) before the run executor
@@ -137,6 +152,7 @@ async def update_thread_metadata(
     *,
     user_id: str | None = None,
     input_data: dict[str, Any] | None = None,
+    is_ephemeral: bool = False,
 ) -> None:
     """Update thread metadata with assistant and graph information (dialect agnostic).
 
@@ -167,6 +183,7 @@ async def update_thread_metadata(
             status="idle",
             metadata_json=metadata,
             user_id=user_id,
+            is_ephemeral=is_ephemeral,
         )
         session.add(thread_orm)
         return
@@ -181,9 +198,10 @@ async def update_thread_metadata(
     # Only set thread_name if empty and we have a name from the input
     if thread_name and not md.get("thread_name"):
         md["thread_name"] = thread_name
-    await session.execute(
-        update(ThreadORM).where(ThreadORM.thread_id == thread_id).values(metadata_json=md, updated_at=datetime.now(UTC))
-    )
+    values: dict[str, object] = {"metadata_json": md, "updated_at": datetime.now(UTC)}
+    if is_ephemeral:
+        values["is_ephemeral"] = True
+    await session.execute(update(ThreadORM).where(ThreadORM.thread_id == thread_id).values(**values))
 
 
 async def _prepare_run(
@@ -246,7 +264,13 @@ async def _prepare_run(
 
     # Mark thread as busy and update metadata
     await update_thread_metadata(
-        session, thread_id, assistant.assistant_id, assistant.graph_id, user_id=user.identity, input_data=request.input
+        session,
+        thread_id,
+        assistant.assistant_id,
+        assistant.graph_id,
+        user_id=user.identity,
+        input_data=request.input,
+        is_ephemeral=_EPHEMERAL_RUN.get(),
     )
     await set_thread_status(session, thread_id, "busy")
 

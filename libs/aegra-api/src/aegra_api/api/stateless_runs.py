@@ -7,6 +7,7 @@ explicitly sets ``on_completion="keep"``).
 """
 
 import asyncio
+import contextlib
 from collections.abc import AsyncIterator, Mapping
 from uuid import uuid4
 
@@ -33,6 +34,7 @@ from aegra_api.services.run_cleanup import (
     delete_thread_by_id,
     schedule_background_cleanup,
 )
+from aegra_api.services.run_preparation import ephemeral_run_context
 
 router = APIRouter(tags=["Stateless Runs"], dependencies=auth_dependency)
 logger = structlog.getLogger(__name__)
@@ -138,7 +140,8 @@ async def stateless_wait_for_run(
     should_delete = request.on_completion != "keep"
 
     try:
-        response = await wait_for_run(thread_id, request, user)
+        with ephemeral_run_context() if should_delete else contextlib.nullcontext():
+            response = await wait_for_run(thread_id, request, user)
     except Exception:
         if should_delete:
             try:
@@ -206,7 +209,8 @@ async def stateless_stream_run(
     should_delete = request.on_completion != "keep"
 
     try:
-        response = await create_and_stream_run(thread_id, request, user)
+        with ephemeral_run_context() if should_delete else contextlib.nullcontext():
+            response = await create_and_stream_run(thread_id, request, user)
     except Exception:
         # create_and_stream_run may have auto-created the thread via
         # update_thread_metadata before raising; clean up to avoid orphans.
@@ -288,7 +292,8 @@ async def stateless_create_run(
     should_delete = request.on_completion != "keep"
 
     try:
-        result = await create_run(thread_id, request, user, session)
+        with ephemeral_run_context() if should_delete else contextlib.nullcontext():
+            result = await create_run(thread_id, request, user, session)
     except Exception:
         # create_run may have auto-created the thread via
         # update_thread_metadata before raising; clean up to avoid orphans.

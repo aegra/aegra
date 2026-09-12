@@ -10,6 +10,7 @@ from aegra_api.settings import (
     AppSettings,
     CronSettings,
     DatabaseSettings,
+    EphemeralThreadSettings,
     RedisSettings,
     ThreadTTLSettings,
     WorkerSettings,
@@ -689,3 +690,33 @@ class TestMaxSearchLimit:
         monkeypatch.setenv("MAX_SEARCH_LIMIT", "-1")
         with pytest.raises(ValidationError):
             AppSettings(_env_file=None)
+
+
+def test_ephemeral_thread_settings_have_safe_defaults() -> None:
+    """Orphan cleanup is bounded and enabled with conservative defaults."""
+    config = EphemeralThreadSettings(_env_file=None)
+
+    assert config.EPHEMERAL_THREAD_RETENTION_SECONDS == 86400
+    assert config.EPHEMERAL_THREAD_SWEEP_INTERVAL_SECONDS == 300
+    assert config.EPHEMERAL_THREAD_SWEEP_LIMIT == 100
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("EPHEMERAL_THREAD_RETENTION_SECONDS", "0"),
+        ("EPHEMERAL_THREAD_RETENTION_SECONDS", "-1"),
+        ("EPHEMERAL_THREAD_SWEEP_INTERVAL_SECONDS", "0"),
+        ("EPHEMERAL_THREAD_SWEEP_INTERVAL_SECONDS", "-1"),
+        ("EPHEMERAL_THREAD_SWEEP_LIMIT", "0"),
+        ("EPHEMERAL_THREAD_SWEEP_LIMIT", "-1"),
+    ],
+)
+def test_ephemeral_thread_settings_reject_non_positive_values(
+    monkeypatch: pytest.MonkeyPatch, field: str, value: str
+) -> None:
+    """Retention, interval, and batch limits must all be positive."""
+    monkeypatch.setenv(field, value)
+
+    with pytest.raises(ValidationError):
+        EphemeralThreadSettings(_env_file=None)

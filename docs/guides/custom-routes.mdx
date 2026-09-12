@@ -67,11 +67,11 @@ async def custom_root():
 
 ## Authentication on custom routes
 
-By default, custom routes do **not** have Aegra's authentication applied. You have two options:
+By default, custom routes **do** inherit Aegra's authentication. You have two options:
 
-### Option 1: Apply auth to all custom routes
+### Option 1: Use the secure default for all custom routes
 
-Set `enable_custom_route_auth` in your config:
+Nothing extra is required. If you want to make the default explicit in config, set:
 
 ```json
 {
@@ -82,7 +82,20 @@ Set `enable_custom_route_auth` in your config:
 }
 ```
 
-### Option 2: Apply auth to specific routes
+### Option 2: Opt out for a public route surface
+
+If you intentionally want unauthenticated custom routes, opt out in config and keep the public surface narrow, for example for a webhook receiver:
+
+```json
+{
+  "http": {
+    "app": "./custom_routes.py:app",
+    "enable_custom_route_auth": false
+  }
+}
+```
+
+### Option 3: Apply auth to specific routes manually
 
 Use the `require_auth` dependency on individual routes:
 
@@ -127,6 +140,6 @@ The default is `allow_origins: ["*"]` with `allow_credentials: false`. When you 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
 | `http.app` | `string` | `None` | Import path to custom FastAPI app (`./file.py:variable`) |
-| `http.enable_custom_route_auth` | `bool` | `false` | Apply Aegra auth to all custom routes |
+| `http.enable_custom_route_auth` | `bool` | `true` | Apply Aegra auth to all custom routes |
 | `http.cors.allow_origins` | `list[str]` | `["*"]` | Allowed CORS origins |
 | `http.cors.allow_credentials` | `bool` | `false` when origins is `["*"]`, `true` otherwise | Allow credentials in CORS requests |

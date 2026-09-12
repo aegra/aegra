@@ -306,7 +306,7 @@ All worker settings are configured via environment variables. See the [environme
 | Variable | Default | Description |
 |:---------|:--------|:------------|
 | `REDIS_BROKER_ENABLED` | `false` | Enable Redis workers and broker |
-| `REDIS_URL` | `redis://localhost:6379/0` | Redis connection URL |
+| `REDIS_URL` | `redis://localhost:6379/0` | Redis connection URL. Use `redis+sentinel://host:26379/<master>` for a Sentinel-managed HA Redis ([reference](/reference/environment-variables#sentinel)) |
 | `WORKER_COUNT` | `3` | Worker loops per instance |
 | `N_JOBS_PER_WORKER` | `10` | Concurrent runs per worker loop |
 | `BG_JOB_TIMEOUT_SECS` | `3600` | Max execution time per run (1 hour) |

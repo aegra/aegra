@@ -291,3 +291,93 @@ class TestSafeSerialize:
 
         assert result["error"] == "Output serialization failed"
         assert "original_type" in result
+
+
+class TestFinalizeRunClaimFencing:
+    """Terminal writes must belong to the acquisition that still owns the run (#502)."""
+
+    @staticmethod
+    def _session_returning(run_id: str | None) -> AsyncMock:
+        session = _make_mock_session()
+        result = MagicMock()
+        result.scalar_one_or_none.return_value = run_id
+        session.execute = AsyncMock(return_value=result)
+        return session
+
+    @pytest.mark.asyncio
+    async def test_adds_claim_token_predicate_when_token_supplied(self) -> None:
+        session = self._session_returning("run-1")
+
+        with patch("aegra_api.services.run_status._get_session_maker", return_value=_make_mock_session_maker(session)):
+            await finalize_run(
+                "run-1",
+                "thread-1",
+                user_id="user-1",
+                status="success",
+                thread_status="idle",
+                output={"ok": True},
+                claim_token="token-a",
+            )
+
+        compiled = session.execute.await_args_list[0].args[0].compile()
+        assert "claim_token = " in str(compiled)
+        assert "token-a" in compiled.params.values()
+
+    @pytest.mark.asyncio
+    async def test_omits_claim_token_predicate_for_unleased_callers(self) -> None:
+        """LocalExecutor and API-side cancellation hold no lease to fence on."""
+        session = self._session_returning("run-1")
+
+        with patch("aegra_api.services.run_status._get_session_maker", return_value=_make_mock_session_maker(session)):
+            await finalize_run(
+                "run-1",
+                "thread-1",
+                user_id="user-1",
+                status="success",
+                thread_status="idle",
+                output={"ok": True},
+            )
+
+        compiled = session.execute.await_args_list[0].args[0].compile()
+        assert "claim_token = " not in str(compiled)
+
+    @pytest.mark.asyncio
+    async def test_rejects_write_from_a_superseded_attempt(self) -> None:
+        """Regression: a reaped worker finishing late used to overwrite the
+        output of the attempt that replaced it."""
+        session = self._session_returning(None)
+
+        with patch("aegra_api.services.run_status._get_session_maker", return_value=_make_mock_session_maker(session)):
+            finalized = await finalize_run(
+                "run-1",
+                "thread-1",
+                user_id="user-1",
+                status="success",
+                thread_status="idle",
+                output={"stale": True},
+                claim_token="retired-token",
+            )
+
+        assert finalized is False
+        session.commit.assert_not_awaited()
+        session.rollback.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_terminalizing_clears_the_lease_in_the_same_statement(self) -> None:
+        """A terminal run must never be left advertising an owner."""
+        session = self._session_returning("run-1")
+
+        with patch("aegra_api.services.run_status._get_session_maker", return_value=_make_mock_session_maker(session)):
+            await finalize_run(
+                "run-1",
+                "thread-1",
+                user_id="user-1",
+                status="error",
+                thread_status="error",
+                error="boom",
+                claim_token="token-a",
+            )
+
+        compiled = session.execute.await_args_list[0].args[0].compile()
+        cleared = {name for name, value in compiled.params.items() if value is None}
+        assert {"claimed_by", "claim_token", "lease_expires_at"} <= cleared

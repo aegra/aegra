@@ -166,8 +166,8 @@ uv run --package aegra-api pytest libs/aegra-api/tests/e2e/test_assistants/test_
 Aegra is a drop-in replacement for LangSmith Deployments. Every request field the LangGraph SDK can send must either change behavior or return `422`. Never accept a field and ignore it.
 
 - Declare every SDK field on the request model, even ones Aegra does not implement yet; reject unsupported values with a clear error.
-- Extend the drift tests when you add a route or field, so a new SDK field fails CI instead of being dropped.
-- The only fields allowed to be inert are ones that configure a system outside Aegra (LangSmith-side routing). List each in `docs/feature-support.mdx` with the reason.
+- Extend the drift tests when you add a route or field, so a new SDK field fails CI instead of being dropped. Assert the value lands, not just that the key is declared: a key-set check passes while the field is silently ignored.
+- The only fields allowed to be inert are ones that configure a system outside Aegra (LangSmith-side routing), where no value changes what Aegra does. If a field is inert only for some values, accept those and `422` the rest. List each inert field in `docs/feature-support.mdx` with the reason.
 - Follow the public LangGraph Platform names and defaults for config keys, env vars and enum values.
 
 ## 🔒 Security

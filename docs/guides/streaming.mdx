@@ -246,6 +246,20 @@ Cancellation is asynchronous while a live worker owns the run.
 The cancel response may therefore still show `pending` or `running`; poll, join, or stream the run until it reaches a terminal status.
 Use the REST endpoint with `wait=1` when the caller needs the request to wait briefly for the worker to settle.
 
+### Cancelling several runs
+
+`POST /runs/cancel` cancels many runs in one call. Select them by `thread_id` plus `run_ids`, or by status (`pending`, `running`, or `all`). The SDK exposes it as `cancel_many`:
+
+```python
+# Stop specific runs on a thread
+await client.runs.cancel_many(thread_id=thread_id, run_ids=[run_a, run_b], action="interrupt")
+
+# Stop every active run you own
+await client.runs.cancel_many(status="all")
+```
+
+Runs that already finished are skipped, and only the caller's runs are affected. `action` accepts `cancel` and `interrupt`, the same values as the per-run endpoint. The response is `204 No Content`.
+
 ## SSE reconnection
 
 Aegra stores streaming events in a replay buffer (Redis Lists when `REDIS_BROKER_ENABLED=true`, in-memory list in dev mode) for replay. If your connection drops:

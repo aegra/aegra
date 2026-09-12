@@ -2383,6 +2383,69 @@
         }
       }
     },
+    "/runs/cancel": {
+      "post": {
+        "tags": [
+          "Thread Runs"
+        ],
+        "summary": "Cancel Runs",
+        "description": "Cancel several runs at once, by status or by thread_id plus run_ids.\n\nRuns the caller does not own or that already finished are skipped. The\nthread must exist for the run_ids form; unknown run ids are ignored.",
+        "operationId": "cancel_runs_runs_cancel_post",
+        "parameters": [
+          {
+            "name": "action",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "enum": [
+                "cancel",
+                "interrupt"
+              ],
+              "type": "string",
+              "description": "Cancellation strategy: 'cancel' for hard cancel, 'interrupt' for cooperative interrupt.",
+              "default": "interrupt",
+              "title": "Action"
+            },
+            "description": "Cancellation strategy: 'cancel' for hard cancel, 'interrupt' for cooperative interrupt."
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RunsCancel"
+              }
+            }
+          }
+        },
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "404": {
+            "description": "Resource not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AgentProtocolError"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/runs/wait": {
       "post": {
         "tags": [
@@ -4896,6 +4959,57 @@
         ],
         "title": "RunStatus",
         "description": "Simple run status response"
+      },
+      "RunsCancel": {
+        "properties": {
+          "status": {
+            "anyOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "pending",
+                  "running",
+                  "all"
+                ]
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Status",
+            "description": "Cancel every active run of the caller in this status. 'all' means pending and running."
+          },
+          "thread_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Thread Id",
+            "description": "Thread that owns the runs listed in run_ids."
+          },
+          "run_ids": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Run Ids",
+            "description": "Runs to cancel; requires thread_id."
+          }
+        },
+        "type": "object",
+        "title": "RunsCancel",
+        "description": "Selector for ``POST /runs/cancel``: a status filter, or thread_id plus run_ids."
       },
       "StoreDeleteRequest": {
         "properties": {

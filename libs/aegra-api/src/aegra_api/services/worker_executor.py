@@ -44,6 +44,7 @@ logger = structlog.getLogger(__name__)
 # Terminal run states (kept local to avoid circular import with run_waiters -> executor)
 _TERMINAL_STATUSES = frozenset({"success", "error", "interrupted"})
 _RUN_ID_PATTERN = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
+_HEARTBEAT_TTL_REFRESH_TIMEOUT_SECONDS = 5.0
 
 
 def _is_valid_run_id(value: str) -> bool:
@@ -581,7 +582,10 @@ async def _heartbeat_loop(
             logger.warning("Heartbeat lease extension failed", run_id=run_id, worker=worker_name)
 
         try:
-            await broker_manager.refresh_replay_ttl(run_id)
+            await asyncio.wait_for(
+                broker_manager.refresh_replay_ttl(run_id),
+                timeout=_HEARTBEAT_TTL_REFRESH_TIMEOUT_SECONDS,
+            )
         except Exception:
             logger.warning("Failed refreshing replay TTL during heartbeat", run_id=run_id)
 

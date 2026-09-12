@@ -35,11 +35,22 @@ class RunCreate(BaseModel):
         None,
         description="Input data for the run. Optional when resuming from a checkpoint.",
     )
-    config: dict[str, Any] | None = Field(default_factory=dict, description="Execution config")
+    config: dict[str, Any] | None = Field(
+        default_factory=dict,
+        description=(
+            "Execution config. A checkpoint-only resume may also be expressed here as "
+            "config.configurable.checkpoint_id (the LangGraph SDK's spelling) — "
+            "equivalent to the top-level 'checkpoint' field."
+        ),
+    )
     context: dict[str, Any] | None = Field(default_factory=dict, description="Execution context")
     checkpoint: dict[str, Any] | None = Field(
         None,
-        description="Checkpoint configuration (e.g., {'checkpoint_id': '...', 'checkpoint_ns': ''})",
+        description=(
+            "Checkpoint configuration (e.g., {'checkpoint_id': '...', 'checkpoint_ns': ''}). "
+            "Merged into config.configurable; config.configurable.checkpoint_id is an "
+            "equivalent spelling accepted for checkpoint-only resumes."
+        ),
     )
     stream: bool = Field(False, description="Enable streaming response")
     stream_mode: str | list[str] | None = Field(None, description="Requested stream mode(s)")
@@ -136,8 +147,19 @@ class RunCreate(BaseModel):
                 raise ValueError("Cannot specify both 'input' and 'command' - they are mutually exclusive")
         # Checkpoint-only resume keeps input=None so Pregel resumes from next=[...]
         # instead of restarting from __start__ with an empty input.
+        #
+        # The checkpoint may also arrive as config.configurable.checkpoint_id —
+        # the legacy-compliant spelling the LangGraph SDK uses (its ThreadStream
+        # folds `forkFrom` there before dispatch, expecting the server-side
+        # merge). Execution already honors it: create_run_config() merges the
+        # top-level `checkpoint` dict into `configurable` anyway, so the two
+        # spellings are equivalent past validation. Without this, SDK-driven
+        # regenerate/fork (run.start with only forkFrom) is rejected here.
         if self.input is None and self.command is None and self.checkpoint is None:
-            raise ValueError("Must specify at least one of 'input', 'command', or 'checkpoint'")
+            configurable = (self.config or {}).get("configurable")
+            has_configurable_checkpoint = isinstance(configurable, dict) and bool(configurable.get("checkpoint_id"))
+            if not has_configurable_checkpoint:
+                raise ValueError("Must specify at least one of 'input', 'command', or 'checkpoint'")
         return self
 
 

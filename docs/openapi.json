@@ -4689,7 +4689,7 @@
               }
             ],
             "title": "Config",
-            "description": "Execution config"
+            "description": "Execution config. A checkpoint-only resume may also be expressed here as config.configurable.checkpoint_id (the LangGraph SDK's spelling) \u2014 equivalent to the top-level 'checkpoint' field."
           },
           "context": {
             "anyOf": [
@@ -4715,7 +4715,7 @@
               }
             ],
             "title": "Checkpoint",
-            "description": "Checkpoint configuration (e.g., {'checkpoint_id': '...', 'checkpoint_ns': ''})"
+            "description": "Checkpoint configuration (e.g., {'checkpoint_id': '...', 'checkpoint_ns': ''}). Merged into config.configurable; config.configurable.checkpoint_id is an equivalent spelling accepted for checkpoint-only resumes."
           },
           "stream": {
             "type": "boolean",

@@ -26,7 +26,7 @@ from aegra_api.models.errors import CONFLICT, NOT_FOUND, SSE_RESPONSE
 from aegra_api.services.broker import broker_manager
 from aegra_api.services.run_preparation import _prepare_run
 from aegra_api.services.run_status import interrupt_unowned_run
-from aegra_api.services.run_waiters import TERMINAL_STATES, encode_output, heartbeat_wait_body
+from aegra_api.services.run_waiters import TERMINAL_STATES, encode_output, heartbeat_wait_body, run_result_body
 from aegra_api.services.streaming_service import streaming_service
 from aegra_api.settings import settings
 from aegra_api.utils.status_compat import validate_run_status
@@ -320,6 +320,10 @@ async def join_run(
     If the run is already in a terminal state, the output is returned
     immediately with no heartbeat overhead.
 
+    A run that failed, or that the wait gave up on, returns
+    ``{"__error__": {"error": ..., "message": ...}}`` instead of an output;
+    the LangGraph SDK reads that key and raises.
+
     Sessions are managed manually (not via ``Depends``) to avoid holding a
     pool connection during the long wait.
     """
@@ -339,7 +343,7 @@ async def join_run(
 
         if run_orm.status in TERMINAL_STATES:
             return StreamingResponse(
-                iter([encode_output(run_orm.output or {})]),
+                iter([encode_output(run_result_body(run_orm, str(run_id)))]),
                 media_type="application/json",
             )
 
@@ -370,6 +374,10 @@ async def wait_for_run(
     heartbeat bytes to keep the connection alive. The final chunk is the
     JSON result. Uses ``BG_JOB_TIMEOUT_SECS`` (default 1 hour) as the
     safety-net timeout.
+
+    A run that failed, or that the wait gave up on, returns
+    ``{"__error__": {"error": ..., "message": ...}}`` instead of an output;
+    the LangGraph SDK reads that key and raises.
 
     Sessions are managed manually (not via ``Depends``) to avoid holding a
     pool connection during the long wait.

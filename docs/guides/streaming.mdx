@@ -170,6 +170,18 @@ print(result)
 
 This calls `POST /threads/{thread_id}/runs/wait` and returns the final output.
 
+If the run fails, the body is an error envelope instead of an output:
+
+```json
+{"__error__": {"error": "Error", "message": "KeyError: 'topic'"}}
+```
+
+`client.runs.wait()` raises on that envelope by default; pass `raise_error=False` to get it
+back as a dict. The same envelope is returned when the wait gives up before the run reaches a
+terminal state (`TimeoutError` or `IncompleteRun`), and by `client.runs.join()`, which returns it
+rather than raising. An interrupted run is not a failure — it returns its partial output with
+`__interrupt__`.
+
 ## Subgraph streaming
 
 If your graph uses subgraphs, you can stream events from them too:

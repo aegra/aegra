@@ -8,7 +8,9 @@ using Starlette's AuthenticationMiddleware.
 import functools
 import importlib
 import importlib.util
+import inspect
 import sys
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -29,6 +31,80 @@ from aegra_api.models.errors import AgentProtocolError
 from aegra_api.settings import settings
 
 logger = structlog.getLogger(__name__)
+
+
+def _headers_from_connection(conn: HTTPConnection) -> dict[str, str]:
+    """Normalize Starlette headers to ``str -> str`` for auth handlers."""
+    return {
+        key.decode() if isinstance(key, bytes) else key: value.decode() if isinstance(value, bytes) else value
+        for key, value in conn.headers.items()
+    }
+
+
+def _authorization_from_headers(headers: dict[str, str]) -> str | None:
+    """Return the ``Authorization`` header value, if present."""
+    return headers.get("authorization") or headers.get("Authorization")
+
+
+def _authenticate_kwargs_for_handler(
+    conn: HTTPConnection,
+    handler: Callable[..., Any],
+) -> dict[str, Any]:
+    """Build kwargs for ``@auth.authenticate`` using inject-by-name rules.
+
+    Aegra injects only a focused subset of ``langgraph_sdk`` Authenticator
+    parameters — enough for route-aware auth without exposing ``request`` or
+    ``body`` (reading the ASGI body in middleware would break downstream handlers).
+
+    Supported parameter names: ``path``, ``method``, ``headers``,
+    ``authorization``.
+
+    Handlers that only declare ``headers`` (Aegra's historical contract) keep
+    receiving only that argument.
+    """
+    headers = _headers_from_connection(conn)
+    scope = getattr(conn, "scope", None) or {}
+
+    url = getattr(conn, "url", None)
+    path = getattr(url, "path", "/") if url is not None else "/"
+
+    candidates: dict[str, Any] = {
+        "headers": headers,
+        "path": path,
+        "method": scope.get("method", "GET"),
+        "authorization": _authorization_from_headers(headers),
+    }
+
+    try:
+        sig = inspect.signature(handler)
+    except (TypeError, ValueError):
+        return {"headers": headers}
+
+    kwargs: dict[str, Any] = {}
+
+    for name, param in sig.parameters.items():
+        if param.kind is inspect.Parameter.VAR_KEYWORD:
+            continue
+        if param.kind in (
+            inspect.Parameter.POSITIONAL_ONLY,
+            inspect.Parameter.POSITIONAL_OR_KEYWORD,
+            inspect.Parameter.KEYWORD_ONLY,
+        ) and name in candidates:
+            kwargs[name] = candidates[name]
+
+    return kwargs
+
+
+async def _call_authenticate_handler(
+    handler: Callable[..., Any],
+    conn: HTTPConnection,
+) -> Any:
+    """Invoke the user's ``@auth.authenticate`` handler with injected request context."""
+    kwargs = _authenticate_kwargs_for_handler(conn, handler)
+    result = handler(**kwargs)
+    if inspect.isawaitable(result):
+        return await result
+    return result
 
 
 class LangGraphUser(BaseUser):
@@ -250,14 +326,10 @@ class LangGraphAuthBackend(AuthenticationBackend):
             return None
 
         try:
-            # Convert headers to dict format expected by auth handlers
-            headers = {
-                key.decode() if isinstance(key, bytes) else key: value.decode() if isinstance(value, bytes) else value
-                for key, value in conn.headers.items()
-            }
-
-            # Call the authenticate handler
-            user_data = await self.auth_instance._authenticate_handler(headers)
+            user_data = await _call_authenticate_handler(
+                self.auth_instance._authenticate_handler,
+                conn,
+            )
 
             if not user_data or not isinstance(user_data, dict):
                 raise AuthenticationError("Invalid user data returned from auth handler")

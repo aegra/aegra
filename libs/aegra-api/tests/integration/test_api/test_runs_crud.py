@@ -783,13 +783,13 @@ class TestCreateRunValidation:
 class TestWaitForRunTimeouts:
     """Test wait_for_run timeout behavior.
 
-    wait_for_run now returns a StreamingResponse wrapping heartbeat_wait_body.
-    On timeout, the heartbeat generator reads the run's current output from DB
-    and yields it as the final JSON chunk.
+    wait_for_run returns a StreamingResponse wrapping heartbeat_wait_body.
+    On timeout the run never reached a terminal state, so the generator yields
+    an ``__error__`` envelope rather than whatever partial output is on the row.
     """
 
     def test_wait_for_run_timeout(self):
-        """Test that wait_for_run returns current state on timeout."""
+        """Test that wait_for_run reports the timeout instead of partial state."""
         app = create_test_app(include_runs=True, include_threads=False)
 
         # Mock assistant and run
@@ -853,4 +853,4 @@ class TestWaitForRunTimeouts:
 
             assert resp.status_code == 200
             # StreamingResponse: body is heartbeat newlines + final JSON
-            assert resp.json() == {"partial": "data"}
+            assert resp.json()["__error__"]["error"] == "TimeoutError"

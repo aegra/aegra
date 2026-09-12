@@ -1,6 +1,6 @@
 """Unit tests for heartbeat keep-alive on join/wait endpoints.
 
-Tests the heartbeat_wait_body generator, read_run_output helper,
+Tests the heartbeat_wait_body generator, read_run_result helper,
 and the join_run endpoint's streaming behavior.
 """
 
@@ -15,7 +15,7 @@ import pytest
 from aegra_api.api.runs import join_run
 from aegra_api.core.orm import Run as RunORM
 from aegra_api.models import User
-from aegra_api.services.run_waiters import heartbeat_wait_body, read_run_output
+from aegra_api.services.run_waiters import heartbeat_wait_body, read_run_result
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -63,11 +63,11 @@ async def _collect_body(gen: AsyncGenerator[bytes, None]) -> tuple[list[bytes], 
 
 
 # ---------------------------------------------------------------------------
-# read_run_output
+# read_run_result
 # ---------------------------------------------------------------------------
 
 
-class TestReadRunOutput:
+class TestReadRunResult:
     @pytest.mark.asyncio
     async def test_returns_output_for_success(self) -> None:
         session = AsyncMock()
@@ -75,20 +75,21 @@ class TestReadRunOutput:
         maker = _make_session_maker(session)
 
         with patch("aegra_api.services.run_waiters._get_session_maker", return_value=maker):
-            result = await read_run_output("run-1", "thread-1", "test-user")
+            result = await read_run_result("run-1", "thread-1", "test-user")
 
         assert result == {"result": "ok"}
 
     @pytest.mark.asyncio
-    async def test_returns_empty_dict_when_run_not_found(self) -> None:
+    async def test_reports_not_found_when_the_run_row_is_gone(self) -> None:
+        """A row deleted mid-wait must not read as a run that produced nothing."""
         session = AsyncMock()
         session.scalar.return_value = None
         maker = _make_session_maker(session)
 
         with patch("aegra_api.services.run_waiters._get_session_maker", return_value=maker):
-            result = await read_run_output("run-1", "thread-1", "test-user")
+            result = await read_run_result("run-1", "thread-1", "test-user")
 
-        assert result == {}
+        assert result == {"__error__": {"error": "RunNotFound", "message": "Run 'run-1' no longer exists"}}
 
     @pytest.mark.asyncio
     async def test_returns_empty_dict_when_output_is_none(self) -> None:
@@ -97,25 +98,74 @@ class TestReadRunOutput:
         maker = _make_session_maker(session)
 
         with patch("aegra_api.services.run_waiters._get_session_maker", return_value=maker):
-            result = await read_run_output("run-1", "thread-1", "test-user")
+            result = await read_run_result("run-1", "thread-1", "test-user")
 
         assert result == {}
 
     @pytest.mark.asyncio
-    async def test_returns_error_output_as_is(self) -> None:
-        """Error run output is returned without transformation."""
+    async def test_error_run_reports_its_error_message(self) -> None:
+        """A failed run finalizes with an empty output; the reason lives on the row."""
         session = AsyncMock()
         session.scalar.return_value = _make_run_orm(
             status="error",
-            output={"error": "something broke"},
-            error_message="Graph crashed",
+            output={},
+            error_message="KeyError: 'topic'",
         )
         maker = _make_session_maker(session)
 
         with patch("aegra_api.services.run_waiters._get_session_maker", return_value=maker):
-            result = await read_run_output("run-1", "thread-1", "test-user")
+            result = await read_run_result("run-1", "thread-1", "test-user")
 
-        assert result == {"error": "something broke"}
+        assert result == {"__error__": {"error": "Error", "message": "KeyError: 'topic'"}}
+
+    @pytest.mark.asyncio
+    async def test_error_run_without_a_message_falls_back(self) -> None:
+        session = AsyncMock()
+        session.scalar.return_value = _make_run_orm(status="error", output={}, error_message=None)
+        maker = _make_session_maker(session)
+
+        with patch("aegra_api.services.run_waiters._get_session_maker", return_value=maker):
+            result = await read_run_result("run-1", "thread-1", "test-user")
+
+        assert result == {"__error__": {"error": "Error", "message": "Run failed"}}
+
+    @pytest.mark.asyncio
+    async def test_interrupted_run_keeps_its_partial_output(self) -> None:
+        """An interrupt is a human-review pause, not a failure."""
+        session = AsyncMock()
+        session.scalar.return_value = _make_run_orm(
+            status="interrupted",
+            output={"__interrupt__": [{"value": "approve?"}]},
+        )
+        maker = _make_session_maker(session)
+
+        with patch("aegra_api.services.run_waiters._get_session_maker", return_value=maker):
+            result = await read_run_result("run-1", "thread-1", "test-user")
+
+        assert result == {"__interrupt__": [{"value": "approve?"}]}
+
+    @pytest.mark.asyncio
+    async def test_non_terminal_run_reports_incomplete(self) -> None:
+        session = AsyncMock()
+        session.scalar.return_value = _make_run_orm(status="running", output={"partial": "data"})
+        maker = _make_session_maker(session)
+
+        with patch("aegra_api.services.run_waiters._get_session_maker", return_value=maker):
+            result = await read_run_result("run-1", "thread-1", "test-user")
+
+        assert result["__error__"]["error"] == "IncompleteRun"
+        assert "running" in result["__error__"]["message"]
+
+    @pytest.mark.asyncio
+    async def test_non_terminal_run_after_a_timeout_reports_the_timeout(self) -> None:
+        session = AsyncMock()
+        session.scalar.return_value = _make_run_orm(status="running", output={"partial": "data"})
+        maker = _make_session_maker(session)
+
+        with patch("aegra_api.services.run_waiters._get_session_maker", return_value=maker):
+            result = await read_run_result("run-1", "thread-1", "test-user", timed_out=True)
+
+        assert result["__error__"]["error"] == "TimeoutError"
 
 
 # ---------------------------------------------------------------------------
@@ -186,8 +236,8 @@ class TestHeartbeatWaitBody:
         assert json.loads(full) == {"result": "final"}
 
     @pytest.mark.asyncio
-    async def test_timeout_yields_current_output(self) -> None:
-        """When wait_for_completion times out, the current run output is returned."""
+    async def test_timeout_yields_an_error_envelope(self) -> None:
+        """A wait that gave up must not look like a run that returned nothing."""
         session = AsyncMock()
         session.scalar.return_value = _make_run_orm(status="running", output={"partial": "data"})
         maker = _make_session_maker(session)
@@ -207,7 +257,7 @@ class TestHeartbeatWaitBody:
             body = heartbeat_wait_body("run-1", "thread-1", "test-user", timeout=3600)
             chunks, full = await _collect_body(body)
 
-        assert json.loads(full) == {"partial": "data"}
+        assert json.loads(full)["__error__"]["error"] == "TimeoutError"
 
     @pytest.mark.asyncio
     async def test_leading_whitespace_ignored_by_json_parser(self) -> None:
@@ -301,7 +351,7 @@ class TestJoinRunEndpoint:
         session.scalar.return_value = run_orm
         user = User(identity="test-user", scopes=[])
 
-        # For read_run_output called inside the generator
+        # For read_run_result called inside the generator
         fetch_session = AsyncMock()
         fetch_session.scalar.return_value = _make_run_orm(status="success", output={"done": True})
 
@@ -337,9 +387,9 @@ class TestJoinRunEndpoint:
         assert "Location" in response.headers
 
     @pytest.mark.asyncio
-    async def test_error_run_returns_immediately(self) -> None:
-        """Error-state run returns immediately (it's terminal)."""
-        run_orm = _make_run_orm(status="error", output={"err": "failed"})
+    async def test_error_run_returns_an_envelope_immediately(self) -> None:
+        """The fast path reports a failure the same way the waiting path does."""
+        run_orm = _make_run_orm(status="error", output={}, error_message="Graph crashed")
         session = AsyncMock()
         session.scalar.return_value = run_orm
         maker = _make_session_maker(session)
@@ -351,4 +401,4 @@ class TestJoinRunEndpoint:
         body = b""
         async for chunk in response.body_iterator:
             body += chunk if isinstance(chunk, bytes) else chunk.encode()
-        assert json.loads(body) == {"err": "failed"}
+        assert json.loads(body) == {"__error__": {"error": "Error", "message": "Graph crashed"}}

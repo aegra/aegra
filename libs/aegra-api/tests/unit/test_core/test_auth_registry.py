@@ -147,11 +147,16 @@ def test_known_resources_map_to_their_own_namespace(path: str, expected_resource
 
 def test_stateless_runs_authorize_as_thread_run_creation() -> None:
     """Stateless runs mint an ephemeral thread, so they must not bypass thread rules."""
-    for path in ("/runs", "/runs/stream", "/runs/wait"):
+    for path in ("/runs", "/runs/batch", "/runs/stream", "/runs/wait"):
         assert lookup_route_auth("POST", path) == ("threads", "create_run"), (
             f"POST {path} must authorize as threads/create_run so an @auth.on.threads "
             "handler cannot be bypassed by dropping the thread_id"
         )
+
+
+def test_stateless_batch_run_dispatches_auth_internally() -> None:
+    """Keep per-item authorization in the batch handler."""
+    assert ("POST", "/runs/batch") in SELF_DISPATCHING
 
 
 def test_assistant_routes_are_all_covered() -> None:
@@ -209,6 +214,7 @@ _SPEC_TUPLES: dict[tuple[str, str], tuple[str, str]] = {
     ("DELETE", "/threads/{thread_id}/runs/{run_id}"): ("threads", "delete"),
     # stateless runs
     ("POST", "/runs"): ("threads", "create_run"),
+    ("POST", "/runs/batch"): ("threads", "create_run"),
     ("POST", "/runs/stream"): ("threads", "create_run"),
     ("POST", "/runs/wait"): ("threads", "create_run"),
     # crons

@@ -226,6 +226,23 @@ output = await client.runs.join(thread_id=thread_id, run_id=run["run_id"])
 print(output)
 ```
 
+### Create stateless runs in a batch
+
+For clients that need to start several independent stateless runs, send an
+array of normal run request objects to `POST /runs/batch` (up to 100 runs per
+request). The response is an array of run records in the same order as the
+requests. Validation is atomic:
+if one request is invalid, no runs are created.
+
+```bash
+curl -X POST http://localhost:2026/runs/batch \
+  -H "Content-Type: application/json" \
+  -d '[
+    {"assistant_id": "agent", "input": {"messages": [{"role": "user", "content": "First task"}]}},
+    {"assistant_id": "agent", "input": {"messages": [{"role": "user", "content": "Second task"}]}}
+  ]'
+```
+
 ## Cancelling runs
 
 Cancel or interrupt a running execution:

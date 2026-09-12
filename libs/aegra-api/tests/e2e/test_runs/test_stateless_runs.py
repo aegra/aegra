@@ -12,7 +12,7 @@ import pytest
 from httpx import AsyncClient
 
 from aegra_api.settings import settings
-from tests.e2e._utils import elog, get_e2e_client
+from tests.e2e._utils import check_and_skip_if_geo_blocked, elog, get_e2e_client
 
 # ---------------------------------------------------------------------------
 # POST /runs/wait  (stateless wait)
@@ -217,6 +217,78 @@ async def test_stateless_create_run_returns_run_object() -> None:
         assert "run_id" in data
         assert "thread_id" in data
         assert data["status"] in ("pending", "running")
+
+
+@pytest.mark.e2e
+@pytest.mark.asyncio
+async def test_stateless_batch_creates_ordered_runs() -> None:
+    """POST /runs/batch creates multiple stateless runs in input order."""
+    sdk = get_e2e_client()
+    first_assistant = await sdk.assistants.create(
+        graph_id="agent",
+        config={"tags": ["stateless", "batch", "first"]},
+        if_exists="do_nothing",
+    )
+    second_assistant = await sdk.assistants.create(
+        graph_id="agent",
+        config={"tags": ["stateless", "batch", "second"]},
+        if_exists="do_nothing",
+    )
+
+    async with AsyncClient(base_url=settings.app.SERVER_URL, timeout=120.0) as http:
+        resp = await http.post(
+            "/runs/batch",
+            json=[
+                {
+                    "assistant_id": first_assistant["assistant_id"],
+                    "input": {"messages": [{"role": "user", "content": "First"}]},
+                },
+                {
+                    "assistant_id": second_assistant["assistant_id"],
+                    "input": {"messages": [{"role": "user", "content": "Second"}]},
+                },
+            ],
+        )
+
+    assert resp.status_code == 200, f"Expected 200, got {resp.status_code}: {resp.text}"
+    runs = resp.json()
+    elog("POST /runs/batch", {"status": resp.status_code, "runs": runs})
+    for run in runs:
+        check_and_skip_if_geo_blocked(run)
+    assert len(runs) == 2
+    assert [run["assistant_id"] for run in runs] == [
+        first_assistant["assistant_id"],
+        second_assistant["assistant_id"],
+    ]
+    assert runs[0]["thread_id"] != runs[1]["thread_id"]
+
+
+@pytest.mark.e2e
+@pytest.mark.asyncio
+async def test_stateless_batch_rejects_partial_invalid_request() -> None:
+    """POST /runs/batch rejects an invalid item before creating any run."""
+    sdk = get_e2e_client()
+    assistant = await sdk.assistants.create(
+        graph_id="agent",
+        config={"tags": ["stateless", "batch-invalid"]},
+        if_exists="do_nothing",
+    )
+
+    async with AsyncClient(base_url=settings.app.SERVER_URL, timeout=120.0) as http:
+        resp = await http.post(
+            "/runs/batch",
+            json=[
+                {
+                    "assistant_id": assistant["assistant_id"],
+                    "input": {"messages": [{"role": "user", "content": "Valid"}]},
+                },
+                {"assistant_id": assistant["assistant_id"]},
+            ],
+        )
+
+    elog("POST /runs/batch (invalid)", {"status": resp.status_code, "body": resp.json()})
+    check_and_skip_if_geo_blocked(resp.json())
+    assert resp.status_code == 422, f"Expected 422, got {resp.status_code}: {resp.text}"
 
 
 @pytest.mark.e2e

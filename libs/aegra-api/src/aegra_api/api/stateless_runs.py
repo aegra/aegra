@@ -8,15 +8,19 @@ explicitly sets ``on_completion="keep"``).
 
 import asyncio
 from collections.abc import AsyncIterator, Mapping
+from typing import Annotated
 from uuid import uuid4
 
 import structlog
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
+from pydantic import Field
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sse_starlette import EventSourceResponse
 
 from aegra_api.api.runs import (
+    _apply_create_run_auth,
     create_and_stream_run,
     create_run,
     wait_for_run,
@@ -26,16 +30,20 @@ from aegra_api.core.orm import get_session
 from aegra_api.core.sse import make_sse_response
 from aegra_api.models import Run, RunCreate, User
 from aegra_api.models.errors import CONFLICT, NOT_FOUND, SSE_RESPONSE
+from aegra_api.models.run_job import RunJob
 from aegra_api.services.broker import broker_manager
+from aegra_api.services.executor import executor
 from aegra_api.services.run_cleanup import (
     _CLEANUP_ERRORS,
     _background_cleanup_tasks,
     delete_thread_by_id,
     schedule_background_cleanup,
 )
+from aegra_api.services.run_preparation import _prepare_run
 
 router = APIRouter(tags=["Stateless Runs"], dependencies=auth_dependency)
 logger = structlog.getLogger(__name__)
+MAX_BATCH_RUNS = 100
 
 
 # ---------------------------------------------------------------------------
@@ -306,3 +314,67 @@ async def stateless_create_run(
         schedule_background_cleanup(result.run_id, thread_id, user.identity)
 
     return result
+
+
+@router.post("/runs/batch", response_model=list[Run], responses={**NOT_FOUND, **CONFLICT})
+async def stateless_create_runs(
+    requests: Annotated[list[RunCreate], Field(max_length=MAX_BATCH_RUNS)],
+    user: User = Depends(get_current_user),
+    session: AsyncSession = Depends(get_session),
+) -> list[Run]:
+    """Create several stateless runs atomically."""
+    thread_ids = [str(uuid4()) for _ in requests]
+    prepared: list[tuple[str, Run, RunJob]] = []
+
+    try:
+        for thread_id, request in zip(thread_ids, requests, strict=True):
+            await _apply_create_run_auth(user, thread_id, request)
+
+        for thread_id, request in zip(thread_ids, requests, strict=True):
+            prepared.append(
+                await _prepare_run(
+                    session,
+                    thread_id,
+                    request,
+                    user,
+                    initial_status="pending",
+                    commit=False,
+                    submit=False,
+                )
+            )
+        await session.commit()
+    except (HTTPException, SQLAlchemyError, ValueError):
+        await session.rollback()
+        raise
+
+    results: list[Run] = []
+    try:
+        for _index, (run_id, run, job) in enumerate(prepared):
+            await executor.submit(job)
+            logger.info("Submitted batch run to executor", run_id=run_id)
+            results.append(run)
+
+        for index, (run_id, run, _job) in enumerate(prepared):
+            if requests[index].on_completion != "keep":
+                schedule_background_cleanup(run_id, run.thread_id, user.identity)
+    except asyncio.CancelledError:
+        for index, (_run_id, run, _job) in enumerate(prepared):
+            if requests[index].on_completion != "keep":
+                await _delete_thread_with_log(
+                    run.thread_id,
+                    user.identity,
+                    reason="Failed to delete ephemeral batch run after cancellation",
+                )
+        raise
+    except Exception:
+        # Executor failures can happen after the batch transaction commits.
+        for index, (_run_id, run, _job) in enumerate(prepared):
+            if requests[index].on_completion != "keep":
+                await _delete_thread_with_log(
+                    run.thread_id,
+                    user.identity,
+                    reason="Failed to delete ephemeral batch run after submission failure",
+                )
+        raise
+
+    return results

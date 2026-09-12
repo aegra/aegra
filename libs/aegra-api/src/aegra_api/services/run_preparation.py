@@ -194,12 +194,15 @@ async def _prepare_run(
     *,
     initial_status: str,
     event_streaming_v2: bool = False,
+    commit: bool = True,
+    submit: bool = True,
 ) -> tuple[str, Run, RunJob]:
     """Shared run-creation logic used by create, stream, and wait endpoints.
 
     Validates inputs, resolves the assistant, persists the RunORM record,
     builds a RunJob, submits it to the executor, and returns the triple
-    ``(run_id, run_model, job)``.
+    ``(run_id, run_model, job)``. Batch callers can defer the transaction
+    commit and executor submission until every request has been validated.
     """
     await _validate_resume_command(session, thread_id, request.command)
 
@@ -300,12 +303,16 @@ async def _prepare_run(
         execution_params=exec_params,
     )
     session.add(run_orm)
-    await session.commit()
+    if commit:
+        await session.commit()
+    else:
+        await session.flush()
 
     run = Run.model_validate(run_orm)
 
     # Submit to executor
-    await executor.submit(job)
-    logger.info("Submitted run to executor", run_id=run_id)
+    if submit:
+        await executor.submit(job)
+        logger.info("Submitted run to executor", run_id=run_id)
 
     return run_id, run, job

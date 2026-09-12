@@ -67,6 +67,7 @@ ROUTE_AUTH_MAP: Final[dict[tuple[str, str], tuple[str, str]]] = {
     # These mint an ephemeral thread, so they authorize as a thread create_run
     # exactly like their threaded counterparts.
     ("POST", "/runs"): ("threads", "create_run"),
+    ("POST", "/runs/batch"): ("threads", "create_run"),
     ("POST", "/runs/stream"): ("threads", "create_run"),
     ("POST", "/runs/wait"): ("threads", "create_run"),
     # --- crons --------------------------------------------------------------
@@ -127,6 +128,7 @@ SELF_DISPATCHING: Final[frozenset[tuple[str, str]]] = frozenset(
         ("GET", "/threads/{thread_id}/runs/{run_id}"),
         ("DELETE", "/threads/{thread_id}/runs/{run_id}"),
         ("POST", "/runs"),
+        ("POST", "/runs/batch"),
         ("POST", "/runs/stream"),
         ("POST", "/runs/wait"),
         ("POST", "/runs/crons"),

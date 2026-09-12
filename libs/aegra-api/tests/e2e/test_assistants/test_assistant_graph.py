@@ -1,4 +1,5 @@
 import pytest
+from langgraph_sdk.errors import NotFoundError
 
 from tests.e2e._utils import elog, get_e2e_client
 
@@ -238,6 +239,75 @@ async def test_get_assistant_subgraphs_not_found():
     assert "404" in str(exc_info.value) or "not found" in str(exc_info.value).lower()
 
     elog("Subgraphs endpoint correctly returns 404 for non-existent assistant", {})
+
+
+@pytest.mark.e2e
+@pytest.mark.asyncio
+async def test_get_assistant_subgraph_by_namespace() -> None:
+    """Test that we can retrieve a specific subgraph by namespace.
+
+    Uses subgraph_agent which has actual subgraphs.
+    """
+    client = get_e2e_client()
+
+    # 1. Create an assistant with a graph that has subgraphs
+    assistant = await client.assistants.create(
+        name="Test Subgraph Namespace Assistant",
+        description="Assistant for testing single subgraph namespace endpoint",
+        graph_id="subgraph_agent",
+        if_exists="do_nothing",
+    )
+
+    try:
+        # 2. First get all subgraphs to know a valid namespace
+        all_subgraphs = await client.assistants.get_subgraphs(assistant_id=assistant["assistant_id"])
+        assert len(all_subgraphs) > 0, "subgraph_agent should have subgraphs"
+        target_namespace = next(iter(all_subgraphs.keys()))
+
+        # 3. Query the specific namespace
+        subgraph = await client.assistants.get_subgraphs(
+            assistant_id=assistant["assistant_id"],
+            namespace=target_namespace,
+        )
+
+        assert isinstance(subgraph, dict)
+        assert set(subgraph.keys()) == {target_namespace}
+        assert subgraph[target_namespace] == all_subgraphs[target_namespace]
+
+        elog(
+            "Single subgraph retrieved successfully by namespace",
+            {
+                "assistant_id": assistant["assistant_id"],
+                "namespace": target_namespace,
+            },
+        )
+    finally:
+        await client.assistants.delete(assistant_id=assistant["assistant_id"])
+
+
+@pytest.mark.e2e
+@pytest.mark.asyncio
+async def test_get_assistant_subgraph_by_namespace_not_found() -> None:
+    """Test that querying a non-existent subgraph namespace returns 404."""
+    client = get_e2e_client()
+
+    assistant = await client.assistants.create(
+        name="Test Subgraph 404 Assistant",
+        description="Assistant for testing 404 on missing subgraph namespace",
+        graph_id="subgraph_agent",
+        if_exists="do_nothing",
+    )
+
+    try:
+        with pytest.raises(NotFoundError) as exc_info:
+            await client.assistants.get_subgraphs(
+                assistant_id=assistant["assistant_id"],
+                namespace="non_existent_namespace_xyz",
+            )
+        assert exc_info.value.status_code == 404
+        elog("Subgraphs endpoint correctly returns 404 for non-existent namespace", {})
+    finally:
+        await client.assistants.delete(assistant_id=assistant["assistant_id"])
 
 
 @pytest.mark.e2e

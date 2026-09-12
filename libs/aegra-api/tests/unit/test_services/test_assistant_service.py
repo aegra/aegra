@@ -1157,6 +1157,7 @@ class TestAuthDispatch:
             ("get_assistant_schemas", ("asst-1",)),
             ("get_assistant_graph", ("asst-1", False)),
             ("get_assistant_subgraphs", ("asst-1", None, False)),
+            ("get_assistant_subgraph", ("asst-1", "ns-1", False)),
             ("delete_assistant", ("asst-1",)),
             ("set_assistant_latest", ("asst-1", 1)),
             ("update_assistant", ("asst-1", AssistantUpdate(name="x"))),
@@ -1203,3 +1204,33 @@ class TestAuthDispatch:
         stmt = assistant_service.session.scalars.call_args.args[0]
         compiled = stmt.compile(dialect=postgresql.dialect())
         assert {"owner": "user-123"} in compiled.params.values()
+
+
+class TestGetAssistantSubgraph:
+    """Test AssistantService.get_assistant_subgraph"""
+
+    @pytest.mark.asyncio
+    async def test_get_assistant_subgraph_success(self, assistant_service: AssistantService) -> None:
+        expected = {"agent:sub": {"input_schema": {}, "output_schema": {}}}
+        with patch.object(
+            assistant_service, "get_assistant_subgraphs", new=AsyncMock(return_value=expected)
+        ) as mock_get:
+            result = await assistant_service.get_assistant_subgraph("asst-1", "agent:sub", recurse=True)
+            mock_get.assert_awaited_once_with("asst-1", namespace="agent:sub", recurse=True)
+            assert result == expected
+
+    @pytest.mark.asyncio
+    async def test_get_assistant_subgraph_not_found_empty(self, assistant_service: AssistantService) -> None:
+        with patch.object(assistant_service, "get_assistant_subgraphs", new=AsyncMock(return_value={})):
+            with pytest.raises(HTTPException) as exc_info:
+                await assistant_service.get_assistant_subgraph("asst-1", "missing_ns")
+            assert exc_info.value.status_code == 404
+            assert "missing_ns" in exc_info.value.detail
+
+    @pytest.mark.asyncio
+    async def test_get_assistant_subgraph_not_found_different_ns(self, assistant_service: AssistantService) -> None:
+        with patch.object(assistant_service, "get_assistant_subgraphs", new=AsyncMock(return_value={"other_ns": {}})):
+            with pytest.raises(HTTPException) as exc_info:
+                await assistant_service.get_assistant_subgraph("asst-1", "target_ns")
+            assert exc_info.value.status_code == 404
+            assert "target_ns" in exc_info.value.detail

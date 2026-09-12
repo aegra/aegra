@@ -11,6 +11,7 @@ Addresses GitHub Issue #132: Cancel endpoint doesn't cancel asyncio task
 import asyncio
 
 import pytest
+from langgraph_sdk.client import LangGraphClient
 
 from tests.e2e._utils import check_and_skip_if_geo_blocked, elog, get_e2e_client
 
@@ -316,7 +317,7 @@ async def test_cancel_with_wait_flag():
     assert final_run["status"] in ("interrupted", "error", "success")
 
 
-async def _start_slow_run(client, assistant_id: str) -> tuple[str, str]:
+async def _start_slow_run(client: LangGraphClient, assistant_id: str) -> tuple[str, str]:
     thread = await client.threads.create()
     run = await client.runs.create(
         thread["thread_id"],
@@ -326,7 +327,7 @@ async def _start_slow_run(client, assistant_id: str) -> tuple[str, str]:
     return thread["thread_id"], run["run_id"]
 
 
-async def _wait_terminal(client, thread_id: str, run_id: str, timeout: float = 15.0) -> str:
+async def _wait_terminal(client: LangGraphClient, thread_id: str, run_id: str, timeout: float = 15.0) -> str:
     deadline = asyncio.get_running_loop().time() + timeout
     while asyncio.get_running_loop().time() < deadline:
         run = await client.runs.get(thread_id, run_id)

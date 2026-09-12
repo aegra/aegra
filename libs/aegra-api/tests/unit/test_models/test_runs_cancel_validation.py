@@ -30,6 +30,17 @@ class TestRunsCancelSelector:
         with pytest.raises(ValidationError, match="either 'status' or both"):
             RunsCancel(status="all", thread_id="t1", run_ids=["r1"])
 
+    @pytest.mark.parametrize("extra", [{"thread_id": "t1"}, {"run_ids": ["r1"]}])
+    def test_status_with_a_partial_id_selector_is_invalid(self, extra: dict[str, object]) -> None:
+        """The handler reads the status branch and ignores thread_id, so accepting
+        this would cancel every matching run instead of the ones asked for."""
+        with pytest.raises(ValidationError, match="either 'status' or both"):
+            RunsCancel(status="pending", **extra)
+
+    def test_thread_id_without_run_ids_is_invalid(self) -> None:
+        with pytest.raises(ValidationError, match="either 'status' or both"):
+            RunsCancel(thread_id="t1")
+
     @pytest.mark.parametrize("status", ["success", "interrupted", "bogus"])
     def test_non_active_status_is_invalid(self, status: str) -> None:
         with pytest.raises(ValidationError):

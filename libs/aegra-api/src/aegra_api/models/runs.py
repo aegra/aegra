@@ -152,9 +152,12 @@ class RunsCancel(BaseModel):
 
     @model_validator(mode="after")
     def validate_exactly_one_selector(self) -> Self:
+        """Reject a half-filled selector: the handler reads one branch and would
+        ignore the rest, so {status, thread_id} would cancel every matching run."""
         by_status = self.status is not None
-        by_ids = self.thread_id is not None and self.run_ids is not None
-        if by_status == by_ids:
+        complete_ids = self.thread_id is not None and self.run_ids is not None
+        any_ids = self.thread_id is not None or self.run_ids is not None
+        if by_status == any_ids or (any_ids and not complete_ids):
             raise ValueError("Provide either 'status' or both 'thread_id' and 'run_ids'")
         return self
 

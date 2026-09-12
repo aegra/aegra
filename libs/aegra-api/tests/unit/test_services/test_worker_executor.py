@@ -257,6 +257,7 @@ class TestHeartbeatLoop:
 
     @pytest.mark.asyncio
     async def test_heartbeat_refreshes_replay_ttl(self) -> None:
+        """Test that _heartbeat_loop refreshes broker replay TTL on each tick."""
         session = AsyncMock()
         session.execute = AsyncMock()
         session.commit = AsyncMock()
@@ -265,6 +266,7 @@ class TestHeartbeatLoop:
         call_count = 0
 
         async def counting_sleep(delay: float) -> None:
+            """Cancel after counting iterations."""
             nonlocal call_count
             call_count += 1
             if call_count >= 2:
@@ -286,6 +288,7 @@ class TestHeartbeatLoop:
 
     @pytest.mark.asyncio
     async def test_heartbeat_continues_when_refresh_replay_ttl_fails(self) -> None:
+        """Test that _heartbeat_loop continues even when TTL refresh raises."""
         session = AsyncMock()
         session.execute = AsyncMock()
         session.commit = AsyncMock()
@@ -294,6 +297,7 @@ class TestHeartbeatLoop:
         call_count = 0
 
         async def counting_sleep(delay: float) -> None:
+            """Cancel after counting iterations."""
             nonlocal call_count
             call_count += 1
             if call_count >= 2:
@@ -320,6 +324,7 @@ class TestHeartbeatLoop:
 
     @pytest.mark.asyncio
     async def test_heartbeat_continues_when_refresh_replay_ttl_times_out(self) -> None:
+        """Test that _heartbeat_loop continues when TTL refresh times out."""
         session = AsyncMock()
         session.execute = AsyncMock()
         session.commit = AsyncMock()
@@ -328,12 +333,14 @@ class TestHeartbeatLoop:
         call_count = 0
 
         async def counting_sleep(delay: float) -> None:
+            """Cancel after counting iterations."""
             nonlocal call_count
             call_count += 1
             if call_count >= 2:
                 raise asyncio.CancelledError
 
         async def slow_refresh(run_id: str) -> None:
+            """Simulate a hanging refresh operation."""
             await asyncio.sleep(10)
 
         with (

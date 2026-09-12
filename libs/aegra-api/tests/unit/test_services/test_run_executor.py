@@ -1,16 +1,20 @@
 """Unit tests for run_executor service."""
 
 import asyncio
+from collections.abc import AsyncIterator
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 from aegra_api.models.auth import User
-from aegra_api.models.run_job import RunExecution, RunIdentity, RunJob
+from aegra_api.models.run_job import RunBehavior, RunExecution, RunIdentity, RunJob
 from aegra_api.services import run_executor as run_executor_module
 from aegra_api.services.run_executor import (
+    _build_run_config,
     _GraphResult,
     _lease_loss_cancellations,
+    _normalize_interrupt_value,
     _shutdown_cancellations,
     _signal_end_event,
     _signal_run_done,
@@ -36,6 +40,24 @@ def _make_job(run_id: str = "run-1") -> RunJob:
 def _patch_execute_run_deps() -> dict[str, MagicMock | AsyncMock]:
     """Return a dict of patch targets and their mocks for execute_run tests."""
     return {}
+
+
+class TestRunInterruptConfiguration:
+    @pytest.mark.parametrize(
+        ("value", "expected"),
+        [(["agent"], ["agent"]), (["*"], "*"), ("agent", "agent"), (None, None)],
+    )
+    def test_normalizes_interrupt_value(self, value: str | list[str] | None, expected: str | list[str] | None) -> None:
+        assert _normalize_interrupt_value(value) == expected
+
+    def test_interrupts_do_not_enter_run_config(self) -> None:
+        job = _make_job()
+        job = job.model_copy(update={"behavior": RunBehavior(interrupt_before=["agent"], interrupt_after=["tools"])})
+
+        config = _build_run_config(job)
+
+        assert "interrupt_before" not in config
+        assert "interrupt_after" not in config
 
 
 class TestExecuteRunSuccess:
@@ -223,6 +245,39 @@ class TestStreamNativeV2InterruptDetection:
     async def test_no_interrupt_when_absent(self) -> None:
         event = {"params": {"data": {"messages": []}}}
         assert await self._run(("values", event)) is False
+
+    @pytest.mark.asyncio
+    async def test_forwards_interrupt_kwargs_to_native_stream(self) -> None:
+        captured_kwargs: dict[str, Any] = {}
+
+        async def stream_native_v3_events(
+            **kwargs: Any,
+        ) -> AsyncIterator[tuple[str, dict[str, Any]]]:
+            captured_kwargs.update(kwargs)
+            empty_events: tuple[tuple[str, dict[str, Any]], ...] = ()
+            for event in empty_events:
+                yield event
+
+        result = _GraphResult()
+        with (
+            patch.object(run_executor_module, "stream_native_v3_events", stream_native_v3_events),
+            patch.object(run_executor_module, "broker_manager") as bm,
+            patch.object(run_executor_module, "streaming_service") as ss,
+        ):
+            bm.allocate_event_id = AsyncMock(return_value="run-1_event_1")
+            ss.put_to_broker = AsyncMock()
+            await _stream_native_v2(
+                _make_job(),
+                MagicMock(),
+                {"msg": "x"},
+                {},
+                result,
+                interrupt_before=["agent"],
+                interrupt_after=["tools"],
+            )
+
+        assert captured_kwargs["interrupt_before"] == ["agent"]
+        assert captured_kwargs["interrupt_after"] == ["tools"]
 
 
 class TestSignalEndEvent:

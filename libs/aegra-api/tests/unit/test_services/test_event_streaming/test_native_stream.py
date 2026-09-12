@@ -92,6 +92,43 @@ class TestStreamNativeV3Events:
         assert out[1][0] == "messages"
         assert out[1][1]["params"]["data"] == {"event": "message-start", "id": "m1"}
 
+    async def test_forwards_run_level_interrupts_as_explicit_kwargs(self) -> None:
+        graph = _FakeGraph([])
+        config = {
+            "c": 2,
+        }
+
+        _ = [
+            pair
+            async for pair in stream_native_v3_events(
+                graph=graph,
+                input_data={},
+                config=config,
+                interrupt_before=["prepare"],
+                interrupt_after=["finish"],
+            )
+        ]
+
+        assert graph.calls[0]["config"] == {"c": 2}
+        assert graph.calls[0]["interrupt_before"] == ["prepare"]
+        assert graph.calls[0]["interrupt_after"] == ["finish"]
+
+    async def test_normalizes_wildcard_interrupts(self) -> None:
+        graph = _FakeGraph([])
+
+        _ = [
+            pair
+            async for pair in stream_native_v3_events(
+                graph=graph,
+                input_data={},
+                config={},
+                interrupt_before="*",
+            )
+        ]
+
+        assert graph.calls[0]["config"] == {}
+        assert graph.calls[0]["interrupt_before"] == "*"
+
     async def test_skips_non_event_dicts(self) -> None:
         graph = _FakeGraph([{"not": "an event"}, _event("values", {"a": 1})])
         out = [pair async for pair in stream_native_v3_events(graph=graph, input_data={}, config={})]

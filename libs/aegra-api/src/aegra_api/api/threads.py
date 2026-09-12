@@ -10,7 +10,8 @@ from uuid import uuid4
 
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy import select
+from fastapi import status as http_status
+from sqlalchemy import func, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -27,6 +28,7 @@ from aegra_api.models import (
     Thread,
     ThreadCheckpoint,
     ThreadCheckpointPostRequest,
+    ThreadCountRequest,
     ThreadCreate,
     ThreadHistoryRequest,
     ThreadList,
@@ -39,7 +41,7 @@ from aegra_api.models import (
     ThreadUpdate,
     User,
 )
-from aegra_api.models.errors import CONFLICT, NOT_FOUND, AgentProtocolError
+from aegra_api.models.errors import BAD_REQUEST, CONFLICT, NOT_FOUND, AgentProtocolError
 from aegra_api.models.search_limit import effective_search_limit
 from aegra_api.services.streaming_service import streaming_service
 from aegra_api.services.thread_state_service import ThreadStateService
@@ -949,7 +951,51 @@ async def prune_threads(
     return ThreadPruneResponse(deleted=deleted, pruned=pruned)
 
 
-@router.post("/threads/search", response_model=list[Thread])
+def _build_thread_filter_clauses(
+    user_id: str,
+    filters: Any,
+    *,
+    status: str | None = None,
+    metadata: dict[str, Any] | None = None,
+    values: dict[str, Any] | None = None,
+) -> list[Any]:
+    """Build shared filter clauses for thread search and count queries.
+
+    Args:
+        user_id: The authenticated user identity owning the threads.
+        filters: Evaluated authorization filters to apply.
+        status: Optional thread status filter string (e.g., 'idle', 'busy').
+        metadata: Optional metadata containment filter dictionary.
+        values: Optional state values filter dictionary.
+
+    Returns:
+        List of SQLAlchemy binary expressions representing the query clauses.
+
+    Raises:
+        HTTPException: If non-empty `values` filter is passed, since thread state
+            values are stored in checkpoints and not indexable via the thread table.
+    """
+    if values:
+        raise HTTPException(
+            status_code=http_status.HTTP_400_BAD_REQUEST,
+            detail="Filtering threads by state values is not currently supported",
+        )
+
+    clauses: list[Any] = [ThreadORM.user_id == user_id]
+    auth_filter = build_metadata_filter(ThreadORM.metadata_json, filters)
+    if auth_filter is not None:
+        clauses.append(auth_filter)
+
+    if status:
+        clauses.append(ThreadORM.status == status)
+
+    if metadata:
+        clauses.append(ThreadORM.metadata_json.op("@>")(metadata))
+
+    return clauses
+
+
+@router.post("/threads/search", response_model=list[Thread], responses={**BAD_REQUEST})
 async def search_threads(
     request: ThreadSearchRequest,
     user: User = Depends(get_current_user),
@@ -965,20 +1011,14 @@ async def search_threads(
     value = request.model_dump()
     filters = await handle_event(ctx, value)
 
-    stmt = select(ThreadORM).where(ThreadORM.user_id == user.identity)
-    # Compile the handler filter rather than merging only its "metadata" key:
-    # the flat shape and the $eq/$contains/$or/$and operators were dropped here.
-    auth_filter = build_metadata_filter(ThreadORM.metadata_json, filters)
-    if auth_filter is not None:
-        stmt = stmt.where(auth_filter)
-
-    if request.status:
-        stmt = stmt.where(ThreadORM.status == request.status)
-
-    if request.metadata:
-        # JSONB containment: type-correct, deep-nested, GIN-indexable. Mirrors
-        # AssistantService.search_assistants for cross-endpoint consistency.
-        stmt = stmt.where(ThreadORM.metadata_json.op("@>")(request.metadata))
+    clauses = _build_thread_filter_clauses(
+        user.identity,
+        filters,
+        status=request.status,
+        metadata=request.metadata,
+        values=request.values,
+    )
+    stmt = select(ThreadORM).where(*clauses)
 
     offset = request.offset or 0
     limit = request.limit if request.limit is not None else effective_search_limit()
@@ -991,7 +1031,38 @@ async def search_threads(
     result = await session.scalars(stmt)
     rows = result.all()
 
-    # Use safe serialization
     threads_models = [_serialize_thread(t) for t in rows]
-
     return threads_models
+
+
+@router.post("/threads/count", responses={**BAD_REQUEST})
+async def count_threads(
+    request: ThreadCountRequest,
+    user: User = Depends(get_current_user),
+    session: AsyncSession = Depends(get_session),
+) -> int:
+    """Count threads matching filters.
+
+    Args:
+        request: Thread count filter parameters (status, metadata, values).
+        user: The authenticated user making the request.
+        session: Database async session.
+
+    Returns:
+        The integer count of matching threads owned by the user.
+    """
+    ctx = build_auth_context(user, "threads", "search")
+    value = request.model_dump(exclude_none=True)
+    filters = await handle_event(ctx, value)
+
+    clauses = _build_thread_filter_clauses(
+        user.identity,
+        filters,
+        status=request.status,
+        metadata=request.metadata,
+        values=request.values,
+    )
+    stmt = select(func.count()).select_from(ThreadORM).where(*clauses)
+
+    total = await session.scalar(stmt)
+    return total or 0

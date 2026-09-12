@@ -1,7 +1,7 @@
 """Integration tests for threads CRUD operations"""
 
 from contextlib import asynccontextmanager
-from typing import Any
+from typing import Any, Self
 from unittest.mock import AsyncMock, MagicMock, Mock, patch
 
 import pytest
@@ -527,8 +527,6 @@ class TestSearchThreads:
             _thread_row("thread-3", status="idle", metadata={"env": "prod", "team": "beta"}),
         ]
 
-        from tests.fixtures.session_fixtures import ThreadSession
-
         override_session_dependency(app, ThreadSession, threads=threads)
         return make_client(app)
 
@@ -633,31 +631,29 @@ class TestSearchThreads:
         )
         assert resp.status_code == 422
 
-    def test_search_accepts_bool_metadata_filter(self, client):
+    def test_search_accepts_bool_metadata_filter(self: Self, client: TestClient) -> None:
         """metadata={'active': True} is accepted end-to-end (real matching verified in E2E)."""
         resp = client.post("/threads/search", json={"metadata": {"active": True}})
         assert resp.status_code == 200
         assert isinstance(resp.json(), list)
 
-    def test_search_accepts_limit_500(self, client: TestClient) -> None:
+    def test_search_accepts_limit_500(self: Self, client: TestClient) -> None:
         """LangGraph SDK clients page with limit=500; must not 422."""
         resp = client.post("/threads/search", json={"limit": 500})
         assert resp.status_code == 200
         assert isinstance(resp.json(), list)
 
-    def test_search_accepts_limit_at_cap(self, client: TestClient) -> None:
+    def test_search_accepts_limit_at_cap(self: Self, client: TestClient) -> None:
         resp = client.post("/threads/search", json={"limit": settings.app.MAX_SEARCH_LIMIT})
         assert resp.status_code == 200
         assert isinstance(resp.json(), list)
 
-    def test_search_accepts_null_limit(self, client: TestClient) -> None:
+    def test_search_accepts_null_limit(self: Self, client: TestClient) -> None:
         resp = client.post("/threads/search", json={"limit": None})
         assert resp.status_code == 200
         assert isinstance(resp.json(), list)
 
-    def test_search_omitted_limit_honors_cap_below_default(
-        self: "TestSearchThreads", monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_search_omitted_limit_honors_cap_below_default(self: Self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(settings.app, "MAX_SEARCH_LIMIT", 10)
         captured: list[int | None] = []
         app = create_test_app(include_runs=False, include_threads=True)
@@ -675,9 +671,7 @@ class TestSearchThreads:
         assert resp.status_code == 200
         assert captured == [10]
 
-    def test_search_null_limit_honors_cap_below_default(
-        self: "TestSearchThreads", monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_search_null_limit_honors_cap_below_default(self: Self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(settings.app, "MAX_SEARCH_LIMIT", 10)
         captured: list[int | None] = []
         app = create_test_app(include_runs=False, include_threads=True)
@@ -695,7 +689,7 @@ class TestSearchThreads:
         assert resp.status_code == 200
         assert captured == [10]
 
-    def test_search_returns_422_when_limit_exceeds_cap(self, client: TestClient) -> None:
+    def test_search_returns_422_when_limit_exceeds_cap(self: Self, client: TestClient) -> None:
         """limit above MAX_SEARCH_LIMIT is rejected at the request model."""
         cap = settings.app.MAX_SEARCH_LIMIT
         resp = client.post("/threads/search", json={"limit": cap + 1})
@@ -709,16 +703,100 @@ class TestSearchThreads:
         )
 
     @pytest.mark.parametrize("limit", [0, -1])
-    def test_search_returns_422_when_limit_is_zero_or_negative(self, client: TestClient, limit: int) -> None:
+    def test_search_returns_422_when_limit_is_zero_or_negative(self: Self, client: TestClient, limit: int) -> None:
         resp = client.post("/threads/search", json={"limit": limit})
         assert resp.status_code == 422
         assert "limit" in resp.text
 
     @pytest.mark.parametrize("limit", ["abc", [], {}, 20.5])
-    def test_search_returns_422_when_limit_is_not_an_integer(self, client: TestClient, limit: object) -> None:
+    def test_search_returns_422_when_limit_is_not_an_integer(self: Self, client: TestClient, limit: object) -> None:
         resp = client.post("/threads/search", json={"limit": limit})
         assert resp.status_code == 422
         assert "limit" in resp.text
+
+    def test_search_threads_with_values_rejects_with_400(self: Self, client: TestClient) -> None:
+        """Filtering search by state values returns 400 because state is stored in checkpoints."""
+        resp = client.post(
+            "/threads/search",
+            json={"values": {"foo": "bar"}},
+        )
+        assert resp.status_code == 400
+        assert "not currently supported" in resp.json()["detail"]
+
+
+class TestCountThreads:
+    """Test POST /threads/count endpoint."""
+
+    @pytest.fixture
+    def client(self: Self) -> TestClient:
+        """Create test client with seeded threads in ThreadSession."""
+        app = create_test_app(include_runs=False, include_threads=True)
+
+        threads = [
+            _thread_row("thread-1", status="idle", metadata={"env": "prod", "team": "alpha"}),
+            _thread_row("thread-2", status="busy", metadata={"env": "dev", "team": "beta"}),
+            _thread_row("thread-3", status="idle", metadata={"env": "prod", "team": "beta"}),
+        ]
+
+        override_session_dependency(app, ThreadSession, threads=threads)
+        return make_client(app)
+
+    def test_count_threads_no_filters(self: Self, client: TestClient) -> None:
+        """Counting without filters returns total count of caller threads."""
+        resp = client.post("/threads/count", json={})
+        assert resp.status_code == 200
+        assert resp.json() == 3
+
+    def test_count_threads_with_status(self: Self, client: TestClient) -> None:
+        """Counting with status filter returns count of matching threads."""
+        resp_idle = client.post("/threads/count", json={"status": "idle"})
+        assert resp_idle.status_code == 200
+        assert resp_idle.json() == 2
+
+        resp_busy = client.post("/threads/count", json={"status": "busy"})
+        assert resp_busy.status_code == 200
+        assert resp_busy.json() == 1
+
+        resp_interrupted = client.post("/threads/count", json={"status": "interrupted"})
+        assert resp_interrupted.status_code == 200
+        assert resp_interrupted.json() == 0
+
+    def test_count_threads_with_metadata(self: Self, client: TestClient) -> None:
+        """Counting with metadata filter returns count of matching threads."""
+        resp_prod = client.post(
+            "/threads/count",
+            json={"metadata": {"env": "prod"}},
+        )
+        assert resp_prod.status_code == 200
+        assert resp_prod.json() == 2
+
+        resp_beta = client.post(
+            "/threads/count",
+            json={"metadata": {"team": "beta"}},
+        )
+        assert resp_beta.status_code == 200
+        assert resp_beta.json() == 2
+
+        resp_none = client.post(
+            "/threads/count",
+            json={"metadata": {"env": "prod", "team": "gamma"}},
+        )
+        assert resp_none.status_code == 200
+        assert resp_none.json() == 0
+
+    def test_count_threads_with_values_rejects_with_400(self: Self, client: TestClient) -> None:
+        """Filtering by state values returns 400 because state is stored in checkpoints."""
+        resp = client.post(
+            "/threads/count",
+            json={"values": {"foo": "bar"}},
+        )
+        assert resp.status_code == 400
+        assert "not currently supported" in resp.json()["detail"]
+
+    def test_count_threads_invalid_status(self: Self, client: TestClient) -> None:
+        """Counting with invalid status returns 422 validation error."""
+        resp = client.post("/threads/count", json={"status": "nonexistent_status"})
+        assert resp.status_code == 422
 
 
 class TestThreadGetState:

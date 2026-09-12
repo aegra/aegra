@@ -1601,6 +1601,69 @@
               }
             }
           },
+          "400": {
+            "description": "Invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AgentProtocolError"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/threads/count": {
+      "post": {
+        "tags": [
+          "Threads"
+        ],
+        "summary": "Count Threads",
+        "description": "Count threads matching filters.\n\nArgs:\n    request: Thread count filter parameters (status, metadata, values).\n    user: The authenticated user making the request.\n    session: Database async session.\n\nReturns:\n    The integer count of matching threads owned by the user.",
+        "operationId": "count_threads_threads_count_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ThreadCountRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "integer",
+                  "title": "Response Count Threads Threads Count Post"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AgentProtocolError"
+                }
+              }
+            }
+          },
           "422": {
             "description": "Validation Error",
             "content": {
@@ -5342,6 +5405,51 @@
         "title": "ThreadCommand",
         "description": "Body for ``POST /threads/{thread_id}/commands`` (JSON-RPC style)."
       },
+      "ThreadCountRequest": {
+        "properties": {
+          "metadata": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Metadata",
+            "description": "Metadata filters"
+          },
+          "values": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Values",
+            "description": "State values filter (SDK compatibility; filtering by values is not supported and returns 400)"
+          },
+          "status": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Status",
+            "description": "Thread status filter (idle, busy, interrupted, error)"
+          }
+        },
+        "type": "object",
+        "title": "ThreadCountRequest",
+        "description": "Request model for thread count"
+      },
       "ThreadCreate": {
         "properties": {
           "metadata": {
@@ -5555,6 +5663,19 @@
             ],
             "title": "Metadata",
             "description": "Metadata filters"
+          },
+          "values": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Values",
+            "description": "State values filter (SDK compatibility; filtering by values is not supported and returns 400)"
           },
           "status": {
             "anyOf": [

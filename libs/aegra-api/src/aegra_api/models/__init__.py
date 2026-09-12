@@ -32,6 +32,7 @@ from aegra_api.models.threads import (
     Thread,
     ThreadCheckpoint,
     ThreadCheckpointPostRequest,
+    ThreadCountRequest,
     ThreadCreate,
     ThreadHistoryRequest,
     ThreadList,
@@ -55,6 +56,7 @@ __all__ = [
     "AgentSchemas",
     # Threads
     "Thread",
+    "ThreadCountRequest",
     "ThreadCreate",
     "ThreadList",
     "ThreadSearchRequest",

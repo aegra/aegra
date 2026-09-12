@@ -138,6 +138,22 @@ threads = await client.threads.search(
 
 `limit` accepts 1 through `MAX_SEARCH_LIMIT` (default 1000, matching LangGraph Platform). Omitted or null `limit` uses `min(20, MAX_SEARCH_LIMIT)`. Values above the cap return 422.
 
+## Counting threads
+
+Count threads matching metadata or status filters without transferring the full thread list:
+
+```python
+# Count by metadata
+count = await client.threads.count(
+    metadata={"user_name": "Alice"},
+)
+
+# Count by status
+count = await client.threads.count(
+    status="interrupted",
+)
+```
+
 ## Listing threads
 
 ```python

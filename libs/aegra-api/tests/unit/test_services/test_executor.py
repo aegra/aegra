@@ -5,6 +5,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from aegra_api.core.active_runs import active_runs
 from aegra_api.models.auth import User
 from aegra_api.models.run_job import RunExecution, RunIdentity, RunJob
 from aegra_api.services.local_executor import LocalExecutor
@@ -42,6 +43,24 @@ class TestLocalExecutor:
             assert "run-1" in active_runs
             task = active_runs.pop("run-1")
             task.cancel()
+
+    @pytest.mark.asyncio
+    async def test_submit_delays_execution_without_blocking_submission(self) -> None:
+        executor = LocalExecutor()
+        mock_execute = AsyncMock()
+
+        with (
+            patch("aegra_api.services.run_executor.execute_run", mock_execute),
+            patch("aegra_api.services.local_executor.make_run_trace_context", return_value=None),
+        ):
+            await executor.submit(_make_job("delayed-run").model_copy(update={"after_seconds": 1}))
+            await asyncio.sleep(0.05)
+
+            mock_execute.assert_not_awaited()
+            task = active_runs["delayed-run"]
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+            assert "delayed-run" not in active_runs
 
     @pytest.mark.asyncio
     async def test_wait_for_completion_returns_on_done(self) -> None:

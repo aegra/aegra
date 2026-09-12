@@ -9,6 +9,29 @@ from aegra_api.models.runs import RunCreate
 class TestRunCreateValidation:
     """Tests for RunCreate input/command validation."""
 
+    def test_after_seconds_defaults_to_zero(self) -> None:
+        run = RunCreate(assistant_id="assistant", input={"value": 1})
+        assert run.after_seconds == 0
+
+    def test_after_seconds_accepts_non_negative_delay(self) -> None:
+        run = RunCreate(assistant_id="assistant", input={"value": 1}, after_seconds=30)
+        assert run.after_seconds == 30
+
+    def test_after_seconds_rejects_negative_delay(self) -> None:
+        with pytest.raises(ValidationError):
+            RunCreate(assistant_id="assistant", input={"value": 1}, after_seconds=-1)
+
+    def test_after_seconds_rejects_unrepresentable_delay(self) -> None:
+        with pytest.raises(ValidationError):
+            RunCreate(assistant_id="assistant", input={"value": 1}, after_seconds=2_147_483_648)
+
+    @pytest.mark.parametrize("value", ["30", 30.0])
+    def test_after_seconds_rejects_non_integer_values(
+        self: "TestRunCreateValidation", value: int | float | str
+    ) -> None:
+        with pytest.raises(ValidationError):
+            RunCreate(assistant_id="assistant", input={"value": 1}, after_seconds=value)
+
     def test_checkpoint_only_payload_preserves_none_input(self):
         """Checkpoint-only payloads must keep input as None so LangGraph resumes
         from the checkpoint instead of restarting the graph from __start__.

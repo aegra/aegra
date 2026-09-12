@@ -69,6 +69,9 @@ class RunJob(BaseModel):
     user: User
     execution: RunExecution = RunExecution()
     behavior: RunBehavior = RunBehavior()
+    # Scheduling metadata keeps local and worker API behavior aligned.
+    # Production workers use persisted ``not_before`` for crash-safe scheduling.
+    after_seconds: int = Field(default=0, strict=True, ge=0, le=2_147_483_647)
     # JSONB-persisted; deliberately ``dict[str, Any]`` so legacy/drifted rows stay readable via
     # ``from_run_orm``. OTEL boundary in ``merge_run_metadata`` filters at emit. Do not narrow.
     run_metadata: dict[str, Any] = Field(default_factory=dict)
@@ -86,6 +89,7 @@ class RunJob(BaseModel):
             "execution": self.execution.model_dump(),
             "behavior": self.behavior.model_dump(),
             "run_metadata": self.run_metadata,
+            "after_seconds": self.after_seconds,
         }
 
     @classmethod
@@ -104,4 +108,5 @@ class RunJob(BaseModel):
             execution=RunExecution.model_validate(params["execution"]),
             behavior=RunBehavior.model_validate(params["behavior"]),
             run_metadata=params.get("run_metadata") or {},
+            after_seconds=params.get("after_seconds", 0),
         )

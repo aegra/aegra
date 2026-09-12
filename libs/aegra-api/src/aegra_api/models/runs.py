@@ -31,6 +31,13 @@ class RunCreate(BaseModel):
     """Request model for creating runs"""
 
     assistant_id: str = Field(..., description="Assistant to execute")
+    after_seconds: int = Field(
+        0,
+        strict=True,
+        ge=0,
+        le=2_147_483_647,
+        description="Delay execution by this many seconds after creating the run.",
+    )
     input: dict[str, Any] | None = Field(
         None,
         description="Input data for the run. Optional when resuming from a checkpoint.",

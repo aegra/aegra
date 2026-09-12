@@ -181,6 +181,11 @@ class Run(Base):
     claimed_by: Mapped[str | None] = mapped_column(Text, nullable=True)
     lease_expires_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True), nullable=True)
 
+    # A persisted scheduling boundary makes delayed runs recoverable after an
+    # API/worker restart. NULL means the run is eligible immediately.
+    not_before: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True), nullable=True)
+    dispatched_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True), nullable=True)
+
     # Indexes for performance
     __table_args__ = (
         Index("idx_runs_thread_id", "thread_id"),
@@ -189,6 +194,8 @@ class Run(Base):
         Index("idx_runs_assistant_id", "assistant_id"),
         Index("idx_runs_created_at", "created_at"),
         Index("idx_runs_lease_reaper", "status", "lease_expires_at"),
+        Index("idx_runs_not_before", "status", "not_before"),
+        Index("idx_runs_dispatch", "status", "not_before", "dispatched_at"),
     )
 
 

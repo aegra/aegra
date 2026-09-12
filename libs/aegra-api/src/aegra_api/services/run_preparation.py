@@ -5,7 +5,7 @@ resume-command validation, and config/context merging logic.
 """
 
 import asyncio
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import uuid4
 
@@ -203,6 +203,12 @@ async def _prepare_run(
     """
     await _validate_resume_command(session, thread_id, request.command)
 
+    # FastAPI provides RunCreate; request-like callers may omit this field.
+    request_fields = getattr(request, "__dict__", {})
+    after_seconds = getattr(request, "after_seconds", 0) if "after_seconds" in request_fields else 0
+    if not isinstance(after_seconds, int) or not 0 <= after_seconds <= 2_147_483_647:
+        raise HTTPException(status_code=422, detail="`after_seconds` must be an integer between 0 and 2147483647")
+
     run_id = str(uuid4())
     langgraph_service = get_langgraph_service()
     logger.info(
@@ -270,6 +276,7 @@ async def _prepare_run(
             subgraphs=request.stream_subgraphs or False,
         ),
         run_metadata=request.metadata or {},
+        after_seconds=after_seconds,
     )
 
     # Persist run record with trace metadata for worker observability.
@@ -284,6 +291,7 @@ async def _prepare_run(
     }
 
     now = datetime.now(UTC)
+    not_before = now + timedelta(seconds=after_seconds) if after_seconds else None
     run_orm = RunORM(
         run_id=run_id,
         thread_id=thread_id,
@@ -298,6 +306,7 @@ async def _prepare_run(
         output=None,
         error_message=None,
         execution_params=exec_params,
+        not_before=not_before,
     )
     session.add(run_orm)
     await session.commit()

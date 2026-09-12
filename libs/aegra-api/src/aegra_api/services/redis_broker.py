@@ -31,6 +31,10 @@ logger = structlog.getLogger(__name__)
 
 _serializer = GeneralSerializer()
 
+# uvloop surfaces I/O on a closed transport as RuntimeError instead of a redis
+# ConnectionError; both are transport failures for every broker Redis guard.
+_TRANSPORT_ERRORS: tuple[type[Exception], ...] = (RedisError, RuntimeError)
+
 # TTL for the replay buffer — safety net for runs that crash without cleanup.
 # cleanup_run() deletes the broker on normal completion; this TTL only matters
 # if cleanup never fires (e.g. process crash, OOM kill).
@@ -44,7 +48,7 @@ _BACKOFF_MAX = 30.0
 _BACKOFF_FACTOR = 2.0
 
 # Bounded retry for the write path (put). The read path (aiter) retries
-# RedisError indefinitely; the write path must be bounded so a producer can't
+# transport errors indefinitely; the write path must be bounded so a producer can't
 # block forever, but it should still retry a transient blip rather than drop the
 # event — a dropped event is a permanently lost SSE token.
 _PUT_MAX_ATTEMPTS = 3
@@ -129,7 +133,7 @@ class RedisRunBroker(BaseRunBroker):
 
                 if is_end:
                     self._finished = True
-            except RedisError as e:
+            except _TRANSPORT_ERRORS as e:
                 logger.error(
                     f"Redis {operation} write failed for run {self.run_id} after {_PUT_MAX_ATTEMPTS} attempts: {e}"
                 )
@@ -160,14 +164,14 @@ class RedisRunBroker(BaseRunBroker):
         Mirrors the retry/backoff the read path (aiter) already applies, so a
         transient client-side blip (e.g. socket timeout) is retried instead of
         dropping the event. Bounded by ``_PUT_MAX_ATTEMPTS`` so a producer never
-        blocks indefinitely; the final ``RedisError`` propagates to ``put()``.
+        blocks indefinitely; the final transport error propagates to ``put()``.
         """
         attempt = 0
         while True:
             try:
                 await op(message)
                 return
-            except RedisError as e:
+            except _TRANSPORT_ERRORS as e:
                 attempt += 1
                 if attempt >= _PUT_MAX_ATTEMPTS:
                     raise
@@ -187,7 +191,7 @@ class RedisRunBroker(BaseRunBroker):
                     yield event_id, payload
                 # Clean exit from _subscribe_and_listen (end event or finished)
                 break
-            except RedisError as e:
+            except _TRANSPORT_ERRORS as e:
                 attempt += 1
                 delay = _backoff_delay(attempt)
                 logger.warning(
@@ -258,7 +262,7 @@ class RedisRunBroker(BaseRunBroker):
                 if isinstance(payload, tuple) and len(payload) >= 1 and payload[0] == "end":
                     self._finished = True
                     return True
-        except RedisError as e:
+        except _TRANSPORT_ERRORS as e:
             logger.warning(f"Failed checking replay buffer for end event for run {self.run_id}: {e}")
         return False
 
@@ -266,7 +270,7 @@ class RedisRunBroker(BaseRunBroker):
         try:
             client = redis_manager.get_client()
             raw_messages = await client.lrange(self._cache_key, 0, _REPLAY_MAX_EVENTS - 1)  # type: ignore[invalid-await]
-        except RedisError as e:
+        except _TRANSPORT_ERRORS as e:
             logger.error(f"Redis replay failed for run {self.run_id}: {e}")
             return []
 
@@ -395,7 +399,7 @@ class RedisBrokerManager(BaseBrokerManager):
             client = redis_manager.get_client()
             await client.publish(self._cancel_channel, message)
             logger.info(f"Published {action} command for run {run_id}")
-        except RedisError as e:
+        except _TRANSPORT_ERRORS as e:
             logger.error(f"Failed to publish {action} for run {run_id}: {e}")
             # Fall back to local execution - if the task is on this instance,
             # we can still cancel it even if Redis publish fails.
@@ -408,7 +412,7 @@ class RedisBrokerManager(BaseBrokerManager):
             value = await client.get(f"{self._counter_prefix}{run_id}")
             if value is not None:
                 return int(value)
-        except (RedisError, ValueError) as e:
+        except (*_TRANSPORT_ERRORS, ValueError) as e:
             logger.warning(f"Failed to read event counter for run {run_id}: {e}")
         return 0
 
@@ -425,7 +429,7 @@ class RedisBrokerManager(BaseBrokerManager):
             seq = await client.incr(counter_key)
             await client.expire(counter_key, _REPLAY_TTL_SECONDS)
             return generate_event_id(run_id, int(seq))
-        except RedisError as e:
+        except _TRANSPORT_ERRORS as e:
             logger.warning(f"Failed to allocate event_id for run {run_id}: {e}")
             # Fallback: use timestamp-based ID (unique but not sequential)
             return generate_event_id(run_id, int(time.time() * 1000))
@@ -439,7 +443,7 @@ class RedisBrokerManager(BaseBrokerManager):
                 attempt = 0
             except asyncio.CancelledError:
                 break
-            except RedisError as e:
+            except _TRANSPORT_ERRORS as e:
                 attempt += 1
                 delay = _backoff_delay(attempt)
                 logger.error(

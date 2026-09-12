@@ -2,6 +2,8 @@
 
 import asyncio
 import json
+from collections.abc import AsyncIterator
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -772,3 +774,185 @@ class TestRedisBrokerManager:
 
             await manager.stop()
             assert manager._running is False
+
+
+class TestTransportErrorResilience:
+    """uvloop surfaces I/O on a dead transport as RuntimeError, not RedisError.
+
+    Every resilience guard in the broker must treat it as the transport
+    failure it is — otherwise a single dead connection kills the run.
+    """
+
+    _TRANSPORT_RUNTIME_ERROR = RuntimeError(
+        "unable to perform operation on <TCPTransport closed=True reading=False>; the handler is closed"
+    )
+
+    def _make_broker(self, run_id: str = "run-123") -> RedisRunBroker:
+        return RedisRunBroker(
+            run_id,
+            f"aegra:run:{run_id}",
+            f"aegra:run:cache:{run_id}",
+            f"aegra:run:counter:{run_id}",
+        )
+
+    def _make_manager(self) -> RedisBrokerManager:
+        return RedisBrokerManager()
+
+    @pytest.mark.asyncio
+    async def test_put_survives_transport_runtime_error(self) -> None:
+        """put() must not propagate a dead-transport RuntimeError to the producer"""
+        broker = self._make_broker()
+        mock_pipe = MagicMock()
+        mock_pipe.execute = AsyncMock(side_effect=self._TRANSPORT_RUNTIME_ERROR)
+        mock_client = MagicMock()
+        mock_client.publish = AsyncMock()
+        mock_client.pipeline.return_value = mock_pipe
+
+        with (
+            patch("aegra_api.services.redis_broker.redis_manager") as mock_rm,
+            patch("aegra_api.services.redis_broker.asyncio.sleep", new_callable=AsyncMock),
+        ):
+            mock_rm.get_client.return_value = mock_client
+
+            await broker.put("evt-1", ("values", {"data": "test"}))
+
+        assert mock_pipe.execute.await_count == _PUT_MAX_ATTEMPTS
+
+    @pytest.mark.asyncio
+    async def test_put_retries_transport_runtime_error_then_succeeds(self) -> None:
+        """A transient dead-transport blip on the cache write is retried like a RedisError"""
+        broker = self._make_broker()
+        mock_pipe = MagicMock()
+        mock_pipe.execute = AsyncMock(side_effect=[self._TRANSPORT_RUNTIME_ERROR, None])
+        mock_client = MagicMock()
+        mock_client.publish = AsyncMock()
+        mock_client.pipeline.return_value = mock_pipe
+
+        with (
+            patch("aegra_api.services.redis_broker.redis_manager") as mock_rm,
+            patch("aegra_api.services.redis_broker.asyncio.sleep", new_callable=AsyncMock),
+        ):
+            mock_rm.get_client.return_value = mock_client
+
+            await broker.put("evt-1", ("values", {"msg": "hi"}))
+
+        assert mock_pipe.execute.await_count == 2
+        mock_client.publish.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_aiter_retries_on_transport_runtime_error(self) -> None:
+        """aiter() must reconnect after a dead-transport RuntimeError, not die"""
+        broker = self._make_broker()
+        calls = {"n": 0}
+
+        async def fake_subscribe() -> AsyncIterator[tuple[str, Any]]:
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise self._TRANSPORT_RUNTIME_ERROR
+            broker._finished = True
+            return
+            yield  # pragma: no cover — makes this an async generator
+
+        with (
+            patch.object(broker, "_subscribe_and_listen", side_effect=lambda: fake_subscribe()),
+            patch("aegra_api.services.redis_broker.asyncio.sleep", new_callable=AsyncMock),
+        ):
+            events = [e async for e in broker.aiter()]
+
+        assert events == []
+        assert calls["n"] == 2
+
+    @pytest.mark.asyncio
+    async def test_allocate_event_id_falls_back_on_transport_runtime_error(self) -> None:
+        """allocate_event_id keeps its timestamp fallback on a dead transport"""
+        manager = self._make_manager()
+        mock_client = AsyncMock()
+        mock_client.incr.side_effect = self._TRANSPORT_RUNTIME_ERROR
+
+        with patch("aegra_api.services.redis_broker.redis_manager") as mock_rm:
+            mock_rm.get_client.return_value = mock_client
+
+            event_id = await manager.allocate_event_id("run-123")
+
+        assert isinstance(event_id, str)
+        assert event_id
+
+    @pytest.mark.asyncio
+    async def test_get_event_sequence_handles_transport_runtime_error(self) -> None:
+        """get_event_sequence returns 0 on a dead transport instead of raising"""
+        manager = self._make_manager()
+        mock_client = AsyncMock()
+        mock_client.get.side_effect = self._TRANSPORT_RUNTIME_ERROR
+
+        with patch("aegra_api.services.redis_broker.redis_manager") as mock_rm:
+            mock_rm.get_client.return_value = mock_client
+
+            result = await manager.get_event_sequence("run-123")
+
+        assert result == 0
+
+    @pytest.mark.asyncio
+    async def test_request_cancel_falls_back_on_transport_runtime_error(self) -> None:
+        """request_cancel falls back to local cancel on a dead transport"""
+        manager = self._make_manager()
+        mock_client = MagicMock()
+        mock_client.publish = AsyncMock(side_effect=self._TRANSPORT_RUNTIME_ERROR)
+
+        with (
+            patch("aegra_api.services.redis_broker.redis_manager") as mock_rm,
+            patch.object(manager, "_execute_cancel", new_callable=AsyncMock) as mock_exec,
+        ):
+            mock_rm.get_client.return_value = mock_client
+
+            await manager.request_cancel("run-123", "cancel")
+
+            mock_exec.assert_awaited_once_with("run-123", emit_end_event=True)
+
+    @pytest.mark.asyncio
+    async def test_cancel_listener_survives_transport_runtime_error(self) -> None:
+        """The cancel listener must reconnect after a dead transport, not die silently"""
+        manager = self._make_manager()
+        manager._running = True
+        calls = {"n": 0}
+
+        async def fake_handle() -> None:
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise self._TRANSPORT_RUNTIME_ERROR
+            manager._running = False
+
+        with (
+            patch.object(manager, "_subscribe_and_handle_cancels", side_effect=fake_handle),
+            patch("aegra_api.services.redis_broker.asyncio.sleep", new_callable=AsyncMock),
+        ):
+            await manager._listen_for_cancel_commands()
+
+        assert calls["n"] == 2
+
+    @pytest.mark.asyncio
+    async def test_replay_returns_empty_on_transport_runtime_error(self) -> None:
+        """replay() degrades to an empty list on a dead transport instead of raising"""
+        broker = self._make_broker()
+        mock_client = AsyncMock()
+        mock_client.lrange.side_effect = self._TRANSPORT_RUNTIME_ERROR
+
+        with patch("aegra_api.services.redis_broker.redis_manager") as mock_rm:
+            mock_rm.get_client.return_value = mock_client
+
+            result = await broker.replay(None)
+
+        assert result == []
+
+    @pytest.mark.asyncio
+    async def test_check_end_in_buffer_returns_false_on_transport_runtime_error(self) -> None:
+        """_check_end_in_buffer treats a dead transport as 'no end event seen'"""
+        broker = self._make_broker()
+        mock_client = AsyncMock()
+        mock_client.lrange.side_effect = self._TRANSPORT_RUNTIME_ERROR
+
+        with patch("aegra_api.services.redis_broker.redis_manager") as mock_rm:
+            mock_rm.get_client.return_value = mock_client
+
+            result = await broker._check_end_in_buffer()
+
+        assert result is False

@@ -256,7 +256,7 @@ class TestNoopAuth:
         credentials, user = result
         assert user.identity == "anonymous"
         assert user.display_name == "Anonymous User"
-        assert user.is_authenticated is True
+        assert user.is_authenticated is False
         assert isinstance(credentials, AuthCredentials)
         assert credentials.scopes == []
 

@@ -110,3 +110,7 @@ class BaseBrokerManager(ABC):
 
         counter = await self.get_event_sequence(run_id) + 1
         return generate_event_id(run_id, counter)
+
+    @abstractmethod
+    async def refresh_replay_ttl(self, run_id: str) -> None:
+        """Refresh replay buffer retention for an active run."""

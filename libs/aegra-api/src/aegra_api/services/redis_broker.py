@@ -149,6 +149,17 @@ class RedisRunBroker(BaseRunBroker):
         pipe.expire(self._counter_key, _REPLAY_TTL_SECONDS)
         await pipe.execute()
 
+    async def refresh_ttl(self, ttl_seconds: int = _REPLAY_TTL_SECONDS) -> None:
+        """Extend TTL on replay buffer and counter keys while run is alive."""
+        try:
+            client = redis_manager.get_client()
+            pipe = client.pipeline()
+            pipe.expire(self._cache_key, ttl_seconds)
+            pipe.expire(self._counter_key, ttl_seconds)
+            await pipe.execute()
+        except RedisError as e:
+            logger.warning(f"Failed refreshing replay TTL for run {self.run_id}: {e}")
+
     async def _publish_event(self, message: str) -> None:
         """Broadcast the event to live subscribers."""
         client = redis_manager.get_client()
@@ -429,6 +440,24 @@ class RedisBrokerManager(BaseBrokerManager):
             logger.warning(f"Failed to allocate event_id for run {run_id}: {e}")
             # Fallback: use timestamp-based ID (unique but not sequential)
             return generate_event_id(run_id, int(time.time() * 1000))
+
+    async def refresh_replay_ttl(self, run_id: str) -> None:
+        """Extend replay buffer and counter TTL for an active run."""
+        broker = self.get_broker(run_id)
+        if broker is not None:
+            await broker.refresh_ttl()
+            return
+
+        cache_key = f"{self._cache_prefix}{run_id}"
+        counter_key = f"{self._counter_prefix}{run_id}"
+        try:
+            client = redis_manager.get_client()
+            pipe = client.pipeline()
+            pipe.expire(cache_key, _REPLAY_TTL_SECONDS)
+            pipe.expire(counter_key, _REPLAY_TTL_SECONDS)
+            await pipe.execute()
+        except RedisError as e:
+            logger.warning(f"Failed to refresh replay TTL for run {run_id}: {e}")
 
     async def _listen_for_cancel_commands(self) -> None:
         """Background task: subscribe to cancel channel with reconnect backoff."""

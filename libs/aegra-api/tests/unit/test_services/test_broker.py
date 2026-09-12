@@ -238,3 +238,10 @@ class TestBrokerManager:
         await manager.stop()
 
         assert manager._cleanup_task.cancelled() or manager._cleanup_task.done()
+
+    @pytest.mark.asyncio
+    async def test_refresh_replay_ttl_is_noop(self) -> None:
+        """Test that refresh_replay_ttl is a safe no-op on in-memory broker manager."""
+        manager = BrokerManager()
+        result = await manager.refresh_replay_ttl("run-123")
+        assert result is None

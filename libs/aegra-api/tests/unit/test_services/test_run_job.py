@@ -19,6 +19,15 @@ class TestRunIdentity:
         assert identity.thread_id == "t1"
         assert identity.graph_id == "g1"
 
+    def test_assistant_id_defaults_to_none(self) -> None:
+        """Read paths and assistant-less rows have no assistant."""
+        identity = RunIdentity(run_id="r1", thread_id="t1", graph_id="g1")
+        assert identity.assistant_id is None
+
+    def test_assistant_id_carried(self) -> None:
+        identity = RunIdentity(run_id="r1", thread_id="t1", graph_id="g1", assistant_id="asst-1")
+        assert identity.assistant_id == "asst-1"
+
 
 class TestRunExecution:
     def test_defaults(self) -> None:
@@ -55,7 +64,7 @@ class TestRunJob:
     @pytest.fixture()
     def sample_job(self) -> RunJob:
         return RunJob(
-            identity=RunIdentity(run_id="run-1", thread_id="thread-1", graph_id="graph-1"),
+            identity=RunIdentity(run_id="run-1", thread_id="thread-1", graph_id="graph-1", assistant_id="asst-1"),
             user=User(identity="user-1", is_authenticated=True, permissions=["read"]),
             execution=RunExecution(
                 input_data={"message": "hello"},
@@ -84,6 +93,7 @@ class TestRunJob:
         class FakeORM:
             run_id = "run-1"
             thread_id = "thread-1"
+            assistant_id = "asst-1"
             execution_params = sample_job.to_execution_params()
 
         restored = RunJob.from_run_orm(FakeORM())
@@ -98,6 +108,23 @@ class TestRunJob:
         assert "run_id" not in params
         assert "thread_id" not in params
 
+    def test_from_run_orm_reads_assistant_id_from_the_column(self) -> None:
+        """assistant_id is a runs column, so rows persisted before this change restore it."""
+
+        class LegacyORM:
+            run_id = "r1"
+            thread_id = "t1"
+            assistant_id = "asst-42"
+            execution_params = {
+                "graph_id": "g1",
+                "user": {"identity": "u1", "is_authenticated": True, "permissions": []},
+                "execution": {},
+                "behavior": {},
+            }
+
+        restored = RunJob.from_run_orm(LegacyORM())
+        assert restored.identity.assistant_id == "asst-42"
+
     def test_extra_user_fields_preserved(self) -> None:
         """User model allows extra fields (ConfigDict extra='allow')."""
         job = RunJob(
@@ -110,6 +137,7 @@ class TestRunJob:
         class FakeORM:
             run_id = "r1"
             thread_id = "t1"
+            assistant_id = "asst-1"
             execution_params = params
 
         restored = RunJob.from_run_orm(FakeORM())
@@ -138,6 +166,7 @@ class TestRunJob:
         class FakeORM:
             run_id = "r1"
             thread_id = "t1"
+            assistant_id = "asst-1"
             execution_params = params
 
         restored = RunJob.from_run_orm(FakeORM())
@@ -149,6 +178,7 @@ class TestRunJob:
         class LegacyORM:
             run_id = "r1"
             thread_id = "t1"
+            assistant_id = "asst-1"
             execution_params = {
                 "graph_id": "g1",
                 "user": {"identity": "u1", "is_authenticated": True, "permissions": []},

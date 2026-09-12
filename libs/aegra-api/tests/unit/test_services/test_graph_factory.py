@@ -20,6 +20,8 @@ from pydantic import BaseModel
 from aegra_api.services.graph_factory import (
     _FACTORY_CONTEXT_TYPES,
     _FACTORY_KWARGS,
+    AegraExecutionRuntime,
+    AegraReadRuntime,
     _classify_factory,
     _extract_context_type,
     _is_runtime_annotation,
@@ -675,6 +677,80 @@ class TestBuildServerRuntimeWithContext:
 
         assert isinstance(runtime, _ReadRuntime)
         assert not hasattr(runtime, "context")
+
+
+# ---------------------------------------------------------------------------
+# build_server_runtime — assistant identity
+# ---------------------------------------------------------------------------
+
+
+class TestBuildServerRuntimeAssistantId:
+    """The runtime carries the assistant a run executes as."""
+
+    def test_execution_runtime_carries_assistant_id(self) -> None:
+        runtime = build_server_runtime(
+            access_context="threads.create_run",
+            store=Mock(),
+            user=Mock(),
+            assistant_id="asst-1",
+        )
+
+        assert isinstance(runtime, AegraExecutionRuntime)
+        assert isinstance(runtime, _ExecutionRuntime)
+        assert runtime.assistant_id == "asst-1"
+
+    def test_execution_runtime_without_assistant_id(self) -> None:
+        runtime = build_server_runtime(
+            access_context="threads.create_run",
+            store=Mock(),
+            user=Mock(),
+        )
+
+        assert runtime.assistant_id is None
+
+    @pytest.mark.parametrize("access_context", ["threads.read", "threads.update", "assistants.read"])
+    def test_read_runtime_assistant_id_is_none(self, access_context: str) -> None:
+        """Read paths have no run and therefore no assistant."""
+        runtime = build_server_runtime(
+            access_context=access_context,  # type: ignore[arg-type]
+            store=None,
+            user=Mock(),
+            assistant_id="asst-1",
+        )
+
+        assert isinstance(runtime, AegraReadRuntime)
+        assert isinstance(runtime, _ReadRuntime)
+        assert runtime.assistant_id is None
+
+    def test_runtime_only_factory_reads_assistant_id(self) -> None:
+        """The zero-config factory signature can read the assistant without a config param."""
+        seen: dict[str, Any] = {}
+
+        def make_graph(runtime: ServerRuntime) -> str:
+            seen["assistant_id"] = runtime.assistant_id  # type: ignore[union-attr]
+            return "graph"
+
+        classify_factory(make_graph, "assistant_rt_graph")
+        runtime = build_server_runtime(
+            access_context="threads.create_run",
+            store=Mock(),
+            user=Mock(),
+            assistant_id="asst-1",
+        )
+
+        assert invoke_factory(make_graph, "assistant_rt_graph", {}, runtime) == "graph"
+        assert seen["assistant_id"] == "asst-1"
+
+    def test_read_path_factory_does_not_raise(self) -> None:
+        """A factory reading assistant_id still works for schema extraction."""
+
+        def make_graph(runtime: ServerRuntime) -> str | None:
+            return runtime.assistant_id  # type: ignore[union-attr]
+
+        classify_factory(make_graph, "assistant_read_graph")
+        runtime = build_server_runtime(access_context="assistants.read", store=None, user=None)
+
+        assert invoke_factory(make_graph, "assistant_read_graph", {}, runtime) is None
 
 
 # ---------------------------------------------------------------------------

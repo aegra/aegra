@@ -55,6 +55,7 @@ def _make_run_orm(
     *,
     run_id: str = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
     thread_id: str = "11111111-2222-3333-4444-555555555555",
+    assistant_id: str = "99999999-8888-7777-6666-555555555555",
     status: str = "pending",
     execution_params: dict | None = None,
 ) -> MagicMock:
@@ -62,6 +63,7 @@ def _make_run_orm(
     orm = MagicMock()
     orm.run_id = run_id
     orm.thread_id = thread_id
+    orm.assistant_id = assistant_id
     orm.status = status
     orm.execution_params = execution_params or {
         "graph_id": "test-graph",

@@ -76,3 +76,79 @@ class TestValidateResumeCommand:
         session = _session_returning(_thread("idle"))
         await _validate_resume_command(session, "t1", None)
         session.scalar.assert_not_awaited()
+
+
+class TestPrepareRunAssistantIdentity:
+    """The resolved assistant becomes the run's server-authoritative identity."""
+
+    @staticmethod
+    def _session(assistant: object, thread: object) -> AsyncMock:
+        """A session that answers the assistant lookup, then the thread lookup."""
+        session = AsyncMock()
+        session.scalar = AsyncMock(side_effect=[assistant, thread])
+        session.execute = AsyncMock(return_value=MagicMock(rowcount=1))
+        session.add = MagicMock()
+        return session
+
+    @staticmethod
+    def _assistant() -> SimpleNamespace:
+        return SimpleNamespace(
+            assistant_id="asst-1",
+            graph_id="graph-1",
+            config={},
+            context={},
+        )
+
+    async def _prepare(self, monkeypatch: pytest.MonkeyPatch, request_config: dict | None) -> object:
+        from aegra_api.models import RunCreate, User
+
+        thread = SimpleNamespace(
+            thread_id="thread-1",
+            status="idle",
+            metadata_json={"owner": "user-1"},
+            user_id="user-1",
+        )
+        session = self._session(self._assistant(), thread)
+
+        service = MagicMock()
+        service.list_graphs = MagicMock(return_value={"graph-1": "graph.py:graph"})
+        monkeypatch.setattr(mod, "get_langgraph_service", lambda: service)
+
+        submitted: list[object] = []
+        submit = AsyncMock(side_effect=lambda job: submitted.append(job))
+        monkeypatch.setattr(mod.executor, "submit", submit)
+
+        await mod._prepare_run(
+            session,
+            "thread-1",
+            RunCreate(
+                assistant_id="asst-1",
+                input={"message": "hi"},
+                config=request_config,
+            ),
+            User(identity="user-1"),
+            initial_status="pending",
+        )
+
+        return submitted[0]
+
+    async def test_identity_carries_the_resolved_assistant(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        job = await self._prepare(monkeypatch, None)
+
+        assert job.identity.assistant_id == "asst-1"
+
+    async def test_client_supplied_assistant_id_is_ignored(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Posting another assistant's id under config.configurable must not take effect.
+
+        The graph is built and configured from this value, so honoring the
+        client's would let a caller reach another tenant's configuration.
+        """
+        from aegra_api.services.run_executor import _build_run_config
+
+        job = await self._prepare(
+            monkeypatch,
+            {"configurable": {"assistant_id": "victim-assistant"}},
+        )
+
+        assert job.identity.assistant_id == "asst-1"
+        assert _build_run_config(job)["configurable"]["assistant_id"] == "asst-1"

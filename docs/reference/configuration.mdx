@@ -199,6 +199,35 @@ Use `runtime.execution_runtime` to check whether the factory is being called for
 
 For a complete example combining both layers, see [`examples/factory/`](https://github.com/aegra/aegra/tree/main/examples/factory).
 
+#### Run identity in the factory
+
+Runs stamp the assistant they execute as into the run config, matching LangGraph
+Platform:
+
+```python
+def graph(config: dict):
+    assistant_id = config["configurable"]["assistant_id"]
+    return build_graph(load_settings_for(assistant_id))
+```
+
+The same value is on the runtime, so a factory taking only `runtime` does not
+have to also declare `config`:
+
+```python
+def graph(runtime: ServerRuntime):
+    assistant_id = runtime.assistant_id
+    ...
+```
+
+The server sets it from the resolved assistant and overwrites anything a client
+sends under `config.configurable.assistant_id`, so it is safe to key
+per-assistant credentials and prompts off it.
+
+It is `None` — and absent from `configurable` — outside run execution. State
+reads, state updates and schema extraction have no run and therefore no
+assistant, so a factory that reads it must tolerate `None` (every factory is
+called for `assistants.read` at least once, to extract schemas).
+
 ## `auth`
 
 Configure authentication and authorization.

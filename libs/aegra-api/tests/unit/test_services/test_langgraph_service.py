@@ -189,6 +189,78 @@ class TestLangGraphServiceConfig:
         assert service.get_dependencies() == []
 
 
+class TestLoadGraphRegistry:
+    """Tests for supported graph configuration forms and validation."""
+
+    def test_loads_legacy_string_entry(self) -> None:
+        service = LangGraphService()
+        service.config = {"graphs": {"agent": "./graphs/agent.py:graph"}}
+
+        service._load_graph_registry()
+
+        assert service._graph_registry["agent"] == {
+            "file_path": "./graphs/agent.py",
+            "export_name": "graph",
+        }
+
+    def test_loads_object_entry_with_description(self) -> None:
+        service = LangGraphService()
+        service.config = {
+            "graphs": {
+                "agent": {
+                    "path": "./graphs/agent.py:graph",
+                    "description": "ReAct agent with tools",
+                }
+            }
+        }
+
+        service._load_graph_registry()
+
+        assert service._graph_registry["agent"] == {
+            "file_path": "./graphs/agent.py",
+            "export_name": "graph",
+            "description": "ReAct agent with tools",
+        }
+
+    def test_loads_object_entry_without_description(self) -> None:
+        service = LangGraphService()
+        service.config = {"graphs": {"agent": {"path": "./graphs/agent.py:graph"}}}
+
+        service._load_graph_registry()
+
+        assert service._graph_registry["agent"] == {
+            "file_path": "./graphs/agent.py",
+            "export_name": "graph",
+        }
+
+    @pytest.mark.parametrize(
+        ("graph_config", "message"),
+        [
+            ({"description": "Missing path"}, "missing required 'path'"),
+            ({"path": 42}, "field 'path' must be a string"),
+            ({"path": "./agent.py:graph", "description": 42}, "field 'description' must be a string"),
+            ({"path": "./agent.py:graph", "description": None}, "field 'description' must be a string"),
+            (42, "configuration must be a string or object"),
+            ({"path": "./agent.py"}, "Invalid graph path format"),
+            ({"path": ":graph"}, "Invalid graph path format"),
+            ({"path": "./agent.py:"}, "Invalid graph path format"),
+        ],
+    )
+    def test_rejects_invalid_graph_entry(self, graph_config: object, message: str) -> None:
+        service = LangGraphService()
+        service.config = {"graphs": {"broken": graph_config}}
+
+        with pytest.raises(ValueError, match=message):
+            service._load_graph_registry()
+
+    def test_rejects_non_object_graphs_section(self) -> None:
+        service = LangGraphService()
+        service.config = {"graphs": ["./graphs/agent.py:graph"]}
+
+        with pytest.raises(ValueError, match="field 'graphs' must be an object"):
+            service._load_graph_registry()
+
+
 class TestLangGraphServiceGraphs:
     """Test graph management"""
 

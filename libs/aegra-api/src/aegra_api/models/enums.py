@@ -29,3 +29,5 @@ MultitaskStrategy = Literal[
 ]
 
 RunCancellationAction = Literal["cancel", "interrupt"]
+
+BulkRunCancellationAction = Literal["interrupt", "rollback"]

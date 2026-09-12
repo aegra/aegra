@@ -5,7 +5,7 @@ from datetime import UTC, datetime
 from types import SimpleNamespace
 from typing import Any
 
-from sqlalchemy import DateTime, Insert, inspect
+from sqlalchemy import DateTime, Insert, Update, inspect
 from sqlalchemy.dialects import postgresql
 from sqlalchemy.exc import NoInspectionAvailable
 
@@ -98,3 +98,20 @@ def override_get_session_dep(
         yield session_factory()
 
     return _dep
+
+
+def apply_thread_metadata_merge(stmt: Update, row: Any) -> None:
+    """Apply a thread UPDATE to *row* the way Postgres would.
+
+    ``PATCH /threads/{id}`` merges metadata in SQL (``metadata_json ||
+    :metadata_patch``) so that concurrent writers cannot overwrite each other,
+    which leaves a session mock standing in for the database: bound scalars are
+    assigned and the bound patch is merged over the row's existing metadata,
+    as ``jsonb || jsonb`` does at the top level.
+    """
+    params = stmt.compile(dialect=postgresql.dialect()).params
+    patch = params.get("metadata_patch")
+    if patch is not None:
+        row.metadata_json = {**(getattr(row, "metadata_json", None) or {}), **patch}
+    if "updated_at" in params:
+        row.updated_at = params["updated_at"]

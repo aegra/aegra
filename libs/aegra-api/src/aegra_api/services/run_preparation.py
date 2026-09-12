@@ -12,7 +12,7 @@ from uuid import uuid4
 import structlog
 from asgi_correlation_id import correlation_id
 from fastapi import HTTPException
-from sqlalchemy import or_, select, update
+from sqlalchemy import ColumnElement, case, func, literal_column, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from aegra_api.core.orm import Assistant as AssistantORM
@@ -25,6 +25,7 @@ from aegra_api.services.executor import executor
 from aegra_api.services.langgraph_service import get_langgraph_service
 from aegra_api.services.run_status import set_thread_status
 from aegra_api.utils.assistants import resolve_assistant_id
+from aegra_api.utils.jsonb import jsonb_patch, jsonb_shallow_merge
 from aegra_api.utils.run_utils import _merge_jsonb
 
 logger = structlog.getLogger(__name__)
@@ -138,14 +139,16 @@ async def update_thread_metadata(
     user_id: str | None = None,
     input_data: dict[str, Any] | None = None,
 ) -> None:
-    """Update thread metadata with assistant and graph information (dialect agnostic).
+    """Update thread metadata with assistant and graph information.
 
     If thread doesn't exist, auto-creates it.
     When *input_data* is provided and the thread has no name yet, the first
     human message content is used as ``thread_name``.
     Does NOT commit — the caller controls the transaction boundary.
     """
-    # Read-modify-write to avoid DB-specific JSON concat operators
+    # This read decides whether to auto-create; the update below merges in the
+    # database, so a PATCH /threads/{id} racing this run cannot drop the keys
+    # written here (or have its own dropped).
     thread = await session.scalar(select(ThreadORM).where(ThreadORM.thread_id == thread_id))
 
     thread_name = _extract_thread_name(input_data or {})
@@ -171,18 +174,30 @@ async def update_thread_metadata(
         session.add(thread_orm)
         return
 
-    md = dict(getattr(thread, "metadata_json", {}) or {})
-    md.update(
-        {
-            "assistant_id": str(assistant_id),
-            "graph_id": graph_id,
-        }
-    )
-    # Only set thread_name if empty and we have a name from the input
-    if thread_name and not md.get("thread_name"):
-        md["thread_name"] = thread_name
+    patches: list[ColumnElement[Any]] = [
+        jsonb_patch({"assistant_id": str(assistant_id), "graph_id": graph_id}, "metadata_patch")
+    ]
+    if thread_name:
+        # Only name a thread that has no name yet. The condition is evaluated at
+        # write time against the row the UPDATE locks, not against the read above.
+        patches.append(
+            case(
+                (
+                    func.coalesce(ThreadORM.metadata_json["thread_name"].astext, "") == "",
+                    jsonb_patch({"thread_name": thread_name}, "thread_name_patch"),
+                ),
+                else_=literal_column("'{}'::jsonb"),
+            )
+        )
+
     await session.execute(
-        update(ThreadORM).where(ThreadORM.thread_id == thread_id).values(metadata_json=md, updated_at=datetime.now(UTC))
+        update(ThreadORM)
+        .where(ThreadORM.thread_id == thread_id)
+        .values(
+            metadata_json=jsonb_shallow_merge(ThreadORM.metadata_json, *patches),
+            updated_at=datetime.now(UTC),
+        )
+        .execution_options(synchronize_session=False)
     )
 
 

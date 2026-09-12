@@ -18,6 +18,7 @@ from tests.fixtures.clients import create_test_app, make_client
 from tests.fixtures.database import (
     DummyScalarResult,
     DummySessionBase,
+    apply_thread_metadata_merge,
     override_get_session_dep,
 )
 from tests.fixtures.session_fixtures import BasicSession, ThreadSession, override_session_dependency
@@ -1194,11 +1195,14 @@ class TestUpdateThread:
             async def scalar(self, _stmt):
                 return thread
 
+            async def execute(self, stmt, *args, **kwargs):
+                # The merge happens in the database; stand in for it.
+                apply_thread_metadata_merge(stmt, thread)
+
             async def commit(self):
                 pass
 
             async def refresh(self, obj):
-                # In a real DB, refresh updates the object; here we just simulate it
                 pass
 
         app.dependency_overrides[core_get_session] = override_get_session_dep(Session)
@@ -1230,6 +1234,9 @@ class TestUpdateThread:
         class Session(DummySessionBase):
             async def scalar(self, _stmt):
                 return thread
+
+            async def execute(self, stmt, *args, **kwargs):
+                apply_thread_metadata_merge(stmt, thread)
 
             async def commit(self):
                 pass
@@ -1271,6 +1278,9 @@ class TestUpdateThread:
         class Session(DummySessionBase):
             async def scalar(self, _stmt):
                 return thread
+
+            async def execute(self, stmt, *args, **kwargs):
+                apply_thread_metadata_merge(stmt, thread)
 
             async def commit(self):
                 pass

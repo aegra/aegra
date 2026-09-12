@@ -227,3 +227,42 @@ async def test_lifespan_skips_ttl_sweeper_without_config() -> None:
 
         mock_sweeper.start.assert_not_awaited()
         mock_sweeper.stop.assert_not_awaited()
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_lifespan_fails_on_default_graph_id_that_names_no_graph(tmp_path, monkeypatch) -> None:
+    """A default_graph_id typo fails the boot, naming the value and the choices.
+
+    Resolution happens before migrations or the database connection, so the
+    error is the config's, not a downstream symptom of it.
+    """
+    import json
+
+    import aegra_api.main as main_module
+
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "aegra.json").write_text(
+        json.dumps(
+            {
+                "default_graph_id": "agnet",
+                "graphs": {"agent": "./agent.py:graph", "other": "./other.py:graph"},
+            }
+        )
+    )
+
+    with (
+        patch("aegra_api.main.run_migrations_async", new_callable=AsyncMock) as mock_migrations,
+        patch("aegra_api.main.db_manager") as mock_db_manager,
+    ):
+        mock_db_manager.initialize = AsyncMock()
+
+        with pytest.raises(ValueError) as exc_info:
+            async with main_module.lifespan(MagicMock()):
+                pass
+
+    message = str(exc_info.value)
+    assert "agnet" in message
+    assert "agent, other" in message
+    mock_migrations.assert_not_called()
+    mock_db_manager.initialize.assert_not_called()

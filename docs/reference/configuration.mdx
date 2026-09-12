@@ -30,6 +30,7 @@ aegra dev
     "agent": "./src/react_agent/graph.py:graph",
     "agent_hitl": "./src/react_agent_hitl/graph.py:graph"
   },
+  "default_graph_id": "agent",
   "auth": {
     "path": "./my_auth.py:auth",
     "disable_studio_auth": false
@@ -199,6 +200,34 @@ Use `runtime.execution_runtime` to check whether the factory is being called for
 
 For a complete example combining both layers, see [`examples/factory/`](https://github.com/aegra/aegra/tree/main/examples/factory).
 
+## `default_graph_id`
+
+Nominate the graph that `POST /assistants` uses when a request omits `graph_id`.
+
+```json
+{
+  "graphs": {
+    "agent": "./src/agent/graph.py:graph",
+    "agent_hitl": "./src/agent_hitl/graph.py:graph"
+  },
+  "default_graph_id": "agent"
+}
+```
+
+| Type | Description |
+|------|-------------|
+| `string` | A key of `graphs`. Optional. |
+
+- A config with exactly one graph defaults to it without setting this key
+- A value that names no configured graph fails startup, listing the graph ids that exist
+- Set nothing with several graphs configured and `graph_id` stays required — a create that omits it answers `422`
+- An explicit `graph_id` in the request always wins
+
+The resolved default is published in the OpenAPI schema, so clients generated
+against a deployment that has one need not send `graph_id` at all.
+
+See [assistants guide](/guides/assistants) for how creates use it.
+
 ## `auth`
 
 Configure authentication and authorization.
@@ -322,6 +351,18 @@ If neither `checkpointer.ttl` nor `AEGRA_THREAD_TTL` is configured, threads neve
   "graphs": {
     "agent": "./src/agent/graph.py:graph"
   }
+}
+```
+
+### With a house default graph
+
+```json
+{
+  "graphs": {
+    "agent": "./src/agent/graph.py:graph",
+    "agent_hitl": "./src/agent_hitl/graph.py:graph"
+  },
+  "default_graph_id": "agent"
 }
 ```
 

@@ -44,6 +44,32 @@ async def main():
 asyncio.run(main())
 ```
 
+### Omitting `graph_id`
+
+A deployment with one graph has only one answer, so `graph_id` is optional:
+
+```python
+assistant = await client.assistants.create(name="Customer Support Agent")
+```
+
+With several graphs, nominate one with `default_graph_id` in `aegra.json` and
+creates that omit `graph_id` use it:
+
+```json
+{
+  "graphs": {
+    "agent": "./src/agent/graph.py:graph",
+    "agent_hitl": "./src/agent_hitl/graph.py:graph"
+  },
+  "default_graph_id": "agent"
+}
+```
+
+An explicit `graph_id` always wins. With several graphs and no
+`default_graph_id`, a create that omits `graph_id` answers `422` listing the
+graphs it could have meant. See the
+[configuration reference](/reference/configuration) for the key.
+
 ### Idempotent creation
 
 Use `if_exists` to avoid errors when the assistant already exists:

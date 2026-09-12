@@ -1,6 +1,7 @@
 """Configuration management for Aegra HTTP settings"""
 
 import json
+from functools import cache
 from pathlib import Path
 from typing import TypedDict
 
@@ -237,6 +238,50 @@ def load_auth_config() -> AuthConfig | None:
         return auth_config
 
     return None
+
+
+def _resolve_default_graph_id(config: dict | None) -> str | None:
+    """Resolve the graph a create falls back to when the request omits ``graph_id``.
+
+    An explicit ``default_graph_id`` wins; otherwise a deployment with exactly
+    one graph defaults to it, because no other choice was available. Returns
+    None when several graphs are configured and none is nominated, which keeps
+    ``graph_id`` required.
+
+    Raises:
+        ValueError: ``default_graph_id`` does not name a configured graph.
+    """
+    if not config:
+        return None
+
+    graphs = config.get("graphs") or {}
+    configured = config.get("default_graph_id")
+
+    if configured is not None:
+        if not isinstance(configured, str) or configured not in graphs:
+            available = ", ".join(graphs) or "(none)"
+            raise ValueError(
+                f"default_graph_id {configured!r} does not name a configured graph. Available graph ids: {available}"
+            )
+        return configured
+
+    if len(graphs) == 1:
+        return next(iter(graphs))
+
+    return None
+
+
+@cache
+def get_default_graph_id() -> str | None:
+    """Resolve the deployment-wide default graph id from aegra.json or langgraph.json.
+
+    Resolved once and cached. Invalid config raises so a default naming no
+    graph fails the boot instead of surfacing at the first assistant create.
+
+    Returns:
+        Default graph id, or None when ``graph_id`` stays required
+    """
+    return _resolve_default_graph_id(load_config())
 
 
 def get_config_dir() -> Path | None:

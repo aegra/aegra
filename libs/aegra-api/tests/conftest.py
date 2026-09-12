@@ -135,6 +135,21 @@ def clear_auth_cache():
     get_auth_backend.cache_clear()
 
 
+@pytest.fixture(autouse=True)
+def clear_default_graph_id_cache():
+    """Clear the resolved default graph_id between tests.
+
+    get_default_graph_id() is @cache'd so it resolves once per process; tests
+    that point the config resolver at a temp directory must not leak their
+    answer into the next test.
+    """
+    from aegra_api.config import get_default_graph_id
+
+    get_default_graph_id.cache_clear()
+    yield
+    get_default_graph_id.cache_clear()
+
+
 # --- AUTO-SKIP GEO-BLOCK FAILURES ---
 @pytest.hookimpl(hookwrapper=True)
 def pytest_runtest_makereport(item, call):

@@ -177,6 +177,10 @@ class BrokerManager(BaseBrokerManager):
         """Return the current event sequence from the in-memory counter."""
         return self._event_counters.get(run_id, 0)
 
+    async def refresh_replay_ttl(self, run_id: str) -> None:
+        """No-op for in-memory broker; unfinished runs are never swept."""
+        return None
+
     async def _cleanup_old_brokers(self) -> None:
         """Remove finished brokers older than 1 hour every 5 minutes."""
         while True:

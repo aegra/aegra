@@ -29,6 +29,7 @@ from aegra_api.core.redis_manager import redis_manager
 from aegra_api.models.run_job import RunJob
 from aegra_api.observability.span_enrichment import merge_run_metadata, set_trace_context
 from aegra_api.services.base_executor import BaseExecutor
+from aegra_api.services.broker import broker_manager
 from aegra_api.services.run_executor import (
     _lease_loss_cancellations,
     _shutdown_cancellations,
@@ -578,6 +579,11 @@ async def _heartbeat_loop(
             logger.debug("Lease extended", run_id=run_id, worker=worker_name)
         except Exception:
             logger.warning("Heartbeat lease extension failed", run_id=run_id, worker=worker_name)
+
+        try:
+            await broker_manager.refresh_replay_ttl(run_id)
+        except Exception:
+            logger.warning("Failed refreshing replay TTL during heartbeat", run_id=run_id)
 
 
 async def _is_run_terminal(run_id: str) -> bool:

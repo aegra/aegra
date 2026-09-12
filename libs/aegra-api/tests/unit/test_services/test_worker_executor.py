@@ -255,6 +255,69 @@ class TestHeartbeatLoop:
         # Loop continued despite DB errors (2 iterations before cancel on 3rd sleep)
         assert session.execute.await_count == 2
 
+    @pytest.mark.asyncio
+    async def test_heartbeat_refreshes_replay_ttl(self) -> None:
+        session = AsyncMock()
+        session.execute = AsyncMock()
+        session.commit = AsyncMock()
+        maker = _make_session_maker(session)
+
+        call_count = 0
+
+        async def counting_sleep(delay: float) -> None:
+            nonlocal call_count
+            call_count += 1
+            if call_count >= 2:
+                raise asyncio.CancelledError
+
+        with (
+            patch(f"{MODULE}._get_session_maker", return_value=maker),
+            patch(f"{MODULE}.settings") as mock_settings,
+            patch(f"{MODULE}.asyncio.sleep", side_effect=counting_sleep),
+            patch(f"{MODULE}.broker_manager.refresh_replay_ttl", new_callable=AsyncMock) as mock_refresh,
+        ):
+            mock_settings.worker.HEARTBEAT_INTERVAL_SECONDS = 1
+            mock_settings.worker.LEASE_DURATION_SECONDS = 30
+
+            with pytest.raises(asyncio.CancelledError):
+                await _heartbeat_loop("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee", "worker-0")
+
+        mock_refresh.assert_awaited_once_with("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee")
+
+    @pytest.mark.asyncio
+    async def test_heartbeat_continues_when_refresh_replay_ttl_fails(self) -> None:
+        session = AsyncMock()
+        session.execute = AsyncMock()
+        session.commit = AsyncMock()
+        maker = _make_session_maker(session)
+
+        call_count = 0
+
+        async def counting_sleep(delay: float) -> None:
+            nonlocal call_count
+            call_count += 1
+            if call_count >= 2:
+                raise asyncio.CancelledError
+
+        with (
+            patch(f"{MODULE}._get_session_maker", return_value=maker),
+            patch(f"{MODULE}.settings") as mock_settings,
+            patch(f"{MODULE}.asyncio.sleep", side_effect=counting_sleep),
+            patch(
+                f"{MODULE}.broker_manager.refresh_replay_ttl",
+                new_callable=AsyncMock,
+                side_effect=Exception("Redis connection lost"),
+            ),
+        ):
+            mock_settings.worker.HEARTBEAT_INTERVAL_SECONDS = 1
+            mock_settings.worker.LEASE_DURATION_SECONDS = 30
+
+            with pytest.raises(asyncio.CancelledError):
+                await _heartbeat_loop("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee", "worker-0")
+
+        assert session.execute.await_count == 1
+        assert session.commit.await_count == 1
+
 
 # ------------------------------------------------------------------
 # _is_run_terminal

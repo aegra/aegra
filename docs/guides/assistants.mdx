@@ -100,6 +100,18 @@ assistant = await client.assistants.update(
 )
 ```
 
+Updates are partial: a field you leave out keeps the value it already has, and
+`metadata` is merged into the assistant's existing metadata rather than
+replacing it. To clear a field, send it explicitly empty:
+
+```python
+# Drop the config, and the context that mirrors config["configurable"]
+assistant = await client.assistants.update(
+    assistant_id="your-assistant-id",
+    config={},
+)
+```
+
 ## Versioning
 
 Assistants are versioned. Each update creates a new version while preserving the history:

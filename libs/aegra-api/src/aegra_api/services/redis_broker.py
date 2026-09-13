@@ -23,7 +23,7 @@ from aegra_api.core.active_runs import active_runs, explicit_run_cancellations
 from aegra_api.core.redis_manager import redis_manager
 from aegra_api.core.serializers import GeneralSerializer
 from aegra_api.models.enums import RunCancellationAction
-from aegra_api.services.base_broker import BaseBrokerManager, BaseRunBroker
+from aegra_api.services.base_broker import REPLAY_RETENTION_SECONDS, BaseBrokerManager, BaseRunBroker
 from aegra_api.settings import settings
 from aegra_api.utils import generate_event_id
 
@@ -31,10 +31,9 @@ logger = structlog.getLogger(__name__)
 
 _serializer = GeneralSerializer()
 
-# TTL for the replay buffer — safety net for runs that crash without cleanup.
-# cleanup_run() deletes the broker on normal completion; this TTL only matters
-# if cleanup never fires (e.g. process crash, OOM kill).
-_REPLAY_TTL_SECONDS = 600  # 10 minutes
+# Every write refreshes the TTL, so the buffer expires this long after the last
+# event, matching the in-memory post-completion window.
+_REPLAY_TTL_SECONDS = REPLAY_RETENTION_SECONDS
 # Max events in the replay buffer (prevents unbounded growth)
 _REPLAY_MAX_EVENTS = 10_000
 

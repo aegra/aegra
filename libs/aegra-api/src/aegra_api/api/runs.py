@@ -20,7 +20,7 @@ from aegra_api.core.orm import Run as RunORM
 from aegra_api.core.orm import Thread as ThreadORM
 from aegra_api.core.orm import _get_session_maker, get_session
 from aegra_api.core.sse import create_end_event, get_sse_headers, make_sse_response, sse_to_bytes
-from aegra_api.models import Run, RunCreate, RunStatus, User
+from aegra_api.models import Run, RunCreate, RunsCancel, RunStatus, User
 from aegra_api.models.enums import RunCancellationAction
 from aegra_api.models.errors import CONFLICT, NOT_FOUND, SSE_RESPONSE
 from aegra_api.services.broker import broker_manager
@@ -527,6 +527,47 @@ async def cancel_run_endpoint(
 
     await session.refresh(run_orm)
     return Run.model_validate(run_orm)
+
+
+@router.post("/runs/cancel", status_code=204, responses={**NOT_FOUND})
+async def cancel_runs(
+    request: RunsCancel,
+    action: RunCancellationAction = Query(
+        "interrupt",
+        description="Cancellation strategy: 'cancel' for hard cancel, 'interrupt' for cooperative interrupt.",
+    ),
+    user: User = Depends(get_current_user),
+    session: AsyncSession = Depends(get_session),
+) -> None:
+    """Cancel several runs at once, by status or by thread_id plus run_ids.
+
+    Runs the caller does not own or that already finished are skipped. The
+    thread must exist for the run_ids form; unknown run ids are ignored.
+    """
+    stmt = select(RunORM).where(RunORM.user_id == user.identity)
+    if request.status is not None:
+        active = ["pending", "running"] if request.status == "all" else [request.status]
+        stmt = stmt.where(RunORM.status.in_(active))
+    else:
+        thread_exists = await session.scalar(
+            select(ThreadORM.thread_id).where(
+                ThreadORM.thread_id == request.thread_id, ThreadORM.user_id == user.identity
+            )
+        )
+        if not thread_exists:
+            raise HTTPException(404, f"Thread '{request.thread_id}' not found")
+        stmt = stmt.where(RunORM.thread_id == request.thread_id, RunORM.run_id.in_(request.run_ids or []))
+
+    runs = (await session.scalars(stmt)).all()
+    logger.info(
+        "[cancel_runs] bulk cancel",
+        action=action,
+        user=user.identity,
+        selector=request.model_dump(exclude_none=True),
+        count=len(runs),
+    )
+    for run_orm in runs:
+        await _request_run_interruption(session, run_orm, action)
 
 
 @router.delete(

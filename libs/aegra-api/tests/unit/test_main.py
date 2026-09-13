@@ -1,6 +1,8 @@
 """Tests for application lifespan and startup logic"""
 
 import importlib
+import json
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -231,14 +233,14 @@ async def test_lifespan_skips_ttl_sweeper_without_config() -> None:
 
 @pytest.mark.unit
 @pytest.mark.asyncio
-async def test_lifespan_fails_on_default_graph_id_that_names_no_graph(tmp_path, monkeypatch) -> None:
+async def test_lifespan_fails_on_default_graph_id_that_names_no_graph(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """A default_graph_id typo fails the boot, naming the value and the choices.
 
     Resolution happens before migrations or the database connection, so the
     error is the config's, not a downstream symptom of it.
     """
-    import json
-
     import aegra_api.main as main_module
 
     monkeypatch.chdir(tmp_path)

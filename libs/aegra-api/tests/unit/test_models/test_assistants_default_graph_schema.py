@@ -18,7 +18,7 @@ def _use_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, config: dict) -
     (tmp_path / "aegra.json").write_text(json.dumps(config))
 
 
-def test_schema_advertises_the_resolved_default(tmp_path, monkeypatch):
+def test_schema_advertises_the_resolved_default(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """A resolvable default is optional, and clients are told which graph it is."""
     _use_config(
         tmp_path,
@@ -35,7 +35,7 @@ def test_schema_advertises_the_resolved_default(tmp_path, monkeypatch):
     assert "graph_id" not in schema.get("required", [])
 
 
-def test_schema_advertises_the_sole_graph_as_the_default(tmp_path, monkeypatch):
+def test_schema_advertises_the_sole_graph_as_the_default(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """The single-graph deployment needs no config to publish its default."""
     _use_config(tmp_path, monkeypatch, {"graphs": {"agent": "./agent.py:graph"}})
 
@@ -45,7 +45,7 @@ def test_schema_advertises_the_sole_graph_as_the_default(tmp_path, monkeypatch):
     assert "graph_id" not in schema.get("required", [])
 
 
-def test_schema_keeps_graph_id_required_without_a_default(tmp_path, monkeypatch):
+def test_schema_keeps_graph_id_required_without_a_default(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Several graphs and no nominated default: clients must still send one."""
     _use_config(
         tmp_path,

@@ -4,11 +4,13 @@ This file contains shared fixtures and configuration that are available
 to all tests across the test suite.
 """
 
+from collections.abc import Iterator
 from unittest.mock import AsyncMock
 
 import pytest
 from httpx import HTTPStatusError
 
+from aegra_api.config import get_default_graph_id
 from tests.fixtures.auth import DummyUser
 from tests.fixtures.clients import (
     create_test_app,
@@ -136,15 +138,13 @@ def clear_auth_cache():
 
 
 @pytest.fixture(autouse=True)
-def clear_default_graph_id_cache():
+def clear_default_graph_id_cache() -> Iterator[None]:
     """Clear the resolved default graph_id between tests.
 
     get_default_graph_id() is @cache'd so it resolves once per process; tests
     that point the config resolver at a temp directory must not leak their
     answer into the next test.
     """
-    from aegra_api.config import get_default_graph_id
-
     get_default_graph_id.cache_clear()
     yield
     get_default_graph_id.cache_clear()

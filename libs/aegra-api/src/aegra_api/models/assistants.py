@@ -5,6 +5,35 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from aegra_api.config import get_default_graph_id
+
+
+def _publish_default_graph_id(schema: dict[str, Any]) -> None:
+    """Describe this deployment's ``graph_id`` contract in the generated schema.
+
+    Whether a create may omit ``graph_id`` is a property of the deployment's
+    config rather than of the model, so it is stamped when the schema is built
+    rather than when the class is defined. Generated clients then see the value
+    the server will use, or that they still have to supply one.
+    """
+    graph_id = schema["properties"]["graph_id"]
+    default = get_default_graph_id()
+
+    if default is None:
+        graph_id.pop("default", None)
+        # Non-nullable as well as required. The field is nullable on the model
+        # only because a default may stand in for it; with no default, a null
+        # is treated as omitted and answered 422, so publishing the nullable
+        # branch would describe {"graph_id": null} as valid when it is not.
+        graph_id.pop("anyOf", None)
+        graph_id["type"] = "string"
+        required = schema.setdefault("required", [])
+        if "graph_id" not in required:
+            required.append("graph_id")
+        return
+
+    graph_id["default"] = default
+
 
 class AssistantCreate(BaseModel):
     """Request model for creating assistants"""
@@ -17,11 +46,19 @@ class AssistantCreate(BaseModel):
     description: str | None = Field(None, description="Assistant description")
     config: dict[str, Any] | None = Field(default_factory=dict, description="Assistant configuration")
     context: dict[str, Any] | None = Field(default_factory=dict, description="Assistant context")
-    graph_id: str = Field(..., description="LangGraph graph ID from aegra.json")
+    graph_id: str | None = Field(
+        None,
+        description=(
+            "LangGraph graph ID from aegra.json. Optional when the deployment resolves a default "
+            "graph — `default_graph_id`, or the sole entry in `graphs`; required otherwise."
+        ),
+    )
     metadata: dict[str, Any] | None = Field(
         default_factory=dict, description="Metadata to use for searching and filtering assistants."
     )
     if_exists: str | None = Field("error", description="What to do if assistant exists: error or do_nothing")
+
+    model_config = ConfigDict(json_schema_extra=_publish_default_graph_id)
 
 
 class Assistant(BaseModel):

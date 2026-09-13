@@ -1,6 +1,9 @@
 """Integration tests for assistants CRUD operations"""
 
+from unittest.mock import MagicMock
+
 import pytest
+from fastapi.testclient import TestClient
 
 from aegra_api.services.assistant_service import get_assistant_service
 from tests.fixtures.clients import create_test_app, make_client
@@ -48,6 +51,20 @@ class TestCreateAssistant:
         assert data["name"] == "Test Assistant"
         assert data["graph_id"] == "test-graph"
         mock_assistant_service.create_assistant.assert_called_once()
+
+    def test_create_assistant_without_graph_id(self, client: TestClient, mock_assistant_service: MagicMock) -> None:
+        """graph_id may be omitted: the request boundary no longer rejects it.
+
+        Which graph it resolves to is the service's business; the API layer only
+        has to let the create through.
+        """
+        assistant = make_assistant()
+        mock_assistant_service.create_assistant.return_value = assistant
+
+        resp = client.post("/assistants", json={"name": "Test Assistant"})
+
+        assert resp.status_code == 200
+        assert mock_assistant_service.create_assistant.call_args.args[0].graph_id is None
 
     def test_create_assistant_with_metadata(self, client, mock_assistant_service):
         """Test creating assistant with rich metadata"""

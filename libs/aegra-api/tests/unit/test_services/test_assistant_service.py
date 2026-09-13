@@ -1203,3 +1203,76 @@ class TestAuthDispatch:
         stmt = assistant_service.session.scalars.call_args.args[0]
         compiled = stmt.compile(dialect=postgresql.dialect())
         assert {"owner": "user-123"} in compiled.params.values()
+
+
+class TestAssistantServiceDefaultGraph:
+    """graph_id may be omitted when the deployment resolves a default graph."""
+
+    @pytest.fixture
+    def two_graphs(self, assistant_service: AssistantService) -> None:
+        assistant_service.langgraph_service.list_graphs.return_value = {
+            "test-graph": {},
+            "other-graph": {},
+        }
+
+    @pytest.mark.asyncio
+    async def test_create_assistant_falls_back_to_the_default_graph(
+        self,
+        assistant_service: AssistantService,
+    ) -> None:
+        """An omitted graph_id resolves to the deployment default."""
+        insert_wins(assistant_service.session)
+
+        with patch("aegra_api.services.assistant_service.get_default_graph_id", return_value="test-graph"):
+            result = await assistant_service.create_assistant(AssistantCreate(name="Test Assistant"))
+
+        assert result.graph_id == "test-graph"
+        assistant_service.langgraph_service.get_graph_for_validation.assert_awaited_once_with("test-graph")
+
+    @pytest.mark.asyncio
+    async def test_create_assistant_prefers_an_explicit_graph_id(
+        self,
+        assistant_service: AssistantService,
+        two_graphs: None,
+    ) -> None:
+        """The request wins over the configured default."""
+        insert_wins(assistant_service.session)
+
+        with patch("aegra_api.services.assistant_service.get_default_graph_id", return_value="other-graph"):
+            result = await assistant_service.create_assistant(
+                AssistantCreate(name="Test Assistant", graph_id="test-graph")
+            )
+
+        assert result.graph_id == "test-graph"
+
+    @pytest.mark.asyncio
+    async def test_should_return_422_when_omitted_and_no_default_resolves(
+        self,
+        assistant_service: AssistantService,
+        two_graphs: None,
+    ) -> None:
+        """Without a default the field is still required, and the error names the choices."""
+        with (
+            patch("aegra_api.services.assistant_service.get_default_graph_id", return_value=None),
+            pytest.raises(HTTPException) as exc_info,
+        ):
+            await assistant_service.create_assistant(AssistantCreate(name="Test Assistant"))
+
+        assert exc_info.value.status_code == 422
+        assert "test-graph" in exc_info.value.detail
+        assert "other-graph" in exc_info.value.detail
+
+    @pytest.mark.asyncio
+    async def test_create_assistant_dispatches_the_resolved_graph_id(
+        self,
+        assistant_service: AssistantService,
+    ) -> None:
+        """Auth handlers see the graph the create will use, not the omitted field."""
+        insert_wins(assistant_service.session)
+        dispatch = AsyncMock()
+        assistant_service._dispatch = dispatch
+
+        with patch("aegra_api.services.assistant_service.get_default_graph_id", return_value="test-graph"):
+            await assistant_service.create_assistant(AssistantCreate(name="Test Assistant"))
+
+        assert dispatch.await_args.args[1]["graph_id"] == "test-graph"

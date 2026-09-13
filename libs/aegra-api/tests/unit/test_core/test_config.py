@@ -5,7 +5,12 @@ from pathlib import Path
 
 import pytest
 
-from aegra_api.config import load_checkpointer_config, load_http_config, load_store_config
+from aegra_api.config import (
+    get_default_graph_id,
+    load_checkpointer_config,
+    load_http_config,
+    load_store_config,
+)
 
 
 def test_load_http_config_from_aegra_json(tmp_path, monkeypatch):
@@ -250,3 +255,91 @@ def test_load_checkpointer_config_no_config(tmp_path: Path, monkeypatch: pytest.
     config = load_checkpointer_config()
 
     assert config is None
+
+
+def _write_config(tmp_path: Path, config: dict) -> None:
+    (tmp_path / "aegra.json").write_text(json.dumps(config))
+
+
+class TestDefaultGraphId:
+    """get_default_graph_id resolves the fallback for POST /assistants."""
+
+    def test_single_graph_is_the_default(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """One graph is unambiguous, so it needs no configuration to be the default."""
+        monkeypatch.chdir(tmp_path)
+        _write_config(tmp_path, {"graphs": {"agent": "./agent.py:graph"}})
+
+        assert get_default_graph_id() == "agent"
+
+    def test_several_graphs_have_no_default(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """With a choice to make, the server does not make it — graph_id stays required."""
+        monkeypatch.chdir(tmp_path)
+        _write_config(
+            tmp_path,
+            {"graphs": {"agent": "./agent.py:graph", "other": "./other.py:graph"}},
+        )
+
+        assert get_default_graph_id() is None
+
+    def test_configured_default_selects_one_of_several_graphs(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """default_graph_id nominates the house default for a multi-graph deployment."""
+        monkeypatch.chdir(tmp_path)
+        _write_config(
+            tmp_path,
+            {
+                "default_graph_id": "other",
+                "graphs": {"agent": "./agent.py:graph", "other": "./other.py:graph"},
+            },
+        )
+
+        assert get_default_graph_id() == "other"
+
+    def test_configured_default_wins_over_the_sole_graph(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """An explicit key is honoured even where the single-graph rule would also fire."""
+        monkeypatch.chdir(tmp_path)
+        _write_config(tmp_path, {"default_graph_id": "agent", "graphs": {"agent": "./agent.py:graph"}})
+
+        assert get_default_graph_id() == "agent"
+
+    def test_should_raise_when_default_names_no_configured_graph(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A typo fails loudly, naming both the bad value and what was available."""
+        monkeypatch.chdir(tmp_path)
+        _write_config(
+            tmp_path,
+            {
+                "default_graph_id": "agnet",
+                "graphs": {"agent": "./agent.py:graph", "other": "./other.py:graph"},
+            },
+        )
+
+        with pytest.raises(ValueError) as exc_info:
+            get_default_graph_id()
+
+        message = str(exc_info.value)
+        assert "agnet" in message
+        assert "agent, other" in message
+
+    def test_should_raise_when_default_is_not_a_string(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A non-string default can never name a graph."""
+        monkeypatch.chdir(tmp_path)
+        _write_config(tmp_path, {"default_graph_id": ["agent"], "graphs": {"agent": "./agent.py:graph"}})
+
+        with pytest.raises(ValueError):
+            get_default_graph_id()
+
+    def test_no_config_file_has_no_default(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Nothing to resolve from means graph_id stays required."""
+        monkeypatch.chdir(tmp_path)
+
+        assert get_default_graph_id() is None
+
+    def test_langgraph_json_fallback_resolves_a_default(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """The compatibility config file is read the same way."""
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / "langgraph.json").write_text(json.dumps({"graphs": {"agent": "./agent.py:graph"}}))
+
+        assert get_default_graph_id() == "agent"

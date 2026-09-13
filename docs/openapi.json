@@ -3503,7 +3503,7 @@
           "graph_id": {
             "type": "string",
             "title": "Graph Id",
-            "description": "LangGraph graph ID from aegra.json"
+            "description": "LangGraph graph ID from aegra.json. Optional when the deployment resolves a default graph \u2014 `default_graph_id`, or the sole entry in `graphs`; required otherwise."
           },
           "metadata": {
             "anyOf": [

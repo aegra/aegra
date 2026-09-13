@@ -12,6 +12,7 @@ every other E2E test runs against. They are covered at the unit level, where the
 resolver is pointed at a temporary config instead.
 """
 
+import uuid
 from collections.abc import AsyncIterator
 
 import httpx
@@ -49,15 +50,24 @@ async def test_create_without_graph_id_is_rejected_naming_the_graphs(http_client
 @pytest.mark.e2e
 @pytest.mark.asyncio
 async def test_explicit_graph_id_still_creates(http_client: httpx.AsyncClient) -> None:
-    """The deployment still creates normally when the caller names a graph."""
+    """The deployment still creates normally when the caller names a graph.
+
+    The config is unique per run because a create dedupes on
+    ``(graph_id, config)`` for the calling user: with the default empty config
+    this would match an assistant another test left behind, hand back its id,
+    and have the cleanup below delete something this test never created.
+    """
+    config = {"tags": [f"default-graph-id-e2e-{uuid.uuid4()}"]}
+
     response = await http_client.post(
         "/assistants",
-        json={"name": "Explicit graph id", "graph_id": "agent", "if_exists": "do_nothing"},
+        json={"name": "Explicit graph id", "graph_id": "agent", "config": config},
     )
 
     assert response.status_code == 200, response.text
     created = response.json()
     assert created["graph_id"] == "agent"
+    assert created["config"] == config, "a pre-existing assistant was returned instead of a new one"
 
     try:
         elog("Create with explicit graph_id succeeded", {"assistant_id": created["assistant_id"]})

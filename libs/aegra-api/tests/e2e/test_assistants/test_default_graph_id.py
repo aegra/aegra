@@ -66,10 +66,12 @@ async def test_explicit_graph_id_still_creates(http_client: httpx.AsyncClient) -
 
     assert response.status_code == 200, response.text
     created = response.json()
-    assert created["graph_id"] == "agent"
-    assert created["config"] == config, "a pre-existing assistant was returned instead of a new one"
 
+    # Everything that can fail goes inside, so a failed assertion still cleans
+    # up the assistant it created.
     try:
+        assert created["graph_id"] == "agent"
+        assert created["config"] == config, "a pre-existing assistant was returned instead of a new one"
         elog("Create with explicit graph_id succeeded", {"assistant_id": created["assistant_id"]})
     finally:
         await http_client.delete(f"/assistants/{created['assistant_id']}")

@@ -4,7 +4,7 @@ import asyncio
 import contextlib
 from collections.abc import AsyncIterator, Iterator
 from datetime import UTC, datetime
-from unittest.mock import AsyncMock, MagicMock, call, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
 
 import pytest
@@ -1192,10 +1192,10 @@ class TestStatelessCreateRuns:
         submit.assert_not_awaited()
 
     @pytest.mark.asyncio
-    async def test_cleans_up_all_ephemeral_runs_when_submission_fails(
+    async def test_waits_for_submitted_runs_when_submission_fails(
         self: "TestStatelessCreateRuns", mock_user: User, mock_session: AsyncMock
     ) -> None:
-        """Delete every ephemeral run after a queue failure."""
+        """Wait for submitted runs and delete only unsubmitted runs."""
         requests = [
             RunCreate(assistant_id="agent-1", input={"msg": "one"}),
             RunCreate(assistant_id="agent-2", input={"msg": "two"}),
@@ -1224,11 +1224,8 @@ class TestStatelessCreateRuns:
         ):
             await stateless_create_runs(requests, mock_user, mock_session)
 
-        schedule_cleanup.assert_not_called()
-        assert delete_thread.await_args_list == [
-            call("thread-1", mock_user.identity),
-            call("thread-2", mock_user.identity),
-        ]
+        schedule_cleanup.assert_called_once_with("run-1", "thread-1", mock_user.identity)
+        delete_thread.assert_awaited_once_with("thread-2", mock_user.identity)
 
     @pytest.mark.asyncio
     async def test_preserves_keep_runs_when_a_later_submission_fails(
@@ -1262,6 +1259,40 @@ class TestStatelessCreateRuns:
             await stateless_create_runs(requests, mock_user, mock_session)
 
         schedule_cleanup.assert_not_called()
+        delete_thread.assert_awaited_once_with("thread-2", mock_user.identity)
+
+    @pytest.mark.asyncio
+    async def test_waits_for_submitted_runs_when_submission_is_cancelled(
+        self: "TestStatelessCreateRuns", mock_user: User, mock_session: AsyncMock
+    ) -> None:
+        """Wait for earlier submissions when a later submission is cancelled."""
+        requests = [
+            RunCreate(assistant_id="agent-1", input={"msg": "one"}),
+            RunCreate(assistant_id="agent-2", input={"msg": "two"}),
+        ]
+        prepare = AsyncMock(
+            side_effect=[
+                ("run-1", MagicMock(thread_id="thread-1"), MagicMock()),
+                ("run-2", MagicMock(thread_id="thread-2"), MagicMock()),
+            ]
+        )
+
+        with (
+            patch("aegra_api.api.stateless_runs.uuid4", side_effect=["thread-1", "thread-2"]),
+            patch("aegra_api.api.stateless_runs._apply_create_run_auth", new_callable=AsyncMock),
+            patch("aegra_api.api.stateless_runs._prepare_run", prepare),
+            patch(
+                "aegra_api.api.stateless_runs.executor.submit",
+                new_callable=AsyncMock,
+                side_effect=[None, asyncio.CancelledError],
+            ),
+            patch("aegra_api.api.stateless_runs.schedule_background_cleanup") as schedule_cleanup,
+            patch("aegra_api.api.stateless_runs.delete_thread_by_id", new_callable=AsyncMock) as delete_thread,
+            pytest.raises(asyncio.CancelledError),
+        ):
+            await stateless_create_runs(requests, mock_user, mock_session)
+
+        schedule_cleanup.assert_called_once_with("run-1", "thread-1", mock_user.identity)
         delete_thread.assert_awaited_once_with("thread-2", mock_user.identity)
 
     @pytest.mark.asyncio

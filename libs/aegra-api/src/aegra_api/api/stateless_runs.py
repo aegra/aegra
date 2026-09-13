@@ -348,9 +348,11 @@ async def stateless_create_runs(
         raise
 
     results: list[Run] = []
+    submitted_indices: set[int] = set()
     try:
-        for _index, (run_id, run, job) in enumerate(prepared):
+        for index, (run_id, run, job) in enumerate(prepared):
             await executor.submit(job)
+            submitted_indices.add(index)
             logger.info("Submitted batch run to executor", run_id=run_id)
             results.append(run)
 
@@ -358,23 +360,29 @@ async def stateless_create_runs(
             if requests[index].on_completion != "keep":
                 schedule_background_cleanup(run_id, run.thread_id, user.identity)
     except asyncio.CancelledError:
-        for index, (_run_id, run, _job) in enumerate(prepared):
+        for index, (run_id, run, _job) in enumerate(prepared):
             if requests[index].on_completion != "keep":
-                await _delete_thread_with_log(
-                    run.thread_id,
-                    user.identity,
-                    reason="Failed to delete ephemeral batch run after cancellation",
-                )
+                if index in submitted_indices:
+                    schedule_background_cleanup(run_id, run.thread_id, user.identity)
+                else:
+                    await _delete_thread_with_log(
+                        run.thread_id,
+                        user.identity,
+                        reason="Failed to delete ephemeral batch run after cancellation",
+                    )
         raise
     except Exception:
         # Executor failures can happen after the batch transaction commits.
-        for index, (_run_id, run, _job) in enumerate(prepared):
+        for index, (run_id, run, _job) in enumerate(prepared):
             if requests[index].on_completion != "keep":
-                await _delete_thread_with_log(
-                    run.thread_id,
-                    user.identity,
-                    reason="Failed to delete ephemeral batch run after submission failure",
-                )
+                if index in submitted_indices:
+                    schedule_background_cleanup(run_id, run.thread_id, user.identity)
+                else:
+                    await _delete_thread_with_log(
+                        run.thread_id,
+                        user.identity,
+                        reason="Failed to delete ephemeral batch run after submission failure",
+                    )
         raise
 
     return results

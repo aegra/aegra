@@ -47,18 +47,25 @@ class Assistant(BaseModel):
 
 
 class AssistantUpdate(BaseModel):
-    """Request model for creating assistants"""
+    """Request model for partially updating assistants.
 
-    name: str | None = Field(None, description="The name of the assistant (auto-generated if not provided)")
-    description: str | None = Field(None, description="The description of the assistant. Defaults to null.")
-    config: dict[str, Any] | None = Field(default_factory=dict, description="Configuration to use for the graph.")
-    graph_id: str = Field("agent", description="The ID of the graph")
+    Every field is optional and defaults to ``None`` so that an omitted field
+    is distinguishable from an explicit one via ``model_dump(exclude_unset=True)``:
+    omitting ``config`` keeps the stored config, sending ``{"config": {}}`` clears it.
+    """
+
+    name: str | None = Field(None, description="The name of the assistant. Unchanged when omitted.")
+    description: str | None = Field(None, description="The description of the assistant. Unchanged when omitted.")
+    config: dict[str, Any] | None = Field(
+        None, description="Configuration to use for the graph. Unchanged when omitted."
+    )
+    graph_id: str | None = Field(None, description="The ID of the graph. Unchanged when omitted.")
     context: dict[str, Any] | None = Field(
-        default_factory=dict,
-        description="The context to use for the graph. Useful when graph is configurable.",
+        None,
+        description="The context to use for the graph. Useful when graph is configurable. Unchanged when omitted.",
     )
     metadata: dict[str, Any] | None = Field(
-        default_factory=dict, description="Metadata to use for searching and filtering assistants."
+        None, description="Metadata to merge into the assistant's existing metadata."
     )
 
 

@@ -715,6 +715,151 @@ class TestAssistantServiceUpdate:
         assert "Cannot specify both configurable and context" in str(exc_info.value.detail)
 
 
+class TestAssistantServicePartialUpdate:
+    """PATCH /assistants/{id} is a partial update: a field the caller left out
+    keeps its stored value, and supplied metadata merges into what is stored,
+    which is the contract langgraph_sdk's assistants.update documents."""
+
+    @staticmethod
+    def stored_row() -> Mock:
+        """A row whose every field differs from the request payloads below."""
+        row = Mock()
+        row.assistant_id = "asst-1"
+        row.name = "Stored Assistant"
+        row.description = "Stored description"
+        row.user_id = "user-123"
+        row.graph_id = "stored-graph"
+        row.version = 1
+        row.created_at = datetime.now(UTC)
+        row.updated_at = datetime.now(UTC)
+        row.config = {"configurable": {"model": "stored"}, "recursion_limit": 7}
+        row.context = {"model": "stored"}
+        row.metadata_dict = {"owner": "team-a"}
+        return row
+
+    @staticmethod
+    async def send_patch(service: AssistantService, payload: dict[str, Any], row: Mock) -> tuple[Any, dict[str, Any]]:
+        """PATCH ``payload`` over ``row``; return its version row and UPDATE values.
+
+        The payload goes through ``model_validate`` rather than the constructor
+        so that omitted fields are genuinely unset, as they are over HTTP.
+        """
+        service.session.scalar.side_effect = [row, 1, row]
+        service.session.execute = AsyncMock()
+        service.session.commit = AsyncMock()
+
+        await service.update_assistant(row.assistant_id, AssistantUpdate.model_validate(payload))
+
+        version_row = service.session.add.call_args.args[0]
+        executed_stmt = service.session.execute.call_args.args[0]
+        values = {
+            getattr(column, "name", None): getattr(value, "value", value)
+            for column, value in executed_stmt._values.items()
+        }
+        return version_row, values
+
+    @pytest.mark.asyncio
+    async def test_rename_keeps_every_omitted_field(self, assistant_service: AssistantService) -> None:
+        """What the SDK sends for client.assistants.update(id, name=...)."""
+        row = self.stored_row()
+
+        _, values = await self.send_patch(assistant_service, {"name": "Renamed"}, row)
+
+        assert values["name"] == "Renamed"
+        assert values["description"] == "Stored description"
+        assert values["graph_id"] == "stored-graph"
+        assert values["config"] == {"configurable": {"model": "stored"}, "recursion_limit": 7}
+        assert values["context"] == {"model": "stored"}
+        assert values["metadata"] == {"owner": "team-a"}
+
+    @pytest.mark.asyncio
+    async def test_version_row_records_the_merged_result(self, assistant_service: AssistantService) -> None:
+        """The version history has to be replayable: it stores the assistant as
+        it now is, not the sparse payload that produced it."""
+        row = self.stored_row()
+
+        version_row, _ = await self.send_patch(assistant_service, {"name": "Renamed"}, row)
+
+        assert version_row.name == "Renamed"
+        assert version_row.graph_id == "stored-graph"
+        assert version_row.config == {"configurable": {"model": "stored"}, "recursion_limit": 7}
+        assert version_row.context == {"model": "stored"}
+        assert version_row.metadata_dict == {"owner": "team-a"}
+
+    @pytest.mark.asyncio
+    async def test_supplied_metadata_merges_into_stored_metadata(self, assistant_service: AssistantService) -> None:
+        row = self.stored_row()
+
+        _, values = await self.send_patch(assistant_service, {"metadata": {"env": "prod"}}, row)
+
+        assert values["metadata"] == {"owner": "team-a", "env": "prod"}
+
+    @pytest.mark.asyncio
+    async def test_supplied_metadata_overwrites_only_the_keys_it_names(
+        self, assistant_service: AssistantService
+    ) -> None:
+        row = self.stored_row()
+        row.metadata_dict = {"owner": "team-a", "env": "staging"}
+
+        _, values = await self.send_patch(assistant_service, {"metadata": {"env": "prod"}}, row)
+
+        assert values["metadata"] == {"owner": "team-a", "env": "prod"}
+
+    @pytest.mark.asyncio
+    async def test_handler_injected_metadata_merges_too(self, assistant_service: AssistantService) -> None:
+        """An @auth.on handler injects by mutating value["metadata"] in place,
+        which must land on top of the stored metadata like a caller's would."""
+        row = self.stored_row()
+
+        async def inject(_ctx: Any, value: dict[str, Any]) -> None:
+            value["metadata"]["updated_by"] = "user-123"
+
+        with patch(_DISPATCH, new=AsyncMock(side_effect=inject)):
+            _, values = await self.send_patch(assistant_service, {"name": "Renamed"}, row)
+
+        assert values["metadata"] == {"owner": "team-a", "updated_by": "user-123"}
+
+    @pytest.mark.asyncio
+    async def test_empty_config_clears_config(self, assistant_service: AssistantService) -> None:
+        """An explicitly empty dict is a request to clear, which is the
+        distinction a defaulted field cannot express."""
+        row = self.stored_row()
+
+        _, values = await self.send_patch(assistant_service, {"config": {}}, row)
+
+        assert values["config"] == {}
+        assert values["context"] == {}
+
+    @pytest.mark.asyncio
+    async def test_supplied_context_updates_the_config_mirror(self, assistant_service: AssistantService) -> None:
+        row = self.stored_row()
+
+        _, values = await self.send_patch(assistant_service, {"context": {"model": "sonnet"}}, row)
+
+        assert values["context"] == {"model": "sonnet"}
+        assert values["config"] == {"configurable": {"model": "sonnet"}, "recursion_limit": 7}
+
+    @pytest.mark.asyncio
+    async def test_supplied_configurable_updates_the_context_mirror(self, assistant_service: AssistantService) -> None:
+        row = self.stored_row()
+
+        _, values = await self.send_patch(assistant_service, {"config": {"configurable": {"model": "sonnet"}}}, row)
+
+        assert values["context"] == {"model": "sonnet"}
+        assert values["config"] == {"configurable": {"model": "sonnet"}}
+
+    @pytest.mark.asyncio
+    async def test_graph_id_survives_a_config_only_update(self, assistant_service: AssistantService) -> None:
+        """The pre-fix default repointed the assistant at a graph called "agent"
+        on any request that did not name one."""
+        row = self.stored_row()
+
+        version_row, values = await self.send_patch(assistant_service, {"config": {"recursion_limit": 1}}, row)
+
+        assert values["graph_id"] == "stored-graph"
+        assert version_row.graph_id == "stored-graph"
+
+
 class TestAssistantServiceDelete:
     """Test assistant deletion business logic"""
 

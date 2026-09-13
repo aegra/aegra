@@ -6,13 +6,26 @@ from typing import Any
 
 import structlog
 
-from aegra_api.core.sse import create_error_event
+from aegra_api.core.sse import create_end_event, create_error_event
 from aegra_api.models import Run
 from aegra_api.services.broker import broker_manager
 from aegra_api.services.event_converter import EventConverter
 from aegra_api.utils import extract_event_sequence
 
 logger = structlog.getLogger(__name__)
+
+# Same set as run_waiters.TERMINAL_STATES — kept local to avoid importing that
+# module (run_waiters → executor → local_executor → streaming_service).
+_TERMINAL_STATUSES = frozenset({"success", "error", "interrupted"})
+
+
+def _is_end_sse(sse_event: str) -> bool:
+    return sse_event.startswith("event: end")
+
+
+def _terminal_end_status(run_status: str) -> str:
+    """Match the header-free short-circuit in ``stream_run``."""
+    return "error" if run_status == "error" else run_status
 
 
 class StreamingService:
@@ -100,12 +113,21 @@ class StreamingService:
             if last_event_id:
                 last_sent_sequence = extract_event_sequence(last_event_id)
 
+            replayed_end = False
             async for event_id, sse_event in self._replay_stored_events(run_id, last_event_id):
                 # Track the highest replayed sequence for live dedup
                 replayed_seq = extract_event_sequence(event_id)
                 if replayed_seq > last_sent_sequence:
                     last_sent_sequence = replayed_seq
+                replayed_end = replayed_end or _is_end_sse(sse_event)
                 yield sse_event
+
+            # Broker may be gone after restart/cleanup. Don't aiter() an empty
+            # unfinished broker created by replay — that hangs (#472).
+            if run.status in _TERMINAL_STATUSES:
+                if not replayed_end:
+                    yield create_end_event(status=_terminal_end_status(run.status))
+                return
 
             # Stream live events if run is still active
             async for sse_event in self._stream_live_events(run, last_sent_sequence):
@@ -146,7 +168,7 @@ class StreamingService:
         # If run is in a terminal state and broker is either missing or finished,
         # there are no live events to stream. Using get_broker (not get_or_create)
         # avoids creating a blank broker that would hang forever in aiter().
-        if run.status in ["success", "error", "interrupted"] and (broker is None or broker.is_finished()):
+        if run.status in _TERMINAL_STATUSES and (broker is None or broker.is_finished()):
             return
 
         if broker is None:

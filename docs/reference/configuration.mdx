@@ -188,6 +188,8 @@ async def graph(runtime: ServerRuntime[MyContext]):
 
 Use `runtime.execution_runtime` to check whether the factory is being called for actual execution (returns the execution runtime with `.context`) or for introspection like schema extraction (returns `None`).
 
+Declaring `ServerRuntime[T]` makes `T` the contract for the run context. Aegra validates the run's context — the request's `context` (or `config.configurable` when `context` is absent) merged over the assistant's stored context — against `T` when the run is created, and rejects a context `T` cannot accept with `422` naming the offending fields. No run is created. `model_config = ConfigDict(extra="forbid")` on `T` therefore rejects unexpected keys, and fields with defaults keep a context permissive. A factory annotated with plain `ServerRuntime` declares no shape and receives whatever context the request carries, as a raw dict.
+
 **When to use which:**
 
 | Need | Use | Works with |

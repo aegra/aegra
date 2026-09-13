@@ -1,12 +1,16 @@
 """Unit tests for run_preparation helpers."""
 
+from collections.abc import Iterator
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from fastapi import HTTPException
+from pydantic import BaseModel, ConfigDict
 
 from aegra_api.services import run_preparation as mod
+from aegra_api.services.graph_factory import _FACTORY_CONTEXT_TYPES
 from aegra_api.services.run_preparation import _validate_resume_command
 
 
@@ -76,3 +80,92 @@ class TestValidateResumeCommand:
         session = _session_returning(_thread("idle"))
         await _validate_resume_command(session, "t1", None)
         session.scalar.assert_not_awaited()
+
+
+class _Ctx(BaseModel):
+    """Context type a graph factory declares via ``ServerRuntime[_Ctx]``."""
+
+    prompt_version: int
+
+
+class _StrictCtx(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    prompt_version: int
+
+
+@pytest.fixture
+def _declared_contexts() -> Iterator[dict[str, type | None]]:
+    """Register factory context types for the duration of a test."""
+    _FACTORY_CONTEXT_TYPES.clear()
+    try:
+        yield _FACTORY_CONTEXT_TYPES
+    finally:
+        _FACTORY_CONTEXT_TYPES.clear()
+
+
+class TestValidateContextAgainstGraph:
+    def test_graph_without_declared_type_accepts_anything(self, _declared_contexts: dict) -> None:
+        mod._validate_context_against_graph({"anything": "goes"}, "untyped-graph")
+
+    def test_plain_server_runtime_accepts_anything(self, _declared_contexts: dict) -> None:
+        _declared_contexts["g"] = None
+        mod._validate_context_against_graph({"anything": "goes"}, "g")
+
+    def test_valid_context_passes(self, _declared_contexts: dict) -> None:
+        _declared_contexts["g"] = _Ctx
+        mod._validate_context_against_graph({"prompt_version": 3}, "g")
+
+    def test_invalid_value_is_422_naming_the_field(self, _declared_contexts: dict) -> None:
+        _declared_contexts["g"] = _Ctx
+
+        with pytest.raises(HTTPException) as exc:
+            mod._validate_context_against_graph({"prompt_version": "abc"}, "g")
+
+        assert exc.value.status_code == 422
+        assert "context.prompt_version" in exc.value.detail
+        assert "g" in exc.value.detail
+
+    def test_structured_errors_ride_along_in_details(self, _declared_contexts: dict) -> None:
+        _declared_contexts["g"] = _Ctx
+
+        with pytest.raises(HTTPException) as exc:
+            mod._validate_context_against_graph({"prompt_version": "abc"}, "g")
+
+        assert exc.value.details == {  # type: ignore[attr-defined]
+            "errors": [
+                {
+                    "loc": ["context", "prompt_version"],
+                    "msg": "Input should be a valid integer, unable to parse string as an integer",
+                    "type": "int_parsing",
+                }
+            ]
+        }
+
+    def test_extra_forbid_rejects_instead_of_dropping_the_context(self, _declared_contexts: dict) -> None:
+        """The point of ``extra="forbid"``: an unexpected key is an error, not a downgrade."""
+        _declared_contexts["g"] = _StrictCtx
+
+        with pytest.raises(HTTPException) as exc:
+            mod._validate_context_against_graph({"prompt_version": 3, "typo": 1}, "g")
+
+        assert exc.value.status_code == 422
+        assert "context.typo" in exc.value.detail
+
+
+class TestEveryRunCreationPathIsValidated:
+    """Run rows are built in exactly one place, so one check covers every path.
+
+    ``/threads/{id}/runs``, ``/threads/{id}/runs/stream``, ``/threads/{id}/runs/wait``,
+    the stateless ``/runs*`` endpoints, the v2 ``run.start`` command, cron creation
+    and the cron scheduler all reach the database through ``_prepare_run``. A new
+    endpoint that builds its own ``RunORM`` would skip context validation, so fail
+    here instead.
+    """
+
+    def test_run_rows_are_only_constructed_in_run_preparation(self) -> None:
+        src = Path(mod.__file__).parent.parent
+        constructing = sorted(
+            path.relative_to(src).as_posix() for path in src.rglob("*.py") if "RunORM(" in path.read_text()
+        )
+        assert constructing == ["services/run_preparation.py"]

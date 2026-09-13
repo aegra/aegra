@@ -421,10 +421,8 @@ class AssistantService(Authenticated):
         if not assistant:
             raise HTTPException(404, f"Assistant '{assistant_id}' not found")
 
-        # name and graph_id are NOT NULL columns, so an empty one cannot be
-        # stored. Refusing beats the silent fallback this endpoint exists to
-        # remove: a caller who supplies a field and sees it ignored is exactly
-        # the failure being fixed here.
+        # NOT NULL columns: an empty value cannot be stored, and falling back to
+        # the stored one silently is the bug this endpoint is fixing.
         for field in ("name", "graph_id"):
             if field in supplied and not supplied[field]:
                 raise HTTPException(
@@ -443,10 +441,8 @@ class AssistantService(Authenticated):
 
         metadata = {**(assistant.metadata_dict or {}), **(request.metadata or {})}
 
-        # Keep config and context up to date with one another. context mirrors
-        # config["configurable"], so whichever one the caller supplied wins and the
-        # other is derived from it; when neither was supplied both come from the
-        # stored row and are already consistent.
+        # context mirrors config["configurable"], so whichever one the caller
+        # supplied wins and the other is derived from it.
         if "context" in supplied:
             config = {**config, "configurable": context}
         elif "config" in supplied:

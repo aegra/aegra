@@ -96,6 +96,8 @@ class AppSettings(EnvBase):
     AUTH_TYPE: LowerStr = "noop"
     ENV_MODE: UpperStr = "LOCAL"
     DEBUG: bool = False
+    # Default 1000 matches LangGraph Platform threads.search (Agent Server OpenAPI max).
+    MAX_SEARCH_LIMIT: int = Field(default=1000, ge=1)
 
     # Run alembic upgrade head on startup. Default True (dev / single-pod).
     # Set False for multi-pod K8s to avoid advisory-lock probe timeouts;

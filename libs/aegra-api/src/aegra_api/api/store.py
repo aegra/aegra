@@ -23,6 +23,7 @@ from aegra_api.models import (
     User,
 )
 from aegra_api.models.errors import BAD_REQUEST, NOT_FOUND
+from aegra_api.models.search_limit import effective_search_limit
 
 logger = structlog.get_logger(__name__)
 
@@ -172,6 +173,8 @@ async def search_store_items(
     scoped_prefix = apply_namespace_scoping(request.namespace_prefix, user)
 
     store = db_manager.get_store()
+    limit = request.limit if request.limit is not None else effective_search_limit()
+    offset = request.offset or 0
 
     # Search with LangGraph store
     # asearch takes namespace_prefix as a positional-only argument
@@ -179,8 +182,8 @@ async def search_store_items(
         tuple(scoped_prefix),
         query=request.query,
         filter=request.filter,
-        limit=request.limit or 20,
-        offset=request.offset or 0,
+        limit=limit,
+        offset=offset,
     )
 
     items = [StoreItem(key=r.key, value=r.value, namespace=list(r.namespace)) for r in results]
@@ -188,8 +191,8 @@ async def search_store_items(
     return StoreSearchResponse(
         items=items,
         total=len(items),  # LangGraph store doesn't provide total count
-        limit=request.limit or 20,
-        offset=request.offset or 0,
+        limit=limit,
+        offset=offset,
     )
 
 

@@ -1,7 +1,11 @@
 """Integration tests for store CRUD operations"""
 
-import pytest
+from unittest.mock import AsyncMock
 
+import pytest
+from fastapi.testclient import TestClient
+
+from aegra_api.settings import settings
 from tests.fixtures.clients import create_test_app, make_client
 from tests.fixtures.test_helpers import DummyStoreItem
 
@@ -432,6 +436,124 @@ class TestSearchStoreItems:
         mock_store.asearch.assert_called_once()
         call_args = mock_store.asearch.call_args
         assert call_args.kwargs["filter"] is None
+
+    def test_search_items_accepts_limit_500(self, client: TestClient, mock_store: AsyncMock) -> None:
+        """LangGraph SDK clients page with limit=500; must not 422."""
+        mock_store.asearch.return_value = []
+
+        resp = client.post(
+            "/store/items/search",
+            json={"namespace_prefix": ["test"], "limit": 500},
+        )
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["limit"] == 500
+        mock_store.asearch.assert_called_once()
+        assert mock_store.asearch.call_args.kwargs["limit"] == 500
+
+    def test_search_items_accepts_limit_at_cap(self, client: TestClient, mock_store: AsyncMock) -> None:
+        mock_store.asearch.return_value = []
+        cap = settings.app.MAX_SEARCH_LIMIT
+
+        resp = client.post(
+            "/store/items/search",
+            json={"namespace_prefix": ["test"], "limit": cap},
+        )
+
+        assert resp.status_code == 200
+        assert resp.json()["limit"] == cap
+        mock_store.asearch.assert_called_once()
+        assert mock_store.asearch.call_args.kwargs["limit"] == cap
+
+    def test_search_items_null_limit_uses_default(self, client: TestClient, mock_store: AsyncMock) -> None:
+        mock_store.asearch.return_value = []
+
+        resp = client.post(
+            "/store/items/search",
+            json={"namespace_prefix": ["test"], "limit": None},
+        )
+
+        assert resp.status_code == 200
+        assert resp.json()["limit"] == 20
+        mock_store.asearch.assert_called_once()
+        assert mock_store.asearch.call_args.kwargs["limit"] == 20
+
+    def test_search_items_omitted_limit_honors_cap_below_default(
+        self, client: TestClient, mock_store: AsyncMock, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(settings.app, "MAX_SEARCH_LIMIT", 10)
+        mock_store.asearch.return_value = []
+
+        resp = client.post(
+            "/store/items/search",
+            json={"namespace_prefix": ["test"], "query": None},
+        )
+
+        assert resp.status_code == 200
+        assert resp.json()["limit"] == 10
+        mock_store.asearch.assert_called_once()
+        assert mock_store.asearch.call_args.kwargs["limit"] == 10
+
+    def test_search_items_null_limit_honors_cap_below_default(
+        self, client: TestClient, mock_store: AsyncMock, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(settings.app, "MAX_SEARCH_LIMIT", 10)
+        mock_store.asearch.return_value = []
+
+        resp = client.post(
+            "/store/items/search",
+            json={"namespace_prefix": ["test"], "limit": None},
+        )
+
+        assert resp.status_code == 200
+        assert resp.json()["limit"] == 10
+        mock_store.asearch.assert_called_once()
+        assert mock_store.asearch.call_args.kwargs["limit"] == 10
+
+    def test_search_items_returns_422_when_limit_exceeds_cap(self, client: TestClient, mock_store: AsyncMock) -> None:
+        """limit above MAX_SEARCH_LIMIT is rejected before the store query."""
+        cap = settings.app.MAX_SEARCH_LIMIT
+        resp = client.post(
+            "/store/items/search",
+            json={"namespace_prefix": ["test"], "limit": cap + 1},
+        )
+
+        assert resp.status_code == 422
+        detail = resp.json()["detail"]
+        assert any(
+            error.get("loc") == ["body", "limit"]
+            and error.get("type") == "less_than_equal"
+            and error.get("ctx", {}).get("le") == cap
+            for error in detail
+        )
+        mock_store.asearch.assert_not_called()
+
+    @pytest.mark.parametrize("limit", [0, -1])
+    def test_search_items_returns_422_when_limit_is_zero_or_negative(
+        self, client: TestClient, mock_store: AsyncMock, limit: int
+    ) -> None:
+        resp = client.post(
+            "/store/items/search",
+            json={"namespace_prefix": ["test"], "limit": limit},
+        )
+
+        assert resp.status_code == 422
+        assert "limit" in resp.text
+        mock_store.asearch.assert_not_called()
+
+    @pytest.mark.parametrize("limit", ["abc", [], {}, 20.5])
+    def test_search_items_returns_422_when_limit_is_not_an_integer(
+        self, client: TestClient, mock_store: AsyncMock, limit: object
+    ) -> None:
+        resp = client.post(
+            "/store/items/search",
+            json={"namespace_prefix": ["test"], "limit": limit},
+        )
+
+        assert resp.status_code == 422
+        assert "limit" in resp.text
+        mock_store.asearch.assert_not_called()
 
     def test_search_items_with_auth_handler_filter_merge(self, client, mock_store):
         """Test that auth handler filters are merged with request filters"""

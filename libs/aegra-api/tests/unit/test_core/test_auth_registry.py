@@ -215,6 +215,7 @@ _SPEC_TUPLES: dict[tuple[str, str], tuple[str, str]] = {
     # stateless runs
     ("POST", "/runs"): ("threads", "create_run"),
     ("POST", "/runs/batch"): ("threads", "create_run"),
+    ("POST", "/runs/cancel"): ("threads", "update"),
     ("POST", "/runs/stream"): ("threads", "create_run"),
     ("POST", "/runs/wait"): ("threads", "create_run"),
     # crons

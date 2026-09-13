@@ -14,9 +14,10 @@ cp .env.example .env
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `PROJECT_NAME` | `Aegra` | Application name |
-| `VERSION` | `0.1.0` | Application version |
+| `VERSION` | `0.10.5` | Application version |
 | `DEBUG` | `false` | Enable debug mode |
 | `AEGRA_CONFIG` | `aegra.json` | Path to the configuration file |
+| `MAX_SEARCH_LIMIT` | `1000` | Max `limit` for `POST /threads/search` and `POST /store/items/search`. Omitted or null `limit` uses `min(20, MAX_SEARCH_LIMIT)`. Default cap matches LangGraph Platform threads.search (`1..1000`). |
 
 ## Database
 

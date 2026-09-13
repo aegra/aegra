@@ -706,6 +706,86 @@ class TestLangGraphServiceConfigs:
         assert result["configurable"]["thread_id"] == "thread-456"
         assert result["configurable"]["checkpoint_id"] == "cp-9"
 
+    def test_create_run_config_stamps_assistant_id(self):
+        """The run's assistant reaches configurable, matching LangGraph Platform."""
+        mock_user = Mock()
+        mock_user.identity = "user-123"
+        mock_user.display_name = "Test User"
+
+        with patch(
+            "aegra_api.services.langgraph_service.get_tracing_callbacks",
+            return_value=[],
+        ):
+            result = create_run_config("run-789", "thread-456", mock_user, assistant_id="asst-1")
+
+        assert result["configurable"]["assistant_id"] == "asst-1"
+
+    def test_create_run_config_ignores_client_assistant_id_override(self):
+        """A client-supplied configurable.assistant_id must not name another assistant.
+
+        Factories key per-assistant configuration (credentials, prompts) off this
+        value, so honoring a body override would let a caller have the server
+        resolve another tenant's configuration.
+        """
+        mock_user = Mock()
+        mock_user.identity = "user-123"
+        mock_user.display_name = "Test User"
+
+        attacker_override = {"configurable": {"assistant_id": "victim-assistant"}}
+
+        with patch(
+            "aegra_api.services.langgraph_service.get_tracing_callbacks",
+            return_value=[],
+        ):
+            result = create_run_config(
+                "run-789",
+                "thread-456",
+                mock_user,
+                assistant_id="asst-1",
+                additional_config=attacker_override,
+            )
+
+        assert result["configurable"]["assistant_id"] == "asst-1"
+
+    def test_create_run_config_checkpoint_cannot_override_assistant_id(self):
+        """The checkpoint dict is merged last; it must not redefine assistant_id."""
+        mock_user = Mock()
+        mock_user.identity = "user-123"
+        mock_user.display_name = "Test User"
+
+        malicious_checkpoint = {"assistant_id": "victim-assistant", "checkpoint_id": "cp-9"}
+
+        with patch(
+            "aegra_api.services.langgraph_service.get_tracing_callbacks",
+            return_value=[],
+        ):
+            result = create_run_config(
+                "run-789",
+                "thread-456",
+                mock_user,
+                assistant_id="asst-1",
+                checkpoint=malicious_checkpoint,
+            )
+
+        assert result["configurable"]["assistant_id"] == "asst-1"
+        assert result["configurable"]["checkpoint_id"] == "cp-9"
+
+    def test_create_run_config_without_assistant_drops_client_value(self):
+        """With no server-side assistant the key is absent, not client-controlled."""
+        mock_user = Mock()
+        mock_user.identity = "user-123"
+        mock_user.display_name = "Test User"
+
+        attacker_override = {"configurable": {"assistant_id": "victim-assistant"}}
+
+        with patch(
+            "aegra_api.services.langgraph_service.get_tracing_callbacks",
+            return_value=[],
+        ):
+            result = create_run_config("run-789", "thread-456", mock_user, additional_config=attacker_override)
+
+        assert "assistant_id" not in result["configurable"]
+
     def test_create_run_config_with_tracing_callbacks(self):
         """Test creating run config with tracing callbacks"""
         mock_user = Mock()

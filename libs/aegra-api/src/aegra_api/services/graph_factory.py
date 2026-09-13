@@ -19,6 +19,7 @@ import inspect
 import typing
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
+from dataclasses import dataclass
 from typing import Any, Literal, get_args, get_origin
 
 import structlog
@@ -69,6 +70,31 @@ _FACTORY_CONTEXT_TYPES: dict[str, type | None] = {}
 
 # Concrete runtime classes used for ``issubclass`` checks during classification.
 _RUNTIME_CLASSES: tuple[type, ...] = (_ExecutionRuntime, _ReadRuntime)
+
+
+@dataclass(kw_only=True, slots=True, frozen=True)
+class AegraExecutionRuntime[ContextT](_ExecutionRuntime[ContextT]):
+    """``_ExecutionRuntime`` plus the assistant the run executes as."""
+
+    assistant_id: str | None = None
+    """The assistant whose configuration this run uses.
+
+    Server-authoritative: it comes from the resolved assistant row, never from
+    the request body. Also available as ``config["configurable"]["assistant_id"]``.
+    """
+
+
+@dataclass(kw_only=True, slots=True, frozen=True)
+class AegraReadRuntime[ContextT](_ReadRuntime[ContextT]):
+    """``_ReadRuntime`` plus the assistant field, always ``None``.
+
+    Read and introspection contexts have no run and therefore no assistant.
+    The field exists so a factory can read ``runtime.assistant_id`` in every
+    access context without branching.
+    """
+
+    assistant_id: str | None = None
+
 
 # Type alias for RunnableConfig — LangGraph uses ``dict[str, Any]``.
 _RunnableConfig = dict[str, Any]
@@ -318,12 +344,13 @@ def build_server_runtime(
     store: BaseStore | None,
     user: User | BaseUser | None = None,
     context: Any = None,
+    assistant_id: str | None = None,
 ) -> ServerRuntime:
     """Construct the appropriate ``ServerRuntime`` variant for the access context.
 
-    For ``threads.create_run``, returns an ``_ExecutionRuntime`` (which has
+    For ``threads.create_run``, returns an ``AegraExecutionRuntime`` (which has
     a ``context`` field populated with the coerced request context).
-    For all other contexts, returns a ``_ReadRuntime`` (no ``context`` field).
+    For all other contexts, returns an ``AegraReadRuntime`` (no ``context`` field).
 
     If *user* is ``None``, falls back to the current request's auth context.
 
@@ -332,23 +359,27 @@ def build_server_runtime(
         store: The persistence store for the graph run.
         user: The authenticated user, or ``None`` to auto-detect from auth context.
         context: The (optionally coerced) request context for the factory.
-            Only used for ``_ExecutionRuntime``.
+            Only used for the execution runtime.
+        assistant_id: The assistant the run executes as. ``None`` for every
+            non-execution context, which has no run and so no assistant.
 
     Returns:
-        A ``ServerRuntime`` instance (either ``_ExecutionRuntime`` or ``_ReadRuntime``).
+        A ``ServerRuntime`` instance (either ``AegraExecutionRuntime`` or
+        ``AegraReadRuntime``).
     """
     if user is None:
         auth_ctx = get_auth_ctx()
         user = auth_ctx.user if auth_ctx else None
 
     if is_for_execution(access_context):
-        return _ExecutionRuntime(
+        return AegraExecutionRuntime(
             access_context=access_context,
             user=user,
             store=store,
             context=context,
+            assistant_id=assistant_id,
         )
-    return _ReadRuntime(
+    return AegraReadRuntime(
         access_context=access_context,
         user=user,
         store=store,

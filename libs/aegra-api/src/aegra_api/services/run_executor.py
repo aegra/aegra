@@ -184,6 +184,7 @@ async def _stream_graph(job: RunJob) -> _GraphResult:
             access_context="threads.create_run",
             user=job.user,
             context=job.execution.context,
+            assistant_id=job.identity.assistant_id,
         ) as graph,
         with_auth_ctx(job.user, job.user.permissions),  # type: ignore[arg-type]
     ):
@@ -263,6 +264,7 @@ def _build_run_config(job: RunJob) -> dict[str, Any]:
         job.identity.run_id,
         job.identity.thread_id,
         job.user,
+        assistant_id=job.identity.assistant_id,
         additional_config=job.execution.config,
         checkpoint=job.execution.checkpoint,
     )

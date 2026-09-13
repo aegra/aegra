@@ -28,7 +28,7 @@ from aegra_api.services.graph_factory import (
     _FACTORY_KWARGS,
     classify_factory,
 )
-from aegra_api.services.langgraph_service import LangGraphService
+from aegra_api.services.langgraph_service import LangGraphService, create_run_config
 
 # Module-level context models for integration tests.
 # Defined here (not inside test methods) so that ``typing.get_type_hints()``
@@ -340,6 +340,85 @@ class TestGetGraphWithFactory:
                 pass
 
         assert received_config.get("configurable", {}).get("thread_id") == "t1"
+
+    @pytest.mark.asyncio
+    async def test_factory_reads_assistant_id_from_config(self) -> None:
+        """A run's assistant reaches a config-taking factory via configurable."""
+        seen: dict[str, Any] = {}
+
+        def factory(config: dict[str, Any]) -> Mock:
+            seen["assistant_id"] = config["configurable"]["assistant_id"]
+            g = Mock(spec=Pregel)
+            g.copy = Mock(return_value=g)
+            return g
+
+        service = LangGraphService()
+        service._graph_registry = {"fa": {"file_path": "f.py", "export_name": "graph"}}
+        service._graph_factories = {"fa": factory}
+
+        classify_factory(factory, "fa")
+
+        with patch("aegra_api.core.database.db_manager") as mock_db:
+            mock_db.get_checkpointer = Mock(return_value=Mock())
+            mock_db.get_store = Mock(return_value=Mock())
+
+            with patch(
+                "aegra_api.services.langgraph_service.get_tracing_callbacks",
+                return_value=[],
+            ):
+                run_config = create_run_config("run-1", "thread-1", None, assistant_id="asst-1")
+
+            async with service.get_graph("fa", config=run_config, assistant_id="asst-1") as _graph:
+                pass
+
+        assert seen["assistant_id"] == "asst-1"
+
+    @pytest.mark.asyncio
+    async def test_runtime_only_factory_reads_assistant_id(self) -> None:
+        """The same value reaches a factory that takes only ``runtime``."""
+        seen: dict[str, Any] = {}
+
+        def factory(runtime: ServerRuntime) -> Mock:
+            seen["assistant_id"] = runtime.assistant_id  # type: ignore[union-attr]
+            g = Mock(spec=Pregel)
+            g.copy = Mock(return_value=g)
+            return g
+
+        service = LangGraphService()
+        service._graph_registry = {"fra": {"file_path": "f.py", "export_name": "graph"}}
+        service._graph_factories = {"fra": factory}
+
+        classify_factory(factory, "fra")
+
+        with patch("aegra_api.core.database.db_manager") as mock_db:
+            mock_db.get_checkpointer = Mock(return_value=Mock())
+            mock_db.get_store = Mock(return_value=Mock())
+
+            async with service.get_graph("fra", config={"configurable": {}}, assistant_id="asst-1") as _graph:
+                pass
+
+        assert seen["assistant_id"] == "asst-1"
+
+    @pytest.mark.asyncio
+    async def test_read_path_factory_sees_no_assistant(self) -> None:
+        """Schema extraction has no run, so a factory reading the assistant gets ``None``."""
+        seen: dict[str, Any] = {}
+
+        def factory(runtime: ServerRuntime) -> Mock:
+            seen["assistant_id"] = runtime.assistant_id  # type: ignore[union-attr]
+            g = Mock(spec=Pregel)
+            g.copy = Mock(return_value=g)
+            return g
+
+        service = LangGraphService()
+        service._graph_registry = {"frr": {"file_path": "f.py", "export_name": "graph"}}
+        service._graph_factories = {"frr": factory}
+
+        classify_factory(factory, "frr")
+
+        await service.get_graph_for_validation("frr")
+
+        assert seen["assistant_id"] is None
 
     @pytest.mark.asyncio
     async def test_factory_receives_execution_runtime(self) -> None:

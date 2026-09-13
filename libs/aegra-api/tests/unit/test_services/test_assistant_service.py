@@ -859,6 +859,44 @@ class TestAssistantServicePartialUpdate:
         assert values["graph_id"] == "stored-graph"
         assert version_row.graph_id == "stored-graph"
 
+    @pytest.mark.asyncio
+    async def test_an_explicit_null_clears_the_description(self, assistant_service: AssistantService) -> None:
+        """description is nullable, so a supplied null is a request to clear it."""
+        row = self.stored_row()
+
+        _, values = await self.send_patch(assistant_service, {"description": None}, row)
+
+        assert values["description"] is None
+
+    @pytest.mark.asyncio
+    async def test_an_empty_description_is_stored_not_ignored(self, assistant_service: AssistantService) -> None:
+        """An empty string is a value the caller chose, not an absent field."""
+        row = self.stored_row()
+
+        _, values = await self.send_patch(assistant_service, {"description": ""}, row)
+
+        assert values["description"] == ""
+
+    @pytest.mark.parametrize("value", ["", None])
+    @pytest.mark.parametrize("field", ["name", "graph_id"])
+    @pytest.mark.asyncio
+    async def test_should_return_422_when_a_non_null_field_is_supplied_empty(
+        self, assistant_service: AssistantService, field: str, value: str | None
+    ) -> None:
+        """Neither column can hold this, so refuse rather than silently ignore.
+
+        The old code fell back to the stored value here, which is the silent
+        fallback this endpoint exists to remove.
+        """
+        row = self.stored_row()
+        assistant_service.session.scalar.side_effect = [row, 1, row]
+
+        with pytest.raises(HTTPException) as exc_info:
+            await assistant_service.update_assistant(row.assistant_id, AssistantUpdate.model_validate({field: value}))
+
+        assert exc_info.value.status_code == 422
+        assert field in exc_info.value.detail
+
 
 class TestAssistantServiceDelete:
     """Test assistant deletion business logic"""

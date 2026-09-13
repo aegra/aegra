@@ -100,9 +100,7 @@ assistant = await client.assistants.update(
 )
 ```
 
-Updates are partial: a field you leave out keeps the value it already has, and
-`metadata` is merged into the assistant's existing metadata rather than
-replacing it. To clear a field, send it explicitly empty:
+Updates are partial: a field you leave out keeps the value it already has. `config` and `context` replace, so sending either one explicitly empty clears it:
 
 ```python
 # Drop the config, and the context that mirrors config["configurable"]
@@ -111,6 +109,10 @@ assistant = await client.assistants.update(
     config={},
 )
 ```
+
+`metadata` is different: it merges into the assistant's existing metadata rather than replacing it, so `metadata={}` changes nothing and a stored key cannot be removed through this endpoint — only overwritten.
+
+`name` and `graph_id` are stored as non-null, so supplying either one empty is a `422` rather than a silent no-op. Omit them to leave them unchanged. `description` is nullable, so an explicit `None` clears it.
 
 ## Versioning
 

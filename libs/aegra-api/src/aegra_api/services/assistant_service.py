@@ -421,6 +421,17 @@ class AssistantService(Authenticated):
         if not assistant:
             raise HTTPException(404, f"Assistant '{assistant_id}' not found")
 
+        # name and graph_id are NOT NULL columns, so an empty one cannot be
+        # stored. Refusing beats the silent fallback this endpoint exists to
+        # remove: a caller who supplies a field and sees it ignored is exactly
+        # the failure being fixed here.
+        for field in ("name", "graph_id"):
+            if field in supplied and not supplied[field]:
+                raise HTTPException(
+                    status_code=422,
+                    detail=f"{field} must be a non-empty string when supplied; omit it to leave it unchanged",
+                )
+
         config = (supplied["config"] or {}) if "config" in supplied else (assistant.config or {})
         context = (supplied["context"] or {}) if "context" in supplied else (assistant.context or {})
 
@@ -455,12 +466,14 @@ class AssistantService(Authenticated):
         new_version_details = {
             "assistant_id": assistant_id,
             "version": new_version,
-            "graph_id": request.graph_id or assistant.graph_id,
+            # .get returns a supplied null rather than the stored value, which
+            # is what lets an explicit null clear the nullable description.
+            "graph_id": supplied.get("graph_id", assistant.graph_id),
             "config": config,
             "context": context,
             "created_at": now,
-            "name": request.name or assistant.name,
-            "description": request.description or assistant.description,
+            "name": supplied.get("name", assistant.name),
+            "description": supplied.get("description", assistant.description),
             "metadata_dict": metadata,
         }
 

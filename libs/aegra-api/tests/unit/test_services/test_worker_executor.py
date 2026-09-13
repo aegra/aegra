@@ -341,7 +341,7 @@ class TestHeartbeatLoop:
 
         async def slow_refresh(run_id: str) -> None:
             """Simulate a hanging refresh operation."""
-            await asyncio.sleep(10)
+            await asyncio.Event().wait()
 
         with (
             patch(f"{MODULE}._get_session_maker", return_value=maker),

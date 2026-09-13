@@ -321,8 +321,9 @@ async def join_run(
     immediately with no heartbeat overhead.
 
     A run that failed, or that the wait gave up on, returns
-    ``{"__error__": {"error": ..., "message": ...}}`` instead of an output;
-    the LangGraph SDK reads that key and raises.
+    ``{"__error__": {"error": ..., "message": ...}}`` instead of an output.
+    ``langgraph_sdk``'s ``runs.join`` hands that body back as-is, unlike
+    ``runs.wait``, which inspects the key and raises.
 
     Sessions are managed manually (not via ``Depends``) to avoid holding a
     pool connection during the long wait.

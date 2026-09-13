@@ -102,8 +102,14 @@ async def heartbeat_wait_body(
 
     async def _wait_for_run() -> None:
         nonlocal timed_out
+        started = asyncio.get_running_loop().time()
         try:
             await executor.wait_for_completion(run_id, timeout=timeout)
+            # LocalExecutor suppresses its own TimeoutError and returns normally,
+            # so a wait that spent its whole budget timed out however it returned.
+            if asyncio.get_running_loop().time() - started >= timeout:
+                timed_out = True
+                logger.warning("heartbeat_wait timeout", run_id=run_id, timeout=timeout)
         except TimeoutError:
             timed_out = True
             logger.warning("heartbeat_wait timeout", run_id=run_id, timeout=timeout)

@@ -21,6 +21,12 @@ def _publish_default_graph_id(schema: dict[str, Any]) -> None:
 
     if default is None:
         graph_id.pop("default", None)
+        # Non-nullable as well as required. The field is nullable on the model
+        # only because a default may stand in for it; with no default, a null
+        # is treated as omitted and answered 422, so publishing the nullable
+        # branch would describe {"graph_id": null} as valid when it is not.
+        graph_id.pop("anyOf", None)
+        graph_id["type"] = "string"
         required = schema.setdefault("required", [])
         if "graph_id" not in required:
             required.append("graph_id")

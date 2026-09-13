@@ -57,3 +57,32 @@ def test_schema_keeps_graph_id_required_without_a_default(tmp_path: Path, monkey
 
     assert "graph_id" in schema["required"]
     assert "default" not in schema["properties"]["graph_id"]
+
+
+def test_schema_without_a_default_does_not_permit_null(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Required and non-nullable go together, because a null is refused.
+
+    The model's field is nullable because a resolved default can stand in for
+    it. Where nothing resolves, a null is treated as omitted and answered 422,
+    so publishing the nullable branch would describe a request the server
+    refuses as schema-valid.
+    """
+    _use_config(
+        tmp_path,
+        monkeypatch,
+        {"graphs": {"agent": "./agent.py:graph", "other": "./other.py:graph"}},
+    )
+
+    graph_id = AssistantCreate.model_json_schema()["properties"]["graph_id"]
+
+    assert graph_id["type"] == "string"
+    assert "anyOf" not in graph_id
+
+
+def test_schema_with_a_default_still_permits_null(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Where a default resolves, a null means "use it", so it stays valid."""
+    _use_config(tmp_path, monkeypatch, {"graphs": {"agent": "./agent.py:graph"}})
+
+    graph_id = AssistantCreate.model_json_schema()["properties"]["graph_id"]
+
+    assert {"type": "null"} in graph_id["anyOf"]

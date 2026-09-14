@@ -663,6 +663,18 @@ class AssistantService(Authenticated):
         except Exception as e:
             raise HTTPException(400, f"Failed to get subgraphs: {str(e)}") from e
 
+    async def get_assistant_subgraph(
+        self,
+        assistant_id: str,
+        namespace: str,
+        recurse: bool = False,
+    ) -> dict[str, Any]:
+        """Get a specific subgraph of an assistant by namespace"""
+        subgraphs = await self.get_assistant_subgraphs(assistant_id, namespace=namespace, recurse=recurse)
+        if not subgraphs or namespace not in subgraphs:
+            raise HTTPException(404, detail=f"Subgraph namespace '{namespace}' not found")
+        return subgraphs
+
 
 def get_assistant_service(
     session: AsyncSession = Depends(get_session),

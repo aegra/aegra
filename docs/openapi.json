@@ -772,6 +772,82 @@
         }
       }
     },
+    "/assistants/{assistant_id}/subgraphs/{namespace}": {
+      "get": {
+        "tags": [
+          "Assistants"
+        ],
+        "summary": "Get Assistant Subgraph By Namespace",
+        "description": "Get a specific subgraph of an assistant by namespace.\n\nReturns the subgraph definitions for the requested namespace. Set\n`recurse=true` to include deeply nested subgraphs.",
+        "operationId": "get_assistant_subgraph_by_namespace_assistants__assistant_id__subgraphs__namespace__get",
+        "parameters": [
+          {
+            "name": "assistant_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Assistant Id"
+            }
+          },
+          {
+            "name": "namespace",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Namespace"
+            }
+          },
+          {
+            "name": "recurse",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "boolean",
+              "description": "Recursively include nested subgraphs.",
+              "default": false,
+              "title": "Recurse"
+            },
+            "description": "Recursively include nested subgraphs."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "title": "Response Get Assistant Subgraph By Namespace Assistants  Assistant Id  Subgraphs  Namespace  Get"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Resource not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AgentProtocolError"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/threads": {
       "get": {
         "tags": [

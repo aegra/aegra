@@ -1,6 +1,7 @@
 """Integration tests for assistants CRUD operations"""
 
 import pytest
+from fastapi import HTTPException
 
 from aegra_api.services.assistant_service import get_assistant_service
 from tests.fixtures.clients import create_test_app, make_client
@@ -773,3 +774,50 @@ class TestGetAssistantSubgraphs:
         assert resp.status_code == 200
         data = resp.json()
         assert isinstance(data, dict)
+
+
+class TestGetAssistantSubgraphByNamespace:
+    """Test GET /assistants/{assistant_id}/subgraphs/{namespace}"""
+
+    def test_get_assistant_subgraph_by_namespace(self, client, mock_assistant_service) -> None:
+        """Test getting specific subgraph by namespace"""
+        subgraphs = {
+            "subgraph_1": {
+                "nodes": ["node_a", "node_b"],
+                "edges": [{"from": "node_a", "to": "node_b"}],
+            }
+        }
+        mock_assistant_service.get_assistant_subgraph.return_value = subgraphs
+
+        resp = client.get("/assistants/test-assistant-123/subgraphs/subgraph_1")
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert "subgraph_1" in data
+        mock_assistant_service.get_assistant_subgraph.assert_called_once_with("test-assistant-123", "subgraph_1", False)
+
+    def test_get_assistant_subgraph_by_namespace_with_recurse(self, client, mock_assistant_service) -> None:
+        """Test getting specific subgraph by namespace with recurse=true"""
+        subgraphs = {
+            "subgraph_1": {"nodes": []},
+            "subgraph_1:nested": {"nodes": []},
+        }
+        mock_assistant_service.get_assistant_subgraph.return_value = subgraphs
+
+        resp = client.get("/assistants/test-assistant-123/subgraphs/subgraph_1?recurse=true")
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert "subgraph_1" in data
+        mock_assistant_service.get_assistant_subgraph.assert_called_once_with("test-assistant-123", "subgraph_1", True)
+
+    def test_get_assistant_subgraph_by_namespace_not_found(self, client, mock_assistant_service) -> None:
+        """Test 404 when namespace is not found"""
+        mock_assistant_service.get_assistant_subgraph.side_effect = HTTPException(
+            status_code=404, detail="Subgraph namespace 'missing' not found"
+        )
+
+        resp = client.get("/assistants/test-assistant-123/subgraphs/missing")
+
+        assert resp.status_code == 404
+        assert resp.json()["detail"] == "Subgraph namespace 'missing' not found"

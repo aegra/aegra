@@ -1,4 +1,5 @@
 import json
+from base64 import b64encode
 
 import pytest
 from fastapi.testclient import TestClient
@@ -290,3 +291,63 @@ class TestBeforeParameterFormats:
 
         assert len(captured) == 1
         assert captured[0] is None
+
+
+# ------------------------------------------------------------------
+# Regression: non-UTF-8 bytes in checkpoint state must not 500
+# See: https://github.com/aegra/aegra/issues/451
+# ------------------------------------------------------------------
+
+BINARY_BLOB = b"\x89PNG\r\n\x1a\n\xff\xfe"
+BINARY_BASE64 = b64encode(BINARY_BLOB).decode("ascii")
+
+
+@pytest.fixture()
+def mock_langgraph_binary():
+    """Patch get_langgraph_service so aget_state_history yields a snapshot with non-UTF-8 bytes."""
+
+    def _agent_for_config(config):
+        c1 = {
+            "configurable": {
+                "thread_id": config.get("configurable", {}).get("thread_id"),
+                "checkpoint_id": "cp_bin_1",
+                "checkpoint_ns": config.get("configurable", {}).get("checkpoint_ns", ""),
+            }
+        }
+        return FakeAgent([make_snapshot({"blob": BINARY_BLOB, "text": "hello"}, c1, next_nodes=["step_b"])])
+
+    class DynamicFakeAgent(FakeAgent):
+        def __init__(self):
+            super().__init__(snapshots=[])
+
+        async def aget_state_history(self, config, **kwargs):
+            agent = _agent_for_config(config)
+            async for s in agent.aget_state_history(config, **kwargs):
+                yield s
+
+    with patch_langgraph_service(agent=DynamicFakeAgent()):
+        yield
+
+
+def test_post_history_with_binary_state_returns_200(client: TestClient, mock_langgraph_binary):
+    """POST /threads/{id}/history returns 200 with Base64-encoded binary values."""
+    thread_id = _ensure_thread(client)
+
+    resp = client.post(f"/threads/{thread_id}/history", json={"limit": 10})
+    assert resp.status_code == 200, resp.text
+    states = resp.json()
+    assert len(states) == 1
+    assert states[0]["values"]["blob"] == BINARY_BASE64
+    assert states[0]["values"]["text"] == "hello"
+
+
+def test_get_history_with_binary_state_returns_200(client: TestClient, mock_langgraph_binary):
+    """GET /threads/{id}/history returns 200 with Base64-encoded binary values."""
+    thread_id = _ensure_thread(client)
+
+    resp = client.get(f"/threads/{thread_id}/history")
+    assert resp.status_code == 200, resp.text
+    states = resp.json()
+    assert len(states) == 1
+    assert states[0]["values"]["blob"] == BINARY_BASE64
+    assert states[0]["values"]["text"] == "hello"

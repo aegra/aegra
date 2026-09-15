@@ -130,7 +130,7 @@ class TestStatelessWaitForRun:
             patch("aegra_api.api.runs._get_session_maker", return_value=mock_maker),
             patch("aegra_api.services.run_preparation.get_langgraph_service") as mock_service,
             patch("aegra_api.api.stateless_runs.delete_thread_by_id", new_callable=AsyncMock),
-            patch("aegra_api.api.stateless_runs.mark_thread_ephemeral", new_callable=AsyncMock),
+            patch("aegra_api.api.stateless_runs.create_ephemeral_thread", new_callable=AsyncMock),
         ):
             mock_service.return_value.list_graphs.return_value = ["test-graph"]
 
@@ -226,7 +226,7 @@ class TestStatelessWaitForRun:
             patch("aegra_api.services.run_waiters.executor", mock_executor),
             patch("aegra_api.services.run_preparation.get_langgraph_service") as mock_service,
             patch("aegra_api.api.stateless_runs.delete_thread_by_id", new_callable=AsyncMock),
-            patch("aegra_api.api.stateless_runs.mark_thread_ephemeral", new_callable=AsyncMock),
+            patch("aegra_api.api.stateless_runs.create_ephemeral_thread", new_callable=AsyncMock),
         ):
             mock_service.return_value.list_graphs.return_value = ["test-graph"]
 
@@ -276,7 +276,7 @@ class TestStatelessStreamRun:
             patch("aegra_api.api.runs._get_session_maker", return_value=mock_maker),
             patch("aegra_api.services.run_preparation.get_langgraph_service") as mock_service,
             patch("aegra_api.api.stateless_runs.delete_thread_by_id", new_callable=AsyncMock),
-            patch("aegra_api.api.stateless_runs.mark_thread_ephemeral", new_callable=AsyncMock),
+            patch("aegra_api.api.stateless_runs.create_ephemeral_thread", new_callable=AsyncMock),
         ):
             mock_service.return_value.list_graphs.return_value = ["test-graph"]
 
@@ -338,7 +338,7 @@ class TestStatelessCreateRun:
         with (
             patch("aegra_api.services.run_preparation.get_langgraph_service") as mock_service,
             patch("aegra_api.api.stateless_runs.delete_thread_by_id", new_callable=AsyncMock),
-            patch("aegra_api.api.stateless_runs.mark_thread_ephemeral", new_callable=AsyncMock),
+            patch("aegra_api.api.stateless_runs.create_ephemeral_thread", new_callable=AsyncMock),
         ):
             mock_service.return_value.list_graphs.return_value = ["test-graph"]
 
@@ -391,12 +391,12 @@ class TestStatelessCreateRun:
         override_session_dependency(app, Session)
         client = make_client(app)
 
-        # Mock delete_thread_by_id and mark_thread_ephemeral: assistant lookup
-        # raises 404, and both cleanup helpers open their own DB session via
+        # Mock delete_thread_by_id and create_ephemeral_thread: assistant lookup
+        # raises 404, and both helpers open their own DB session via
         # _get_session_maker, which is not initialized in this test harness.
         with (
             patch("aegra_api.api.stateless_runs.delete_thread_by_id", new_callable=AsyncMock),
-            patch("aegra_api.api.stateless_runs.mark_thread_ephemeral", new_callable=AsyncMock),
+            patch("aegra_api.api.stateless_runs.create_ephemeral_thread", new_callable=AsyncMock),
         ):
             resp = client.post(
                 "/runs",

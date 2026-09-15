@@ -15,8 +15,6 @@ Create Date: 2026-09-15 00:00:00.000000
 
 """
 
-import sqlalchemy as sa
-
 from alembic import op
 
 # revision identifiers, used by Alembic.
@@ -29,10 +27,10 @@ INDEX_NAME = "idx_thread_ephemeral_updated_at"
 
 
 def upgrade() -> None:
-    op.add_column(
-        "thread",
-        sa.Column("is_ephemeral", sa.Boolean(), server_default=sa.text("false"), nullable=False),
-    )
+    # IF NOT EXISTS: autocommit_block below commits this column add before
+    # the index build, ahead of the revision record — a retry after a failed
+    # or interrupted build must not fail on "column already exists".
+    op.execute("ALTER TABLE thread ADD COLUMN IF NOT EXISTS is_ephemeral BOOLEAN NOT NULL DEFAULT false")
     with op.get_context().autocommit_block():
         op.execute(f"DROP INDEX CONCURRENTLY IF EXISTS {INDEX_NAME}")
         op.execute(f"CREATE INDEX CONCURRENTLY {INDEX_NAME} ON thread (updated_at) WHERE is_ephemeral")
@@ -41,4 +39,4 @@ def upgrade() -> None:
 def downgrade() -> None:
     with op.get_context().autocommit_block():
         op.execute(f"DROP INDEX CONCURRENTLY IF EXISTS {INDEX_NAME}")
-    op.drop_column("thread", "is_ephemeral")
+    op.execute("ALTER TABLE thread DROP COLUMN IF EXISTS is_ephemeral")

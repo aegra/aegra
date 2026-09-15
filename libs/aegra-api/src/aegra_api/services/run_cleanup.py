@@ -9,7 +9,7 @@ import asyncio
 import structlog
 from psycopg import Error as PsycopgError
 from redis import RedisError
-from sqlalchemy import select, update
+from sqlalchemy import select
 from sqlalchemy.exc import SQLAlchemyError
 
 from aegra_api.core.active_runs import active_runs
@@ -72,21 +72,23 @@ async def delete_thread_by_id(thread_id: str, user_id: str) -> None:
             await session.commit()
 
 
-async def mark_thread_ephemeral(thread_id: str) -> None:
-    """Best-effort: flag a thread for the orphan-thread sweeper.
+async def create_ephemeral_thread(thread_id: str, user_id: str) -> None:
+    """Pre-create the thread row already flagged for the orphan-thread sweeper.
 
-    Called after the underlying threaded endpoint has created the thread, so
-    the UPDATE is a no-op only on infra failure, never on a missing row.
-    Opens its own session since callers already hold no active one at this
-    point (or hold one on a different pool, e.g. the stream/wait paths).
+    Called before delegating to the threaded endpoint, in its own committed
+    transaction: a later best-effort UPDATE would leave the thread unmarked
+    (and unsweepable) if the process died between setup and that UPDATE.
+    ``update_thread_metadata`` finds this row already exists and only
+    updates its metadata, leaving ``is_ephemeral`` untouched. Not wrapped in
+    _CLEANUP_ERRORS — a failure here must fail the request, not silently
+    skip the flag the sweeper depends on.
     """
     maker = _get_session_maker()
-    try:
-        async with maker() as session:
-            await session.execute(update(ThreadORM).where(ThreadORM.thread_id == thread_id).values(is_ephemeral=True))
-            await session.commit()
-    except _CLEANUP_ERRORS:
-        logger.exception("Failed to mark ephemeral thread for sweeping", thread_id=thread_id)
+    async with maker() as session:
+        session.add(
+            ThreadORM(thread_id=thread_id, user_id=user_id, metadata_json={"owner": user_id}, is_ephemeral=True)
+        )
+        await session.commit()
 
 
 async def cleanup_after_background_run(run_id: str, thread_id: str, user_id: str) -> None:

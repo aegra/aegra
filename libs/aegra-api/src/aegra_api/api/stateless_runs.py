@@ -3,7 +3,7 @@
 These endpoints accept POST /runs/stream, /runs/wait, and /runs without a
 thread_id. They generate an ephemeral thread, delegate to the existing threaded
 endpoint functions, and clean up the thread afterward (unless the caller
-explicitly sets ``on_completion="keep"``). Threads are also flagged
+explicitly sets ``on_completion="keep"``). Threads are pre-created flagged
 ``is_ephemeral`` so ``services.orphan_thread_sweeper`` can catch any that
 this fast-path delete misses.
 """
@@ -32,8 +32,8 @@ from aegra_api.services.broker import broker_manager
 from aegra_api.services.run_cleanup import (
     _CLEANUP_ERRORS,
     _background_cleanup_tasks,
+    create_ephemeral_thread,
     delete_thread_by_id,
-    mark_thread_ephemeral,
     schedule_background_cleanup,
 )
 
@@ -139,14 +139,13 @@ async def stateless_wait_for_run(
     """
     thread_id = str(uuid4())
     should_delete = request.on_completion != "keep"
+    if should_delete:
+        await create_ephemeral_thread(thread_id, user.identity)
 
     try:
         response = await wait_for_run(thread_id, request, user)
     except Exception:
         if should_delete:
-            # Mark first: if the delete below also fails (or this handler
-            # never runs to completion), the orphan sweeper still finds it.
-            await mark_thread_ephemeral(thread_id)
             try:
                 await delete_thread_by_id(thread_id, user.identity)
             except _CLEANUP_ERRORS:
@@ -156,8 +155,6 @@ async def stateless_wait_for_run(
                 )
         raise
 
-    if should_delete:
-        await mark_thread_ephemeral(thread_id)
     if not should_delete:
         return response
 
@@ -212,14 +209,13 @@ async def stateless_stream_run(
     """
     thread_id = str(uuid4())
     should_delete = request.on_completion != "keep"
+    if should_delete:
+        await create_ephemeral_thread(thread_id, user.identity)
 
     try:
         response = await create_and_stream_run(thread_id, request, user)
     except Exception:
-        # create_and_stream_run may have auto-created the thread via
-        # update_thread_metadata before raising; clean up to avoid orphans.
         if should_delete:
-            await mark_thread_ephemeral(thread_id)
             try:
                 await delete_thread_by_id(thread_id, user.identity)
             except _CLEANUP_ERRORS:
@@ -229,8 +225,6 @@ async def stateless_stream_run(
                 )
         raise
 
-    if should_delete:
-        await mark_thread_ephemeral(thread_id)
     if not should_delete:
         return response
 
@@ -297,14 +291,13 @@ async def stateless_create_run(
     """
     thread_id = str(uuid4())
     should_delete = request.on_completion != "keep"
+    if should_delete:
+        await create_ephemeral_thread(thread_id, user.identity)
 
     try:
         result = await create_run(thread_id, request, user, session)
     except Exception:
-        # create_run may have auto-created the thread via
-        # update_thread_metadata before raising; clean up to avoid orphans.
         if should_delete:
-            await mark_thread_ephemeral(thread_id)
             try:
                 await delete_thread_by_id(thread_id, user.identity)
             except _CLEANUP_ERRORS:
@@ -315,9 +308,6 @@ async def stateless_create_run(
         raise
 
     if should_delete:
-        # Safety net in case the process crashes before schedule_background_cleanup's
-        # fire-and-forget task (below) reaches its own delete_thread_by_id call.
-        await mark_thread_ephemeral(thread_id)
         schedule_background_cleanup(result.run_id, thread_id, user.identity)
 
     return result

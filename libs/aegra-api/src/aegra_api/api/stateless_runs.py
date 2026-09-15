@@ -3,9 +3,10 @@
 These endpoints accept POST /runs/stream, /runs/wait, and /runs without a
 thread_id. They generate an ephemeral thread, delegate to the existing threaded
 endpoint functions, and clean up the thread afterward (unless the caller
-explicitly sets ``on_completion="keep"``). Threads are pre-created flagged
-``is_ephemeral`` so ``services.orphan_thread_sweeper`` can catch any that
-this fast-path delete misses.
+explicitly sets ``on_completion="keep"``). Threads are flagged ``is_ephemeral``
+atomically at creation (inside the shared _prepare_run transaction, after
+authorization) so ``services.orphan_thread_sweeper`` can catch any that this
+fast-path delete misses.
 """
 
 import asyncio
@@ -19,9 +20,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sse_starlette import EventSourceResponse
 
 from aegra_api.api.runs import (
-    create_and_stream_run,
-    create_run,
-    wait_for_run,
+    _create_and_stream_run,
+    _create_run,
+    _wait_for_run,
 )
 from aegra_api.core.auth_deps import auth_dependency, get_current_user
 from aegra_api.core.orm import get_session
@@ -32,7 +33,6 @@ from aegra_api.services.broker import broker_manager
 from aegra_api.services.run_cleanup import (
     _CLEANUP_ERRORS,
     _background_cleanup_tasks,
-    create_ephemeral_thread,
     delete_thread_by_id,
     schedule_background_cleanup,
 )
@@ -139,11 +139,9 @@ async def stateless_wait_for_run(
     """
     thread_id = str(uuid4())
     should_delete = request.on_completion != "keep"
-    if should_delete:
-        await create_ephemeral_thread(thread_id, user.identity)
 
     try:
-        response = await wait_for_run(thread_id, request, user)
+        response = await _wait_for_run(thread_id, request, user, is_ephemeral=should_delete)
     except Exception:
         if should_delete:
             try:
@@ -209,11 +207,9 @@ async def stateless_stream_run(
     """
     thread_id = str(uuid4())
     should_delete = request.on_completion != "keep"
-    if should_delete:
-        await create_ephemeral_thread(thread_id, user.identity)
 
     try:
-        response = await create_and_stream_run(thread_id, request, user)
+        response = await _create_and_stream_run(thread_id, request, user, is_ephemeral=should_delete)
     except Exception:
         if should_delete:
             try:
@@ -291,11 +287,9 @@ async def stateless_create_run(
     """
     thread_id = str(uuid4())
     should_delete = request.on_completion != "keep"
-    if should_delete:
-        await create_ephemeral_thread(thread_id, user.identity)
 
     try:
-        result = await create_run(thread_id, request, user, session)
+        result = await _create_run(thread_id, request, user, session, is_ephemeral=should_delete)
     except Exception:
         if should_delete:
             try:

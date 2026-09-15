@@ -108,6 +108,34 @@ async def _apply_create_run_auth(user: User, thread_id: str, request: RunCreate)
     )
 
 
+async def _create_run(
+    thread_id: str,
+    request: RunCreate,
+    user: User,
+    session: AsyncSession,
+    *,
+    is_ephemeral: bool = False,
+) -> Run:
+    """Shared implementation for create_run.
+
+    ``is_ephemeral`` is not a route parameter — a stateless_runs.py caller
+    passes it directly; the real endpoint always authorizes before it could
+    ever be true. Keeping it off the route signature avoids exposing it as
+    an accidental query parameter on the real endpoint.
+    """
+    existing_thread = await session.scalar(select(ThreadORM).where(ThreadORM.thread_id == thread_id))
+    if existing_thread and existing_thread.user_id != user.identity:
+        raise HTTPException(404, f"Thread '{thread_id}' not found")
+
+    await _apply_create_run_auth(user, thread_id, request)
+
+    _run_id, run, _job = await _prepare_run(
+        session, thread_id, request, user, initial_status="pending", is_ephemeral=is_ephemeral
+    )
+
+    return run
+
+
 @router.post("/threads/{thread_id}/runs", response_model=Run, responses={**NOT_FOUND, **CONFLICT})
 async def create_run(
     thread_id: str,
@@ -122,37 +150,17 @@ async def create_run(
     endpoint to follow progress. Provide either `input` or `command` (for
     human-in-the-loop resumption) but not both.
     """
-    existing_thread = await session.scalar(select(ThreadORM).where(ThreadORM.thread_id == thread_id))
-    if existing_thread and existing_thread.user_id != user.identity:
-        raise HTTPException(404, f"Thread '{thread_id}' not found")
-
-    await _apply_create_run_auth(user, thread_id, request)
-
-    _run_id, run, _job = await _prepare_run(session, thread_id, request, user, initial_status="pending")
-
-    return run
+    return await _create_run(thread_id, request, user, session)
 
 
-@router.post("/threads/{thread_id}/runs/stream", responses={**SSE_RESPONSE, **NOT_FOUND, **CONFLICT})
-async def create_and_stream_run(
+async def _create_and_stream_run(
     thread_id: str,
     request: RunCreate,
-    user: User = Depends(get_current_user),
+    user: User,
+    *,
+    is_ephemeral: bool = False,
 ) -> EventSourceResponse:
-    """Create a new run and stream its execution via SSE.
-
-    Returns a `text/event-stream` response with Server-Sent Events. Each
-    event has a `type` field (e.g. `values`, `updates`, `messages`,
-    `metadata`, `end`) and a JSON `data` payload.
-
-    Set `on_disconnect` to `"continue"` if the run should keep executing
-    after the client disconnects (default is `"cancel"`). Use `stream_mode`
-    to control which event types are emitted.
-
-    A periodic SSE keepalive comment is sent every
-    ``KEEPALIVE_INTERVAL_SECS`` so idle proxies don't drop long-running
-    silent nodes (e.g. agents holding an upstream WebSocket).
-    """
+    """Shared implementation for create_and_stream_run. See _create_run for ``is_ephemeral``."""
     maker = _get_session_maker()
     async with maker() as session:
         existing_thread = await session.scalar(select(ThreadORM).where(ThreadORM.thread_id == thread_id))
@@ -161,7 +169,9 @@ async def create_and_stream_run(
 
         await _apply_create_run_auth(user, thread_id, request)
 
-        run_id, run, _job = await _prepare_run(session, thread_id, request, user, initial_status="pending")
+        run_id, run, _job = await _prepare_run(
+            session, thread_id, request, user, initial_status="pending", is_ephemeral=is_ephemeral
+        )
 
     # Default to cancel on disconnect - this matches user expectation that clicking
     # "Cancel" in the frontend will stop the backend task. Users can explicitly
@@ -189,6 +199,29 @@ async def create_and_stream_run(
             "Content-Location": f"/threads/{thread_id}/runs/{run_id}",
         },
     )
+
+
+@router.post("/threads/{thread_id}/runs/stream", responses={**SSE_RESPONSE, **NOT_FOUND, **CONFLICT})
+async def create_and_stream_run(
+    thread_id: str,
+    request: RunCreate,
+    user: User = Depends(get_current_user),
+) -> EventSourceResponse:
+    """Create a new run and stream its execution via SSE.
+
+    Returns a `text/event-stream` response with Server-Sent Events. Each
+    event has a `type` field (e.g. `values`, `updates`, `messages`,
+    `metadata`, `end`) and a JSON `data` payload.
+
+    Set `on_disconnect` to `"continue"` if the run should keep executing
+    after the client disconnects (default is `"cancel"`). Use `stream_mode`
+    to control which event types are emitted.
+
+    A periodic SSE keepalive comment is sent every
+    ``KEEPALIVE_INTERVAL_SECS`` so idle proxies don't drop long-running
+    silent nodes (e.g. agents holding an upstream WebSocket).
+    """
+    return await _create_and_stream_run(thread_id, request, user)
 
 
 @router.get("/threads/{thread_id}/runs/{run_id}", response_model=Run, responses={**NOT_FOUND})
@@ -358,6 +391,44 @@ async def join_run(
     )
 
 
+async def _wait_for_run(
+    thread_id: str,
+    request: RunCreate,
+    user: User,
+    *,
+    is_ephemeral: bool = False,
+) -> StreamingResponse:
+    """Shared implementation for wait_for_run. See _create_run for ``is_ephemeral``."""
+    maker = _get_session_maker()
+
+    # Session block: all pre-execution DB work (validate, create run, submit)
+    async with maker() as session:
+        existing_thread = await session.scalar(select(ThreadORM).where(ThreadORM.thread_id == thread_id))
+        if existing_thread and existing_thread.user_id != user.identity:
+            raise HTTPException(404, f"Thread '{thread_id}' not found")
+
+        await _apply_create_run_auth(user, thread_id, request)
+
+        run_id, _run, _job = await _prepare_run(
+            session, thread_id, request, user, initial_status="pending", is_ephemeral=is_ephemeral
+        )
+
+    # No pool connection held from here — safe for long waits
+    return StreamingResponse(
+        heartbeat_wait_body(
+            run_id,
+            thread_id,
+            user.identity,
+            timeout=settings.worker.BG_JOB_TIMEOUT_SECS,
+        ),
+        media_type="application/json",
+        headers={
+            "Location": f"/threads/{thread_id}/runs/{run_id}/join",
+            "Content-Location": f"/threads/{thread_id}/runs/{run_id}",
+        },
+    )
+
+
 @router.post("/threads/{thread_id}/runs/wait", responses={**NOT_FOUND, **CONFLICT})
 async def wait_for_run(
     thread_id: str,
@@ -374,32 +445,7 @@ async def wait_for_run(
     Sessions are managed manually (not via ``Depends``) to avoid holding a
     pool connection during the long wait.
     """
-    maker = _get_session_maker()
-
-    # Session block: all pre-execution DB work (validate, create run, submit)
-    async with maker() as session:
-        existing_thread = await session.scalar(select(ThreadORM).where(ThreadORM.thread_id == thread_id))
-        if existing_thread and existing_thread.user_id != user.identity:
-            raise HTTPException(404, f"Thread '{thread_id}' not found")
-
-        await _apply_create_run_auth(user, thread_id, request)
-
-        run_id, _run, _job = await _prepare_run(session, thread_id, request, user, initial_status="pending")
-
-    # No pool connection held from here — safe for long waits
-    return StreamingResponse(
-        heartbeat_wait_body(
-            run_id,
-            thread_id,
-            user.identity,
-            timeout=settings.worker.BG_JOB_TIMEOUT_SECS,
-        ),
-        media_type="application/json",
-        headers={
-            "Location": f"/threads/{thread_id}/runs/{run_id}/join",
-            "Content-Location": f"/threads/{thread_id}/runs/{run_id}",
-        },
-    )
+    return await _wait_for_run(thread_id, request, user)
 
 
 @router.get("/threads/{thread_id}/runs/{run_id}/stream", responses={**SSE_RESPONSE, **NOT_FOUND})

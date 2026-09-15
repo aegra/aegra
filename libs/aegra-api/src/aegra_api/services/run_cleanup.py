@@ -72,25 +72,6 @@ async def delete_thread_by_id(thread_id: str, user_id: str) -> None:
             await session.commit()
 
 
-async def create_ephemeral_thread(thread_id: str, user_id: str) -> None:
-    """Pre-create the thread row already flagged for the orphan-thread sweeper.
-
-    Called before delegating to the threaded endpoint, in its own committed
-    transaction: a later best-effort UPDATE would leave the thread unmarked
-    (and unsweepable) if the process died between setup and that UPDATE.
-    ``update_thread_metadata`` finds this row already exists and only
-    updates its metadata, leaving ``is_ephemeral`` untouched. Not wrapped in
-    _CLEANUP_ERRORS — a failure here must fail the request, not silently
-    skip the flag the sweeper depends on.
-    """
-    maker = _get_session_maker()
-    async with maker() as session:
-        session.add(
-            ThreadORM(thread_id=thread_id, user_id=user_id, metadata_json={"owner": user_id}, is_ephemeral=True)
-        )
-        await session.commit()
-
-
 async def cleanup_after_background_run(run_id: str, thread_id: str, user_id: str) -> None:
     """Wait for a background run to finish, then delete its ephemeral thread.
 

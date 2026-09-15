@@ -189,6 +189,16 @@ AEGRA_THREAD_TTL='{"strategy": "keep_latest", "default_ttl": 1440, "sweep_interv
 `AEGRA_THREAD_TTL` takes precedence. When set, the `checkpointer.ttl` block in `aegra.json` is ignored entirely and unset fields fall back to their defaults. See the [configuration reference](/reference/configuration#checkpointer) for field semantics.
 </Note>
 
+## Orphan thread sweeper
+
+The stateless run endpoints (`POST /runs`, `/runs/wait`, `/runs/stream`) create an ephemeral thread and delete it once the run finishes. If that delete is missed — e.g. a slow-client or dead-proxy disconnect in prod mode racing ahead of the broker's end-event drain — this background sweeper deletes the leftover thread once it's been idle past the retention window with no active run. Unlike Thread TTL above, it requires no configuration to enable: it only ever touches threads the stateless endpoints marked ephemeral, never threads created via `POST /threads`.
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `ORPHAN_THREAD_SWEEP_INTERVAL_SECONDS` | `300` | How often (in seconds) the sweeper checks for idle ephemeral threads |
+| `ORPHAN_THREAD_RETENTION_MINUTES` | `60` | How long an ephemeral thread with no active run must be idle before it's deleted |
+| `ORPHAN_THREAD_SWEEP_BATCH_SIZE` | `100` | Maximum ephemeral threads deleted per sweep tick |
+
 ## Prometheus metrics
 
 | Variable | Default | Description |

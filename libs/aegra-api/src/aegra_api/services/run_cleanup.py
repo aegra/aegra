@@ -9,7 +9,7 @@ import asyncio
 import structlog
 from psycopg import Error as PsycopgError
 from redis import RedisError
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.exc import SQLAlchemyError
 
 from aegra_api.core.active_runs import active_runs
@@ -70,6 +70,23 @@ async def delete_thread_by_id(thread_id: str, user_id: str) -> None:
             await db_manager.get_checkpointer().adelete_thread(thread_id)
             await session.delete(thread)
             await session.commit()
+
+
+async def mark_thread_ephemeral(thread_id: str) -> None:
+    """Best-effort: flag a thread for the orphan-thread sweeper.
+
+    Called after the underlying threaded endpoint has created the thread, so
+    the UPDATE is a no-op only on infra failure, never on a missing row.
+    Opens its own session since callers already hold no active one at this
+    point (or hold one on a different pool, e.g. the stream/wait paths).
+    """
+    maker = _get_session_maker()
+    try:
+        async with maker() as session:
+            await session.execute(update(ThreadORM).where(ThreadORM.thread_id == thread_id).values(is_ephemeral=True))
+            await session.commit()
+    except _CLEANUP_ERRORS:
+        logger.exception("Failed to mark ephemeral thread for sweeping", thread_id=thread_id)
 
 
 async def cleanup_after_background_run(run_id: str, thread_id: str, user_id: str) -> None:

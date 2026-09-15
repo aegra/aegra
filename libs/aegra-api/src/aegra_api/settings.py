@@ -464,6 +464,41 @@ class EventStreamingSettings(EnvBase):
     FF_V2_EVENT_STREAMING: bool = True
 
 
+class OrphanThreadSettings(EnvBase):
+    """Orphan ephemeral-thread sweeper configuration.
+
+    Stateless run endpoints (POST /runs, /runs/wait, /runs/stream) create an
+    ephemeral thread and normally delete it once the run finishes. That
+    fast-path delete can be missed (e.g. a slow-client abort in prod mode
+    racing ahead of the broker's end-event drain), leaking the thread row.
+    This sweeper runs unconditionally (unlike the opt-in thread_ttl sweeper)
+    and deletes ephemeral threads that are idle past the retention window,
+    skipping any thread with a pending/running run.
+    """
+
+    ORPHAN_THREAD_SWEEP_INTERVAL_SECONDS: int = 300
+    ORPHAN_THREAD_RETENTION_MINUTES: int = 60
+    ORPHAN_THREAD_SWEEP_BATCH_SIZE: int = 100
+
+    @model_validator(mode="after")
+    def _validate_positive(self) -> "OrphanThreadSettings":
+        """Reject non-positive sweeper timing/batch values during settings validation."""
+        if self.ORPHAN_THREAD_SWEEP_INTERVAL_SECONDS <= 0:
+            raise ValueError(
+                "ORPHAN_THREAD_SWEEP_INTERVAL_SECONDS must be greater than 0, "
+                f"got {self.ORPHAN_THREAD_SWEEP_INTERVAL_SECONDS}"
+            )
+        if self.ORPHAN_THREAD_RETENTION_MINUTES <= 0:
+            raise ValueError(
+                f"ORPHAN_THREAD_RETENTION_MINUTES must be greater than 0, got {self.ORPHAN_THREAD_RETENTION_MINUTES}"
+            )
+        if self.ORPHAN_THREAD_SWEEP_BATCH_SIZE <= 0:
+            raise ValueError(
+                f"ORPHAN_THREAD_SWEEP_BATCH_SIZE must be greater than 0, got {self.ORPHAN_THREAD_SWEEP_BATCH_SIZE}"
+            )
+        return self
+
+
 class Settings:
     """Container object that instantiates all application settings groups."""
 
@@ -478,6 +513,7 @@ class Settings:
         self.cron = CronSettings()
         self.thread_ttl = ThreadTTLSettings()
         self.event_streaming = EventStreamingSettings()
+        self.orphan_thread = OrphanThreadSettings()
 
 
 settings = Settings()

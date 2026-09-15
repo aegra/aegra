@@ -192,6 +192,8 @@ The reaper resets the run to `pending` and re-enqueues it.
 The new worker resumes from the last checkpoint.
 Once retries are exhausted, the reaper marks the run `error`, clears ownership, and marks the thread `error` in the same transaction when no other run is active.
 
+A separate `OrphanThreadSweeper` background task guards against a related leak: the stateless run endpoints (`POST /runs`, `/runs/wait`, `/runs/stream`) create an ephemeral thread and normally delete it once the run finishes, but a slow-client or dead-proxy disconnect can race ahead of the broker's end-event drain and skip that delete to avoid cancelling a still-active run. The sweeper periodically deletes ephemeral threads that are idle past `ORPHAN_THREAD_RETENTION_MINUTES` with no active run, so a missed fast-path delete doesn't leak the thread (and its checkpoints) forever. Unlike the opt-in [Thread TTL](/guides/threads-and-state#thread-ttl) sweeper, it runs unconditionally — it only ever touches threads the stateless endpoints marked ephemeral, never threads created via `POST /threads`.
+
 <a href="https://mermaid.live/view#pako:eNptk09PwkAQxb_K2FOJiCbeGjVpocIBpRZJLyZm3Y6wge7W_aMkxO_uLK2CQE9N9r3fezPtbgKuSgwiCAx-OJQcB4LNNateJNBTM20FFzWTFooYmIFC6SVqiI_Ps6E_z5Sxc43Tp_GxIkdWk5dU7VuoJCSdE8JGUwpzokayVyN5kY2iiC_u7rJhBP0VExVoJyFcITN4K9XX-fWV6ezpijiCdI3cWQSatV70er0DzAgp8g2ZhRDXFmUJW1rnN-9RkVd9UgUP6-fxdAThZPJwuRSrVeeUZkc0VtXmGORjxz4EcF0LjQZIa333X22ztbbhNB2n_WcoRmmeEpJZZ25pbCnkHOLHQdMXboDmD9tC2ZC8DSSCe-Voqiaq9As7OxEyywbx8x--pj0Qvguc4LpJODDlEeTZjJZBwFdRQqjxAiX9WW63uyJphMk4m2St33-VJGpdezJfIuYfjkqCxK_9zO25N-VoXIXwrlUFfIF8WSsh7QHk_yTGcY7GBF0IKtQVEyVdgU1gF1htL0PJ9DL4_v4BvGz9cA==" target="_blank" rel="noopener">View fullscreen ↗</a>
 
 ```mermaid
@@ -334,6 +336,7 @@ All worker settings are configured via environment variables. See the [environme
 | `services/run_status.py` | Database status updates |
 | `services/run_preparation.py` | Run creation (validate, persist, submit) |
 | `services/lease_reaper.py` | Background task recovering crashed worker runs |
+| `services/orphan_thread_sweeper.py` | Background task deleting leaked ephemeral threads |
 | `services/broker.py` | In-memory broker + factory |
 | `services/redis_broker.py` | Redis pub/sub broker for SSE |
 | `services/streaming_service.py` | SSE orchestration (replay + live) |

@@ -66,12 +66,10 @@ class OrphanThreadSweeper:
     """Periodically deletes ephemeral threads left behind by missed cleanup."""
 
     def __init__(self) -> None:
-        """Initialize the sweeper state for the background polling loop."""
         self._task: asyncio.Task[None] | None = None
         self._running = False
 
     async def start(self) -> None:
-        """Start the background sweep task."""
         self._running = True
         self._task = asyncio.create_task(self._loop())
         logger.info(
@@ -81,7 +79,6 @@ class OrphanThreadSweeper:
         )
 
     async def stop(self) -> None:
-        """Stop the background sweep task and wait for cancellation to finish."""
         self._running = False
         if self._task is not None:
             self._task.cancel()

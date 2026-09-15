@@ -147,10 +147,8 @@ class Thread(Base):
     user_id: Mapped[str] = mapped_column(Text, nullable=False)
     created_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), server_default=text("now()"))
     updated_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), server_default=text("now()"))
-    # Set on threads auto-created by the stateless run endpoints (POST /runs,
-    # /runs/wait, /runs/stream). Lets the orphan-thread sweeper find threads
-    # whose fast-path delete-after-run was missed, without touching threads
-    # created via POST /threads.
+    # Set by the stateless run endpoints, never by POST /threads — lets the
+    # orphan-thread sweeper find threads whose delete-after-run was missed.
     is_ephemeral: Mapped[bool] = mapped_column(Boolean, server_default=text("false"), nullable=False)
 
     # Indexes for performance

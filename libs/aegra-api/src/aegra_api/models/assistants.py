@@ -3,9 +3,9 @@
 from datetime import datetime
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field
 
-from aegra_api.models.entity_ids import MAX_ENTITY_ID_LENGTH
+from aegra_api.models.entity_ids import ENTITY_ID_PATTERN, MAX_ENTITY_ID_LENGTH
 
 
 class AssistantCreate(BaseModel):
@@ -15,6 +15,7 @@ class AssistantCreate(BaseModel):
         None,
         min_length=1,
         max_length=MAX_ENTITY_ID_LENGTH,
+        pattern=ENTITY_ID_PATTERN,
         description=(
             "Optional client-provided assistant ID. "
             "Omit or null to let the server generate a UUID. "
@@ -34,13 +35,6 @@ class AssistantCreate(BaseModel):
         default_factory=dict, description="Metadata to use for searching and filtering assistants."
     )
     if_exists: str | None = Field("error", description="What to do if assistant exists: error or do_nothing")
-
-    @field_validator("assistant_id")
-    @classmethod
-    def _assistant_id_not_blank(cls, v: str | None) -> str | None:
-        if v is not None and not v.strip():
-            raise ValueError("assistant_id must not be blank")
-        return v
 
 
 class Assistant(BaseModel):

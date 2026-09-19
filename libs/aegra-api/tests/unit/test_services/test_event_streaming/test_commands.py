@@ -8,6 +8,8 @@ import pytest
 from aegra_api.models import User
 from aegra_api.services.event_streaming import commands as cmd
 
+_CHECKPOINT_ID = "1ef4f797-8335-6428-8001-8a1503f9b875"
+
 
 @pytest.fixture
 def user() -> User:
@@ -137,6 +139,81 @@ class TestRunStart:
         request = prepared_run.call_args.args[2]
         assert request.command == {"resume": {"answer": 42}}
         assert request.input is None
+
+    async def test_run_start_forks_from_configurable_checkpoint_id_without_input(
+        self, prepared_run: AsyncMock, user: User
+    ) -> None:
+        resp, run_id = await _dispatch(
+            {
+                "id": 1,
+                "method": "run.start",
+                "params": {"assistant_id": "agent", "config": {"configurable": {"checkpoint_id": _CHECKPOINT_ID}}},
+            },
+            user,
+        )
+        assert resp["type"] == "success"
+        assert run_id == "run-xyz"
+        request = prepared_run.call_args.args[2]
+        assert request.checkpoint == {"checkpoint_id": _CHECKPOINT_ID}
+        assert request.input is None
+
+    async def test_run_start_forks_with_input(self, prepared_run: AsyncMock, user: User) -> None:
+        await _dispatch(
+            {
+                "id": 1,
+                "method": "run.start",
+                "params": {
+                    "assistant_id": "agent",
+                    "input": {"x": 1},
+                    "config": {"configurable": {"checkpoint_id": _CHECKPOINT_ID}},
+                },
+            },
+            user,
+        )
+        request = prepared_run.call_args.args[2]
+        assert request.checkpoint == {"checkpoint_id": _CHECKPOINT_ID}
+        assert request.input == {"x": 1}
+
+    async def test_run_start_without_checkpoint_id_sets_no_checkpoint(
+        self, prepared_run: AsyncMock, user: User
+    ) -> None:
+        await _dispatch(
+            {
+                "id": 1,
+                "method": "run.start",
+                "params": {"assistant_id": "agent", "input": {"x": 1}, "config": {"configurable": {"k": "v"}}},
+            },
+            user,
+        )
+        assert prepared_run.call_args.args[2].checkpoint is None
+
+    @pytest.mark.parametrize("checkpoint_id", ["", "   ", "not-a-uuid", 123, ["a"], {"id": "a"}, False])
+    async def test_run_start_rejects_invalid_checkpoint_id(
+        self, prepared_run: AsyncMock, user: User, checkpoint_id: Any
+    ) -> None:
+        resp, run_id = await _dispatch(
+            {
+                "id": 1,
+                "method": "run.start",
+                "params": {"assistant_id": "agent", "config": {"configurable": {"checkpoint_id": checkpoint_id}}},
+            },
+            user,
+        )
+        assert resp["error"] == "invalid_argument"
+        assert "checkpoint_id" in resp["message"]
+        assert run_id is None
+        prepared_run.assert_not_called()
+
+    @pytest.mark.parametrize("config", [None, {}, {"configurable": None}, {"configurable": []}, {"configurable": {}}])
+    async def test_run_start_without_input_or_fork_target_is_invalid(
+        self, prepared_run: AsyncMock, user: User, config: Any
+    ) -> None:
+        resp, run_id = await _dispatch(
+            {"id": 1, "method": "run.start", "params": {"assistant_id": "agent", "config": config}}, user
+        )
+        assert resp["error"] == "invalid_argument"
+        assert run_id is None
+        prepared_run.assert_not_called()
 
 
 class TestInputRespond:

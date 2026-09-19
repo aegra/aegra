@@ -164,6 +164,51 @@ async def test_run_start_persists_request_context() -> None:
 
 @pytest.mark.e2e
 @pytest.mark.asyncio
+async def test_run_start_forks_from_checkpoint_without_input() -> None:
+    """run.start with only config.configurable.checkpoint_id replays from that checkpoint."""
+    if not await _v2_enabled():
+        pytest.skip("FF_V2_EVENT_STREAMING is disabled on the server under test")
+
+    assistant_id = await _ensure_assistant()
+    client = get_client(url=_base_url())
+    thread = await client.threads.create()
+    thread_id = thread["thread_id"]
+    await client.runs.wait(
+        thread_id,
+        assistant_id,
+        input={"messages": [{"role": "user", "content": json.dumps({"steps": 1})}]},
+    )
+    history = await client.threads.get_history(thread_id)
+    fork_target = next(state for state in history if state["next"])
+    checkpoint_id = fork_target["checkpoint"]["checkpoint_id"]
+    elog("fork target", {"checkpoint_id": checkpoint_id, "next": fork_target["next"]})
+
+    async with httpx.AsyncClient(base_url=_base_url(), timeout=10.0) as http:
+        response = await http.post(
+            f"/threads/{thread_id}/commands",
+            json={
+                "id": 1,
+                "method": "run.start",
+                "params": {
+                    "assistant_id": assistant_id,
+                    "config": {"configurable": {"checkpoint_id": checkpoint_id}},
+                },
+            },
+        )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["type"] == "success", body
+    run_id = body["result"]["run_id"]
+    await client.runs.join(thread_id, run_id)
+    run = await client.runs.get(thread_id, run_id)
+    assert run["status"] == "success"
+    forked_history = await client.threads.get_history(thread_id)
+    assert len(forked_history) > len(history)
+
+
+@pytest.mark.e2e
+@pytest.mark.asyncio
 async def test_sdk_receives_values_events() -> None:
     """The SDK receives values-channel events carrying the run's state."""
     if not await _v2_enabled():

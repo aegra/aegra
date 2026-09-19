@@ -327,6 +327,8 @@ curl -X POST http://localhost:8000/threads/$THREAD/commands \
 
 `context` is forwarded to both the graph factory through `ServerRuntime[T]` and graph nodes through `Runtime[T]`. It is an Aegra extension: the Agent Protocol `run.start` params are `assistant_id`, `input`, `config`, `metadata`, and `langsmith_tracer`. For a payload that also works against LangGraph Platform, put the same values under `config.configurable`; when `context` is absent the server copies `configurable` into it.
 
+To fork or time travel, set `config.configurable.checkpoint_id` to a checkpoint of the thread. The run replays from that checkpoint, and `input` is optional in that case. The JS SDK `forkFrom` option (the regenerate button in `useStream` and assistant-ui) sends this field. A value that is not a UUID string returns `invalid_argument`.
+
 `langsmith_tracer` is accepted and ignored. Aegra traces through OpenTelemetry, see [Observability](/guides/observability).
 
 Params outside the documented set are logged at warning level with their key names and otherwise ignored.

@@ -3,13 +3,25 @@
 from datetime import datetime
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
+
+from aegra_api.models.entity_ids import MAX_ENTITY_ID_LENGTH
 
 
 class AssistantCreate(BaseModel):
     """Request model for creating assistants"""
 
-    assistant_id: str | None = Field(None, description="Unique assistant identifier (auto-generated if not provided)")
+    assistant_id: str | None = Field(
+        None,
+        min_length=1,
+        max_length=MAX_ENTITY_ID_LENGTH,
+        description=(
+            "Optional client-provided assistant ID. "
+            "Omit or null to let the server generate a UUID. "
+            f"When set, 1-{MAX_ENTITY_ID_LENGTH} characters and not blank "
+            "(must fit PostgreSQL btree keys uncompressed)."
+        ),
+    )
     name: str | None = Field(
         None,
         description="Human-readable assistant name (auto-generated if not provided)",
@@ -22,6 +34,13 @@ class AssistantCreate(BaseModel):
         default_factory=dict, description="Metadata to use for searching and filtering assistants."
     )
     if_exists: str | None = Field("error", description="What to do if assistant exists: error or do_nothing")
+
+    @field_validator("assistant_id")
+    @classmethod
+    def _assistant_id_not_blank(cls, v: str | None) -> str | None:
+        if v is not None and not v.strip():
+            raise ValueError("assistant_id must not be blank")
+        return v
 
 
 class Assistant(BaseModel):

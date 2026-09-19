@@ -3504,14 +3504,16 @@
           "assistant_id": {
             "anyOf": [
               {
-                "type": "string"
+                "type": "string",
+                "maxLength": 255,
+                "minLength": 1
               },
               {
                 "type": "null"
               }
             ],
             "title": "Assistant Id",
-            "description": "Unique assistant identifier (auto-generated if not provided)"
+            "description": "Optional client-provided assistant ID. Omit or null to let the server generate a UUID. When set, 1-255 characters and not blank (must fit PostgreSQL btree keys uncompressed)."
           },
           "name": {
             "anyOf": [
@@ -5500,14 +5502,16 @@
           "threadId": {
             "anyOf": [
               {
-                "type": "string"
+                "type": "string",
+                "maxLength": 255,
+                "minLength": 1
               },
               {
                 "type": "null"
               }
             ],
             "title": "Threadid",
-            "description": "Optional client-provided thread ID for idempotent creation"
+            "description": "Optional client-provided thread ID for idempotent creation. Omit or null to let the server generate a UUID. When set, 1\u2013255 characters and not blank (must fit PostgreSQL btree keys uncompressed)."
           },
           "ifExists": {
             "anyOf": [

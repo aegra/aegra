@@ -5,6 +5,7 @@ from typing import Any, Literal
 
 from pydantic import AliasChoices, BaseModel, ConfigDict, Field, field_validator
 
+from aegra_api.models.entity_ids import MAX_ENTITY_ID_LENGTH
 from aegra_api.models.search_limit import (
     resolve_search_limit,
     search_limit_json_schema_extra,
@@ -15,9 +16,7 @@ from aegra_api.utils.status_compat import validate_thread_status
 # (timedelta.max is ~1.44e9 minutes); rejects inf/1e308 at validation time.
 MAX_TTL_MINUTES = 1_000_000_000
 
-# Stay well under PostgreSQL btree's ~2704-byte index tuple cap even uncompressed.
-# LangGraph SDK has no cap; PostgresSaver docs recommend 255 characters.
-MAX_THREAD_ID_LENGTH = 255
+MAX_THREAD_ID_LENGTH = MAX_ENTITY_ID_LENGTH
 
 
 class ThreadTTLSpec(BaseModel):

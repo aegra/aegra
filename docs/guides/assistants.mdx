@@ -69,6 +69,10 @@ With the default `if_exists="error"`, a duplicate answers `409`. An
 returned to you, even with `if_exists="do_nothing"`.
 
 <Note>
+  A client-provided `assistant_id` must be 1–255 non-blank characters. Omit the field (or send `null`) to let the server generate a UUID. Longer or blank values are rejected with 422 before they hit PostgreSQL's btree key limit (~2704 bytes).
+</Note>
+
+<Note>
   The snippets below assume you are inside an `async def` function with an initialized `client` — see the example above.
 </Note>
 

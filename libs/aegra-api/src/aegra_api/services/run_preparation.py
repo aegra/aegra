@@ -186,6 +186,13 @@ async def update_thread_metadata(
     )
 
 
+def _resolve_checkpoint(request: RunCreate) -> dict[str, Any] | None:
+    """Fold the top-level ``checkpoint_id`` into ``checkpoint``; ``checkpoint`` keys win."""
+    if request.checkpoint_id is None:
+        return request.checkpoint
+    return {"checkpoint_id": str(request.checkpoint_id), **(request.checkpoint or {})}
+
+
 async def _prepare_run(
     session: AsyncSession,
     thread_id: str,
@@ -259,7 +266,7 @@ async def _prepare_run(
             config=config,
             context=context,
             stream_mode=request.stream_mode,
-            checkpoint=request.checkpoint,
+            checkpoint=_resolve_checkpoint(request),
             command=request.command,
             event_streaming_v2=event_streaming_v2,
         ),

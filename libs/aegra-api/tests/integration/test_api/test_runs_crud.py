@@ -872,6 +872,34 @@ class TestCreateRunValidation:
         )
         assert resp.status_code == 404
 
+    def test_create_run_with_only_checkpoint_id_passes_validation(self) -> None:
+        app = create_test_app(include_runs=True, include_threads=False)
+
+        class Session(DummySessionBase):
+            async def scalar(self, _stmt: Any) -> None:
+                return None
+
+        override_session_dependency(app, Session)
+        client = make_client(app)
+
+        resp = client.post(
+            "/threads/test-thread-123/runs",
+            json={"assistant_id": "nonexistent", "checkpoint_id": "1ef4f797-8335-6428-8001-8a1503f9b875"},
+        )
+        # Past validation: the 404 comes from the assistant lookup.
+        assert resp.status_code == 404
+
+    def test_create_run_rejects_malformed_checkpoint_id(self) -> None:
+        app = create_test_app(include_runs=True, include_threads=False)
+        override_session_dependency(app, BasicSession)
+        client = make_client(app)
+
+        resp = client.post(
+            "/threads/test-thread-123/runs",
+            json={"assistant_id": "asst-123", "input": {"x": 1}, "checkpoint_id": "not-a-uuid"},
+        )
+        assert resp.status_code == 422
+
 
 class TestWaitForRunTimeouts:
     """Test wait_for_run timeout behavior.

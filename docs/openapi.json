@@ -4780,6 +4780,19 @@
             "title": "Checkpoint",
             "description": "Checkpoint configuration (e.g., {'checkpoint_id': '...', 'checkpoint_ns': ''})"
           },
+          "checkpoint_id": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "uuid"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Checkpoint Id",
+            "description": "Checkpoint to run from. Short form of checkpoint={'checkpoint_id': ...}; 'checkpoint' wins if both set."
+          },
           "stream": {
             "type": "boolean",
             "title": "Stream",

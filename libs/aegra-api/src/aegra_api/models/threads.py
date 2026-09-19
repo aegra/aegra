@@ -121,6 +121,10 @@ class ThreadSearchRequest(BaseModel):
     """Request model for thread search"""
 
     metadata: dict[str, Any] | None = Field(None, description="Metadata filters")
+    values: dict[str, Any] | None = Field(
+        None,
+        description="State values filter (SDK compatibility; filtering by values is not supported and returns 400)",
+    )
     status: str | None = Field(None, description="Thread status filter (idle, busy, interrupted, error)")
     # None default + validate_default so omitted and JSON null share one resolver.
     limit: int | None = Field(
@@ -149,6 +153,25 @@ class ThreadSearchRequest(BaseModel):
     @classmethod
     def validate_limit(cls: type["ThreadSearchRequest"], v: int | None) -> int:
         return resolve_search_limit(v)
+
+    @field_validator("status")
+    @classmethod
+    def validate_status(cls, v: str | None) -> str | None:
+        """Validate status filter conforms to API specification."""
+        if v is not None:
+            return validate_thread_status(v)
+        return v
+
+
+class ThreadCountRequest(BaseModel):
+    """Request model for thread count"""
+
+    metadata: dict[str, Any] | None = Field(None, description="Metadata filters")
+    values: dict[str, Any] | None = Field(
+        None,
+        description="State values filter (SDK compatibility; filtering by values is not supported and returns 400)",
+    )
+    status: str | None = Field(None, description="Thread status filter (idle, busy, interrupted, error)")
 
     @field_validator("status")
     @classmethod

@@ -1,6 +1,6 @@
 """Shared session fixtures for testing"""
 
-from typing import Any
+from typing import Any, Self
 
 from sqlalchemy import Insert
 
@@ -28,17 +28,51 @@ class BasicSession(DummySessionBase):
 
 
 class ThreadSession(BasicSession):
-    """Session for thread operations"""
+    """Session test double for thread operations."""
 
-    def __init__(self, threads: list[Any] | None = None):
+    def __init__(self: Self, threads: list[Any] | None = None, count: int | None = None) -> None:
+        """Initialize ThreadSession with optional threads list and count override."""
         super().__init__()
         self.threads = threads or []
+        self.count = count
 
-    async def scalars(self, stmt: Any = None) -> Any:
-        # Inserts go to the base, which echoes the RETURNING row create paths read.
+    def _filter_threads(self: Self, stmt: Any = None) -> list[Any]:
+        """Filter threads based on whereclause conditions in the statement."""
+        if stmt is None or not hasattr(stmt, "whereclause") or stmt.whereclause is None:
+            return list(self.threads)
+
+        clauses = getattr(stmt.whereclause, "clauses", [stmt.whereclause])
+        filtered = list(self.threads)
+        for clause in clauses:
+            left_name = getattr(getattr(clause, "left", None), "key", None) or str(getattr(clause, "left", ""))
+            right_val = getattr(getattr(clause, "right", None), "value", None)
+
+            if "status" in left_name and right_val is not None:
+                filtered = [t for t in filtered if getattr(t, "status", None) == right_val]
+            elif "metadata_json" in left_name and isinstance(right_val, dict):
+                filtered = [
+                    t
+                    for t in filtered
+                    if isinstance(getattr(t, "metadata_json", None), dict)
+                    and all(getattr(t, "metadata_json", {}).get(k) == v for k, v in right_val.items())
+                ]
+            elif "user_id" in left_name and right_val is not None:
+                filtered = [t for t in filtered if getattr(t, "user_id", None) == right_val]
+        return filtered
+
+    async def scalar(self: Self, stmt: Any = None) -> Any:
+        """Return scalar count or value, evaluating whereclause filters if present."""
+        if self.count is not None:
+            return self.count
+        filtered = self._filter_threads(stmt)
+        return len(filtered)
+
+    async def scalars(self: Self, stmt: Any = None) -> Any:
+        """Return scalar results, evaluating whereclause filters if present."""
         if isinstance(stmt, Insert):
             return await super().scalars(stmt)
-        return DummyScalarResult(self.threads)
+        filtered = self._filter_threads(stmt)
+        return DummyScalarResult(filtered)
 
 
 class RunSession(BasicSession):

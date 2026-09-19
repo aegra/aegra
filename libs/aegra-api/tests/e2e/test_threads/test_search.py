@@ -5,6 +5,7 @@ import uuid
 
 import pytest
 from httpx import AsyncClient
+from langgraph_sdk.errors import BadRequestError
 
 from aegra_api.settings import settings
 from tests.e2e._utils import elog, get_e2e_client
@@ -198,6 +199,33 @@ async def test_search_malformed_order_by_falls_back_e2e() -> None:
             assert resp.status_code == 200, f"order_by={bad!r} → {resp.status_code}: {resp.text}"
             returned = {t["thread_id"] for t in resp.json()}
             assert returned == set(created), f"order_by={bad!r} dropped rows: {returned}"
+
+
+@pytest.mark.e2e
+@pytest.mark.asyncio
+async def test_threads_count_e2e() -> None:
+    """threads.count() returns matching thread count via SDK across filters."""
+    tag = f"count-{uuid.uuid4().hex[:8]}"
+    created = await _seed_three_threads(tag)
+    client = get_e2e_client()
+    try:
+        count = await client.threads.count(metadata={"search_test_tag": tag})
+        assert count == 3
+
+        count_none = await client.threads.count(metadata={"search_test_tag": "nonexistent-tag-xyz"})
+        assert count_none == 0
+
+        count_idle = await client.threads.count(status="idle", metadata={"search_test_tag": tag})
+        assert count_idle == 3
+
+        count_busy = await client.threads.count(status="busy", metadata={"search_test_tag": tag})
+        assert count_busy == 0
+
+        with pytest.raises(BadRequestError):
+            await client.threads.count(values={"test_state": "val"})
+    finally:
+        for tid in created:
+            await client.threads.delete(tid)
 
 
 @pytest.mark.e2e

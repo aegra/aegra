@@ -260,33 +260,25 @@ class TestHeartbeatWaitBody:
         assert json.loads(full)["__error__"]["error"] == "TimeoutError"
 
     @pytest.mark.asyncio
-    async def test_a_swallowed_timeout_is_still_reported_as_one(self) -> None:
-        """LocalExecutor suppresses its own TimeoutError and returns normally.
-
-        Classifying on the exception alone would report that as IncompleteRun,
-        so a run left non-terminal after the full budget counts as a timeout
-        however the waiter returned — which is what dev mode actually does.
-        """
+    async def test_a_waiter_that_returns_early_is_reported_as_incomplete(self) -> None:
+        """No TimeoutError means the wait ended for some other reason, so say so rather than guess."""
         session = AsyncMock()
         session.scalar.return_value = _make_run_orm(status="running", output={"partial": "data"})
         maker = _make_session_maker(session)
-
-        async def swallowed_timeout(run_id: str, *, timeout: float) -> None:
-            await asyncio.sleep(timeout)
 
         with (
             patch("aegra_api.services.run_waiters._get_session_maker", return_value=maker),
             patch("aegra_api.services.run_waiters.executor") as mock_executor,
             patch("aegra_api.services.run_waiters.settings") as mock_settings,
         ):
-            mock_executor.wait_for_completion = AsyncMock(side_effect=swallowed_timeout)
+            mock_executor.wait_for_completion = AsyncMock(return_value=None)
             mock_settings.app.KEEPALIVE_INTERVAL_SECS = 0.01
             mock_settings.worker.BG_JOB_TIMEOUT_SECS = 3600
 
             body = heartbeat_wait_body("run-1", "thread-1", "test-user", timeout=0.05)
             _, full = await _collect_body(body)
 
-        assert json.loads(full)["__error__"]["error"] == "TimeoutError"
+        assert json.loads(full)["__error__"]["error"] == "IncompleteRun"
 
     @pytest.mark.asyncio
     async def test_leading_whitespace_ignored_by_json_parser(self) -> None:

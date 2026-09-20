@@ -24,6 +24,9 @@ logger = structlog.getLogger(__name__)
 # Terminal run states — used by join/wait to skip waiting
 TERMINAL_STATES = {"success", "error", "interrupted"}
 
+# The states whose output is the answer; every other one reports why there is none.
+_STATES_WITH_OUTPUT = frozenset({"success", "interrupted"})
+
 # The key the LangGraph SDK looks for in a wait/join body: `runs.wait()` raises
 # on it by default. Same payload shape as the SSE `error` event that
 # `streaming_service.signal_run_error` emits.
@@ -36,21 +39,20 @@ def error_envelope(error: str, message: str) -> dict[str, Any]:
 
 
 def run_result_body(run_orm: RunORM | None, run_id: str, *, timed_out: bool = False) -> dict[str, Any]:
-    """The join/wait response body for a run in its current state.
+    """The run's output when it has one, otherwise an ``__error__`` envelope saying why not.
 
-    ``success`` and ``interrupted`` return the run's output. An interrupt is a
-    human-review pause rather than a failure, and its partial output is the
-    whole point of the call. Every other state has no output worth returning —
-    a failed run finalizes with ``{}`` — so the body says why instead.
+    An interrupt is a human-review pause rather than a failure, so it keeps
+    returning its partial output.
     """
     if run_orm is None:
         return error_envelope("RunNotFound", f"Run '{run_id}' no longer exists")
+    if run_orm.status in _STATES_WITH_OUTPUT:
+        return run_orm.output or {}
     if run_orm.status == "error":
         return error_envelope("Error", run_orm.error_message or "Run failed")
     if run_orm.status == "timeout":
         return error_envelope("TimeoutError", run_orm.error_message or f"Run '{run_id}' timed out")
-    if run_orm.status in TERMINAL_STATES:
-        return run_orm.output or {}
+    # Non-terminal: the run is still going and the wait stopped first.
     if timed_out:
         return error_envelope("TimeoutError", f"Run '{run_id}' did not finish within the wait timeout")
     return error_envelope(
@@ -102,14 +104,8 @@ async def heartbeat_wait_body(
 
     async def _wait_for_run() -> None:
         nonlocal timed_out
-        started = asyncio.get_running_loop().time()
         try:
             await executor.wait_for_completion(run_id, timeout=timeout)
-            # LocalExecutor suppresses its own TimeoutError and returns normally,
-            # so a wait that spent its whole budget timed out however it returned.
-            if asyncio.get_running_loop().time() - started >= timeout:
-                timed_out = True
-                logger.warning("heartbeat_wait timeout", run_id=run_id, timeout=timeout)
         except TimeoutError:
             timed_out = True
             logger.warning("heartbeat_wait timeout", run_id=run_id, timeout=timeout)

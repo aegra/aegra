@@ -99,6 +99,7 @@ async def test_update_thread_metadata_persists_ephemeral_marker() -> None:
     assert created_thread.user_id == "user-1"
     assert created_thread.is_ephemeral is True
 
+
 _CHECKPOINT_ID = "1ef4f797-8335-6428-8001-8a1503f9b875"
 _OTHER_CHECKPOINT_ID = "1ef4f797-8335-6428-8001-8a1503f9b876"
 

@@ -184,6 +184,7 @@ class TestStatelessWaitForRun:
         assistant = _assistant_row()
         run = _run_row(status="success")
         run.output = {"result": "done"}
+        added_objects: list[object] = []
 
         class Session(DummySessionBase):
             async def scalar(self, stmt: object) -> object:
@@ -198,7 +199,7 @@ class TestStatelessWaitForRun:
                 pass
 
             def add(self, obj: object) -> None:
-                pass
+                added_objects.append(obj)
 
             async def commit(self) -> None:
                 pass
@@ -238,6 +239,9 @@ class TestStatelessWaitForRun:
 
         assert resp.status_code == 200
         assert resp.json() == {"result": "done"}
+        ephemeral_threads = [obj for obj in added_objects if hasattr(obj, "is_ephemeral")]
+        assert len(ephemeral_threads) == 1
+        assert ephemeral_threads[0].is_ephemeral is True
 
 
 # ---------------------------------------------------------------------------

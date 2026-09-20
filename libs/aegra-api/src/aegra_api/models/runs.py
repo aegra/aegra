@@ -3,6 +3,7 @@
 import re
 from datetime import datetime
 from typing import Any, Literal, Self
+from uuid import UUID
 
 from pydantic import (
     BaseModel,
@@ -40,6 +41,10 @@ class RunCreate(BaseModel):
     checkpoint: dict[str, Any] | None = Field(
         None,
         description="Checkpoint configuration (e.g., {'checkpoint_id': '...', 'checkpoint_ns': ''})",
+    )
+    checkpoint_id: UUID | None = Field(
+        None,
+        description="Checkpoint to run from. Short form of checkpoint={'checkpoint_id': ...}; 'checkpoint' wins if both set.",
     )
     stream: bool = Field(False, description="Enable streaming response")
     stream_mode: str | list[str] | None = Field(None, description="Requested stream mode(s)")
@@ -136,8 +141,30 @@ class RunCreate(BaseModel):
                 raise ValueError("Cannot specify both 'input' and 'command' - they are mutually exclusive")
         # Checkpoint-only resume keeps input=None so Pregel resumes from next=[...]
         # instead of restarting from __start__ with an empty input.
-        if self.input is None and self.command is None and self.checkpoint is None:
+        has_checkpoint = self.checkpoint is not None or self.checkpoint_id is not None
+        if self.input is None and self.command is None and not has_checkpoint:
             raise ValueError("Must specify at least one of 'input', 'command', or 'checkpoint'")
+        return self
+
+
+class RunsCancel(BaseModel):
+    """Selector for ``POST /runs/cancel``: a status filter, or thread_id plus run_ids."""
+
+    status: Literal["pending", "running", "all"] | None = Field(
+        None, description="Cancel every active run of the caller in this status. 'all' means pending and running."
+    )
+    thread_id: str | None = Field(None, description="Thread that owns the runs listed in run_ids.")
+    run_ids: list[str] | None = Field(None, description="Runs to cancel; requires thread_id.")
+
+    @model_validator(mode="after")
+    def validate_exactly_one_selector(self) -> Self:
+        """Reject a half-filled selector: the handler reads one branch and would
+        ignore the rest, so {status, thread_id} would cancel every matching run."""
+        by_status = self.status is not None
+        complete_ids = self.thread_id is not None and self.run_ids is not None
+        any_ids = self.thread_id is not None or self.run_ids is not None
+        if by_status == any_ids or (any_ids and not complete_ids):
+            raise ValueError("Provide either 'status' or both 'thread_id' and 'run_ids'")
         return self
 
 

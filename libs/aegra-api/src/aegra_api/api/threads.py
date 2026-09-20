@@ -10,7 +10,7 @@ from uuid import uuid4
 
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -44,6 +44,7 @@ from aegra_api.models.search_limit import effective_search_limit
 from aegra_api.services.streaming_service import streaming_service
 from aegra_api.services.thread_state_service import ThreadStateService
 from aegra_api.services.thread_ttl import get_thread_ttl_config, prune_expired_threads_for_user
+from aegra_api.utils.jsonb import jsonb_patch, jsonb_shallow_merge
 from aegra_api.utils.run_utils import strip_pinned_config_keys
 
 router = APIRouter(tags=["Threads"], dependencies=auth_dependency)
@@ -355,18 +356,27 @@ async def update_thread(
         if isinstance(handler_meta, dict):
             request.metadata = {**(request.metadata or {}), **handler_meta}
 
+    # This read is the 404 probe and the ownership check; the merge below does
+    # not read the column into Python, so it cannot lose a concurrent writer's
+    # keys no matter how long this request takes.
     stmt = select(ThreadORM).where(ThreadORM.thread_id == thread_id, ThreadORM.user_id == user.identity)
     thread = await session.scalar(stmt)
 
     if not thread:
         raise HTTPException(404, f"Thread '{thread_id}' not found")
 
-    thread.updated_at = datetime.now(UTC)
-
+    values: dict[str, Any] = {"updated_at": datetime.now(UTC)}
     if request.metadata:
-        current_metadata = dict(thread.metadata_json or {})
-        current_metadata.update(request.metadata)
-        thread.metadata_json = current_metadata
+        values["metadata_json"] = jsonb_shallow_merge(
+            ThreadORM.metadata_json, jsonb_patch(request.metadata, "metadata_patch")
+        )
+
+    await session.execute(
+        update(ThreadORM)
+        .where(ThreadORM.thread_id == thread_id, ThreadORM.user_id == user.identity)
+        .values(**values)
+        .execution_options(synchronize_session=False)
+    )
 
     await session.commit()
     await session.refresh(thread)

@@ -252,6 +252,15 @@ Aegra runs against user-managed Postgres including multi-host HA (PR #299). DB c
 - NEVER use `eval()`, `exec()`, or `pickle` on user input.
 - Use `subprocess.run([...], shell=False)` — never `shell=True` with user input.
 
+### API Compatibility (STRICT)
+Aegra is a drop-in replacement for LangSmith Deployments, so every request field the LangGraph SDK can send must be handled explicitly. A field that is accepted and quietly ignored is the most common compatibility bug: the client sees success and the behavior it asked for never happens.
+
+- **Every field the SDK can send either changes behavior or returns 422.** Never accept a field and ignore it. If a feature is not implemented, declare the field and reject any value that differs from current behavior with a clear error.
+- **One exception: fields that configure a system outside Aegra.** A field whose only effect is on a LangSmith-side service (for example `langsmith_tracer`, `feedback_keys`) may be accepted and left inert. Each such field is listed in `docs/feature-support.mdx` with the reason. Nothing else may be inert.
+- **Declare accepted keys.** Request models list every SDK field. Agent Protocol v2 handlers keep an explicit key set (`RUN_START_KEYS`, `INPUT_RESPOND_KEYS` in `services/event_streaming/commands.py`) and log unknown keys at warning level. Do not use `extra="forbid"`: the Python SDK always sends default-valued booleans, so a new SDK field would break every client.
+- **Pin the contract with a drift test.** v2: `tests/unit/test_services/test_event_streaming/test_spec_params.py` vendors the protocol param shapes and asserts the handler key sets cover them. v1: the request-model drift test against the SDK request body is tracked in #503; until it lands, add explicit field tests with each new field. A new SDK field must fail CI, not reach a user.
+- **Match public names and defaults.** Config keys, env vars and enum values follow the public LangGraph Platform docs where one exists, so users can move between deployments without changing payloads.
+
 ## Architecture
 
 ### Database Architecture
@@ -337,14 +346,15 @@ Supported factory signatures: 0-arg (called once at startup), config-only (`dict
 - **`aegra-api` and `aegra-cli` MUST always have the same version.** Both versions live in their respective `pyproject.toml` files (`libs/aegra-api/pyproject.toml` and `libs/aegra-cli/pyproject.toml`).
 - **`aegra-cli` depends on `aegra-api~=X.Y.Z`** (compatible release). This allows patch updates (X.Y.Z+1) without changing the constraint, but a **minor bump requires updating the constraint** in `aegra-cli/pyproject.toml`.
 - **Pre-1.0.0 versioning (current):** While in beta (`0.x.y`), the version scheme is `0.MAJOR.PATCH`:
-  - **Patch** (0.5.1 → 0.5.2): Bug fixes, small improvements, new features, non-breaking additions. Update `version` in BOTH `pyproject.toml` files.
-  - **Minor** (0.5.x → 0.6.0): Breaking changes (removed/renamed endpoints, changed behavior, schema migrations). Update `version` in BOTH `pyproject.toml` files AND update the `aegra-api~=` constraint in `aegra-cli/pyproject.toml`.
+  - **Patch** (0.5.1 → 0.5.2): Bug fixes, small improvements, new features, non-breaking additions.
+  - **Minor** (0.5.x → 0.6.0): Breaking changes (removed/renamed endpoints, changed behavior, schema migrations). The release PR also updates the `aegra-api~=` constraint in `aegra-cli/pyproject.toml`.
   - **1.0.0**: Reserved for when the public API is considered stable and we commit to full SemVer guarantees. This is a deliberate decision, not triggered by a single change.
 - **Post-1.0.0 versioning (future):** Standard SemVer applies:
   - **Patch** (1.0.0 → 1.0.1): Bug fixes only.
   - **Minor** (1.0.x → 1.1.0): New features, non-breaking additions.
   - **Major** (1.x.y → 2.0.0): Breaking changes.
-- **Always bump the version before creating a PR.** Determine the bump type from the changes:
-  - Bug fix, small improvement, or new non-breaking feature → patch bump
-  - Breaking change (removed/renamed API, changed defaults, schema migration) → minor bump
+- **Do NOT bump the version in a feature or fix PR.** Releases are batched: several PRs merge, then one release PR bumps everything at once. A bump inside a normal PR conflicts with every other PR in the batch and has to be rebased away.
+- **The release PR bumps four things together:** `version` in BOTH `pyproject.toml` files, `uv.lock`, and `docs/openapi.json`. Determine the bump type from everything in the batch:
+  - Bug fixes, small improvements, new non-breaking features → patch bump
+  - Any breaking change (removed/renamed API, changed defaults, schema migration) → minor bump
 - **`aegra` meta-package** (on PyPI, not in this repo) is a name reservation that points to `aegra-cli`. It does not need to be updated on every release.

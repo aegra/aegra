@@ -4,6 +4,7 @@ import asyncio
 
 import pytest
 
+from aegra_api.services.base_broker import REPLAY_RETENTION_SECONDS
 from aegra_api.services.broker import BrokerManager, RunBroker
 
 
@@ -238,3 +239,63 @@ class TestBrokerManager:
         await manager.stop()
 
         assert manager._cleanup_task.cancelled() or manager._cleanup_task.done()
+
+
+class TestReplayRetention:
+    """Finished brokers survive the replay window, then get swept."""
+
+    @staticmethod
+    def _finish_at(broker: RunBroker, seconds_ago: float) -> None:
+        """Backdate the broker's completion so the sweep sees it as aged."""
+        broker.mark_finished()
+        assert broker._finished_at is not None
+        broker._finished_at -= seconds_ago
+
+    @pytest.mark.asyncio
+    async def test_unfinished_broker_is_never_swept(self) -> None:
+        manager = BrokerManager()
+        manager.get_or_create_broker("run-1")
+
+        assert manager.sweep_expired_brokers(retention_seconds=0) == []
+        assert manager.get_broker("run-1") is not None
+
+    @pytest.mark.asyncio
+    async def test_finished_broker_survives_inside_the_window(self) -> None:
+        manager = BrokerManager()
+        self._finish_at(manager.get_or_create_broker("run-1"), seconds_ago=REPLAY_RETENTION_SECONDS - 60)
+
+        assert manager.sweep_expired_brokers() == []
+        assert manager.get_broker("run-1") is not None
+
+    @pytest.mark.asyncio
+    async def test_finished_broker_is_swept_past_the_window(self) -> None:
+        manager = BrokerManager()
+        self._finish_at(manager.get_or_create_broker("run-1"), seconds_ago=REPLAY_RETENTION_SECONDS + 60)
+        await manager.allocate_event_id("run-1")
+
+        assert manager.sweep_expired_brokers() == ["run-1"]
+        assert manager.get_broker("run-1") is None
+        assert manager._event_counters == {}
+
+    @pytest.mark.asyncio
+    async def test_window_starts_at_completion_not_creation(self) -> None:
+        """A long run must still get a full window after it ends."""
+        manager = BrokerManager()
+        broker = manager.get_or_create_broker("run-1")
+        broker._created_at -= REPLAY_RETENTION_SECONDS * 10
+        broker.mark_finished()
+
+        assert manager.sweep_expired_brokers() == []
+
+    @pytest.mark.asyncio
+    async def test_broker_with_a_queued_event_is_kept(self) -> None:
+        """is_empty() gates the sweep so a subscriber cannot lose an undelivered event."""
+        manager = BrokerManager()
+        broker = manager.get_or_create_broker("run-1")
+        queue: asyncio.Queue = asyncio.Queue()
+        broker._subscribers.add(queue)
+        queue.put_nowait(("evt-1", {"data": "x"}))
+        self._finish_at(broker, seconds_ago=REPLAY_RETENTION_SECONDS + 60)
+
+        assert manager.sweep_expired_brokers() == []
+        assert manager.get_broker("run-1") is not None

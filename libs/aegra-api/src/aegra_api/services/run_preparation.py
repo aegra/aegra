@@ -191,32 +191,29 @@ async def update_thread_metadata(
         session.add(thread_orm)
         return
 
-    values: dict[str, object] = {
-        "metadata_json": jsonb_shallow_merge(
-            ThreadORM.metadata_json,
-            jsonb_patch({"assistant_id": str(assistant_id), "graph_id": graph_id}, "metadata_patch"),
-            *(
-                [
-                    case(
-                        (
-                            func.coalesce(ThreadORM.metadata_json["thread_name"].astext, "") == "",
-                            jsonb_patch({"thread_name": thread_name}, "thread_name_patch"),
-                        ),
-                        else_=literal_column("'{}'::jsonb"),
-                    )
-                ]
-                if thread_name
-                else []
-            ),
-        ),
-        "updated_at": datetime.now(UTC),
-    }
-    if is_ephemeral:
-        values["is_ephemeral"] = True
     await session.execute(
         update(ThreadORM)
         .where(ThreadORM.thread_id == thread_id)
-        .values(**values)
+        .values(
+            metadata_json=jsonb_shallow_merge(
+                ThreadORM.metadata_json,
+                jsonb_patch({"assistant_id": str(assistant_id), "graph_id": graph_id}, "metadata_patch"),
+                *(
+                    [
+                        case(
+                            (
+                                func.coalesce(ThreadORM.metadata_json["thread_name"].astext, "") == "",
+                                jsonb_patch({"thread_name": thread_name}, "thread_name_patch"),
+                            ),
+                            else_=literal_column("'{}'::jsonb"),
+                        )
+                    ]
+                    if thread_name
+                    else []
+                ),
+            ),
+            updated_at=datetime.now(UTC),
+        )
         .execution_options(synchronize_session=False)
     )
 

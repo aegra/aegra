@@ -23,6 +23,7 @@ from aegra_api.services.graph_factory import (
     _FACTORY_KWARGS,
     ContextValidationError,
     _classify_factory,
+    _context_errors,
     _extract_context_type,
     _is_runtime_annotation,
     build_server_runtime,
@@ -734,6 +735,36 @@ class TestValidateContext:
             validate_context({"name": "test", "value": "s3cr3t-value"}, "g")
 
         assert "s3cr3t-value" not in repr(exc_info.value.errors)
+
+    def test_a_declared_type_with_no_construction_path_accepts_anything(self) -> None:
+        """Neither a model nor a dataclass, so there is nothing to build.
+
+        Guessing at a constructor would reject contexts the graph would have
+        accepted, so the raw dict passes through as it did before.
+        """
+
+        class _Opaque:
+            pass
+
+        _FACTORY_CONTEXT_TYPES["g"] = _Opaque
+
+        validate_context({"anything": "at all"}, "g")
+
+    def test_an_errors_method_that_is_not_pydantics_still_rejects(self) -> None:
+        """A duck-typed ``errors`` must not swallow the rejection.
+
+        Anything exposing a callable ``errors`` reaches the Pydantic branch. One
+        that does not behave like Pydantic's collapses to the generic entry, so
+        the caller still gets a 422 rather than the exception escaping as a 500.
+        """
+
+        class _HostileErrors(Exception):
+            def errors(self) -> list[dict[str, Any]]:
+                raise RuntimeError("not Pydantic's errors()")
+
+        entries = _context_errors(_HostileErrors("rejected"))
+
+        assert entries == [{"loc": ["context"], "msg": "rejected", "type": "value_error"}]
 
 
 # ---------------------------------------------------------------------------

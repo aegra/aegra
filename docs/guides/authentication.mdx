@@ -166,7 +166,7 @@ as their parent, so one rule covers a whole family of endpoints:
 | Handler | Also covers |
 |---------|-------------|
 | `@auth.on.threads.read` | `GET /threads/{id}`, `/state`, `/state/{checkpoint_id}`, `/history`, `GET` a run, its `/join` and `/stream` |
-| `@auth.on.threads.update` | `PATCH /threads/{id}`, `POST /threads/{id}/state`, `PATCH` a run, `POST .../runs/{id}/cancel` |
+| `@auth.on.threads.update` | `PATCH /threads/{id}`, `POST /threads/{id}/state`, `PATCH` a run, `POST .../runs/{id}/cancel`, `POST /runs/cancel` |
 | `@auth.on.threads.delete` | `DELETE /threads/{id}`, `DELETE` a run |
 | `@auth.on.threads.create_run` | `POST /threads/{id}/runs`, `/runs/stream`, `/runs/wait`, `/threads/{id}/commands`, and the stateless `POST /runs`, `/runs/stream`, `/runs/wait` |
 | `@auth.on.threads.search` | `GET /threads`, `POST /threads/search`, `GET /threads/{id}/runs` |

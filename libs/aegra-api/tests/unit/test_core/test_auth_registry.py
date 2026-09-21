@@ -209,6 +209,7 @@ _SPEC_TUPLES: dict[tuple[str, str], tuple[str, str]] = {
     ("DELETE", "/threads/{thread_id}/runs/{run_id}"): ("threads", "delete"),
     # stateless runs
     ("POST", "/runs"): ("threads", "create_run"),
+    ("POST", "/runs/cancel"): ("threads", "update"),
     ("POST", "/runs/stream"): ("threads", "create_run"),
     ("POST", "/runs/wait"): ("threads", "create_run"),
     # crons

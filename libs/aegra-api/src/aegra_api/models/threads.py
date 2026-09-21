@@ -5,6 +5,7 @@ from typing import Any, Literal
 
 from pydantic import AliasChoices, BaseModel, ConfigDict, Field, field_validator
 
+from aegra_api.models.entity_ids import ENTITY_ID_PATTERN, MAX_ENTITY_ID_LENGTH
 from aegra_api.models.search_limit import (
     resolve_search_limit,
     search_limit_json_schema_extra,
@@ -14,6 +15,8 @@ from aegra_api.utils.status_compat import validate_thread_status
 # Upper bound keeping now + timedelta(minutes=ttl) finite and timedelta-safe
 # (timedelta.max is ~1.44e9 minutes); rejects inf/1e308 at validation time.
 MAX_TTL_MINUTES = 1_000_000_000
+
+MAX_THREAD_ID_LENGTH = MAX_ENTITY_ID_LENGTH
 
 
 class ThreadTTLSpec(BaseModel):
@@ -49,7 +52,15 @@ class ThreadCreate(BaseModel):
     thread_id: str | None = Field(
         None,
         alias="threadId",
-        description="Optional client-provided thread ID for idempotent creation",
+        min_length=1,
+        max_length=MAX_THREAD_ID_LENGTH,
+        pattern=ENTITY_ID_PATTERN,
+        description=(
+            "Optional client-provided thread ID for idempotent creation. "
+            "Omit or null to let the server generate a UUID. "
+            f"When set, 1–{MAX_THREAD_ID_LENGTH} characters and not blank "
+            "(must fit PostgreSQL btree keys uncompressed)."
+        ),
     )
     if_exists: str | None = Field(
         "raise",

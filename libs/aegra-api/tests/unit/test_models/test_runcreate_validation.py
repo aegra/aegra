@@ -1,9 +1,14 @@
 """Tests for RunCreate model validation."""
 
+from typing import Any
+from uuid import UUID
+
 import pytest
 from pydantic import ValidationError
 
 from aegra_api.models.runs import RunCreate
+
+_CHECKPOINT_ID = "1ef4f797-8335-6428-8001-8a1503f9b875"
 
 
 class TestRunCreateValidation:
@@ -30,6 +35,17 @@ class TestRunCreateValidation:
         """Ensure payloads with no input, command, or checkpoint are rejected."""
         with pytest.raises(ValueError, match="Must specify at least one of 'input', 'command', or 'checkpoint'"):
             RunCreate(assistant_id="agent")
+
+    def test_top_level_checkpoint_id_counts_as_a_checkpoint(self) -> None:
+        run_create = RunCreate(assistant_id="agent", checkpoint_id=_CHECKPOINT_ID)
+
+        assert run_create.checkpoint_id == UUID(_CHECKPOINT_ID)
+        assert run_create.input is None
+
+    @pytest.mark.parametrize("checkpoint_id", ["", "not-a-uuid", 123, ["a"]])
+    def test_rejects_malformed_checkpoint_id(self, checkpoint_id: Any) -> None:
+        with pytest.raises(ValidationError):
+            RunCreate(assistant_id="agent", input={"x": 1}, checkpoint_id=checkpoint_id)
 
 
 class TestRunCreateMetadataValidation:

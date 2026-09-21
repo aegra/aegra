@@ -69,6 +69,10 @@ With the default `if_exists="error"`, a duplicate answers `409`. An
 returned to you, even with `if_exists="do_nothing"`.
 
 <Note>
+  A client-provided `assistant_id` must be 1–255 non-blank characters. Omit the field (or send `null`) to let the server generate a UUID. Longer or blank values are rejected with 422 before they hit PostgreSQL's btree key limit (~2704 bytes).
+</Note>
+
+<Note>
   The snippets below assume you are inside an `async def` function with an initialized `client` — see the example above.
 </Note>
 
@@ -99,6 +103,20 @@ assistant = await client.assistants.update(
     metadata={"department": "engineering"},
 )
 ```
+
+Updates are partial: a field you leave out keeps the value it already has. `config` and `context` replace, so sending either one explicitly empty clears it:
+
+```python
+# Drop the config, and the context that mirrors config["configurable"]
+assistant = await client.assistants.update(
+    assistant_id="your-assistant-id",
+    config={},
+)
+```
+
+`metadata` is different: it merges into the assistant's existing metadata rather than replacing it, so `metadata={}` changes nothing and a stored key cannot be removed through this endpoint — only overwritten.
+
+`name` and `graph_id` are stored as non-null, so supplying either one empty is a `422` rather than a silent no-op. Omit them to leave them unchanged. `description` is nullable, so an explicit `None` clears it.
 
 ## Versioning
 

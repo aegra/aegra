@@ -9,9 +9,10 @@ import pytest
 from fastapi import HTTPException
 from pydantic import BaseModel, ConfigDict
 
+from aegra_api.models.runs import RunCreate
 from aegra_api.services import run_preparation as mod
 from aegra_api.services.graph_factory import _FACTORY_CONTEXT_TYPES
-from aegra_api.services.run_preparation import _validate_resume_command
+from aegra_api.services.run_preparation import _resolve_checkpoint, _validate_resume_command
 
 
 @pytest.fixture(autouse=True)
@@ -169,3 +170,32 @@ class TestEveryRunCreationPathIsValidated:
             path.relative_to(src).as_posix() for path in src.rglob("*.py") if "RunORM(" in path.read_text()
         )
         assert constructing == ["services/run_preparation.py"]
+
+
+_CHECKPOINT_ID = "1ef4f797-8335-6428-8001-8a1503f9b875"
+_OTHER_CHECKPOINT_ID = "1ef4f797-8335-6428-8001-8a1503f9b876"
+
+
+class TestResolveCheckpoint:
+    def test_returns_checkpoint_unchanged_without_checkpoint_id(self) -> None:
+        request = RunCreate(assistant_id="agent", checkpoint={"checkpoint_id": "chk-1", "checkpoint_ns": ""})
+        assert _resolve_checkpoint(request) == {"checkpoint_id": "chk-1", "checkpoint_ns": ""}
+
+    def test_returns_none_when_neither_is_set(self) -> None:
+        assert _resolve_checkpoint(RunCreate(assistant_id="agent", input={"x": 1})) is None
+
+    def test_builds_checkpoint_from_top_level_checkpoint_id(self) -> None:
+        request = RunCreate(assistant_id="agent", checkpoint_id=_CHECKPOINT_ID)
+        assert _resolve_checkpoint(request) == {"checkpoint_id": _CHECKPOINT_ID}
+
+    def test_keeps_other_checkpoint_keys(self) -> None:
+        request = RunCreate(assistant_id="agent", checkpoint_id=_CHECKPOINT_ID, checkpoint={"checkpoint_ns": "sub"})
+        assert _resolve_checkpoint(request) == {"checkpoint_id": _CHECKPOINT_ID, "checkpoint_ns": "sub"}
+
+    def test_checkpoint_dict_wins_over_top_level_checkpoint_id(self) -> None:
+        request = RunCreate(
+            assistant_id="agent",
+            checkpoint_id=_CHECKPOINT_ID,
+            checkpoint={"checkpoint_id": _OTHER_CHECKPOINT_ID},
+        )
+        assert _resolve_checkpoint(request) == {"checkpoint_id": _OTHER_CHECKPOINT_ID}

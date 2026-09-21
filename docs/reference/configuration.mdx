@@ -202,7 +202,7 @@ For a complete example combining both layers, see [`examples/factory/`](https://
 
 ## `default_graph_id`
 
-Nominate the graph that `POST /assistants` uses when a request omits `graph_id`.
+Nominate the graph that `POST /assistants` uses when a request omits `graph_id`. Read from whichever config file applies — `aegra.json`, or `langgraph.json` where that is the one in use.
 
 ```json
 {

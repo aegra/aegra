@@ -52,8 +52,7 @@ A deployment with one graph has only one answer, so `graph_id` is optional:
 assistant = await client.assistants.create(name="Customer Support Agent")
 ```
 
-With several graphs, nominate one with `default_graph_id` in `aegra.json` and
-creates that omit `graph_id` use it:
+With several graphs, nominate one with `default_graph_id` in `aegra.json` (or `langgraph.json`, which is read the same way) and creates that omit `graph_id` use it:
 
 ```json
 {

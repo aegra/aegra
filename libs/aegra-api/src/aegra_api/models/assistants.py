@@ -61,7 +61,8 @@ class AssistantCreate(BaseModel):
     graph_id: str | None = Field(
         None,
         description=(
-            "LangGraph graph ID from aegra.json. Optional when the deployment resolves a default "
+            "LangGraph graph ID from aegra.json or langgraph.json. Optional when the deployment "
+            "resolves a default "
             "graph — `default_graph_id`, or the sole entry in `graphs`; required otherwise."
         ),
     )

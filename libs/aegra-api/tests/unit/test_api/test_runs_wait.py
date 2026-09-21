@@ -120,7 +120,7 @@ class TestWaitForRunExceptionPaths:
 
     @pytest.mark.asyncio
     async def test_wait_for_run_timeout(self) -> None:
-        """Test that TimeoutError is handled gracefully and returns current state."""
+        """A wait that timed out reports it instead of passing off partial state."""
         thread_id = "test-thread-123"
         run_id = str(uuid4())
         user = User(identity="test-user", scopes=[])
@@ -162,7 +162,7 @@ class TestWaitForRunExceptionPaths:
             response = await wait_for_run(thread_id, request, user)
             result = await _consume_streaming_response(response)
 
-        assert result == {"partial": "output"}
+        assert result["__error__"]["error"] == "TimeoutError"
 
     @pytest.mark.asyncio
     async def test_wait_for_run_success(self) -> None:
@@ -207,7 +207,7 @@ class TestWaitForRunExceptionPaths:
 
     @pytest.mark.asyncio
     async def test_wait_for_run_failed_status(self) -> None:
-        """Test that failed runs return their output as-is."""
+        """A failed run reports its error message, not the empty output it stored."""
         thread_id = "test-thread-123"
         run_id = str(uuid4())
         user = User(identity="test-user", scopes=[])
@@ -222,7 +222,7 @@ class TestWaitForRunExceptionPaths:
             run_id,
             thread_id,
             status="error",
-            output={"error": "execution failed"},
+            output={},
             error_message="Graph execution error",
         )
 
@@ -250,7 +250,7 @@ class TestWaitForRunExceptionPaths:
             response = await wait_for_run(thread_id, request, user)
             result = await _consume_streaming_response(response)
 
-        assert result == {"error": "execution failed"}
+        assert result == {"__error__": {"error": "Error", "message": "Graph execution error"}}
 
     @pytest.mark.asyncio
     async def test_wait_for_run_interrupted_status(self) -> None:

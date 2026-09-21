@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import re
 from typing import Any
+from uuid import UUID
 
 import structlog
 from fastapi import HTTPException
@@ -133,6 +134,22 @@ def _context_from_params(params: dict[str, Any]) -> tuple[dict[str, Any] | None,
     return context, None
 
 
+def _fork_checkpoint_id(params: dict[str, Any]) -> tuple[str | None, str | None]:
+    """Returns ``(checkpoint_id, None)`` or ``(None, error_message)``."""
+    config = params.get("config")
+    configurable = config.get("configurable") if isinstance(config, dict) else None
+    checkpoint_id = configurable.get("checkpoint_id") if isinstance(configurable, dict) else None
+    if checkpoint_id is None:
+        return None, None
+    if not isinstance(checkpoint_id, str):
+        return None, "config.configurable.checkpoint_id must be a UUID string."
+    try:
+        UUID(checkpoint_id)
+    except ValueError:
+        return None, f"Invalid config.configurable.checkpoint_id: {checkpoint_id!r}."
+    return checkpoint_id, None
+
+
 async def _run_start(
     command_id: int,
     params: dict[str, Any],
@@ -155,6 +172,10 @@ async def _run_start(
     if context is None:
         return build_error(command_id, "invalid_argument", error_message or "invalid params"), None
 
+    checkpoint_id, error_message = _fork_checkpoint_id(params)
+    if error_message is not None:
+        return build_error(command_id, "invalid_argument", error_message), None
+
     # run.start with input on an interrupted thread means "answer the pending
     # interrupt" — resume with the input instead of starting a fresh turn that
     # would discard the pending tasks.
@@ -173,6 +194,9 @@ async def _run_start(
         input=input_data,
         command=command,
         config=params.get("config") or {},
+        # run.start has no checkpoint field: config.configurable.checkpoint_id is
+        # the fork target, and it must count as a checkpoint for input-less runs.
+        checkpoint={"checkpoint_id": checkpoint_id} if checkpoint_id else None,
         context=context,
         metadata=params.get("metadata"),
         interrupt_before=params.get("interrupt_before"),

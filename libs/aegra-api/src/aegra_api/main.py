@@ -315,12 +315,10 @@ def _api_routes(routes: list[Any], prefix: str = "") -> Iterator[tuple[str, APIR
         if nested is not None:
             context = getattr(route, "include_context", None)
             yield from _api_routes(list(nested.routes), prefix + getattr(context, "prefix", ""))
-        elif getattr(route, "host", None) is not None:
-            # Host-scoped: it serves only that Host header, so it claims nothing here.
-            continue
-        elif hasattr(route, "routes"):
-            # A Mount carries the path its children hang from.
-            yield from _api_routes(list(route.routes), prefix + getattr(route, "path", ""))
+        # Anything else holding routes — a Mount, a Host — is a separate
+        # application. This one does not publish its operations, so they cannot
+        # stand in for a core one: dropping the core route for them would leave
+        # the path served but undocumented.
 
 
 _GROUP_NAME = re.compile(r"\(\?P<[^>]+>")

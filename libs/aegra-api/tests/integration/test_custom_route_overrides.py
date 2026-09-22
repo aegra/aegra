@@ -378,20 +378,21 @@ def _mounted(path: str) -> FastAPI:
 
     app = FastAPI()
     app.mount(path, sub)
+    assert _claimed_operations(app) == set(), "a separate application must not claim"
     _include_core_routers(app)
     return app
 
 
-def test_a_mount_path_is_carried_into_the_claim() -> None:
-    """A sub-app at /custom serves /custom/assistants and claims nothing of the core."""
-    published = _mounted("/custom").openapi()["paths"]
+@pytest.mark.parametrize("mount_path", ["/custom", ""])
+def test_a_mounted_application_claims_nothing(mount_path: str) -> None:
+    """FastAPI does not publish a mounted app's operations in the parent schema.
 
-    assert "post" in published[_SELF_DISPATCHING], "the core operation was removed by a mounted sub-app"
+    Removing the core route for one would leave the path served and undocumented,
+    which is the mismatch this filtering exists to remove, the other way round.
+    """
+    app = _mounted(mount_path)
 
-
-def test_a_mount_at_the_root_still_claims() -> None:
-    """Mounted at ``/`` it really does serve the core path, so it should claim it."""
-    assert ("^" + _SELF_DISPATCHING + "$", "POST") in _claimed_operations(_mounted(""))
+    assert "post" in app.openapi()["paths"][_SELF_DISPATCHING], "the core operation was removed by a mounted sub-app"
 
 
 def test_a_host_scoped_route_claims_nothing() -> None:

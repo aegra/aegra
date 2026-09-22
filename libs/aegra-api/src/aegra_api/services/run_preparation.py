@@ -20,6 +20,7 @@ from aegra_api.core.orm import Run as RunORM
 from aegra_api.core.orm import Thread as ThreadORM
 from aegra_api.core.orm import _get_session_maker
 from aegra_api.models import Run, RunCreate, User
+from aegra_api.models.errors import DetailedHTTPException
 from aegra_api.models.run_job import RunBehavior, RunExecution, RunIdentity, RunJob
 from aegra_api.services.executor import executor
 from aegra_api.services.graph_factory import ContextValidationError, validate_context
@@ -222,9 +223,11 @@ def _validate_context_against_graph(context: dict[str, Any], graph_id: str) -> N
     try:
         validate_context(context, graph_id)
     except ContextValidationError as exc:
-        http_exc = HTTPException(422, detail=_format_context_errors(graph_id, exc.errors))
-        http_exc.details = {"errors": exc.errors}  # type: ignore[attr-defined]
-        raise http_exc from exc
+        raise DetailedHTTPException(
+            422,
+            detail=_format_context_errors(graph_id, exc.errors),
+            details={"errors": exc.errors},
+        ) from exc
 
 
 def _resolve_checkpoint(request: RunCreate) -> dict[str, Any] | None:

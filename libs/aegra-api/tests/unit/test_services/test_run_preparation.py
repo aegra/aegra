@@ -9,6 +9,7 @@ import pytest
 from fastapi import HTTPException
 from pydantic import BaseModel, ConfigDict
 
+from aegra_api.models.errors import DetailedHTTPException
 from aegra_api.models.runs import RunCreate
 from aegra_api.services import run_preparation as mod
 from aegra_api.services.graph_factory import _FACTORY_CONTEXT_TYPES
@@ -128,12 +129,13 @@ class TestValidateContextAgainstGraph:
         assert "g" in exc.value.detail
 
     def test_structured_errors_ride_along_in_details(self, _declared_contexts: dict) -> None:
+        """Narrowed to the subclass: only it declares ``details``."""
         _declared_contexts["g"] = _Ctx
 
-        with pytest.raises(HTTPException) as exc:
+        with pytest.raises(DetailedHTTPException) as exc:
             mod._validate_context_against_graph({"prompt_version": "abc"}, "g")
 
-        assert exc.value.details == {  # type: ignore[attr-defined]
+        assert exc.value.details == {
             "errors": [
                 {
                     "loc": ["context", "prompt_version"],

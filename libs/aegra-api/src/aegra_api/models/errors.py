@@ -17,9 +17,8 @@ class AgentProtocolError(BaseModel):
 class DetailedHTTPException(HTTPException):
     """An ``HTTPException`` that fills in ``AgentProtocolError.details``.
 
-    ``agent_protocol_exception_handler`` reads ``details`` off the exception it
-    is given, but ``HTTPException`` declares no such attribute, so raising one
-    is the only way to supply it without assigning to an undeclared name.
+    ``HTTPException`` declares no such attribute, so raising this is what lets
+    ``agent_protocol_exception_handler`` find one.
     """
 
     def __init__(self, status_code: int, detail: str, details: dict[str, Any]) -> None:

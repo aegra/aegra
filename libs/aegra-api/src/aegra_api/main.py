@@ -297,6 +297,41 @@ def _add_common_middleware(app: FastAPI, cors_config: CorsConfig | None) -> None
     app.add_middleware(ContentTypeFixMiddleware)
 
 
+def _claimed_operations(app: FastAPI) -> set[tuple[str, str]]:
+    """The ``(path, method)`` pairs the app already serves."""
+    return {(route.path, method) for route in app.routes if isinstance(route, APIRoute) for method in route.methods}
+
+
+def _include_core_router(app: FastAPI, router: APIRouter, claimed: set[tuple[str, str]]) -> None:
+    """Include *router*, leaving out operations the app already declares.
+
+    A custom app's routes are registered before this runs, so Starlette already
+    dispatches its route for a path it shares with a core one — first match wins.
+    Including the core duplicate anyway would leave FastAPI to publish *that* one,
+    since generating the schema folds duplicate paths by assignment and the last
+    write wins. Skipping it is what makes the published contract the one served.
+    """
+    overridden = [route for route in router.routes if isinstance(route, APIRoute) and _overrides(route, claimed)]
+    if not overridden:
+        app.include_router(router)
+        return
+
+    for route in overridden:
+        logger.info(
+            "Custom app overrides core route",
+            path=route.path,
+            methods=sorted(route.methods),
+        )
+
+    kept = APIRouter()
+    kept.routes = [route for route in router.routes if route not in overridden]
+    app.include_router(kept)
+
+
+def _overrides(route: APIRoute, claimed: set[tuple[str, str]]) -> bool:
+    return any((route.path, method) in claimed for method in route.methods)
+
+
 def _include_core_routers(app: FastAPI) -> None:
     """Include all core API routers with auth dependency.
 
@@ -312,17 +347,23 @@ def _include_core_routers(app: FastAPI) -> None:
     Args:
         app: FastAPI application instance
     """
-    app.include_router(health_router)
-    app.include_router(assistants_router)
-    app.include_router(threads_router)
-    app.include_router(runs_router)
-    app.include_router(stateless_runs_router)
-    app.include_router(crons_router)
-    app.include_router(store_router)
-    app.include_router(event_streaming_router)
+    claimed = _claimed_operations(app)
+    for router in (
+        health_router,
+        assistants_router,
+        threads_router,
+        runs_router,
+        stateless_runs_router,
+        crons_router,
+        store_router,
+        event_streaming_router,
+    ):
+        _include_core_router(app, router, claimed)
 
     # Attach @auth.on dispatch from the route registry. Routes must opt out
     # explicitly; forgetting the in-body call no longer disables authorization.
+    # Keyed by path and method, so a custom app's overriding route is wired
+    # exactly as the core one it replaced.
     apply_auth_enforcement(app)
 
 

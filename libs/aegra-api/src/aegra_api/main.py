@@ -1,5 +1,6 @@
 """FastAPI application for Aegra (Agent Protocol Server)"""
 
+import re
 from collections.abc import AsyncIterator, Iterator
 from contextlib import asynccontextmanager
 from typing import Any
@@ -317,9 +318,19 @@ def _api_routes(routes: list[Any], prefix: str = "") -> Iterator[tuple[str, APIR
             yield from _api_routes(list(route.routes), prefix)
 
 
+# ``{id}`` and ``{thread_id}`` name the same URL space, and a request cannot tell
+# them apart. The converter is kept, since ``{p}`` and ``{p:path}`` do differ.
+_PATH_PARAMETER = re.compile(r"\{[^}:]*(:[^}]+)?\}")
+
+
+def _url_space(path: str) -> str:
+    """*path* with parameter names dropped, so two spellings of one route match."""
+    return _PATH_PARAMETER.sub(lambda match: "{" + (match.group(1) or "") + "}", path)
+
+
 def _claimed_operations(app: FastAPI) -> set[tuple[str, str]]:
-    """The ``(path, method)`` pairs the app already serves."""
-    return {(path, method) for path, route in _api_routes(list(app.routes)) for method in route.methods}
+    """The ``(path, method)`` pairs the app already serves, by URL space."""
+    return {(_url_space(path), method) for path, route in _api_routes(list(app.routes)) for method in route.methods}
 
 
 def _include_core_router(app: FastAPI, router: APIRouter, claimed: set[tuple[str, str]]) -> None:
@@ -346,7 +357,7 @@ def _include_core_router(app: FastAPI, router: APIRouter, claimed: set[tuple[str
 
 
 def _overrides(route: APIRoute, claimed: set[tuple[str, str]]) -> bool:
-    return any((route.path, method) in claimed for method in route.methods)
+    return any((_url_space(route.path), method) in claimed for method in route.methods)
 
 
 def _include_core_routers(app: FastAPI) -> None:

@@ -304,3 +304,32 @@ async def create(request: ShadowCreate) -> dict[str, Any]:
     body = app.openapi()["paths"][_SELF_DISPATCHING]["post"]["requestBody"]
     assert body["content"]["application/json"]["schema"]["$ref"].endswith("/ShadowCreate")
     assert [route.endpoint.__name__ for route in _serving(app, _SELF_DISPATCHING, "POST")] == ["create"]
+
+
+def test_a_differently_named_path_parameter_still_claims_the_route() -> None:
+    """``{id}`` and ``{thread_id}`` are one URL space; a request cannot tell them apart.
+
+    Comparing the raw templates kept the core operation, so both were registered
+    and the same request had two published operations.
+    """
+    app = FastAPI()
+
+    @app.get("/threads/{id}/state")
+    async def read_state(id: str) -> dict[str, Any]:
+        return {}
+
+    _include_core_routers(app)
+
+    published = app.openapi()["paths"]
+    assert sorted(published["/threads/{id}/state"]) == ["get"]
+    # The core router keeps the methods nothing claimed, under its own spelling.
+    assert "get" not in published["/threads/{thread_id}/state"]
+    assert "post" in published["/threads/{thread_id}/state"]
+
+
+def test_a_converter_distinguishes_two_url_spaces() -> None:
+    """``{p}`` and ``{p:path}`` match different requests, so neither claims the other."""
+    from aegra_api.main import _url_space
+
+    assert _url_space("/x/{a}") == _url_space("/x/{b}")
+    assert _url_space("/x/{a}") != _url_space("/x/{a:path}")

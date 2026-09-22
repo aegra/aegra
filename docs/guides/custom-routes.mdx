@@ -51,7 +51,8 @@ Custom routes follow this priority order:
 
 | Priority | Routes | Behavior |
 |----------|--------|----------|
-| 1 | `/health`, `/ready`, `/live`, `/docs`, `/openapi.json` | Always accessible, cannot be overridden |
+| 1 | `/docs`, `/openapi.json` | Always accessible |
+| 1 | `/health`, `/ready`, `/live` | Overridable, like any other core route |
 | 2 | Your custom routes | Take precedence over shadowable routes |
 | 3 | `/`, `/info` | Can be overridden by custom routes |
 | 4 | `/assistants`, `/threads`, `/runs`, `/store` | Core Agent Protocol routes, overridable — see below |

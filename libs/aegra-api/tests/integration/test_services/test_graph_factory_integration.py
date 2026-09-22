@@ -379,6 +379,8 @@ class TestGetGraphWithFactory:
         seen: dict[str, Any] = {}
 
         def factory(runtime: ServerRuntime) -> Mock:
+            # ServerRuntime is the SDK's union and does not declare assistant_id;
+            # Aegra's subclasses add it. Narrowing needs an exported Aegra type.
             seen["assistant_id"] = runtime.assistant_id  # type: ignore[union-attr]
             g = Mock(spec=Pregel)
             g.copy = Mock(return_value=g)
@@ -405,6 +407,8 @@ class TestGetGraphWithFactory:
         seen: dict[str, Any] = {}
 
         def factory(runtime: ServerRuntime) -> Mock:
+            # ServerRuntime is the SDK's union and does not declare assistant_id;
+            # Aegra's subclasses add it. Narrowing needs an exported Aegra type.
             seen["assistant_id"] = runtime.assistant_id  # type: ignore[union-attr]
             g = Mock(spec=Pregel)
             g.copy = Mock(return_value=g)

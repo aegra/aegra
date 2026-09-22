@@ -6,8 +6,10 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from fastapi import HTTPException
 
+from aegra_api.models.auth import User
 from aegra_api.models.runs import RunCreate
 from aegra_api.services import run_preparation as mod
+from aegra_api.services.run_executor import _build_run_config
 from aegra_api.services.run_preparation import _resolve_checkpoint, _validate_resume_command
 
 
@@ -101,8 +103,6 @@ class TestPrepareRunAssistantIdentity:
         )
 
     async def _prepare(self, monkeypatch: pytest.MonkeyPatch, request_config: dict | None) -> object:
-        from aegra_api.models import RunCreate, User
-
         thread = SimpleNamespace(
             thread_id="thread-1",
             status="idle",
@@ -144,8 +144,6 @@ class TestPrepareRunAssistantIdentity:
         The graph is built and configured from this value, so honoring the
         client's would let a caller reach another tenant's configuration.
         """
-        from aegra_api.services.run_executor import _build_run_config
-
         job = await self._prepare(
             monkeypatch,
             {"configurable": {"assistant_id": "victim-assistant"}},

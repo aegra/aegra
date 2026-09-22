@@ -356,12 +356,9 @@ class TestInvokeFactory:
     """Test factory invocation."""
 
     def test_an_unclassified_graph_id_is_refused_rather_than_called_bare(self) -> None:
-        """A missing hook means the pair is wrong, not that the factory takes nothing.
+        """A missing hook means fn and graph_id do not belong together.
 
-        A zero-argument factory is resolved at load time and never stored as a
-        callable, so the only way to arrive here without a hook is a *fn* and
-        *graph_id* that do not belong together. Calling ``fn()`` on that guess
-        fails inside the factory, a long way from the mismatch that caused it.
+        A zero-argument factory is resolved at load time, so it never arrives here.
         """
         factory = Mock()
 
@@ -732,6 +729,8 @@ class TestBuildServerRuntimeAssistantId:
         seen: dict[str, Any] = {}
 
         def make_graph(runtime: ServerRuntime) -> str:
+            # ServerRuntime is the SDK's union and does not declare assistant_id;
+            # Aegra's subclasses add it. Narrowing needs an exported Aegra type.
             seen["assistant_id"] = runtime.assistant_id  # type: ignore[union-attr]
             return "graph"
 
@@ -750,6 +749,8 @@ class TestBuildServerRuntimeAssistantId:
         """A factory reading assistant_id still works for schema extraction."""
 
         def make_graph(runtime: ServerRuntime) -> str | None:
+            # ServerRuntime is the SDK's union and does not declare assistant_id;
+            # Aegra's subclasses add it. Narrowing needs an exported Aegra type.
             return runtime.assistant_id  # type: ignore[union-attr]
 
         classify_factory(make_graph, "assistant_read_graph")

@@ -206,7 +206,8 @@ Platform:
 
 ```python
 def graph(config: dict):
-    assistant_id = config["configurable"]["assistant_id"]
+    # Absent outside run execution, so read it with a default rather than by key.
+    assistant_id = config.get("configurable", {}).get("assistant_id")
     return build_graph(load_settings_for(assistant_id))
 ```
 
@@ -215,9 +216,14 @@ have to also declare `config`:
 
 ```python
 def graph(runtime: ServerRuntime):
-    assistant_id = runtime.assistant_id
+    assistant_id = runtime.assistant_id  # type: ignore[union-attr]
     ...
 ```
+
+`ServerRuntime` is the SDK's own union and does not declare `assistant_id`;
+Aegra adds it on the runtime it passes. A type checker therefore rejects the
+attribute, and there is no exported Aegra runtime type to annotate instead yet.
+Read it from `config` where that matters, or suppress the one line.
 
 The server sets it from the resolved assistant and overwrites anything a client
 sends under `config.configurable.assistant_id`, so it is safe to key

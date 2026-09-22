@@ -706,7 +706,7 @@ class TestLangGraphServiceConfigs:
         assert result["configurable"]["thread_id"] == "thread-456"
         assert result["configurable"]["checkpoint_id"] == "cp-9"
 
-    def test_create_run_config_stamps_assistant_id(self):
+    def test_create_run_config_stamps_assistant_id(self) -> None:
         """The run's assistant reaches configurable, matching LangGraph Platform."""
         mock_user = Mock()
         mock_user.identity = "user-123"
@@ -720,7 +720,7 @@ class TestLangGraphServiceConfigs:
 
         assert result["configurable"]["assistant_id"] == "asst-1"
 
-    def test_create_run_config_ignores_client_assistant_id_override(self):
+    def test_create_run_config_ignores_client_assistant_id_override(self) -> None:
         """A client-supplied configurable.assistant_id must not name another assistant.
 
         Factories key per-assistant configuration (credentials, prompts) off this
@@ -747,7 +747,7 @@ class TestLangGraphServiceConfigs:
 
         assert result["configurable"]["assistant_id"] == "asst-1"
 
-    def test_create_run_config_checkpoint_cannot_override_assistant_id(self):
+    def test_create_run_config_checkpoint_cannot_override_assistant_id(self) -> None:
         """The checkpoint dict is merged last; it must not redefine assistant_id."""
         mock_user = Mock()
         mock_user.identity = "user-123"
@@ -770,7 +770,7 @@ class TestLangGraphServiceConfigs:
         assert result["configurable"]["assistant_id"] == "asst-1"
         assert result["configurable"]["checkpoint_id"] == "cp-9"
 
-    def test_create_run_config_without_assistant_drops_client_value(self):
+    def test_create_run_config_without_assistant_drops_client_value(self) -> None:
         """With no server-side assistant the key is absent, not client-controlled."""
         mock_user = Mock()
         mock_user.identity = "user-123"

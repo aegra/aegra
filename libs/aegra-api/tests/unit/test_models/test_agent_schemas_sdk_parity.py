@@ -1,9 +1,6 @@
 """``AgentSchemas`` is the wire shape of ``GET /assistants/{id}/schemas``.
 
-The service derives six values and answers ``None`` for any it could not
-produce. FastAPI serialises through this model, so a field it does not declare
-is dropped and a ``None`` in a non-nullable field fails response validation and
-becomes a 500 — both silent, since the service-level tests never see the wire.
+A field it does not declare is dropped, and a ``None`` it will not accept is a 500.
 """
 
 from typing import Any
@@ -41,6 +38,18 @@ def client() -> TestClient:
 def test_the_model_declares_exactly_what_the_sdk_does() -> None:
     """Drift either way should fail here rather than silently drop a field."""
     assert set(AgentSchemas.model_fields) == set(GraphSchema.__annotations__)
+
+
+def test_every_key_is_required_because_the_sdk_typed_dict_is_total() -> None:
+    """Nullable values, not optional keys: the value may be null, the key is always sent."""
+    assert GraphSchema.__total__ is True
+    assert set(AgentSchemas.model_json_schema()["required"]) == set(GraphSchema.__annotations__)
+
+
+def test_omitting_a_schema_key_is_refused() -> None:
+    """A response missing a key would have clients testing for presence instead of null."""
+    with pytest.raises(ValueError):
+        AgentSchemas.model_validate({key: value for key, value in _DERIVED.items() if key != "context_schema"})
 
 
 def test_every_derived_value_reaches_the_client(client: TestClient) -> None:

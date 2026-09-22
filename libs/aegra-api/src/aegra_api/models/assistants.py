@@ -119,10 +119,10 @@ class AgentSchemas(BaseModel):
     """
 
     graph_id: str = Field(..., description="Identifier of the graph these schemas describe.")
-    input_schema: dict[str, Any] | None = Field(None, description="JSON Schema for agent inputs")
-    output_schema: dict[str, Any] | None = Field(None, description="JSON Schema for agent outputs")
-    state_schema: dict[str, Any] | None = Field(None, description="JSON Schema for agent state")
-    config_schema: dict[str, Any] | None = Field(None, description="JSON Schema for agent config")
+    input_schema: dict[str, Any] | None = Field(..., description="JSON Schema for agent inputs")
+    output_schema: dict[str, Any] | None = Field(..., description="JSON Schema for agent outputs")
+    state_schema: dict[str, Any] | None = Field(..., description="JSON Schema for agent state")
+    config_schema: dict[str, Any] | None = Field(..., description="JSON Schema for agent config")
     context_schema: dict[str, Any] | None = Field(
-        None, description="JSON Schema for the run context declared by a graph factory"
+        ..., description="JSON Schema for the run context declared by a graph factory"
     )

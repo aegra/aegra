@@ -572,7 +572,7 @@
           "Assistants"
         ],
         "summary": "Get Assistant Schemas",
-        "description": "Get the JSON schemas for an assistant's graph.\n\nReturns the input, output, state, and config schemas derived from the\nunderlying graph's type annotations.",
+        "description": "Get the JSON schemas for an assistant's graph.\n\nReturns ``graph_id`` and the input, output, state, config and context\nschemas derived from the graph's type annotations. A schema the server\ncould not derive is ``null``; the key is always present.",
         "operationId": "get_assistant_schemas_assistants__assistant_id__schemas_get",
         "parameters": [
           {
@@ -3454,7 +3454,12 @@
         },
         "type": "object",
         "required": [
-          "graph_id"
+          "graph_id",
+          "input_schema",
+          "output_schema",
+          "state_schema",
+          "config_schema",
+          "context_schema"
         ],
         "title": "AgentSchemas",
         "description": "Agent schema definitions for client integration.\n\nMirrors ``langgraph_sdk.schema.GraphSchema``. A schema the server could not\nderive from the graph is ``null``."

@@ -132,15 +132,19 @@ await client.assistants.set_latest(assistant_id, version=2)
 
 ## Graph schemas
 
-Retrieve the input, output, state, and config schemas for an assistant's graph:
+Retrieve the schemas for an assistant's graph:
 
 ```python
 schemas = await client.assistants.get_schemas(assistant_id)
+print(schemas["graph_id"])
 print(schemas["input_schema"])
 print(schemas["output_schema"])
 print(schemas["state_schema"])
 print(schemas["config_schema"])
+print(schemas["context_schema"])  # the context type a graph factory declares
 ```
+
+Every key is always present. A schema the server could not derive from the graph is `null`, so read the value rather than testing for the key.
 
 ## Graph visualization
 

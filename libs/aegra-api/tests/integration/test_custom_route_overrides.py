@@ -12,6 +12,7 @@ import pytest
 from fastapi import APIRouter, FastAPI
 from fastapi.routing import APIRoute
 from pydantic import BaseModel
+from starlette.routing import Host
 
 from aegra_api.core.auth_deps import get_current_user, require_auth
 from aegra_api.main import (
@@ -365,3 +366,46 @@ def test_a_partial_claim_keeps_the_core_route_and_warns(caplog: pytest.LogCaptur
     assert "claims only some methods" in caplog.text
     assert sorted(route.endpoint.__name__ for route in _serving(app, "/multi", "POST")) == ["both"]
     assert sorted(route.endpoint.__name__ for route in _serving(app, "/multi", "GET")) == ["both", "only_get"]
+
+
+def _mounted(path: str) -> FastAPI:
+    """A sub-application declaring the core assistants path, mounted at *path*."""
+    sub = FastAPI()
+
+    @sub.post(_SELF_DISPATCHING, tags=["Assistants"])
+    async def create(request: _CustomCreate) -> dict[str, Any]:
+        return {}
+
+    app = FastAPI()
+    app.mount(path, sub)
+    _include_core_routers(app)
+    return app
+
+
+def test_a_mount_path_is_carried_into_the_claim() -> None:
+    """A sub-app at /custom serves /custom/assistants and claims nothing of the core."""
+    published = _mounted("/custom").openapi()["paths"]
+
+    assert "post" in published[_SELF_DISPATCHING], "the core operation was removed by a mounted sub-app"
+
+
+def test_a_mount_at_the_root_still_claims() -> None:
+    """Mounted at ``/`` it really does serve the core path, so it should claim it."""
+    assert ("^" + _SELF_DISPATCHING + "$", "POST") in _claimed_operations(_mounted(""))
+
+
+def test_a_host_scoped_route_claims_nothing() -> None:
+    """It answers only for its own Host header, so the core route must stay."""
+    sub = FastAPI()
+
+    @sub.post(_SELF_DISPATCHING)
+    async def create() -> dict[str, Any]:
+        return {}
+
+    app = FastAPI()
+    app.router.routes.append(Host("admin.example.com", app=sub))
+
+    assert _claimed_operations(app) == set()
+
+    _include_core_routers(app)
+    assert "post" in app.openapi()["paths"][_SELF_DISPATCHING]

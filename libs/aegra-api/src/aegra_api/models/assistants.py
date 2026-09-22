@@ -59,12 +59,36 @@ class Assistant(BaseModel):
     model_config = ConfigDict(from_attributes=True, populate_by_name=True)
 
 
+def _publish_the_not_null_columns(schema: dict[str, Any]) -> None:
+    """Describe ``name`` and ``graph_id`` as the endpoint actually takes them.
+
+    Both back NOT NULL columns, so a supplied null is answered 422 rather than
+    read as omitted. They are nullable on the model only so that a null arrives
+    as a supplied value and gets that answer instead of a generic type error;
+    publishing the nullable branch would describe ``{"name": null}`` as valid
+    and have a generated client offer the one value that cannot be stored.
+
+    The sentinel default goes with it: ``"default": null`` under
+    ``"type": "string"`` is the same null by another name, and omission — which
+    is what leaves these unchanged — has no default to describe.
+    """
+    for field in ("name", "graph_id"):
+        published = schema["properties"][field]
+        published.pop("anyOf", None)
+        published.pop("default", None)
+        published["type"] = "string"
+
+
 class AssistantUpdate(BaseModel):
     """Request model for partially updating assistants.
 
     Every field is optional and defaults to ``None`` so that an omitted field
     is distinguishable from an explicit one via ``model_dump(exclude_unset=True)``:
     omitting ``config`` keeps the stored config, sending ``{"config": {}}`` clears it.
+
+    A null clears ``description`` and reads as empty for ``config``, ``context``
+    and ``metadata``. ``name`` and ``graph_id`` have no null to store, so one
+    sent is refused; see ``_publish_the_not_null_columns``.
     """
 
     name: str | None = Field(None, description="The name of the assistant. Unchanged when omitted.")
@@ -80,6 +104,8 @@ class AssistantUpdate(BaseModel):
     metadata: dict[str, Any] | None = Field(
         None, description="Metadata to merge into the assistant's existing metadata."
     )
+
+    model_config = ConfigDict(json_schema_extra=_publish_the_not_null_columns)
 
 
 class AssistantList(BaseModel):

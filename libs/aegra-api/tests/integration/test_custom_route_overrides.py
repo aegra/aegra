@@ -1,19 +1,17 @@
 """A custom app's route must win the published schema as well as the request.
 
-Core routers are appended to the custom app, so Starlette already dispatches the
-custom route for a shared path — first match wins. OpenAPI generation folds
-duplicate paths by assignment, so before this the *core* operation was published
-for a path the custom handler served.
+The custom route already wins dispatch; before this the core operation won the
+schema, so the published contract was not the one served.
 """
 
 from typing import Any
 
 import pytest
-from fastapi import FastAPI
+from fastapi import APIRouter, FastAPI
 from fastapi.routing import APIRoute
 from pydantic import BaseModel
 
-from aegra_api.main import _include_core_routers
+from aegra_api.main import _api_routes, _include_core_routers
 
 # Authorization for this one lives in the core handler's body, which is the
 # common case: 38 of the 52 mapped operations are self-dispatching.
@@ -28,31 +26,8 @@ class _CustomCreate(BaseModel):
     shibboleth: str
 
 
-def _api_routes(app: FastAPI) -> list[APIRoute]:
-    """Every APIRoute, including those inside included routers.
-
-    FastAPI wraps an included router rather than flattening it, so reading
-    ``app.routes`` alone sees the custom app's own routes and none of the core ones.
-    """
-
-    def walk(routes: list[Any]) -> list[APIRoute]:
-        found: list[APIRoute] = []
-        for route in routes:
-            if isinstance(route, APIRoute):
-                found.append(route)
-                continue
-            nested = getattr(route, "original_router", None)
-            if nested is not None:
-                found.extend(walk(list(nested.routes)))
-            elif hasattr(route, "routes"):
-                found.extend(walk(list(route.routes)))
-        return found
-
-    return walk(list(app.routes))
-
-
 def _serving(app: FastAPI, path: str, method: str) -> list[APIRoute]:
-    return [route for route in _api_routes(app) if route.path == path and method in route.methods]
+    return [route for route in _api_routes(list(app.routes)) if route.path == path and method in route.methods]
 
 
 @pytest.fixture
@@ -138,10 +113,8 @@ def test_a_shadow_of_an_enforced_route_keeps_its_authorization() -> None:
 def test_a_shadow_of_a_self_dispatching_route_authorizes_nothing_by_itself() -> None:
     """Documents the sharp edge rather than asserting safety that is not there.
 
-    Most operations authorize inside the core handler, so a shadow that does not
-    delegate to it dispatches no ``@auth.on`` event. That is true whether or not
-    the core duplicate is registered — the custom route wins dispatch either way —
-    but it is the reason an override wants to be a deliberate act.
+    Most operations authorize in the core handler, so a shadow that does not
+    delegate to it dispatches nothing — true before this change as well.
     """
     app = FastAPI()
 
@@ -167,7 +140,7 @@ def test_filtering_a_router_preserves_every_other_operation(shadowing_app: FastA
     def fingerprint(app: FastAPI) -> dict[tuple[str, str], tuple[tuple[str, ...], int]]:
         return {
             (route.path, method): (tuple(sorted(route.tags)), len(route.dependencies))
-            for route in _api_routes(app)
+            for route in _api_routes(list(app.routes))
             for method in route.methods
         }
 
@@ -176,3 +149,24 @@ def test_filtering_a_router_preserves_every_other_operation(shadowing_app: FastA
 
     assert set(before) == set(after), "an operation went missing"
     assert {k: v for k, v in before.items() if k != shadowed and after[k] != v} == {}
+
+
+def test_a_router_mounted_with_include_router_also_claims_its_paths() -> None:
+    """A custom app that composes with ``include_router`` has no top-level routes.
+
+    FastAPI wraps the router instead of flattening it, so claim detection that
+    reads ``app.routes`` directly sees nothing and the core duplicate survives.
+    """
+    router = APIRouter(tags=["Assistants"])
+
+    @router.post(_SELF_DISPATCHING)
+    async def create(request: _CustomCreate) -> dict[str, Any]:
+        return {"shibboleth": request.shibboleth}
+
+    app = FastAPI()
+    app.include_router(router)
+    _include_core_routers(app)
+
+    body = app.openapi()["paths"][_SELF_DISPATCHING]["post"]["requestBody"]
+    assert body["content"]["application/json"]["schema"]["$ref"].endswith("/_CustomCreate")
+    assert [route.endpoint.__name__ for route in _serving(app, _SELF_DISPATCHING, "POST")] == ["create"]

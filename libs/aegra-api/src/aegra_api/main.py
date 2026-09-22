@@ -1,6 +1,6 @@
 """FastAPI application for Aegra (Agent Protocol Server)"""
 
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Iterator
 from contextlib import asynccontextmanager
 from typing import Any
 
@@ -297,19 +297,33 @@ def _add_common_middleware(app: FastAPI, cors_config: CorsConfig | None) -> None
     app.add_middleware(ContentTypeFixMiddleware)
 
 
+def _api_routes(routes: list[Any]) -> Iterator[APIRoute]:
+    """Every ``APIRoute``, including those the app registered through a router.
+
+    FastAPI wraps an included router rather than flattening it, so a custom app
+    built with ``include_router`` has no top-level routes at all.
+    """
+    for route in routes:
+        if isinstance(route, APIRoute):
+            yield route
+            continue
+        nested = getattr(route, "original_router", None)
+        if nested is not None:
+            yield from _api_routes(list(nested.routes))
+        elif hasattr(route, "routes"):
+            yield from _api_routes(list(route.routes))
+
+
 def _claimed_operations(app: FastAPI) -> set[tuple[str, str]]:
     """The ``(path, method)`` pairs the app already serves."""
-    return {(route.path, method) for route in app.routes if isinstance(route, APIRoute) for method in route.methods}
+    return {(route.path, method) for route in _api_routes(list(app.routes)) for method in route.methods}
 
 
 def _include_core_router(app: FastAPI, router: APIRouter, claimed: set[tuple[str, str]]) -> None:
     """Include *router*, leaving out operations the app already declares.
 
-    A custom app's routes are registered before this runs, so Starlette already
-    dispatches its route for a path it shares with a core one — first match wins.
-    Including the core duplicate anyway would leave FastAPI to publish *that* one,
-    since generating the schema folds duplicate paths by assignment and the last
-    write wins. Skipping it is what makes the published contract the one served.
+    The custom route already wins dispatch; dropping the core duplicate is what
+    stops the schema publishing the operation that no longer serves the path.
     """
     overridden = [route for route in router.routes if isinstance(route, APIRoute) and _overrides(route, claimed)]
     if not overridden:

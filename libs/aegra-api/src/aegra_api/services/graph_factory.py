@@ -399,8 +399,12 @@ def invoke_factory(
 ) -> Any:
     """Call a graph factory with the correct arguments based on its classification.
 
+    Only for a factory that takes arguments. A zero-argument factory is called
+    once at load time and stored as its resolved graph, so it never reaches
+    here and *fn* always has a dispatch hook registered under *graph_id*.
+
     Args:
-        fn: The graph factory callable.
+        fn: The graph factory callable, classified under *graph_id*.
         graph_id: The graph identifier (used to look up the dispatch hook).
         config: The ``RunnableConfig`` dict for this request.
         server_runtime: The ``ServerRuntime`` for this request.
@@ -408,12 +412,19 @@ def invoke_factory(
     Returns:
         Whatever the factory returns (``Pregel``, ``StateGraph``, coroutine,
         async context manager, etc.).
+
+    Raises:
+        KeyError: If *graph_id* has no dispatch hook, which means *fn* was
+            never classified under it.
     """
     hook = _FACTORY_KWARGS.get(graph_id)
-    if not hook:
-        return fn()
-    kwargs = hook(config, server_runtime)
-    return fn(**kwargs)
+    if hook is None:
+        raise KeyError(
+            f"Graph factory {fn} has no dispatch hook registered under {graph_id!r}. "
+            f"Call classify_factory() first; a zero-argument factory is resolved at "
+            f"load time and must not be invoked here."
+        )
+    return fn(**hook(config, server_runtime))
 
 
 # ---------------------------------------------------------------------------

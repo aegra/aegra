@@ -355,15 +355,20 @@ class TestBuildServerRuntime:
 class TestInvokeFactory:
     """Test factory invocation."""
 
-    def test_invoke_no_args_factory(self) -> None:
-        """Factory with no dispatch hook → called with no args."""
-        mock_graph = Mock()
-        factory = Mock(return_value=mock_graph)
+    def test_an_unclassified_graph_id_is_refused_rather_than_called_bare(self) -> None:
+        """A missing hook means the pair is wrong, not that the factory takes nothing.
 
-        result = invoke_factory(factory, "unregistered_graph", {}, Mock())
+        A zero-argument factory is resolved at load time and never stored as a
+        callable, so the only way to arrive here without a hook is a *fn* and
+        *graph_id* that do not belong together. Calling ``fn()`` on that guess
+        fails inside the factory, a long way from the mismatch that caused it.
+        """
+        factory = Mock()
 
-        factory.assert_called_once_with()
-        assert result is mock_graph
+        with pytest.raises(KeyError, match="no dispatch hook"):
+            invoke_factory(factory, "unregistered_graph", {}, Mock())
+
+        factory.assert_not_called()
 
     def test_invoke_config_factory(self) -> None:
         """Config factory → called with config kwarg."""

@@ -297,26 +297,29 @@ def _add_common_middleware(app: FastAPI, cors_config: CorsConfig | None) -> None
     app.add_middleware(ContentTypeFixMiddleware)
 
 
-def _api_routes(routes: list[Any]) -> Iterator[APIRoute]:
-    """Every ``APIRoute``, including those the app registered through a router.
+def _api_routes(routes: list[Any], prefix: str = "") -> Iterator[tuple[str, APIRoute]]:
+    """Every ``APIRoute`` with the path it is served at, not the one it declares.
 
     FastAPI wraps an included router rather than flattening it, so a custom app
-    built with ``include_router`` has no top-level routes at all.
+    built with ``include_router`` has no top-level routes at all, and the routes
+    inside carry their source path — a router included under a prefix declares
+    ``/assistants`` while serving ``/api/assistants``.
     """
     for route in routes:
         if isinstance(route, APIRoute):
-            yield route
+            yield prefix + route.path, route
             continue
         nested = getattr(route, "original_router", None)
         if nested is not None:
-            yield from _api_routes(list(nested.routes))
+            context = getattr(route, "include_context", None)
+            yield from _api_routes(list(nested.routes), prefix + getattr(context, "prefix", ""))
         elif hasattr(route, "routes"):
-            yield from _api_routes(list(route.routes))
+            yield from _api_routes(list(route.routes), prefix)
 
 
 def _claimed_operations(app: FastAPI) -> set[tuple[str, str]]:
     """The ``(path, method)`` pairs the app already serves."""
-    return {(route.path, method) for route in _api_routes(list(app.routes)) for method in route.methods}
+    return {(path, method) for path, route in _api_routes(list(app.routes)) for method in route.methods}
 
 
 def _include_core_router(app: FastAPI, router: APIRouter, claimed: set[tuple[str, str]]) -> None:

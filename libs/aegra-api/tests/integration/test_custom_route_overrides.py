@@ -4,6 +4,7 @@ The custom route already wins dispatch; before this the core operation won the
 schema, so the published contract was not the one served.
 """
 
+import json
 from typing import Any
 
 import pytest
@@ -264,3 +265,43 @@ def test_an_unclaimed_core_operation_still_answers_over_http() -> None:
     # database, where a route that had been skipped would answer 405.
     with pytest.raises(RuntimeError, match="Database not initialized"):
         make_client(app).get("/assistants/does-not-exist")
+
+
+def test_a_configured_custom_app_overrides_through_create_app(tmp_path, monkeypatch) -> None:
+    """The whole startup path: aegra.json, the loader, then the core routers.
+
+    Everything above calls ``_include_core_routers`` directly, which cannot catch
+    a change in how ``create_app`` orders the custom app against it.
+    """
+    (tmp_path / "custom_app.py").write_text(
+        """
+from typing import Any
+
+from fastapi import FastAPI
+from pydantic import BaseModel
+
+
+class ShadowCreate(BaseModel):
+    shibboleth: str
+
+
+app = FastAPI()
+
+
+@app.post("/assistants", tags=["Assistants"])
+async def create(request: ShadowCreate) -> dict[str, Any]:
+    return {"served_by": "custom"}
+"""
+    )
+    (tmp_path / "aegra.json").write_text(
+        json.dumps({"graphs": {"test": "./test.py:graph"}, "http": {"app": "./custom_app.py:app"}})
+    )
+    monkeypatch.chdir(tmp_path)
+
+    from aegra_api.main import create_app
+
+    app = create_app()
+
+    body = app.openapi()["paths"][_SELF_DISPATCHING]["post"]["requestBody"]
+    assert body["content"]["application/json"]["schema"]["$ref"].endswith("/ShadowCreate")
+    assert [route.endpoint.__name__ for route in _serving(app, _SELF_DISPATCHING, "POST")] == ["create"]

@@ -5,6 +5,7 @@ schema, so the published contract was not the one served.
 """
 
 import json
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -13,7 +14,7 @@ from fastapi.routing import APIRoute
 from pydantic import BaseModel
 
 from aegra_api.core.auth_deps import get_current_user, require_auth
-from aegra_api.main import _api_routes, _include_core_routers
+from aegra_api.main import _api_routes, _include_core_routers, create_app
 from aegra_api.models.auth import User
 from tests.fixtures.clients import make_client
 
@@ -267,7 +268,7 @@ def test_an_unclaimed_core_operation_still_answers_over_http() -> None:
         make_client(app).get("/assistants/does-not-exist")
 
 
-def test_a_configured_custom_app_overrides_through_create_app(tmp_path, monkeypatch) -> None:
+def test_a_configured_custom_app_overrides_through_create_app(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """The whole startup path: aegra.json, the loader, then the core routers.
 
     Everything above calls ``_include_core_routers`` directly, which cannot catch
@@ -297,8 +298,6 @@ async def create(request: ShadowCreate) -> dict[str, Any]:
         json.dumps({"graphs": {"test": "./test.py:graph"}, "http": {"app": "./custom_app.py:app"}})
     )
     monkeypatch.chdir(tmp_path)
-
-    from aegra_api.main import create_app
 
     app = create_app()
 

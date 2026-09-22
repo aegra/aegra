@@ -19,6 +19,7 @@ import inspect
 import typing
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
+from functools import cache
 from typing import Any, Literal, get_args, get_origin
 
 import structlog
@@ -31,7 +32,8 @@ from langgraph_sdk.runtime import (
     _ExecutionRuntime,
     _ReadRuntime,
 )
-from pydantic import ValidationError
+from pydantic import TypeAdapter, ValidationError
+from pydantic.errors import PydanticSchemaGenerationError
 
 from aegra_api.core.auth_ctx import get_auth_ctx
 from aegra_api.models.auth import User
@@ -296,6 +298,19 @@ def validate_context(context: dict[str, Any] | None, graph_id: str) -> None:
         raise ContextValidationError(graph_id, ctx_type, _context_errors(exc)) from exc
 
 
+@cache
+def _dataclass_validator(ctx_type: type) -> TypeAdapter | None:
+    """A cached field-type validator for a dataclass, or ``None`` if there can be one.
+
+    A dataclass with a field pydantic cannot describe has no schema to build, so
+    that type falls back to plain construction.
+    """
+    try:
+        return TypeAdapter(ctx_type)
+    except PydanticSchemaGenerationError:
+        return None
+
+
 def _instantiate_context(context: dict[str, Any], ctx_type: type) -> Any:
     """Build a ``ctx_type`` from *context*, or return it unchanged.
 
@@ -304,7 +319,16 @@ def _instantiate_context(context: dict[str, Any], ctx_type: type) -> Any:
     if _is_pydantic_model(ctx_type):
         return ctx_type.model_validate(context)
     if dataclasses.is_dataclass(ctx_type):
-        return ctx_type(**context)
+        # A dataclass does not enforce its own annotations, so ``ctx_type(**context)``
+        # would accept {"value": "abc"} for ``value: int`` and hand the graph a str.
+        validator = _dataclass_validator(ctx_type)
+        if validator is None:
+            return ctx_type(**context)
+        unexpected = sorted(set(context) - {f.name for f in dataclasses.fields(ctx_type)})
+        if unexpected:
+            # TypeAdapter ignores extras; __init__ is what refuses them.
+            raise TypeError(f"unexpected keyword argument {unexpected[0]!r}")
+        return validator.validate_python(context)
     return context
 
 

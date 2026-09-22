@@ -737,15 +737,60 @@ class TestValidateContext:
             {"loc": ["context", "surprise"], "msg": "Extra inputs are not permitted", "type": "extra_forbidden"}
         ]
 
-    def test_dataclass_error_collapses_to_one_context_entry(self) -> None:
-        """A dataclass TypeError has no field locations, so it points at ``context``."""
+    def test_a_dataclass_missing_field_names_the_field(self) -> None:
         _FACTORY_CONTEXT_TYPES["g"] = _DataclassCtx
 
         with pytest.raises(ContextValidationError) as exc_info:
             validate_context({"name": "test"}, "g")
 
+        assert [e["loc"] for e in exc_info.value.errors] == [["context", "value"]]
+        assert exc_info.value.errors[0]["type"] == "missing"
+
+    def test_a_dataclass_field_type_is_enforced(self) -> None:
+        """A dataclass does not check its own annotations; ``value: int`` must still mean int.
+
+        Plain construction accepts {"value": "abc"} and hands the graph a str.
+        """
+        _FACTORY_CONTEXT_TYPES["g"] = _DataclassCtx
+
+        with pytest.raises(ContextValidationError) as exc_info:
+            validate_context({"name": "test", "value": "abc"}, "g")
+
+        assert exc_info.value.errors == [
+            {
+                "loc": ["context", "value"],
+                "msg": "Input should be a valid integer, unable to parse string as an integer",
+                "type": "int_parsing",
+            }
+        ]
+
+    def test_a_dataclass_still_refuses_an_unexpected_field(self) -> None:
+        """TypeAdapter ignores extras, so __init__ stays the thing that refuses them."""
+        _FACTORY_CONTEXT_TYPES["g"] = _DataclassCtx
+
+        with pytest.raises(ContextValidationError) as exc_info:
+            validate_context({"name": "test", "value": 1, "surprise": 2}, "g")
+
         assert [e["loc"] for e in exc_info.value.errors] == [["context"]]
-        assert exc_info.value.errors[0]["type"] == "value_error"
+        assert "surprise" in exc_info.value.errors[0]["msg"]
+
+    def test_a_dataclass_pydantic_cannot_describe_falls_back_to_construction(self) -> None:
+        """No schema to build, so the field check is whatever __init__ does."""
+
+        class _Opaque:
+            def __init__(self, a: int) -> None:
+                self.a = a
+
+        @dataclasses.dataclass
+        class _OpaqueCtx:
+            field: _Opaque
+
+        _FACTORY_CONTEXT_TYPES["g"] = _OpaqueCtx
+
+        validate_context({"field": _Opaque(1)}, "g")
+
+        with pytest.raises(ContextValidationError):
+            validate_context({"nope": 1}, "g")
 
     def test_errors_do_not_echo_submitted_values(self) -> None:
         """The 422 body must not reflect the caller's own values back at them."""

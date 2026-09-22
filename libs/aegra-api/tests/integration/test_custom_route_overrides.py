@@ -14,7 +14,7 @@ from fastapi.routing import APIRoute
 from pydantic import BaseModel
 
 from aegra_api.core.auth_deps import get_current_user, require_auth
-from aegra_api.main import _api_routes, _include_core_routers, create_app
+from aegra_api.main import _api_routes, _include_core_routers, _url_space, create_app
 from aegra_api.models.auth import User
 from tests.fixtures.clients import make_client
 
@@ -307,11 +307,7 @@ async def create(request: ShadowCreate) -> dict[str, Any]:
 
 
 def test_a_differently_named_path_parameter_still_claims_the_route() -> None:
-    """``{id}`` and ``{thread_id}`` are one URL space; a request cannot tell them apart.
-
-    Comparing the raw templates kept the core operation, so both were registered
-    and the same request had two published operations.
-    """
+    """``{id}`` and ``{thread_id}`` are one URL space; a request cannot tell them apart."""
     app = FastAPI()
 
     @app.get("/threads/{id}/state")
@@ -327,9 +323,16 @@ def test_a_differently_named_path_parameter_still_claims_the_route() -> None:
     assert "post" in published["/threads/{thread_id}/state"]
 
 
-def test_a_converter_distinguishes_two_url_spaces() -> None:
-    """``{p}`` and ``{p:path}`` match different requests, so neither claims the other."""
-    from aegra_api.main import _url_space
-
-    assert _url_space("/x/{a}") == _url_space("/x/{b}")
-    assert _url_space("/x/{a}") != _url_space("/x/{a:path}")
+@pytest.mark.parametrize(
+    ("left", "right", "same"),
+    [
+        ("/x/{a}", "/x/{b}", True),
+        ("/x/{a}", "/x/{a:str}", True),
+        ("/x/{a:uuid}", "/x/{b:uuid}", True),
+        ("/x/{a}", "/x/{a:path}", False),
+        ("/x/{a}", "/x/{a:int}", False),
+    ],
+)
+def test_two_paths_are_one_url_space_only_when_they_match_the_same_requests(left: str, right: str, same: bool) -> None:
+    """``str`` is the implicit converter, so ``{a}`` and ``{a:str}`` are one route."""
+    assert (_url_space(left) == _url_space(right)) is same

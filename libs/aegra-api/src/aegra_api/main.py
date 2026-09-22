@@ -11,6 +11,7 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.routing import APIRoute, APIRouter
+from starlette.routing import compile_path
 
 from aegra_api import __version__
 from aegra_api.api.assistants import router as assistants_router
@@ -318,14 +319,18 @@ def _api_routes(routes: list[Any], prefix: str = "") -> Iterator[tuple[str, APIR
             yield from _api_routes(list(route.routes), prefix)
 
 
-# ``{id}`` and ``{thread_id}`` name the same URL space, and a request cannot tell
-# them apart. The converter is kept, since ``{p}`` and ``{p:path}`` do differ.
-_PATH_PARAMETER = re.compile(r"\{[^}:]*(:[^}]+)?\}")
+_GROUP_NAME = re.compile(r"\(\?P<[^>]+>")
 
 
 def _url_space(path: str) -> str:
-    """*path* with parameter names dropped, so two spellings of one route match."""
-    return _PATH_PARAMETER.sub(lambda match: "{" + (match.group(1) or "") + "}", path)
+    """The requests *path* matches, so two spellings of one route compare equal.
+
+    Starlette decides what a converter means — ``{id}`` and ``{id:str}`` accept
+    the same requests, ``{p:path}`` does not — so the comparison is its compiled
+    pattern with the parameter names taken out.
+    """
+    pattern, _, _ = compile_path(path)
+    return _GROUP_NAME.sub("(", pattern.pattern)
 
 
 def _claimed_operations(app: FastAPI) -> set[tuple[str, str]]:

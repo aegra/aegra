@@ -15,7 +15,7 @@ from langgraph_sdk.runtime import (
     _ExecutionRuntime,
     _ReadRuntime,
 )
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, field_validator
 from structlog.testing import capture_logs
 
 from aegra_api.services.graph_factory import (
@@ -684,6 +684,26 @@ class TestValidateContext:
     def test_unregistered_graph_accepts_anything(self) -> None:
         validate_context({"anything": "goes"}, "unregistered")
 
+    def test_a_server_side_failure_is_not_blamed_on_the_caller(self) -> None:
+        """A validator that breaks for its own reasons must stay a 500.
+
+        Converting it would tell the caller their context was invalid, and put
+        the operational failure's message in the response body.
+        """
+
+        class _BrokenValidator(BaseModel):
+            name: str
+
+            @field_validator("name")
+            @classmethod
+            def _explode(cls, _value: str) -> str:
+                raise RuntimeError("the credential service is down")
+
+        _FACTORY_CONTEXT_TYPES["g"] = _BrokenValidator
+
+        with pytest.raises(RuntimeError, match="credential service"):
+            validate_context({"name": "test"}, "g")
+
     def test_wrong_type_names_the_offending_field(self) -> None:
         _FACTORY_CONTEXT_TYPES["g"] = _PydanticCtx
 
@@ -750,13 +770,8 @@ class TestValidateContext:
 
         validate_context({"anything": "at all"}, "g")
 
-    def test_an_errors_method_that_is_not_pydantics_still_rejects(self) -> None:
-        """A duck-typed ``errors`` must not swallow the rejection.
-
-        Anything exposing a callable ``errors`` reaches the Pydantic branch. One
-        that does not behave like Pydantic's collapses to the generic entry, so
-        the caller still gets a 422 rather than the exception escaping as a 500.
-        """
+    def test_an_errors_method_that_is_not_pydantics_is_never_called(self) -> None:
+        """Only a real ValidationError takes the Pydantic branch."""
 
         class _HostileErrors(Exception):
             def errors(self) -> list[dict[str, Any]]:

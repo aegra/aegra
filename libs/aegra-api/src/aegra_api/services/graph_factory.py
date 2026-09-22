@@ -31,6 +31,7 @@ from langgraph_sdk.runtime import (
     _ExecutionRuntime,
     _ReadRuntime,
 )
+from pydantic import ValidationError
 
 from aegra_api.core.auth_ctx import get_auth_ctx
 from aegra_api.models.auth import User
@@ -275,8 +276,8 @@ class ContextValidationError(ValueError):
 def validate_context(context: dict[str, Any] | None, graph_id: str) -> None:
     """Check *context* against the factory's declared context type ``T``.
 
-    A no-op when the graph declares no context type — an unannotated factory
-    accepts any context, so there is nothing to check against.
+    A no-op when the graph declares no context type: an unannotated factory
+    accepts anything.
 
     Raises:
         ContextValidationError: If the graph declares ``ServerRuntime[T]`` and
@@ -288,16 +289,17 @@ def validate_context(context: dict[str, Any] | None, graph_id: str) -> None:
 
     try:
         _instantiate_context(context, ctx_type)
-    except Exception as exc:
+    # A rejection only. ValidationError is a ValueError, a dataclass raises
+    # TypeError for a bad field, and anything else is the server's fault: it
+    # must stay a 500 rather than blame the caller and echo its message.
+    except (TypeError, ValueError) as exc:
         raise ContextValidationError(graph_id, ctx_type, _context_errors(exc)) from exc
 
 
 def _instantiate_context(context: dict[str, Any], ctx_type: type) -> Any:
     """Build a ``ctx_type`` from *context*, or return it unchanged.
 
-    Pydantic ``BaseModel`` → ``T.model_validate(context)``; ``dataclass`` →
-    ``T(**context)``. Any other declared type has no known construction path,
-    so the raw dict is returned rather than guessed at.
+    A type with no known construction path gets the raw dict, not a guess.
     """
     if _is_pydantic_model(ctx_type):
         return ctx_type.model_validate(context)
@@ -309,27 +311,19 @@ def _instantiate_context(context: dict[str, Any], ctx_type: type) -> Any:
 def _context_errors(exc: Exception) -> list[dict[str, Any]]:
     """Render *exc* as Pydantic-shaped error entries rooted at ``context``.
 
-    Pydantic's ``ValidationError.errors()`` is used when available; anything
-    else (notably the ``TypeError`` a dataclass raises for a missing or
-    unexpected field) collapses to a single entry pointing at ``context``.
-    Only ``loc``/``msg``/``type`` are carried through — ``input`` would echo
-    the submitted values back into the response body.
+    Anything that is not a ``ValidationError`` — notably a dataclass's
+    ``TypeError`` — collapses to one entry. ``input`` is dropped rather than
+    echoing the submitted values back.
     """
-    errors_fn = getattr(exc, "errors", None)
-    if callable(errors_fn):
-        try:
-            return [
-                {
-                    "loc": ["context", *(entry.get("loc") or ())],
-                    "msg": entry.get("msg", ""),
-                    "type": entry.get("type", "value_error"),
-                }
-                for entry in errors_fn()
-            ]
-        except Exception:
-            # Duck-typed call — an ``errors`` that is not Pydantic's falls
-            # through to the generic entry rather than losing the rejection.
-            pass
+    if isinstance(exc, ValidationError):
+        return [
+            {
+                "loc": ["context", *(entry.get("loc") or ())],
+                "msg": entry.get("msg", ""),
+                "type": entry.get("type", "value_error"),
+            }
+            for entry in exc.errors()
+        ]
     return [{"loc": ["context"], "msg": str(exc), "type": "value_error"}]
 
 
@@ -363,7 +357,7 @@ def coerce_context(context: dict[str, Any] | None, graph_id: str) -> Any:
 
     try:
         return _instantiate_context(context, ctx_type)
-    except Exception as exc:
+    except (TypeError, ValueError) as exc:
         logger.error(
             "context_coercion_failed",
             graph_id=graph_id,

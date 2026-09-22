@@ -1,15 +1,9 @@
 """What ``AssistantUpdate`` publishes must match what the endpoint accepts.
 
-``name`` and ``graph_id`` back NOT NULL columns, and ``update_assistant``
-answers a supplied empty one with 422 rather than falling back to the stored
-value, because a caller who supplied a field meant to change it. Publishing
-those two as nullable described ``{"name": null}`` as valid and would have a
-generated client offer the one value that cannot be stored.
-
-They stay nullable on the model so a null arrives as a *supplied* value and
-gets that 422, rather than a generic type error that does not say to omit the
-field instead. The other four are genuinely nullable: a null clears
-``description``, and ``config``, ``context`` and ``metadata`` read it as empty.
+``name`` and ``graph_id`` back NOT NULL columns and are answered 422 when
+supplied empty, so publishing them as nullable described ``{"name": null}`` as
+valid. They stay nullable on the model so a null arrives as supplied and gets
+that 422 rather than a generic type error.
 """
 
 from typing import Any

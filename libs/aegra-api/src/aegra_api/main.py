@@ -362,7 +362,26 @@ def _include_core_router(app: FastAPI, router: APIRouter, claimed: set[tuple[str
 
 
 def _overrides(route: APIRoute, claimed: set[tuple[str, str]]) -> bool:
-    return any((_url_space(route.path), method) in claimed for method in route.methods)
+    """Whether the app has taken over *route* entirely.
+
+    A partial claim keeps the core route: dropping it would take its unclaimed
+    methods off the server with it, which is worse than the duplicate operation
+    this filtering exists to remove. No core route declares more than one method
+    today, so the warning marks the day one does.
+    """
+    space = _url_space(route.path)
+    claimed_methods = {method for method in route.methods if (space, method) in claimed}
+    if not claimed_methods:
+        return False
+    if claimed_methods < route.methods:
+        logger.warning(
+            "Custom app claims only some methods of a core route; keeping it whole",
+            path=route.path,
+            claimed=sorted(claimed_methods),
+            declared=sorted(route.methods),
+        )
+        return False
+    return True
 
 
 def _include_core_routers(app: FastAPI) -> None:

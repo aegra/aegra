@@ -14,7 +14,14 @@ from fastapi.routing import APIRoute
 from pydantic import BaseModel
 
 from aegra_api.core.auth_deps import get_current_user, require_auth
-from aegra_api.main import _api_routes, _include_core_routers, _url_space, create_app
+from aegra_api.main import (
+    _api_routes,
+    _claimed_operations,
+    _include_core_router,
+    _include_core_routers,
+    _url_space,
+    create_app,
+)
 from aegra_api.models.auth import User
 from tests.fixtures.clients import make_client
 
@@ -336,3 +343,25 @@ def test_a_differently_named_path_parameter_still_claims_the_route() -> None:
 def test_two_paths_are_one_url_space_only_when_they_match_the_same_requests(left: str, right: str, same: bool) -> None:
     """``str`` is the implicit converter, so ``{a}`` and ``{a:str}`` are one route."""
     assert (_url_space(left) == _url_space(right)) is same
+
+
+def test_a_partial_claim_keeps_the_core_route_and_warns(caplog: pytest.LogCaptureFixture) -> None:
+    """Losing an unclaimed method would take an Agent Protocol operation off the server."""
+    core = APIRouter()
+
+    @core.api_route("/multi", methods=["GET", "POST"])
+    async def both() -> dict[str, Any]:
+        return {}
+
+    app = FastAPI()
+
+    @app.get("/multi")
+    async def only_get() -> dict[str, Any]:
+        return {}
+
+    with caplog.at_level("WARNING"):
+        _include_core_router(app, core, _claimed_operations(app))
+
+    assert "claims only some methods" in caplog.text
+    assert sorted(route.endpoint.__name__ for route in _serving(app, "/multi", "POST")) == ["both"]
+    assert sorted(route.endpoint.__name__ for route in _serving(app, "/multi", "GET")) == ["both", "only_get"]

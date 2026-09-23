@@ -389,12 +389,11 @@ class TestStreamRoute:
         monkeypatch.setattr(es_module, "make_sse_response", make_sse_response_with_close_handler)
         app = _make_app(monkeypatch)
         monkeypatch.setattr(es_module, "_get_session_maker", lambda: lambda: _SlowSession(owner=_USER))
-        # Separate loop: uvicorn.serve() cancels every task on its running loop.
+        # Separate loop: uvicorn.serve() cancels every task on its running loop. asyncio.run
+        # also cancels leftovers such as sse-starlette's shutdown watcher before closing it.
         server = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=0, log_level="error", lifespan="off"))
-        loop = asyncio.new_event_loop()
-        thread = threading.Thread(target=loop.run_forever, daemon=True)
+        thread = threading.Thread(target=asyncio.run, args=(server.serve(),), daemon=True)
         thread.start()
-        serve = asyncio.run_coroutine_threadsafe(server.serve(), loop)
         try:
             for _ in range(50):
                 if server.started and server.servers:
@@ -419,12 +418,9 @@ class TestStreamRoute:
                 raise TimeoutError("lister session was not closed")
         finally:
             server.should_exit = True
-            # A shutdown timeout fails the test: a generator stuck in shielded polls looks like this.
-            try:
-                serve.result(timeout=3)
-            finally:
-                loop.call_soon_threadsafe(loop.stop)
-                thread.join(timeout=3)
-                loop.close()
+            thread.join(timeout=3)
+            # A hung shutdown fails the test: a generator stuck in shielded polls looks like this.
+            if thread.is_alive():
+                raise TimeoutError("uvicorn did not shut down")
 
         assert not state["aexit_cancelled"]

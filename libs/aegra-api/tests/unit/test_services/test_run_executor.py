@@ -45,7 +45,7 @@ def _patch_execute_run_deps() -> dict[str, MagicMock | AsyncMock]:
 class TestRunInterruptConfiguration:
     @pytest.mark.parametrize(
         ("value", "expected"),
-        [(["agent"], ["agent"]), (["*"], "*"), ("agent", "agent"), (None, None)],
+        [(["agent"], ["agent"]), (["*"], "*"), ("agent", ["agent"]), (None, None)],
     )
     def test_normalizes_interrupt_value(self, value: str | list[str] | None, expected: str | list[str] | None) -> None:
         assert _normalize_interrupt_value(value) == expected

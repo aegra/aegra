@@ -298,9 +298,11 @@ def _build_run_config(job: RunJob) -> dict[str, Any]:
 
 
 def _normalize_interrupt_value(value: str | list[str] | None) -> str | list[str] | None:
-    """Convert the public all-nodes list sentinel to LangGraph's string sentinel."""
+    """Normalize interrupt targets for LangGraph's sequence or wildcard API."""
     if value == ["*"]:
         return "*"
+    if isinstance(value, str):
+        return [value]
     return value
 
 

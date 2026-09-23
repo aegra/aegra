@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import json
 import threading
 import uuid
@@ -406,10 +405,12 @@ class TestStreamRoute:
                 raise TimeoutError("lister session was not closed")
         finally:
             server.should_exit = True
-            with contextlib.suppress(TimeoutError):
+            # A shutdown timeout fails the test: a generator stuck in shielded polls looks like this.
+            try:
                 serve.result(timeout=3)
-            loop.call_soon_threadsafe(loop.stop)
-            thread.join(timeout=3)
-            loop.close()
+            finally:
+                loop.call_soon_threadsafe(loop.stop)
+                thread.join(timeout=3)
+                loop.close()
 
         assert not state["aexit_cancelled"]

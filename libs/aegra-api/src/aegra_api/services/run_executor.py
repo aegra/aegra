@@ -229,7 +229,7 @@ async def _stream_legacy(
     async for event_type, event_data in stream_graph_events(
         graph=graph,
         input_data=execution_input,
-        config=cast("RunnableConfig", run_config),
+        config=cast(RunnableConfig, run_config),
         stream_mode=stream_modes,
         interrupt_before=interrupt_before,
         interrupt_after=interrupt_after,

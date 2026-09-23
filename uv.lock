@@ -19,6 +19,7 @@ version = "0.10.5"
 source = { editable = "libs/aegra-api" }
 dependencies = [
     { name = "alembic" },
+    { name = "anyio" },
     { name = "asgi-correlation-id" },
     { name = "asyncpg" },
     { name = "croniter" },
@@ -60,6 +61,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "alembic", specifier = ">=1.16.4" },
+    { name = "anyio", specifier = ">=4.7.0" },
     { name = "asgi-correlation-id", specifier = ">=4.3.4" },
     { name = "asyncpg", specifier = ">=0.30.0" },
     { name = "croniter", specifier = ">=6.0.0" },

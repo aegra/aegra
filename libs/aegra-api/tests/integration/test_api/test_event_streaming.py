@@ -6,7 +6,7 @@ import asyncio
 import json
 import threading
 import uuid
-from collections.abc import Iterator
+from collections.abc import AsyncIterator, Iterator, Mapping, MutableMapping
 from functools import partial
 from typing import Any
 from unittest.mock import AsyncMock
@@ -16,6 +16,7 @@ import pytest
 import uvicorn
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from sse_starlette import EventSourceResponse
 
 from aegra_api.api import event_streaming as es_module
 from aegra_api.core.auth_deps import get_current_user, require_auth
@@ -349,12 +350,14 @@ class TestStreamRoute:
         """Disconnect during a lister poll must still run session ``__aexit__``."""
         poll_started = threading.Event()
         closed = threading.Event()
+        # Set and awaited on the server loop, so it fires before cancel_on_finish cancels the stream.
+        disconnected = asyncio.Event()
         state = {"aexit_cancelled": False, "aexits": 0}
 
         class _SlowSession(_Session):
             async def execute(self, _stmt: Any) -> Any:
                 poll_started.set()
-                await asyncio.sleep(0.4)
+                await disconnected.wait()
                 return await super().execute(_stmt)
 
             async def __aexit__(self, *_exc: Any) -> None:
@@ -373,6 +376,17 @@ class TestStreamRoute:
             "ThreadEventSession",
             partial(ThreadEventSession, idle_grace_seconds=5),
         )
+        make_sse_response = es_module.make_sse_response
+
+        async def on_disconnect(_message: MutableMapping[str, Any]) -> None:
+            disconnected.set()
+
+        def make_sse_response_with_close_handler(
+            body: AsyncIterator[bytes], *, headers: Mapping[str, str]
+        ) -> EventSourceResponse:
+            return make_sse_response(body, headers=headers, close_handler=on_disconnect)
+
+        monkeypatch.setattr(es_module, "make_sse_response", make_sse_response_with_close_handler)
         app = _make_app(monkeypatch)
         monkeypatch.setattr(es_module, "_get_session_maker", lambda: lambda: _SlowSession(owner=_USER))
         # Separate loop: uvicorn.serve() cancels every task on its running loop.

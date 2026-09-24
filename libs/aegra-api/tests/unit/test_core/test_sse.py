@@ -1,8 +1,10 @@
 """Unit tests for SSE utilities"""
 
 import json
+from collections.abc import AsyncGenerator
 from datetime import datetime
 
+import pytest
 from langchain_core.messages import ToolMessage
 from langgraph.types import Command
 
@@ -15,7 +17,10 @@ from aegra_api.core.sse import (
     create_metadata_event,
     format_sse_message,
     get_sse_headers,
+    make_sse_response,
 )
+
+_HEARTBEAT = b": heartbeat\r\n\r\n"
 
 
 class TestGetSSEHeaders:
@@ -30,6 +35,41 @@ class TestGetSSEHeaders:
         assert headers["Content-Type"] == "text/event-stream"
         assert headers["Access-Control-Allow-Origin"] == "*"
         assert headers["Access-Control-Allow-Headers"] == "Last-Event-ID"
+
+
+class TestMakeSSEResponse:
+    """Every SSE response opens with a keepalive, then streams its body."""
+
+    @pytest.mark.asyncio
+    async def test_opens_with_keepalive_before_the_body(self) -> None:
+        async def body() -> AsyncGenerator[bytes, None]:
+            yield b"event: first\n\n"
+            yield b"event: second\n\n"
+
+        response = make_sse_response(body(), headers=get_sse_headers())
+
+        chunks = [chunk async for chunk in response.body_iterator]
+        assert chunks == [_HEARTBEAT, b"event: first\n\n", b"event: second\n\n"]
+
+    @pytest.mark.asyncio
+    async def test_closing_the_response_closes_the_body(self) -> None:
+        """sse-starlette aborts mid-stream on disconnect, so body cleanup must still run."""
+        closed = False
+
+        async def body() -> AsyncGenerator[bytes, None]:
+            nonlocal closed
+            try:
+                yield b"event: first\n\n"
+            finally:
+                closed = True
+
+        response = make_sse_response(body(), headers=get_sse_headers())
+        iterator = response.body_iterator
+        assert await anext(iterator) == _HEARTBEAT
+        assert await anext(iterator) == b"event: first\n\n"
+        await iterator.aclose()
+
+        assert closed is True
 
 
 class TestFormatSSEMessage:

@@ -26,6 +26,9 @@ from aegra_api.services.event_streaming.session import ThreadEventSession
 
 _USER = "test-user"
 
+# Every SSE response opens with one keepalive comment (see core.sse).
+_OPEN_KEEPALIVE = ": heartbeat\r\n\r\n"
+
 
 class _Session:
     """Test session: scalar() returns the thread's owner id, execute() lists runs.
@@ -259,6 +262,35 @@ class TestStreamRoute:
         resp = client.post("/threads/t1/stream/events", json={"channels": ["messages"]})
         assert resp.status_code == 404
 
+    def test_stream_opens_with_a_keepalive_before_any_event(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """The stream's first bytes are a keepalive, not its first event.
+
+        The SDK rotates its shared subscription by awaiting the new stream's
+        first byte, so a stream silent until it has something to say stalls a
+        whole ping interval per rotation.
+        """
+        run_id = f"run-{uuid.uuid4().hex[:8]}"
+
+        async def seed() -> None:
+            broker = broker_manager.get_or_create_broker(run_id)
+            event = {
+                "type": "event",
+                "method": "messages",
+                "params": {"namespace": [], "data": {"event": "message-start"}},
+            }
+            await broker.put(f"{run_id}_event_1", ("messages", event))
+            await broker.put(f"{run_id}_event_2", ("end", {"status": "success"}))
+
+        asyncio.run(seed())
+        client = TestClient(_make_app(monkeypatch, run_ids=[run_id]))
+
+        with client.stream("POST", "/threads/t1/stream/events", json={"channels": ["messages"]}) as resp:
+            assert resp.status_code == 200
+            body = "".join(resp.iter_text())
+
+        assert body.startswith(_OPEN_KEEPALIVE)
+        assert "event: messages" in body
+
     def test_stream_emits_v2_frames(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """A run on the thread streams content-block frames over SSE."""
         run_id = f"run-{uuid.uuid4().hex[:8]}"
@@ -328,7 +360,9 @@ class TestStreamRoute:
             chunks.append(chunk.decode() if isinstance(chunk, bytes) else chunk)
         body = "".join(chunks)
 
-        input_frame = next(frame for frame in body.split("\n\n") if frame.startswith("event: input.requested"))
+        assert body.startswith(_OPEN_KEEPALIVE)
+        frames = body.removeprefix(_OPEN_KEEPALIVE).split("\n\n")
+        input_frame = next(frame for frame in frames if frame.startswith("event: input.requested"))
         data_line = next(line for line in input_frame.splitlines() if line.startswith("data: "))
         envelope = json.loads(data_line.removeprefix("data: "))
         assert envelope["params"]["data"] == {

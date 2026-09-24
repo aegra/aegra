@@ -114,13 +114,16 @@ Configure CORS for your custom routes in `aegra.json`:
     "app": "./custom_routes.py:app",
     "cors": {
       "allow_origins": ["https://myapp.com"],
+      "allow_origin_regex": "^https://[a-z0-9-]+\\.myapp\\.com$",
       "allow_credentials": true
     }
   }
 }
 ```
 
-The default is `allow_origins: ["*"]` with `allow_credentials: false`. When you specify concrete origins, `allow_credentials` defaults to `true` automatically. You can always set `allow_credentials` explicitly to override the default.
+Without `allow_origin_regex`, the default is `allow_origins: ["*"]` with `allow_credentials: false`. When you specify concrete origins and no regex, `allow_credentials` defaults to `true` automatically. When `allow_origin_regex` is non-null, `allow_credentials` defaults to `false`, and if `allow_origins` is omitted, it defaults to `[]`. An explicit origin list and regex are combined, while an explicit `"*"` remains a wildcard. You can always set `allow_credentials` explicitly to override the default. The regex is passed to Starlette and matched against the complete origin.
+
+Note: the `allow_credentials` default only recognizes an exact `["*"]` or `"*"`. A wildcard mixed with other concrete origins (e.g. `["*", "https://example.com"]`) currently still defaults `allow_credentials` to `true`, even though Starlette treats that list as allow-all — [tracked in #633](https://github.com/aegra/aegra/issues/633). Set `allow_credentials` explicitly if you use a mixed list.
 
 ## Configuration reference
 
@@ -128,5 +131,6 @@ The default is `allow_origins: ["*"]` with `allow_credentials: false`. When you 
 |--------|------|---------|-------------|
 | `http.app` | `string` | `None` | Import path to custom FastAPI app (`./file.py:variable`) |
 | `http.enable_custom_route_auth` | `bool` | `false` | Apply Aegra auth to all custom routes |
-| `http.cors.allow_origins` | `list[str]` | `["*"]` | Allowed CORS origins |
-| `http.cors.allow_credentials` | `bool` | `false` when origins is `["*"]`, `true` otherwise | Allow credentials in CORS requests |
+| `http.cors.allow_origins` | `list[str]` | `["*"]` (`[]` if `allow_origin_regex` is set) | Allowed CORS origins |
+| `http.cors.allow_origin_regex` | `string` | `None` | Regular expression for additional allowed origins; when present without `allow_origins`, the origin-list default is `[]` |
+| `http.cors.allow_credentials` | `bool` | `false` with a regex or wildcard origins, `true` with concrete origins and no regex | Allow credentials in CORS requests |

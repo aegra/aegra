@@ -39,6 +39,7 @@ aegra dev
     "enable_custom_route_auth": false,
     "cors": {
       "allow_origins": ["https://example.com"],
+      "allow_origin_regex": "^https://[a-z0-9-]+\\.example\\.com$",
       "allow_credentials": true
     }
   },
@@ -236,8 +237,7 @@ Configure custom routes and CORS.
     "app": "./custom_routes.py:app",
     "enable_custom_route_auth": false,
     "cors": {
-      "allow_origins": ["https://example.com"],
-      "allow_credentials": true
+      "allow_origin_regex": "^https://[a-z0-9-]+\\.example\\.com$"
     }
   }
 }
@@ -247,8 +247,13 @@ Configure custom routes and CORS.
 |-------|------|---------|-------------|
 | `app` | `string` | `None` | Import path to custom FastAPI app |
 | `enable_custom_route_auth` | `bool` | `false` | Apply Aegra auth to all custom routes |
-| `cors.allow_origins` | `list[str]` | `["*"]` | Allowed CORS origins |
-| `cors.allow_credentials` | `bool` | `false` when origins is `["*"]`, `true` otherwise | Allow credentials in CORS requests |
+| `cors.allow_origins` | `list[str]` | `["*"]` (`[]` if `allow_origin_regex` is set) | Allowed CORS origins |
+| `cors.allow_origin_regex` | `string` | `None` | Regular expression for additional allowed origins; when present without `allow_origins`, the origin-list default is `[]` |
+| `cors.allow_credentials` | `bool` | `false` with a regex or wildcard origins, `true` with concrete origins and no regex | Allow credentials in CORS requests |
+
+When `allow_origin_regex` is non-null, it is passed to Starlette's `CORSMiddleware` and matched against the complete origin. If `allow_origins` is also provided, either the list or regex can authorize an origin. An explicit `allow_origins: ["*"]` remains a wildcard. An empty string still counts as configured; it does not match normal non-empty origins.
+
+Note: the `allow_credentials` default only recognizes an exact `["*"]` or `"*"`. A wildcard mixed with other concrete origins (e.g. `["*", "https://example.com"]`) currently still defaults `allow_credentials` to `true`, even though Starlette treats that list as allow-all — [tracked in #633](https://github.com/aegra/aegra/issues/633). Set `allow_credentials` explicitly if you use a mixed list.
 
 See [custom routes guide](/guides/custom-routes) for details.
 

@@ -7,9 +7,10 @@ from typing import Any
 import structlog
 from asgi_correlation_id import CorrelationIdMiddleware
 from fastapi import FastAPI, HTTPException, Request
+from fastapi.dependencies.utils import get_parameterless_sub_dependant
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
-from fastapi.routing import APIRoute, APIRouter
+from fastapi.routing import APIRoute
 
 from aegra_api import __version__
 from aegra_api.api.assistants import router as assistants_router
@@ -205,39 +206,55 @@ async def root_handler() -> dict[str, str]:
     }
 
 
-def _apply_auth_to_routes(app: FastAPI, auth_deps: list[Any]) -> None:
-    """Apply auth dependency to all existing routes in the FastAPI app.
+def _apply_auth_to_custom_routes(app: FastAPI, auth_deps: list[Any]) -> int:
+    """Prepend ``auth_deps`` to every FastAPI route the custom app declares.
 
-    This function recursively processes all routes including nested routers,
-    adding the auth dependency to each route that doesn't already have it.
-    Auth dependencies are prepended to ensure they run first (fail-fast).
-
-    Args:
-        app: FastAPI application instance
-        auth_deps: List of dependencies to apply (e.g., [Depends(require_auth)])
+    Must run before the core routers are included: health checks and the root
+    stay public, and protocol routes carry their own auth. Returns the number
+    of routes protected.
     """
+    fastapi_pages = {app.openapi_url, app.docs_url, app.redoc_url, app.swagger_ui_oauth2_redirect_url}
+    protected = 0
+    uncovered: list[str] = []
 
-    def process_routes(routes: list) -> None:
-        """Recursively process routes and nested routers."""
+    def walk(routes: list[Any]) -> None:
+        nonlocal protected
         for route in routes:
             if isinstance(route, APIRoute):
-                # Add auth dependency if not already present
-                existing_deps = list(route.dependencies or [])
-                # Check if auth dependency is already present
-                auth_dep_ids = {id(dep) for dep in auth_deps}
-                existing_dep_ids = {id(dep) for dep in existing_deps}
-                if not auth_dep_ids.intersection(existing_dep_ids):
-                    # Prepend auth deps so they run first (fail-fast)
-                    route.dependencies = auth_deps + existing_deps
-            elif isinstance(route, APIRouter):
-                # Process nested router
-                process_routes(route.routes)
-            elif hasattr(route, "routes"):
-                # Handle other route types that have nested routes
-                process_routes(route.routes)
+                protected += _prepend_dependencies(route, auth_deps)
+                continue
+            # FastAPI wraps included routers; newer versions expose the wrapped
+            # router as `original_router` rather than `routes`.
+            nested = getattr(route, "original_router", None)
+            if nested is not None:
+                walk(list(nested.routes))
+                # Effective routes are cached until the wrapped router reports a change; a
+                # schema built at import would otherwise keep serving them unauthenticated.
+                getattr(nested, "_mark_routes_changed", lambda: None)()
+            elif getattr(route, "routes", None):
+                walk(list(route.routes))
+            elif getattr(route, "path", None) not in fastapi_pages:
+                uncovered.append(getattr(route, "path", repr(route)))
 
-    process_routes(app.routes)
-    logger.info("Applied authentication dependency to custom routes")
+    walk(list(app.routes))
+    logger.info("Applied authentication dependency to custom routes", route_count=protected)
+    if uncovered:
+        # Mounted apps, plain Starlette routes and websockets take no FastAPI
+        # dependency; say so rather than let the flag imply they are protected.
+        logger.warning("enable_custom_route_auth does not cover these custom routes", paths=uncovered)
+    return protected
+
+
+def _prepend_dependencies(route: APIRoute, deps: list[Any]) -> int:
+    """Prepend ``deps`` to one route, once. Returns 1 if the route changed."""
+    if any(dep in route.dependencies for dep in deps):
+        return 0
+    route.dependencies = [*deps, *route.dependencies]
+    # `dependencies` alone is only read at construction time; mirror what
+    # APIRoute.__init__ does so the already-built dependant picks it up.
+    for dep in reversed(deps):
+        route.dependant.dependencies.insert(0, get_parameterless_sub_dependant(depends=dep, path=route.path_format))
+    return 1
 
 
 def _add_cors_middleware(app: FastAPI, cors_config: CorsConfig | None) -> None:
@@ -353,6 +370,8 @@ def create_app() -> FastAPI:
             )
 
         application = user_app
+        if http_config and http_config.get("enable_custom_route_auth", False):
+            _apply_auth_to_custom_routes(application, auth_dependency)
         if not application.openapi_tags:
             application.openapi_tags = OPENAPI_TAGS
         _include_core_routers(application)
@@ -364,10 +383,6 @@ def create_app() -> FastAPI:
         application = merge_lifespans(application, lifespan)
         application = merge_exception_handlers(application, exception_handlers)
         _add_common_middleware(application, cors_config)
-
-        # Apply auth to custom routes if enabled
-        if http_config and http_config.get("enable_custom_route_auth", False):
-            _apply_auth_to_routes(application, auth_dependency)
     else:
         application = FastAPI(
             title=settings.app.PROJECT_NAME,

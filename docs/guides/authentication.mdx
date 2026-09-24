@@ -447,7 +447,7 @@ async def whoami(user: User = Depends(require_auth)):
     }
 ```
 
-To require auth on **all** custom routes by default, set `enable_custom_route_auth` in your config:
+Custom routes loaded through `http.app` are authenticated by default. You can leave the default implicit, or make it explicit in config:
 
 ```json
 {
@@ -459,6 +459,17 @@ To require auth on **all** custom routes by default, set `enable_custom_route_au
 ```
 
 See the [custom routes guide](/guides/custom-routes) for more.
+
+If you intentionally need a public custom route surface such as an unauthenticated webhook receiver, opt out explicitly:
+
+```json
+{
+  "http": {
+    "app": "./custom_routes.py:app",
+    "enable_custom_route_auth": false
+  }
+}
+```
 
 ## No-auth mode
 

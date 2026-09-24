@@ -4,6 +4,7 @@ from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
 from fastapi import HTTPException, Request
+from langgraph_sdk import Auth
 from starlette.authentication import AuthCredentials
 
 from aegra_api.core.auth_deps import (
@@ -80,6 +81,77 @@ class TestRequireAuth:
 
             assert exc_info.value.status_code == 401
             assert "Auth error" in exc_info.value.detail
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("status_code", "detail"),
+        [
+            (403, "account disabled"),
+            (429, "too many attempts"),
+            (503, "identity provider unreachable"),
+        ],
+    )
+    async def test_require_auth_preserves_handler_http_status(self, status_code: int, detail: str) -> None:
+        """@auth.authenticate HTTPException status and detail must reach the client."""
+        mock_backend = Mock()
+        mock_backend.authenticate = AsyncMock(
+            side_effect=Auth.exceptions.HTTPException(status_code=status_code, detail=detail)
+        )
+
+        mock_request = Mock(spec=Request)
+        mock_request.scope = {}
+
+        with (
+            patch("aegra_api.core.auth_deps.get_auth_backend", return_value=mock_backend),
+            pytest.raises(HTTPException) as exc_info,
+        ):
+            await require_auth(mock_request)
+
+        assert exc_info.value.status_code == status_code
+        assert exc_info.value.detail == detail
+
+    @pytest.mark.asyncio
+    async def test_require_auth_preserves_handler_http_headers(self) -> None:
+        """Headers from Auth.exceptions.HTTPException are forwarded to FastAPI."""
+        mock_backend = Mock()
+        mock_backend.authenticate = AsyncMock(
+            side_effect=Auth.exceptions.HTTPException(
+                status_code=401,
+                detail="invalid token",
+                headers={"WWW-Authenticate": "Bearer"},
+            )
+        )
+
+        mock_request = Mock(spec=Request)
+        mock_request.scope = {}
+
+        with (
+            patch("aegra_api.core.auth_deps.get_auth_backend", return_value=mock_backend),
+            pytest.raises(HTTPException) as exc_info,
+        ):
+            await require_auth(mock_request)
+
+        assert exc_info.value.status_code == 401
+        assert exc_info.value.detail == "invalid token"
+        assert exc_info.value.headers == {"WWW-Authenticate": "Bearer"}
+
+    @pytest.mark.asyncio
+    async def test_require_auth_reraises_fastapi_http_exception(self) -> None:
+        """A FastAPI HTTPException from the backend is not rewritten to 401."""
+        mock_backend = Mock()
+        mock_backend.authenticate = AsyncMock(side_effect=HTTPException(status_code=403, detail="forbidden"))
+
+        mock_request = Mock(spec=Request)
+        mock_request.scope = {}
+
+        with (
+            patch("aegra_api.core.auth_deps.get_auth_backend", return_value=mock_backend),
+            pytest.raises(HTTPException) as exc_info,
+        ):
+            await require_auth(mock_request)
+
+        assert exc_info.value.status_code == 403
+        assert exc_info.value.detail == "forbidden"
 
     @pytest.mark.asyncio
     async def test_require_auth_preserves_custom_fields(self):

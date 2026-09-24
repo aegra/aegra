@@ -12,12 +12,15 @@ from pathlib import Path
 from unittest.mock import Mock, patch
 
 import pytest
-from fastapi import Request
-from starlette.authentication import AuthCredentials, AuthenticationError
+from fastapi import Depends, FastAPI, HTTPException, Request
+from fastapi.testclient import TestClient
+from langgraph_sdk import Auth
+from starlette.authentication import AuthCredentials
 from starlette.requests import HTTPConnection
 
 from aegra_api.core.auth_deps import require_auth
 from aegra_api.core.auth_middleware import LangGraphAuthBackend, LangGraphUser
+from aegra_api.main import agent_protocol_exception_handler
 from aegra_api.models.auth import User
 
 
@@ -182,8 +185,10 @@ class TestMockJWTAuth:
         mock_conn = Mock(spec=HTTPConnection)
         mock_conn.headers = {"authorization": "Bearer invalid-token"}
 
-        with pytest.raises(AuthenticationError):
+        with pytest.raises(Auth.exceptions.HTTPException) as exc_info:
             await mock_jwt_auth_backend.authenticate(mock_conn)
+
+        assert exc_info.value.status_code == 401
 
     @pytest.mark.asyncio
     async def test_mock_jwt_missing_token(self, mock_jwt_auth_backend):
@@ -191,10 +196,11 @@ class TestMockJWTAuth:
         mock_conn = Mock(spec=HTTPConnection)
         mock_conn.headers = {}
 
-        with pytest.raises(AuthenticationError) as exc_info:
+        with pytest.raises(Auth.exceptions.HTTPException) as exc_info:
             await mock_jwt_auth_backend.authenticate(mock_conn)
 
-        assert "Missing or invalid" in str(exc_info.value)
+        assert exc_info.value.status_code == 401
+        assert "Missing or invalid" in str(exc_info.value.detail)
 
     @pytest.mark.asyncio
     async def test_mock_jwt_malformed_token(self, mock_jwt_auth_backend):
@@ -202,10 +208,11 @@ class TestMockJWTAuth:
         mock_conn = Mock(spec=HTTPConnection)
         mock_conn.headers = {"authorization": "Bearer mock-jwt-incomplete"}
 
-        with pytest.raises(AuthenticationError) as exc_info:
+        with pytest.raises(Auth.exceptions.HTTPException) as exc_info:
             await mock_jwt_auth_backend.authenticate(mock_conn)
 
-        assert "missing required fields" in str(exc_info.value).lower()
+        assert exc_info.value.status_code == 401
+        assert "missing required fields" in str(exc_info.value.detail).lower()
 
     @pytest.mark.asyncio
     async def test_mock_jwt_premium_role(self, mock_jwt_auth_backend):
@@ -348,3 +355,103 @@ class TestUserModelCustomFields:
             # Verify request scope was set
             assert mock_request.scope["user"] is not None
             assert mock_request.scope["auth"] is not None
+
+
+def _auth_raising(*, status_code: int, detail: str, headers: dict[str, str] | None = None) -> Auth:
+    """Auth whose @authenticate handler raises a fixed HTTPException."""
+    auth = Auth()
+
+    @auth.authenticate
+    async def authenticate(_headers: dict[str, str]) -> dict[str, str]:
+        raise Auth.exceptions.HTTPException(status_code=status_code, detail=detail, headers=headers)
+
+    return auth
+
+
+def _auth_succeeding() -> Auth:
+    """Auth whose @authenticate handler always returns a user."""
+    auth = Auth()
+
+    @auth.authenticate
+    async def authenticate(_headers: dict[str, str]) -> dict[str, str | bool]:
+        return {
+            "identity": "ok-user",
+            "display_name": "OK User",
+            "is_authenticated": True,
+        }
+
+    return auth
+
+
+class TestAuthenticateHttpStatusPassthrough:
+    """HTTP-level: handler status/headers reach the Agent Protocol response, not collapse to 401."""
+
+    def _get(self, auth_instance: Auth | None) -> tuple[int, dict[str, object], dict[str, str]]:
+        backend = LangGraphAuthBackend()
+        backend.auth_instance = auth_instance
+
+        app = FastAPI()
+        # Exercise production JSON + header forwarding, not FastAPI's default handler.
+        app.add_exception_handler(HTTPException, agent_protocol_exception_handler)
+
+        @app.get("/protected")
+        async def protected(user: User = Depends(require_auth)) -> dict[str, str]:
+            return {"identity": user.identity}
+
+        with (
+            patch("aegra_api.core.auth_deps.get_auth_backend", return_value=backend),
+            TestClient(app, raise_server_exceptions=False) as client,
+        ):
+            response = client.get("/protected")
+            return response.status_code, response.json(), dict(response.headers)
+
+    @pytest.mark.parametrize(
+        ("status_code", "detail"),
+        [
+            (403, "account disabled"),
+            (429, "too many attempts"),
+            (503, "identity provider unreachable"),
+        ],
+    )
+    def test_handler_http_exception_status_reaches_client(self, status_code: int, detail: str) -> None:
+        code, body, _headers = self._get(_auth_raising(status_code=status_code, detail=detail))
+
+        assert code == status_code
+        assert body["message"] == detail
+
+    def test_handler_http_exception_headers_reach_client(self) -> None:
+        code, body, headers = self._get(
+            _auth_raising(
+                status_code=401,
+                detail="invalid token",
+                headers={"WWW-Authenticate": "Bearer"},
+            )
+        )
+        assert code == 401
+        assert body["message"] == "invalid token"
+        assert headers.get("www-authenticate") == "Bearer"
+
+    def test_non_http_exception_stays_401_without_leaking(self) -> None:
+        auth = Auth()
+
+        @auth.authenticate
+        async def authenticate(_headers: dict[str, str]) -> dict[str, str]:
+            raise RuntimeError("postgres://secret@internal/db")
+
+        code, body, _headers = self._get(auth)
+
+        assert code == 401
+        assert "secret" not in str(body)
+        assert "Authentication system error" in str(body["message"])
+
+    def test_successful_auth_unchanged(self) -> None:
+        code, body, _headers = self._get(_auth_succeeding())
+
+        assert code == 200
+        assert body == {"identity": "ok-user"}
+
+    def test_unconfigured_auth_still_anonymous(self) -> None:
+        code, body, _headers = self._get(None)
+
+        assert code == 200
+        assert body == {"identity": "anonymous"}

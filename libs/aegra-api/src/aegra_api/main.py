@@ -174,6 +174,7 @@ async def agent_protocol_exception_handler(_request: Request, exc: HTTPException
             message=exc.detail,
             details=getattr(exc, "details", None),
         ).model_dump(),
+        headers=exc.headers,
     )
 
 

@@ -74,18 +74,36 @@ Any additional fields you return (like `role`, `team_id`, etc.) are preserved an
 
 ### Denying access
 
-Raise any exception to deny authentication:
+Raise `Auth.exceptions.HTTPException` to deny authentication. Aegra forwards the handler's `status_code`, `detail`, and `headers` to the client. Status codes that the handler does not set default to 401.
 
 ```python
+from langgraph_sdk import Auth
+
+auth = Auth()
+
 @auth.authenticate
 async def authenticate(headers: dict) -> dict:
     token = headers.get("Authorization", "").replace("Bearer ", "")
     if not token:
-        raise Exception("Authentication required")
+        raise Auth.exceptions.HTTPException(status_code=401, detail="Authentication required")
+    if is_rate_limited(token):
+        raise Auth.exceptions.HTTPException(status_code=429, detail="Too many attempts")
+    if is_account_disabled(token):
+        raise Auth.exceptions.HTTPException(status_code=403, detail="Account disabled")
+    if idp_unreachable():
+        raise Auth.exceptions.HTTPException(status_code=503, detail="Identity provider unreachable")
     if not is_valid_token(token):
-        raise Exception("Invalid token")
+        raise Auth.exceptions.HTTPException(status_code=401, detail="Invalid token")
     return user_data
 ```
+
+| Status | Meaning |
+|---|---|
+| `401` | Not authenticated (missing or invalid credentials). Also the default when the handler raises a non-HTTP exception. |
+| `403` | The identity is known but access is refused (disabled account, forbidden). Authorization denials from `@auth.on` are also 403. |
+| Other | Passed through as raised (`429` rate limit, `503` identity provider down, …). |
+
+Any other exception still becomes `401` and does not leak the exception text. Do not raise a generic `Exception` if you need a status other than 401.
 
 ## Authorization handlers
 

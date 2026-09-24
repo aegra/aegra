@@ -14,11 +14,23 @@ from aegra_api.services.run_status import (
 )
 
 
+@pytest.fixture(autouse=True)
+def _no_queue_dispatch(monkeypatch: pytest.MonkeyPatch) -> AsyncMock:
+    """finalize_run / interrupt_unowned_run / cancel_queued_run dispatch the thread's queued
+    runs afterwards; keep that off the database here."""
+    mock = AsyncMock()
+    monkeypatch.setattr("aegra_api.services.run_status.dispatch_next_queued_run", mock)
+    return mock
+
+
 def _make_mock_session() -> AsyncMock:
     """Create a mock async session with execute and commit."""
     session = AsyncMock()
     session.execute = AsyncMock()
     session.commit = AsyncMock()
+    # interrupt_unowned_run wraps its lock+CAS in a SAVEPOINT; `await session.begin_nested()`
+    # must hand back something whose commit()/rollback() are awaitable.
+    session.begin_nested = AsyncMock(return_value=AsyncMock())
     return session
 
 
@@ -235,7 +247,7 @@ class TestSetThreadStatusIfNoActiveRuns:
 
 class TestInterruptUnownedRun:
     @pytest.mark.asyncio
-    async def test_reconciles_run_and_thread_in_one_transaction(self) -> None:
+    async def test_reconciles_run_and_thread_in_one_transaction(self, _no_queue_dispatch: AsyncMock) -> None:
         session = _make_mock_session()
         result = MagicMock()
         result.scalar_one_or_none.return_value = "run-1"
@@ -257,6 +269,8 @@ class TestInterruptUnownedRun:
         assert "user-1" in compiled.params.values()
         mock_set_thread.assert_awaited_once_with(session, ["thread-1"], "idle", user_id="user-1")
         session.commit.assert_awaited_once()
+        # Whether the queue may move is the caller's call (a local task may still be running).
+        _no_queue_dispatch.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_does_not_commit_when_live_owner_wins_race(self) -> None:
@@ -274,6 +288,11 @@ class TestInterruptUnownedRun:
         assert interrupted is False
         mock_set_thread.assert_not_awaited()
         session.commit.assert_not_awaited()
+        # The thread row was locked first (gate lock order) inside a savepoint; a live owner
+        # means we wrote nothing, so the savepoint is rolled back to release the lock without
+        # expiring the caller's session — the owner's finalize needs that lock.
+        session.begin_nested.return_value.rollback.assert_awaited_once()
+        session.rollback.assert_not_awaited()
 
 
 class TestSafeSerialize:

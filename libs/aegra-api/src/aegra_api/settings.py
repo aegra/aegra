@@ -1,6 +1,6 @@
 import logging
 import re
-from typing import Annotated
+from typing import Annotated, Literal
 from urllib.parse import parse_qsl, quote_plus, urlencode
 
 from pydantic import BeforeValidator, Field, computed_field, model_validator
@@ -464,6 +464,24 @@ class EventStreamingSettings(EnvBase):
     FF_V2_EVENT_STREAMING: bool = True
 
 
+class MultitaskSettings(EnvBase):
+    """Double-texting (``multitask_strategy``) admission policy.
+
+    MULTITASK_PAUSED_THREAD_POLICY decides what a fresh-input run (no ``command``)
+    does on a thread paused at a human-in-the-loop ``interrupt()``:
+
+    - ``reject`` (default): 409. Only a ``command={'resume': ...}`` run can clear the
+      pause, and queued runs stay parked behind it. The safe default for approval
+      flows, where a stray message must not bypass a pending review.
+    - ``admit``: the run is admitted and LangGraph starts it from ``__start__``,
+      discarding the pending interrupt (its behaviour for new input on an interrupted
+      thread, and what LangGraph Platform does). Message and resume then serialize
+      under the admission lock, first one wins.
+    """
+
+    MULTITASK_PAUSED_THREAD_POLICY: Literal["reject", "admit"] = "reject"
+
+
 class Settings:
     """Container object that instantiates all application settings groups."""
 
@@ -475,6 +493,7 @@ class Settings:
         self.observability = ObservabilitySettings()
         self.redis = RedisSettings()
         self.worker = WorkerSettings()
+        self.multitask = MultitaskSettings()
         self.cron = CronSettings()
         self.thread_ttl = ThreadTTLSettings()
         self.event_streaming = EventStreamingSettings()

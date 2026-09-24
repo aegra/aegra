@@ -8,6 +8,7 @@ from uuid import uuid4
 import pytest
 from fastapi import HTTPException
 from redis import RedisError
+from sqlalchemy.exc import SQLAlchemyError
 
 from aegra_api.api.runs import create_and_stream_run, stream_run
 from aegra_api.core.orm import Assistant as AssistantORM
@@ -91,6 +92,10 @@ class TestRunsStreamingEndpoints:
 
             # DB setup: first scalar = thread ownership check (None = new thread), second = assistant
             mock_session.scalar.side_effect = [None, sample_assistant]
+            # No in-flight run on the thread → multitask gate lets this run start now.
+            no_active = MagicMock()
+            no_active.all.return_value = []
+            mock_session.scalars.return_value = no_active
 
             # Mock generator for streaming response
             async def mock_generator() -> AsyncGenerator:
@@ -168,11 +173,15 @@ class TestRunsStreamingEndpoints:
             patch("aegra_api.api.runs.active_runs", {}),
             patch("aegra_api.api.runs.streaming_service.stream_run_execution", return_value=_fake_stream()),
             patch("aegra_api.api.runs.broker_manager.request_cancel", new_callable=AsyncMock) as mock_cancel,
+            patch(
+                "aegra_api.api.runs.cancel_queued_run_by_id", new_callable=AsyncMock, return_value=False
+            ) as mock_drop,
             patch("aegra_api.api.runs._get_session_maker", return_value=_make_session_maker(mock_session)),
         ):
             mock_lg_service.return_value.list_graphs.return_value = ["test-graph"]
             # First scalar = thread ownership check (None = new thread); second = assistant
             mock_session.scalar.side_effect = [None, sample_assistant]
+            mock_session.scalars.return_value = MagicMock(all=MagicMock(return_value=[]))  # no in-flight run
 
             response = await create_and_stream_run(thread_id, request, mock_user)
 
@@ -185,6 +194,9 @@ class TestRunsStreamingEndpoints:
             await handler({"type": "http.disconnect"})
             if expect_request_cancel:
                 mock_cancel.assert_awaited_once_with(run_id, "cancel")
+                # The database drop is attempted first (the run may still be parked);
+                # only a run that is no longer queued reaches the broker cancel.
+                mock_drop.assert_awaited_once_with(run_id, thread_id, user_id=mock_user.identity)
             else:
                 mock_cancel.assert_not_awaited()
 
@@ -226,17 +238,120 @@ class TestRunsStreamingEndpoints:
                 new_callable=AsyncMock,
                 side_effect=RedisError("broker down"),
             ),
+            patch("aegra_api.api.runs.cancel_queued_run_by_id", new_callable=AsyncMock, return_value=False),
             patch("aegra_api.api.runs._get_session_maker", return_value=_make_session_maker(mock_session)),
         ):
             mock_lg_service.return_value.list_graphs.return_value = ["test-graph"]
             # First scalar = thread ownership check (None = new thread); second = assistant
             mock_session.scalar.side_effect = [None, sample_assistant]
+            mock_session.scalars.return_value = MagicMock(all=MagicMock(return_value=[]))  # no in-flight run
 
             response = await create_and_stream_run(thread_id, request, mock_user)
             handler = response.client_close_handler_callable
             assert handler is not None
             # Must not raise even though the broker side-effect blows up
             await handler({"type": "http.disconnect"})
+
+    @pytest.mark.asyncio
+    async def test_disconnect_drops_a_still_queued_run_without_broker_cancel(
+        self,
+        mock_user: User,
+        mock_session: AsyncMock,
+    ) -> None:
+        """A double-texted run may still be parked when the client disconnects: it has no
+        task for the broker to cancel, so the handler drops it in the database instead."""
+        thread_id = "t"
+        run_id = str(uuid4())
+        request = RunCreate(assistant_id="test-assistant", input={})  # default enqueue
+
+        with (
+            patch("aegra_api.api.runs.handle_event", new_callable=AsyncMock, return_value=None),
+            patch("aegra_api.api.runs._prepare_run", new_callable=AsyncMock) as mock_prepare,
+            patch("aegra_api.api.runs.streaming_service.stream_run_execution", return_value=_single_event_stream()),
+            patch("aegra_api.api.runs.broker_manager.request_cancel", new_callable=AsyncMock) as mock_cancel,
+            patch("aegra_api.api.runs.cancel_queued_run_by_id", new_callable=AsyncMock, return_value=True) as mock_drop,
+            patch("aegra_api.api.runs._get_session_maker", return_value=_make_session_maker(mock_session)),
+        ):
+            mock_session.scalar.return_value = None
+            mock_prepare.return_value = (run_id, MagicMock(), MagicMock())
+
+            response = await create_and_stream_run(thread_id, request, mock_user)
+            handler = response.client_close_handler_callable
+            assert handler is not None
+
+            await handler({"type": "http.disconnect"})
+
+        mock_drop.assert_awaited_once_with(run_id, thread_id, user_id=mock_user.identity)
+        mock_cancel.assert_not_awaited()  # nothing executes a queued run
+
+    @pytest.mark.asyncio
+    async def test_disconnect_cancels_a_promoted_run_through_the_broker(
+        self,
+        mock_user: User,
+        mock_session: AsyncMock,
+    ) -> None:
+        """Not queued any more (promoted, or never parked): the broker cancel goes out, so a
+        run promoted between the disconnect and the drop attempt cannot keep executing."""
+        thread_id = "t"
+        run_id = str(uuid4())
+        request = RunCreate(assistant_id="test-assistant", input={})
+
+        with (
+            patch("aegra_api.api.runs.handle_event", new_callable=AsyncMock, return_value=None),
+            patch("aegra_api.api.runs._prepare_run", new_callable=AsyncMock) as mock_prepare,
+            patch("aegra_api.api.runs.streaming_service.stream_run_execution", return_value=_single_event_stream()),
+            patch("aegra_api.api.runs.broker_manager.request_cancel", new_callable=AsyncMock) as mock_cancel,
+            patch(
+                "aegra_api.api.runs.cancel_queued_run_by_id", new_callable=AsyncMock, return_value=False
+            ) as mock_drop,
+            patch("aegra_api.api.runs._get_session_maker", return_value=_make_session_maker(mock_session)),
+        ):
+            mock_session.scalar.return_value = None
+            mock_prepare.return_value = (run_id, MagicMock(), MagicMock())
+
+            response = await create_and_stream_run(thread_id, request, mock_user)
+            handler = response.client_close_handler_callable
+            assert handler is not None
+
+            await handler({"type": "http.disconnect"})
+
+        mock_drop.assert_awaited_once()
+        mock_cancel.assert_awaited_once_with(run_id, "cancel")
+
+    @pytest.mark.asyncio
+    async def test_disconnect_database_failure_does_not_skip_broker_cancel(
+        self,
+        mock_user: User,
+        mock_session: AsyncMock,
+    ) -> None:
+        """The database drop and the broker cancel are independent: a failure in the first must
+        not leave an executing run uncancelled, and neither failure may escape the handler."""
+        thread_id = "t"
+        run_id = str(uuid4())
+        request = RunCreate(assistant_id="test-assistant", input={})
+
+        with (
+            patch("aegra_api.api.runs.handle_event", new_callable=AsyncMock, return_value=None),
+            patch("aegra_api.api.runs._prepare_run", new_callable=AsyncMock) as mock_prepare,
+            patch("aegra_api.api.runs.streaming_service.stream_run_execution", return_value=_single_event_stream()),
+            patch("aegra_api.api.runs.broker_manager.request_cancel", new_callable=AsyncMock) as mock_cancel,
+            patch(
+                "aegra_api.api.runs.cancel_queued_run_by_id",
+                new_callable=AsyncMock,
+                side_effect=SQLAlchemyError("db down"),
+            ),
+            patch("aegra_api.api.runs._get_session_maker", return_value=_make_session_maker(mock_session)),
+        ):
+            mock_session.scalar.return_value = None
+            mock_prepare.return_value = (run_id, MagicMock(), MagicMock())
+
+            response = await create_and_stream_run(thread_id, request, mock_user)
+            handler = response.client_close_handler_callable
+            assert handler is not None
+
+            await handler({"type": "http.disconnect"})  # must not raise
+
+        mock_cancel.assert_awaited_once_with(run_id, "cancel")
 
     @pytest.mark.asyncio
     async def test_create_and_stream_run_invokes_create_run_auth_handler(

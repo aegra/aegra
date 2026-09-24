@@ -1988,7 +1988,7 @@
           "Thread Runs"
         ],
         "summary": "Delete Run",
-        "description": "Delete a run record.\n\nIf the run is active (pending or running) and `force=0`, returns 409\nConflict. Set `force=1` to cancel the run first (best-effort) and then\ndelete it. Returns 204 No Content on success.",
+        "description": "Delete a run record.\n\nIf the run is active (pending, running, or enqueued behind another run)\nand `force=0`, returns 409 Conflict. Set `force=1` to cancel the run first\n(best-effort) and then delete it. Returns 204 No Content on success.",
         "operationId": "delete_run_threads__thread_id__runs__run_id__delete",
         "parameters": [
           {
@@ -2067,7 +2067,7 @@
           "Thread Runs"
         ],
         "summary": "Join Run",
-        "description": "Wait for a run to complete and return its output.\n\nReturns a chunked ``application/json`` response. While the run is still\nexecuting, the server sends periodic ``\\n`` heartbeat bytes to keep the\nconnection alive through proxies and load balancers (AWS ALB, Cloudflare,\netc.). The final chunk is the JSON result. Leading whitespace is ignored\nby JSON parsers, so clients can parse the concatenated body normally.\n\nIf the run is already in a terminal state, the output is returned\nimmediately with no heartbeat overhead.\n\nSessions are managed manually (not via ``Depends``) to avoid holding a\npool connection during the long wait.",
+        "description": "Wait for a run to complete and return its output.\n\nReturns a chunked ``application/json`` response. While the run is still\nexecuting, the server sends periodic ``\\n`` heartbeat bytes to keep the\nconnection alive through proxies and load balancers (AWS ALB, Cloudflare,\netc.). The final chunk is the JSON result. Leading whitespace is ignored\nby JSON parsers, so clients can parse the concatenated body normally.\n\nIf the run is already in a terminal state, the output is returned\nimmediately with no heartbeat overhead.\n\nA run that failed, or that the wait gave up on, returns\n``{\"__error__\": {\"error\": ..., \"message\": ...}}`` instead of an output.\n``langgraph_sdk``'s ``runs.join`` hands that body back as-is, unlike\n``runs.wait``, which inspects the key and raises.\n\nSessions are managed manually (not via ``Depends``) to avoid holding a\npool connection during the long wait.",
         "operationId": "join_run_threads__thread_id__runs__run_id__join_get",
         "parameters": [
           {
@@ -2127,7 +2127,7 @@
           "Thread Runs"
         ],
         "summary": "Wait For Run",
-        "description": "Create a run, execute it, and wait for completion.\n\nReturns a chunked ``application/json`` response with periodic ``\\n``\nheartbeat bytes to keep the connection alive. The final chunk is the\nJSON result. Uses ``BG_JOB_TIMEOUT_SECS`` (default 1 hour) as the\nsafety-net timeout.\n\nSessions are managed manually (not via ``Depends``) to avoid holding a\npool connection during the long wait.",
+        "description": "Create a run, execute it, and wait for completion.\n\nReturns a chunked ``application/json`` response with periodic ``\\n``\nheartbeat bytes to keep the connection alive. The final chunk is the\nJSON result. Uses ``BG_JOB_TIMEOUT_SECS`` (default 1 hour) as the\nsafety-net timeout.\n\nA run that failed, or that the wait gave up on, returns\n``{\"__error__\": {\"error\": ..., \"message\": ...}}`` instead of an output;\nthe LangGraph SDK reads that key and raises.\n\nSessions are managed manually (not via ``Depends``) to avoid holding a\npool connection during the long wait.",
         "operationId": "wait_for_run_threads__thread_id__runs_wait_post",
         "parameters": [
           {
@@ -3992,7 +3992,12 @@
             "anyOf": [
               {
                 "type": "string",
-                "maxLength": 256
+                "enum": [
+                  "reject",
+                  "rollback",
+                  "interrupt",
+                  "enqueue"
+                ]
               },
               {
                 "type": "null"
@@ -4401,7 +4406,12 @@
             "anyOf": [
               {
                 "type": "string",
-                "maxLength": 256
+                "enum": [
+                  "reject",
+                  "rollback",
+                  "interrupt",
+                  "enqueue"
+                ]
               },
               {
                 "type": "null"
@@ -4633,7 +4643,7 @@
           "status": {
             "type": "string",
             "title": "Status",
-            "description": "Current run status: pending, running, error, success, timeout, or interrupted.",
+            "description": "Current run status: pending (includes runs enqueued behind another run), running, error, success, timeout, or interrupted.",
             "default": "pending"
           },
           "input": {
@@ -4728,7 +4738,7 @@
           "updated_at"
         ],
         "title": "Run",
-        "description": "Run entity model\n\nStatus values: pending, running, error, success, timeout, interrupted"
+        "description": "Run entity model\n\nStatus values: pending, running, error, success, timeout, interrupted.\nA run parked behind another run (double-texting enqueue) is internally\n'queued' and reported as 'pending', matching the LangGraph SDK vocabulary."
       },
       "RunCreate": {
         "properties": {
@@ -4857,14 +4867,20 @@
           "multitask_strategy": {
             "anyOf": [
               {
-                "type": "string"
+                "type": "string",
+                "enum": [
+                  "reject",
+                  "rollback",
+                  "interrupt",
+                  "enqueue"
+                ]
               },
               {
                 "type": "null"
               }
             ],
             "title": "Multitask Strategy",
-            "description": "Strategy for handling concurrent runs on same thread: 'reject', 'interrupt', 'rollback', or 'enqueue'."
+            "description": "How to handle a new run when the thread already has an active run. 'enqueue' (default) queues it to run after; 'reject' returns 409; 'interrupt' cancels the active run then starts this one; 'rollback' cancels the active run (kept as interrupted) \u2014 or, with no active run, reverts the last run only if it was left interrupted/errored (repairing a broken thread; a completed run is untouched) \u2014 then forks this run from the checkpoint preceding it, reverting that run's writes. None defaults to 'enqueue'."
           },
           "command": {
             "anyOf": [

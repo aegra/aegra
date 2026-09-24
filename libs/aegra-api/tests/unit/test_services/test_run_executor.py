@@ -25,6 +25,14 @@ async def _empty_async_gen():  # type: ignore[no-untyped-def]
     yield  # noqa: RET504 — makes this an async generator
 
 
+@pytest.fixture(autouse=True)
+def _no_queue_dispatch(monkeypatch: pytest.MonkeyPatch) -> AsyncMock:
+    """execute_run promotes the thread's queued runs on some exits; keep that off the DB."""
+    mock = AsyncMock()
+    monkeypatch.setattr("aegra_api.services.run_executor.dispatch_next_queued_run", mock)
+    return mock
+
+
 def _make_job(run_id: str = "run-1") -> RunJob:
     return RunJob(
         identity=RunIdentity(run_id=run_id, thread_id="thread-1", graph_id="graph-1"),
@@ -448,6 +456,7 @@ class TestTerminalStateRaces:
             patch("aegra_api.services.run_executor._signal_run_done", new_callable=AsyncMock),
         ):
             mock_streaming.cleanup_run = AsyncMock()
+            mock_streaming.signal_run_cancelled = AsyncMock()
 
             await execute_run(_make_job())
 
@@ -470,3 +479,32 @@ class TestTerminalStateRaces:
             await execute_run(_make_job())
 
         mock_signal_end.assert_not_awaited()
+
+
+class TestPreemptedBeforeStart:
+    @pytest.mark.asyncio
+    async def test_gate_preempted_run_skips_execution_and_finalize(self) -> None:
+        """A run whose start CAS fails (a multitask gate terminalized it between dispatch
+        and start) must not execute the graph or finalize — the gate owns its status —
+        but it releases attached streams/waiters and lets a parked replacement start."""
+        mock_finalize = AsyncMock()
+        mock_dispatch = AsyncMock()
+
+        with (
+            patch("aegra_api.services.run_executor.start_run", AsyncMock(return_value=False)),
+            patch("aegra_api.services.run_executor._stream_graph", new_callable=AsyncMock) as mock_stream,
+            patch("aegra_api.services.run_executor.finalize_run", mock_finalize),
+            patch("aegra_api.services.run_executor.dispatch_next_queued_run", mock_dispatch),
+            patch("aegra_api.services.run_executor.streaming_service") as mock_streaming,
+            patch("aegra_api.services.run_executor._signal_run_done", new_callable=AsyncMock) as mock_done,
+        ):
+            mock_streaming.cleanup_run = AsyncMock()
+            mock_streaming.signal_run_cancelled = AsyncMock()
+
+            await execute_run(_make_job())
+
+        mock_stream.assert_not_awaited()  # graph never runs
+        mock_finalize.assert_not_awaited()  # gate owns the terminal status
+        mock_streaming.signal_run_cancelled.assert_awaited_once()  # SSE clients released
+        mock_done.assert_awaited_once()  # join/wait waiters released
+        mock_dispatch.assert_awaited_once()  # the run parked behind it may start now

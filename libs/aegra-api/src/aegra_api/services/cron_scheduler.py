@@ -15,6 +15,7 @@ Follows the same ``start()/stop()`` lifecycle pattern used by
 import asyncio
 import contextlib
 from datetime import UTC, datetime
+from typing import get_args
 from uuid import uuid4
 
 import structlog
@@ -25,6 +26,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from aegra_api.core.orm import Cron as CronORM
 from aegra_api.core.orm import _get_session_maker
 from aegra_api.models import RunCreate, User
+from aegra_api.models.enums import MultitaskStrategy
 from aegra_api.services.cron_service import (
     CronService,
     should_delete_stateless_thread,
@@ -34,6 +36,8 @@ from aegra_api.services.run_preparation import _prepare_run
 from aegra_api.settings import settings
 
 logger = structlog.getLogger(__name__)
+
+_VALID_MULTITASK: frozenset[str] = frozenset(get_args(MultitaskStrategy))
 
 
 # Backwards-compat re-export. ``cron_scheduler.py`` previously exposed this
@@ -51,6 +55,11 @@ def _build_run_create(cron: CronORM) -> RunCreate:
     two code paths can never drift.
     """
     payload = cron.payload or {}
+    # Coerce a legacy/invalid stored strategy to None (-> default) so building the
+    # RunCreate can never raise mid-fire and wedge the cron in a claim/expire loop.
+    strategy = payload.get("multitask_strategy")
+    if strategy not in _VALID_MULTITASK:
+        strategy = None
     return RunCreate(
         assistant_id=cron.assistant_id,
         input=payload.get("input"),
@@ -61,7 +70,7 @@ def _build_run_create(cron: CronORM) -> RunCreate:
         interrupt_after=payload.get("interrupt_after"),
         stream_subgraphs=payload.get("stream_subgraphs"),
         stream_mode=payload.get("stream_mode"),
-        multitask_strategy=payload.get("multitask_strategy"),
+        multitask_strategy=strategy,
         # Cron metadata_dict is stored on the cron record for search/filter, not
         # forwarded onto fired runs. Re-wire here if run-level tagging is needed.
         metadata=None,
@@ -168,6 +177,7 @@ class CronScheduler:
         now = datetime.now(UTC)
         should_delete_thread = should_delete_stateless_thread(cron)
         run_created = False
+        skipped = False
 
         # Liveness check: refuse to forge a User for a deleted/revoked identity.
         if not await _validate_cron_user(cron.user_id):
@@ -205,12 +215,25 @@ class CronScheduler:
             if should_delete_thread:
                 schedule_background_cleanup(_run_id, thread_id, cron.user_id)
         except HTTPException as exc:
-            logger.error(
-                "Cron run creation failed",
-                cron_id=cron.cron_id,
-                status_code=exc.status_code,
-                detail=exc.detail,
-            )
+            if exc.status_code == 409:
+                # The thread is busy and the cron's multitask_strategy is `reject`, or it
+                # is paused on a HITL interrupt. That is this occurrence's answer: skip it
+                # and advance, rather than release the claim and re-fire every tick until
+                # the thread frees — which would be `enqueue` in disguise.
+                skipped = True
+                logger.info(
+                    "Cron occurrence skipped: thread busy",
+                    cron_id=cron.cron_id,
+                    thread_id=thread_id,
+                    detail=exc.detail,
+                )
+            else:
+                logger.error(
+                    "Cron run creation failed",
+                    cron_id=cron.cron_id,
+                    status_code=exc.status_code,
+                    detail=exc.detail,
+                )
             if should_delete_thread:
                 await CronScheduler._cleanup_failed_stateless_thread(thread_id, cron)
         except Exception:
@@ -218,7 +241,7 @@ class CronScheduler:
             if should_delete_thread:
                 await CronScheduler._cleanup_failed_stateless_thread(thread_id, cron)
 
-        if run_created:
+        if run_created or skipped:
             # Delegate advance/disable to CronService so the rule lives in one place.
             await CronService(session).advance_next_run(cron)
         else:

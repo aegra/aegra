@@ -41,6 +41,7 @@ from aegra_api.models import (
 )
 from aegra_api.models.errors import CONFLICT, NOT_FOUND, AgentProtocolError
 from aegra_api.models.search_limit import effective_search_limit
+from aegra_api.services.run_status import ACTIVE_RUN_STATES, QUEUED_RUN_STATE
 from aegra_api.services.streaming_service import streaming_service
 from aegra_api.services.thread_state_service import ThreadStateService
 from aegra_api.services.thread_ttl import get_thread_ttl_config, prune_expired_threads_for_user
@@ -914,9 +915,33 @@ async def delete_thread(
     active_runs_stmt = select(RunORM).where(
         RunORM.thread_id == thread_id,
         RunORM.user_id == user.identity,
-        RunORM.status.in_(["pending", "running"]),
+        RunORM.status.in_((QUEUED_RUN_STATE, *ACTIVE_RUN_STATES)),
     )
     active_runs_list = (await session.scalars(active_runs_stmt)).all()
+
+    if any(run.status == QUEUED_RUN_STATE for run in active_runs_list):
+        # A parked run has no task to cancel, and the active run's finalize would promote
+        # it onto the thread being deleted. Drop the parked rows first (guarded: a run
+        # promoted in between no longer matches and is re-read below as active).
+        await session.execute(
+            update(RunORM)
+            .where(
+                RunORM.thread_id == thread_id,
+                RunORM.user_id == user.identity,
+                RunORM.status == QUEUED_RUN_STATE,
+            )
+            .values(status="interrupted", updated_at=datetime.now(UTC))
+        )
+        await session.commit()
+        active_runs_list = (
+            await session.scalars(
+                select(RunORM).where(
+                    RunORM.thread_id == thread_id,
+                    RunORM.user_id == user.identity,
+                    RunORM.status.in_(ACTIVE_RUN_STATES),
+                )
+            )
+        ).all()
 
     if active_runs_list:
         logger.info(f"Cancelling {len(active_runs_list)} active runs for thread {thread_id}")

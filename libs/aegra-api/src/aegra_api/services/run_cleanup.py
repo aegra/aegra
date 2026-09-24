@@ -5,11 +5,12 @@ that need cleanup after the underlying run finishes.
 """
 
 import asyncio
+from datetime import UTC, datetime
 
 import structlog
 from psycopg import Error as PsycopgError
 from redis import RedisError
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.exc import SQLAlchemyError
 
 from aegra_api.core.active_runs import active_runs
@@ -18,6 +19,7 @@ from aegra_api.core.orm import Run as RunORM
 from aegra_api.core.orm import Thread as ThreadORM
 from aegra_api.core.orm import _get_session_maker
 from aegra_api.services.executor import executor
+from aegra_api.services.run_status import ACTIVE_RUN_STATES, QUEUED_RUN_STATE
 from aegra_api.services.streaming_service import streaming_service
 
 logger = structlog.getLogger(__name__)
@@ -41,9 +43,32 @@ async def delete_thread_by_id(thread_id: str, user_id: str) -> None:
         active_runs_stmt = select(RunORM).where(
             RunORM.thread_id == thread_id,
             RunORM.user_id == user_id,
-            RunORM.status.in_(["pending", "running"]),
+            RunORM.status.in_((QUEUED_RUN_STATE, *ACTIVE_RUN_STATES)),
         )
         active_runs_list = (await session.scalars(active_runs_stmt)).all()
+
+        if any(run.status == QUEUED_RUN_STATE for run in active_runs_list):
+            # Same as the delete_thread route: drop parked runs before cancelling the
+            # active one, or its finalize promotes them onto the thread being deleted.
+            await session.execute(
+                update(RunORM)
+                .where(
+                    RunORM.thread_id == thread_id,
+                    RunORM.user_id == user_id,
+                    RunORM.status == QUEUED_RUN_STATE,
+                )
+                .values(status="interrupted", updated_at=datetime.now(UTC))
+            )
+            await session.commit()
+            active_runs_list = (
+                await session.scalars(
+                    select(RunORM).where(
+                        RunORM.thread_id == thread_id,
+                        RunORM.user_id == user_id,
+                        RunORM.status.in_(ACTIVE_RUN_STATES),
+                    )
+                )
+            ).all()
 
         for run in active_runs_list:
             run_id = run.run_id

@@ -11,7 +11,7 @@ from unittest.mock import AsyncMock, Mock, patch
 import pytest
 from fastapi import HTTPException
 
-from aegra_api.services.cron_scheduler import CronScheduler
+from aegra_api.services.cron_scheduler import CronScheduler, _build_run_create
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -588,3 +588,22 @@ class TestSchedulerLoop:
             await scheduler._loop()
 
         assert call_count == 2
+
+
+class TestBuildRunCreateMultitask:
+    """_build_run_create must neutralize legacy/invalid stored strategies."""
+
+    def test_coerces_invalid_multitask_strategy_to_none(self) -> None:
+        cron = _make_cron_orm(payload={"input": {"m": "x"}, "multitask_strategy": "legacy_bad"})
+        rc = _build_run_create(cron)
+        assert rc.multitask_strategy is None
+
+    def test_keeps_valid_multitask_strategy(self) -> None:
+        cron = _make_cron_orm(payload={"input": {"m": "x"}, "multitask_strategy": "reject"})
+        rc = _build_run_create(cron)
+        assert rc.multitask_strategy == "reject"
+
+    def test_none_when_strategy_absent(self) -> None:
+        cron = _make_cron_orm(payload={"input": {"m": "x"}})
+        rc = _build_run_create(cron)
+        assert rc.multitask_strategy is None

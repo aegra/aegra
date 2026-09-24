@@ -5,7 +5,10 @@ at high concurrency without burning API tokens.
 
 Input:
   {"messages": [{"role": "user", "content": "..."}]}
-  Content can optionally be JSON: {"delay": 2.0, "steps": 3, "fail": false}
+  Content can optionally be JSON:
+  {"delay": 2.0, "steps": 3, "fail": false, "interrupt": false, "_m": "marker"}
+  ("interrupt": true pauses on a HITL interrupt(); "_m" tags the echo so tests
+  can assert which runs executed and in what order.)
 
 Output:
   Echoes back with metadata about execution (node count, total delay).
@@ -19,6 +22,7 @@ from typing import Annotated, Any
 
 from langchain_core.messages import AIMessage, AnyMessage
 from langgraph.graph import StateGraph, add_messages
+from langgraph.types import interrupt
 
 
 @dataclass
@@ -50,6 +54,11 @@ async def process_step(state: State) -> dict[str, Any]:
     delay = float(config["delay"])
 
     await asyncio.sleep(delay)
+
+    # Optional human-in-the-loop pause (LLM-free HITL fixture), AFTER the simulated work so a
+    # caller can enqueue behind a still-running run before it pauses. Stays paused until resumed.
+    if config.get("interrupt"):
+        interrupt({"awaiting": config.get("_m", "input")})
 
     new_step = state.step_count + 1
     new_delay = state.total_delay + delay

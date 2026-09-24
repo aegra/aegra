@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from fastapi import APIRouter, FastAPI
+from fastapi import APIRouter, FastAPI, WebSocket
 from fastapi.testclient import TestClient
 from starlette.authentication import AuthCredentials
 from starlette.requests import Request
@@ -39,6 +39,12 @@ def _custom_app() -> FastAPI:
     def included() -> dict[str, str]:
         return {"route": "included"}
 
+    @router.websocket("/custom/ws")
+    async def socket(websocket: WebSocket) -> None:
+        await websocket.accept()
+        await websocket.send_text("connected")
+        await websocket.close()
+
     app.include_router(router)
     return app
 
@@ -50,7 +56,7 @@ def build_client(monkeypatch: pytest.MonkeyPatch) -> Callable[[bool], TestClient
         monkeypatch.setattr(main, "load_http_config", lambda: http_config)
         monkeypatch.setattr(main, "get_config_dir", lambda: Path("."))
         monkeypatch.setattr(main, "load_custom_app", lambda *_args, **_kwargs: _custom_app())
-        monkeypatch.setattr(auth_deps, "get_auth_backend", lambda: _HeaderBackend())
+        monkeypatch.setattr(auth_deps, "get_auth_backend", _HeaderBackend)
         return TestClient(main.create_app())
 
     return build
@@ -85,6 +91,17 @@ def test_aegra_public_routes_stay_public_when_enabled(build_client: Callable[[bo
     response = client.get(path)
 
     assert response.status_code == 200
+
+
+def test_websocket_under_an_included_router_still_connects_when_enabled(
+    build_client: Callable[[bool], TestClient],
+) -> None:
+    client = build_client(True)
+
+    with client.websocket_connect("/custom/ws") as socket:
+        message = socket.receive_text()
+
+    assert message == "connected"
 
 
 @pytest.mark.parametrize("path", CUSTOM_PATHS)

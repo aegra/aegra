@@ -6,11 +6,12 @@ from typing import Any
 
 import structlog
 from asgi_correlation_id import CorrelationIdMiddleware
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.dependencies.utils import get_parameterless_sub_dependant
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.routing import APIRoute
+from starlette.requests import HTTPConnection
 
 from aegra_api import __version__
 from aegra_api.api.assistants import router as assistants_router
@@ -22,7 +23,7 @@ from aegra_api.api.store import router as store_router
 from aegra_api.api.threads import router as threads_router
 from aegra_api.config import CorsConfig, HttpConfig, get_config_dir, load_http_config
 from aegra_api.core.app_loader import load_custom_app
-from aegra_api.core.auth_deps import auth_dependency
+from aegra_api.core.auth_deps import require_auth
 from aegra_api.core.auth_enforcement import apply_auth_enforcement
 from aegra_api.core.database import db_manager
 from aegra_api.core.health import router as health_router
@@ -206,6 +207,17 @@ async def root_handler() -> dict[str, str]:
     }
 
 
+async def _require_auth_on_http(connection: HTTPConnection) -> None:
+    """``require_auth`` for custom routes; websocket routes under an included router pass through."""
+    # An included router's dependencies reach its websockets too, and a Request-typed
+    # dependency there fails every connection with a TypeError.
+    if isinstance(connection, Request):
+        await require_auth(connection)
+
+
+CUSTOM_ROUTE_AUTH = [Depends(_require_auth_on_http)]
+
+
 def _apply_auth_to_custom_routes(app: FastAPI, auth_deps: list[Any]) -> int:
     """Prepend ``auth_deps`` to every FastAPI route the custom app declares.
 
@@ -217,32 +229,49 @@ def _apply_auth_to_custom_routes(app: FastAPI, auth_deps: list[Any]) -> int:
     protected = 0
     uncovered: list[str] = []
 
-    def walk(routes: list[Any]) -> None:
+    def walk(routes: list[Any], context_changed: bool | None) -> None:
+        """``context_changed`` is None outside an included router, else whether its context got ``auth_deps``."""
         nonlocal protected
         for route in routes:
             if isinstance(route, APIRoute):
-                protected += _prepend_dependencies(route, auth_deps)
+                if context_changed is None:
+                    protected += _prepend_dependencies(route, auth_deps)
+                else:
+                    protected += int(context_changed)
                 continue
             # FastAPI wraps included routers; newer versions expose the wrapped
             # router as `original_router` rather than `routes`.
             nested = getattr(route, "original_router", None)
             if nested is not None:
-                walk(list(nested.routes))
+                changed = _prepend_to_include_context(route, auth_deps) if context_changed is None else context_changed
+                walk(list(nested.routes), changed)
                 # Effective routes are cached until the wrapped router reports a change; a
                 # schema built at import would otherwise keep serving them unauthenticated.
                 getattr(nested, "_mark_routes_changed", lambda: None)()
             elif getattr(route, "routes", None):
-                walk(list(route.routes))
+                # A mounted app's routes never inherit an include context.
+                walk(list(route.routes), None)
             elif getattr(route, "path", None) not in fastapi_pages:
                 uncovered.append(getattr(route, "path", repr(route)))
 
-    walk(list(app.routes))
+    walk(list(app.routes), None)
     logger.info("Applied authentication dependency to custom routes", route_count=protected)
     if uncovered:
-        # Mounted apps, plain Starlette routes and websockets take no FastAPI
-        # dependency; say so rather than let the flag imply they are protected.
+        # Plain Starlette routes and mounted non-FastAPI apps take no dependency, and
+        # websockets are skipped by `_require_auth_on_http`; say so rather than imply cover.
         logger.warning("enable_custom_route_auth does not cover these custom routes", paths=uncovered)
     return protected
+
+
+def _prepend_to_include_context(included: Any, deps: list[Any]) -> bool:
+    """Put ``deps`` ahead of an included router's app- and include-level dependencies, once."""
+    # On FastAPI >= 0.137 those run before every route's own list, so prepending
+    # to the route alone would let them execute for unauthenticated requests.
+    context = included.include_context
+    if any(dep in context.dependencies for dep in deps):
+        return False
+    context.dependencies = [*deps, *context.dependencies]
+    return True
 
 
 def _prepend_dependencies(route: APIRoute, deps: list[Any]) -> int:
@@ -371,7 +400,7 @@ def create_app() -> FastAPI:
 
         application = user_app
         if http_config and http_config.get("enable_custom_route_auth", False):
-            _apply_auth_to_custom_routes(application, auth_dependency)
+            _apply_auth_to_custom_routes(application, CUSTOM_ROUTE_AUTH)
         if not application.openapi_tags:
             application.openapi_tags = OPENAPI_TAGS
         _include_core_routers(application)

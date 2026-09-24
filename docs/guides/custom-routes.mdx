@@ -82,9 +82,16 @@ Set `enable_custom_route_auth` in your config:
 }
 ```
 
-A request without valid credentials then gets `401` on every FastAPI route your app declares, including routes from included routers and from mounted FastAPI sub-apps. Aegra's own routes are not affected: `/health`, `/live`, `/ready`, `/info`, `/` and the docs pages stay public, and the Agent Protocol routes keep their usual auth.
+A request without valid credentials then gets `401` on every FastAPI HTTP route your app declares, including routes from included routers and from mounted FastAPI sub-apps. Auth runs before any other dependency on those routes, including app-level and router-level ones.
 
-Three kinds of route cannot take a FastAPI dependency, so this setting does not cover them: plain Starlette routes added with `app.add_route`, websocket routes, and mounted non-FastAPI apps such as `StaticFiles`. Aegra logs a startup warning that lists any it finds. Protect those inside the route itself.
+Aegra's own routes are not affected: `/health`, `/live`, `/ready`, `/info` and the docs pages stay public, and the Agent Protocol routes keep their usual auth. Aegra's default `/` stays public too. If your app declares its own `/`, that is a custom route, and this setting protects it.
+
+This setting does not cover:
+
+- **Websocket routes.** Authentication here runs on the HTTP request, so websocket connections pass through. Authenticate them inside the handler.
+- **Plain Starlette routes** added with `app.add_route`, and **mounted non-FastAPI apps** such as `StaticFiles`. These take no FastAPI dependency.
+
+Aegra logs a startup warning that lists any of these it finds.
 
 ### Option 2: Apply auth to specific routes
 

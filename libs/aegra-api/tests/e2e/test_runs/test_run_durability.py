@@ -23,8 +23,9 @@ async def _history_after_one_run(**run_kwargs: Any) -> list[dict[str, Any]]:
 
 @pytest.mark.e2e
 @pytest.mark.asyncio
-async def test_default_durability_checkpoints_every_step() -> None:
-    history = await _history_after_one_run()
+async def test_async_durability_checkpoints_every_step() -> None:
+    # Explicit mode: the control holds even when the server under test sets a default.
+    history = await _history_after_one_run(durability="async")
 
     assert len(history) > 1
 

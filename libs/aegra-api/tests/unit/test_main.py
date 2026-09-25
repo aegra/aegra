@@ -6,6 +6,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from aegra_api.observability.base import get_observability_manager
+from aegra_api.services import run_preparation
 
 
 @pytest.mark.unit
@@ -236,13 +237,11 @@ async def test_lifespan_fails_before_any_db_work_on_invalid_durability_default(
 ) -> None:
     """A typo in the durability default stops the boot instead of failing every run."""
     import aegra_api.main as main_module
-    from aegra_api.services import run_preparation
-    from aegra_api.services.run_preparation import get_default_durability
 
     importlib.reload(main_module)
     # Patch the module's own settings reference: an earlier test in this file reloads aegra_api.settings.
     monkeypatch.setattr(run_preparation.settings.checkpointer, "AEGRA_CHECKPOINT_DURABILITY", "eventually")
-    get_default_durability.cache_clear()
+    run_preparation.get_default_durability.cache_clear()
     try:
         with (
             patch("aegra_api.main.run_migrations_async", new_callable=AsyncMock) as mock_migrations,
@@ -257,4 +256,4 @@ async def test_lifespan_fails_before_any_db_work_on_invalid_durability_default(
             mock_migrations.assert_not_called()
             mock_db_manager.initialize.assert_not_called()
     finally:
-        get_default_durability.cache_clear()
+        run_preparation.get_default_durability.cache_clear()

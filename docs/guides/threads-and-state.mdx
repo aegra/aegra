@@ -132,6 +132,34 @@ run = await client.runs.create(
 
 If both are set, keys in `checkpoint` win over `checkpoint_id`. A `checkpoint_id` that is not a UUID returns `422`.
 
+## Checkpoint durability
+
+By default LangGraph writes a checkpoint after every step of a run, in the background. Set `durability` on a run to change when checkpoints are written:
+
+```python
+run = await client.runs.create(
+    thread_id,
+    "agent",
+    input={"messages": [{"role": "user", "content": "Hi"}]},
+    durability="exit",
+)
+```
+
+| Mode | When checkpoints are written | After a crash or requeue |
+|------|------------------------------|--------------------------|
+| `sync` | After every step, before the next step starts | Resumes from the last completed step |
+| `async` (default) | After every step, in the background while the next step runs | Resumes from the last checkpoint that finished writing |
+| `exit` | Once, when the run finishes, fails, or stops at an interrupt | Starts over from the thread's state before the run |
+
+`exit` writes one checkpoint per run instead of one per step, which suits high-volume runs that never use time travel or mid-run recovery. It has two costs:
+
+- With Redis workers, a run requeued after a worker crash or a shutdown drain starts over from the thread's last checkpoint, so its steps run a second time. See [worker architecture](/guides/worker-architecture).
+- The thread history holds one checkpoint per run, so you cannot inspect or fork from the steps inside it. Interrupts still write a checkpoint, so human-in-the-loop resumes work.
+
+`checkpoint_during` is the deprecated form of the same setting: `true` means `async` and `false` means `exit`. If both are sent, `durability` wins. Creating a cron accepts both fields and updating one accepts `durability`; the cron applies them to every run it fires. An unknown value returns `422`.
+
+To change the default for runs that do not set a mode, set `checkpointer.durability` in `aegra.json` or the `AEGRA_CHECKPOINT_DURABILITY` environment variable. See the [configuration reference](/reference/configuration#durability).
+
 ## Searching threads
 
 Find threads by status or metadata:

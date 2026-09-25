@@ -11,6 +11,7 @@ import pytest
 from pydantic import ValidationError
 
 from aegra_api.models.crons import CronCreate, CronUpdate
+from aegra_api.models.runs import Durability
 
 
 class TestWebhookValidation:
@@ -122,3 +123,29 @@ class TestInputRequired:
     def test_accepts_empty_dict_input(self) -> None:
         req = CronCreate(assistant_id="a", schedule="* * * * *", input={})
         assert req.input == {}
+
+
+class TestDurability:
+    """Crons declare the SDK's durability fields so each fired run gets them."""
+
+    @pytest.mark.parametrize("mode", ["sync", "async", "exit"])
+    def test_create_accepts_every_mode(self, mode: Durability) -> None:
+        req = CronCreate(input={"q": 1}, assistant_id="a", schedule="* * * * *", durability=mode)
+        assert req.durability == mode
+
+    def test_create_rejects_unknown_mode(self) -> None:
+        with pytest.raises(ValidationError, match="durability"):
+            CronCreate.model_validate(
+                {"input": {"q": 1}, "assistant_id": "a", "schedule": "* * * * *", "durability": "eventually"}
+            )
+
+    def test_create_accepts_checkpoint_during(self) -> None:
+        req = CronCreate(input={"q": 1}, assistant_id="a", schedule="* * * * *", checkpoint_during=False)
+        assert req.checkpoint_during is False
+
+    def test_update_accepts_durability(self) -> None:
+        assert CronUpdate(durability="sync").durability == "sync"
+
+    def test_update_rejects_unknown_mode(self) -> None:
+        with pytest.raises(ValidationError, match="durability"):
+            CronUpdate.model_validate({"durability": "eventually"})

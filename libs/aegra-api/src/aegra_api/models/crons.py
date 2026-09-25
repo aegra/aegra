@@ -6,6 +6,7 @@ from urllib.parse import urlparse
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from aegra_api.models.runs import Durability
 from aegra_api.settings import settings
 
 # Field length caps. Keep these conservative; cron metadata is small by nature.
@@ -63,9 +64,10 @@ class CronCreate(BaseModel):
     stream_mode: str | list[str] | None = None
     stream_subgraphs: bool | None = None
     timezone: str | None = Field(None, max_length=_TIMEZONE_MAX_LEN)
-    # NOTE: checkpoint_during, stream_resumable, and durability are NOT exposed
-    # here because RunCreate has no matching fields yet. Accepting them silently
-    # drops the value at firing time. Re-add once those land on RunCreate.
+    durability: Durability | None = None
+    checkpoint_during: bool | None = None
+    # NOTE: stream_resumable is NOT exposed here because RunCreate has no matching
+    # field yet. Accepting it silently drops the value at firing time.
 
     @model_validator(mode="after")
     def _check(self) -> "CronCreate":
@@ -119,8 +121,8 @@ class CronUpdate(BaseModel):
     stream_mode: str | list[str] | None = None
     stream_subgraphs: bool | None = None
     timezone: str | None = Field(None, max_length=_TIMEZONE_MAX_LEN)
-    # See CronCreate: checkpoint_during/stream_resumable/durability omitted
-    # until RunCreate gains matching fields.
+    durability: Durability | None = None
+    # See CronCreate: stream_resumable omitted until RunCreate gains a matching field.
 
     @model_validator(mode="after")
     def _check(self) -> "CronUpdate":

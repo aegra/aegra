@@ -41,6 +41,13 @@ class TestRunExecution:
         assert execution.stream_mode == ["values", "updates"]
         assert execution.command == {"resume": True}
 
+    def test_durability_defaults_to_none(self) -> None:
+        assert RunExecution().durability is None
+
+    def test_rejects_unknown_durability(self) -> None:
+        with pytest.raises(ValidationError):
+            RunExecution.model_validate({"durability": "eventually"})
+
 
 class TestRunBehavior:
     def test_defaults(self) -> None:
@@ -171,3 +178,22 @@ class TestRunJob:
 
         restored = RunJob.from_run_orm(LegacyORM())
         assert restored.run_metadata == {}
+        # Queued before durability existed: the worker keeps LangGraph's default.
+        assert restored.execution.durability is None
+
+    def test_durability_survives_the_worker_round_trip(self) -> None:
+        """Redis workers rebuild the job from execution_params, so the mode must be in them."""
+        job = RunJob(
+            identity=RunIdentity(run_id="r1", thread_id="t1", graph_id="g1"),
+            user=User(identity="u1"),
+            execution=RunExecution(input_data={"x": 1}, durability="exit"),
+        )
+        params = job.to_execution_params()
+        assert params["execution"]["durability"] == "exit"
+
+        class FakeORM:
+            run_id = "r1"
+            thread_id = "t1"
+            execution_params = params
+
+        assert RunJob.from_run_orm(FakeORM()).execution.durability == "exit"

@@ -3,8 +3,10 @@
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import pytest
 from fastapi.testclient import TestClient
 
+from aegra_api.core.orm import Run as RunORM
 from tests.fixtures.clients import create_test_app, make_client
 from tests.fixtures.database import DummyScalarResult, DummySessionBase
 from tests.fixtures.session_fixtures import BasicSession, override_session_dependency
@@ -975,3 +977,98 @@ class TestWaitForRunTimeouts:
             assert resp.status_code == 200
             # StreamingResponse: body is heartbeat newlines + final JSON
             assert resp.json()["__error__"]["error"] == "TimeoutError"
+
+
+class TestCreateRunDurability:
+    """``durability`` and ``checkpoint_during`` reach the queued job and its persisted execution_params."""
+
+    @staticmethod
+    def _create_run(body: dict[str, Any], *, server_default: str | None = None) -> tuple[Any, MagicMock, list[Any]]:
+        app = create_test_app(include_runs=True, include_threads=False)
+        thread = _thread_row()
+        assistant = _assistant_row()
+        added: list[Any] = []
+
+        class Session(DummySessionBase):
+            async def scalar(self, stmt: Any) -> Any:
+                stmt_str = str(stmt).lower()
+                if "from thread" in stmt_str:
+                    return thread
+                if "from assistant" in stmt_str:
+                    return assistant
+                return None
+
+            def add(self, obj: Any) -> None:
+                added.append(obj)
+
+            async def execute(self, _stmt: Any) -> Any:
+                return MagicMock(rowcount=1)
+
+        override_session_dependency(app, Session)
+        client = make_client(app)
+        mock_executor = MagicMock()
+        mock_executor.submit = AsyncMock(return_value=None)
+
+        with (
+            patch("aegra_api.services.run_preparation.executor", mock_executor),
+            patch("aegra_api.services.run_preparation.get_langgraph_service") as mock_service,
+            patch("aegra_api.services.run_preparation.get_default_durability", return_value=server_default),
+        ):
+            mock_service.return_value.list_graphs.return_value = ["test-graph"]
+            resp = client.post(
+                "/threads/test-thread-123/runs",
+                json={"assistant_id": "test-assistant-123", "input": {"message": "test"}, **body},
+            )
+        return resp, mock_executor, added
+
+    @staticmethod
+    def _persisted_durability(added: list[Any]) -> Any:
+        run_orm = next(obj for obj in added if isinstance(obj, RunORM))
+        return run_orm.execution_params["execution"]["durability"]
+
+    @pytest.mark.parametrize("mode", ["sync", "async", "exit"])
+    def test_durability_reaches_job_and_execution_params(self, mode: str) -> None:
+        resp, mock_executor, added = self._create_run({"durability": mode})
+
+        assert resp.status_code == 200
+        assert mock_executor.submit.await_args.args[0].execution.durability == mode
+        assert self._persisted_durability(added) == mode
+
+    @pytest.mark.parametrize(("checkpoint_during", "expected"), [(True, "async"), (False, "exit")])
+    def test_checkpoint_during_is_mapped(self, checkpoint_during: bool, expected: str) -> None:
+        resp, mock_executor, _added = self._create_run({"checkpoint_during": checkpoint_during})
+
+        assert resp.status_code == 200
+        assert mock_executor.submit.await_args.args[0].execution.durability == expected
+
+    def test_durability_wins_over_checkpoint_during(self) -> None:
+        resp, mock_executor, _added = self._create_run({"durability": "sync", "checkpoint_during": False})
+
+        assert resp.status_code == 200
+        assert mock_executor.submit.await_args.args[0].execution.durability == "sync"
+
+    def test_server_default_applies_when_run_sets_nothing(self) -> None:
+        resp, mock_executor, added = self._create_run({}, server_default="exit")
+
+        assert resp.status_code == 200
+        assert mock_executor.submit.await_args.args[0].execution.durability == "exit"
+        assert self._persisted_durability(added) == "exit"
+
+    def test_unset_everywhere_stays_none(self) -> None:
+        resp, mock_executor, _added = self._create_run({})
+
+        assert resp.status_code == 200
+        assert mock_executor.submit.await_args.args[0].execution.durability is None
+
+    @pytest.mark.parametrize("body", [{"durability": "eventually"}, {"checkpoint_during": "sometimes"}])
+    def test_invalid_value_is_422(self, body: dict[str, Any]) -> None:
+        app = create_test_app(include_runs=True, include_threads=False)
+        override_session_dependency(app, BasicSession)
+        client = make_client(app)
+
+        resp = client.post(
+            "/threads/test-thread-123/runs",
+            json={"assistant_id": "test-assistant-123", "input": {"message": "test"}, **body},
+        )
+
+        assert resp.status_code == 422

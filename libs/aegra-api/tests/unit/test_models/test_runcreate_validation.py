@@ -48,6 +48,37 @@ class TestRunCreateValidation:
             RunCreate(assistant_id="agent", input={"x": 1}, checkpoint_id=checkpoint_id)
 
 
+class TestRunCreateDurability:
+    """``durability`` and its deprecated ``checkpoint_during`` alias are declared, not dropped."""
+
+    def test_defaults_leave_both_unset(self) -> None:
+        run_create = RunCreate(assistant_id="agent", input={"x": 1})
+
+        assert run_create.durability is None
+        assert run_create.checkpoint_during is None
+
+    @pytest.mark.parametrize("mode", ["sync", "async", "exit"])
+    def test_accepts_every_langgraph_mode(self, mode: str) -> None:
+        run_create = RunCreate(assistant_id="agent", input={"x": 1}, durability=mode)
+
+        assert run_create.durability == mode
+
+    @pytest.mark.parametrize("mode", ["", "SYNC", "eventual", 1, True])
+    def test_rejects_unknown_mode(self, mode: Any) -> None:
+        with pytest.raises(ValidationError, match="durability"):
+            RunCreate(assistant_id="agent", input={"x": 1}, durability=mode)
+
+    @pytest.mark.parametrize("value", [True, False])
+    def test_accepts_checkpoint_during_bool(self, value: bool) -> None:
+        run_create = RunCreate(assistant_id="agent", input={"x": 1}, checkpoint_during=value)
+
+        assert run_create.checkpoint_during is value
+
+    def test_rejects_non_bool_checkpoint_during(self) -> None:
+        with pytest.raises(ValidationError, match="checkpoint_during"):
+            RunCreate(assistant_id="agent", input={"x": 1}, checkpoint_during="sometimes")
+
+
 class TestRunCreateMetadataValidation:
     """Tests for ``RunCreate.metadata`` shape enforcement.
 

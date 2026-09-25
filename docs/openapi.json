@@ -4074,6 +4074,33 @@
               }
             ],
             "title": "Timezone"
+          },
+          "durability": {
+            "anyOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "sync",
+                  "async",
+                  "exit"
+                ]
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Durability"
+          },
+          "checkpoint_during": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Checkpoint During"
           }
         },
         "type": "object",
@@ -4483,6 +4510,22 @@
               }
             ],
             "title": "Timezone"
+          },
+          "durability": {
+            "anyOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "sync",
+                  "async",
+                  "exit"
+                ]
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Durability"
           }
         },
         "type": "object",
@@ -4825,6 +4868,35 @@
             ],
             "title": "Checkpoint Id",
             "description": "Checkpoint to run from. Short form of checkpoint={'checkpoint_id': ...}; 'checkpoint' wins if both set."
+          },
+          "durability": {
+            "anyOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "sync",
+                  "async",
+                  "exit"
+                ]
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Durability",
+            "description": "When checkpoints are persisted: 'sync' before each next step starts, 'async' in the background while the next step runs (LangGraph default), 'exit' only once, when the run ends. Overrides the server default (checkpointer.durability)."
+          },
+          "checkpoint_during": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Checkpoint During",
+            "description": "Deprecated alias for durability: true means 'async', false means 'exit'. 'durability' wins if both are set."
           },
           "stream": {
             "type": "boolean",

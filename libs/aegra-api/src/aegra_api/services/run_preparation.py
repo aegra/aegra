@@ -6,24 +6,29 @@ resume-command validation, and config/context merging logic.
 
 import asyncio
 from datetime import UTC, datetime
+from functools import cache
 from typing import Any
 from uuid import uuid4
 
 import structlog
 from asgi_correlation_id import correlation_id
 from fastapi import HTTPException
+from pydantic import TypeAdapter, ValidationError
 from sqlalchemy import ColumnElement, case, func, literal_column, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from aegra_api.config import load_checkpointer_config
 from aegra_api.core.orm import Assistant as AssistantORM
 from aegra_api.core.orm import Run as RunORM
 from aegra_api.core.orm import Thread as ThreadORM
 from aegra_api.core.orm import _get_session_maker
 from aegra_api.models import Run, RunCreate, User
 from aegra_api.models.run_job import RunBehavior, RunExecution, RunIdentity, RunJob
+from aegra_api.models.runs import Durability
 from aegra_api.services.executor import executor
 from aegra_api.services.langgraph_service import get_langgraph_service
 from aegra_api.services.run_status import set_thread_status
+from aegra_api.settings import settings
 from aegra_api.utils.assistants import resolve_assistant_id
 from aegra_api.utils.jsonb import jsonb_patch, jsonb_shallow_merge
 from aegra_api.utils.run_utils import _merge_jsonb
@@ -208,6 +213,39 @@ def _resolve_checkpoint(request: RunCreate) -> dict[str, Any] | None:
     return {"checkpoint_id": str(request.checkpoint_id), **(request.checkpoint or {})}
 
 
+_DURABILITY_ADAPTER: TypeAdapter[Durability] = TypeAdapter(Durability)
+
+
+@cache
+def get_default_durability() -> Durability | None:
+    """Server-wide durability: AEGRA_CHECKPOINT_DURABILITY wins over aegra.json checkpointer.durability.
+
+    None when neither is set, so runs keep LangGraph's own default. An invalid
+    value raises; the lifespan resolves this at startup so a typo fails the boot.
+    """
+    raw: object = settings.checkpointer.AEGRA_CHECKPOINT_DURABILITY
+    source = "AEGRA_CHECKPOINT_DURABILITY"
+    if raw is None or (isinstance(raw, str) and not raw.strip()):
+        checkpointer_config = load_checkpointer_config()
+        raw = checkpointer_config.get("durability") if checkpointer_config else None
+        source = "checkpointer.durability"
+    if raw is None:
+        return None
+    try:
+        return _DURABILITY_ADAPTER.validate_python(raw.strip() if isinstance(raw, str) else raw)
+    except ValidationError:
+        raise ValueError(f"{source} must be 'sync', 'async' or 'exit', got {raw!r}") from None
+
+
+def _resolve_durability(request: RunCreate) -> Durability | None:
+    """Per-run durability, then the deprecated checkpoint_during alias, then the server default."""
+    if request.durability is not None:
+        return request.durability
+    if request.checkpoint_during is not None:
+        return "async" if request.checkpoint_during else "exit"
+    return get_default_durability()
+
+
 async def _prepare_run(
     session: AsyncSession,
     thread_id: str,
@@ -283,6 +321,7 @@ async def _prepare_run(
             stream_mode=request.stream_mode,
             checkpoint=_resolve_checkpoint(request),
             command=request.command,
+            durability=_resolve_durability(request),
             event_streaming_v2=event_streaming_v2,
         ),
         behavior=RunBehavior(

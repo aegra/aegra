@@ -86,6 +86,8 @@ class CheckpointerConfig(TypedDict, total=False):
 
     ttl: CheckpointerTTLConfig | None
     """Thread TTL / retention policy."""
+    durability: str
+    """Default checkpoint durability for runs that do not set one: 'sync', 'async' or 'exit'."""
 
 
 class AuthConfig(TypedDict, total=False):

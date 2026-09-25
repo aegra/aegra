@@ -131,10 +131,7 @@ class TestCustomRoutesAuth:
 
         response = httpx.get(url, timeout=10.0)
 
-        # Should return 401 if auth is required
-        # Note: This depends on enable_custom_route_auth config
-        # If disabled, might return 200 with anonymous user
-        assert response.status_code in (200, 401), f"Unexpected status {response.status_code}: {response.text}"
+        assert response.status_code == 401, f"Expected 401 without auth, got {response.status_code}: {response.text}"
 
         elog("Custom whoami without auth", {"url": url, "status": response.status_code})
 
@@ -169,16 +166,13 @@ class TestCustomRoutesAuth:
 class TestCustomRouteAuthConfig:
     """Test enable_custom_route_auth configuration"""
 
-    def test_custom_public_endpoint_behavior(self):
-        """Test /custom/public endpoint behavior based on config"""
+    def test_custom_route_without_its_own_auth_requires_auth_when_enabled(self) -> None:
+        """/custom/public declares no auth; aegra.auth.json turns enable_custom_route_auth on."""
         url = f"{get_server_url()}/custom/public"
 
-        # Try without auth
         response_no_auth = httpx.get(url, timeout=10.0)
 
-        # If enable_custom_route_auth is True, should return 401
-        # If False, should return 200
-        assert response_no_auth.status_code in (200, 401), f"Unexpected status {response_no_auth.status_code}"
+        assert response_no_auth.status_code == 401, f"Expected 401 without auth, got {response_no_auth.status_code}"
 
         # Try with auth
         headers = get_auth_headers()
@@ -194,6 +188,13 @@ class TestCustomRouteAuthConfig:
                 "with_auth_status": response_with_auth.status_code,
             },
         )
+
+    @pytest.mark.parametrize("path", ["/live", "/info", "/"])
+    def test_aegra_public_routes_stay_public_when_enabled(self, path: str) -> None:
+        """Probes and the root must not start answering 401 when custom route auth is on."""
+        response = httpx.get(f"{get_server_url()}{path}", timeout=10.0)
+
+        assert response.status_code == 200, f"Expected 200 on {path} without auth, got {response.status_code}"
 
 
 @pytest.mark.e2e

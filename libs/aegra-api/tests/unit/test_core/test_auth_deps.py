@@ -50,6 +50,37 @@ class TestRequireAuth:
             assert mock_request.scope["auth"] == credentials
 
     @pytest.mark.asyncio
+    async def test_require_auth_calls_backend_once_per_request(self) -> None:
+        credentials = AuthCredentials(["authenticated"])
+        mock_backend = Mock()
+        mock_backend.authenticate = AsyncMock(return_value=(credentials, LangGraphUser({"identity": "user-123"})))
+        mock_request = Mock(spec=Request)
+        mock_request.scope = {}
+
+        with patch("aegra_api.core.auth_deps.get_auth_backend", return_value=mock_backend):
+            first = await require_auth(mock_request)
+            second = await require_auth(mock_request)
+
+        assert second is first
+        mock_backend.authenticate.assert_awaited_once_with(mock_request)
+
+    @pytest.mark.asyncio
+    async def test_require_auth_authenticates_each_new_request(self) -> None:
+        credentials = AuthCredentials(["authenticated"])
+        mock_backend = Mock()
+        mock_backend.authenticate = AsyncMock(return_value=(credentials, LangGraphUser({"identity": "user-123"})))
+        first_request = Mock(spec=Request)
+        first_request.scope = {}
+        second_request = Mock(spec=Request)
+        second_request.scope = {}
+
+        with patch("aegra_api.core.auth_deps.get_auth_backend", return_value=mock_backend):
+            await require_auth(first_request)
+            await require_auth(second_request)
+
+        assert mock_backend.authenticate.await_count == 2
+
+    @pytest.mark.asyncio
     async def test_require_auth_no_result(self):
         """Test require_auth when backend returns None"""
         mock_backend = Mock()

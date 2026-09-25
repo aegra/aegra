@@ -138,7 +138,7 @@ Key details:
 
 1. **Execution params** are stored in PostgreSQL alongside the run, so any worker can reconstruct the full job context (user identity, config, trace metadata, interrupt settings, etc.).
 2. **Lease acquisition** is atomic — `UPDATE ... WHERE claimed_by IS NULL` ensures only one worker wins the race.
-3. **Heartbeats** extend the lease every 10 seconds. If a worker crashes, the lease expires and the run becomes eligible for recovery.
+3. **Heartbeats** extend the lease in PostgreSQL and refresh the Redis replay buffer and counter TTL every 10 seconds. If a worker crashes, the lease expires and the run becomes eligible for recovery; while alive, quiet runs retain their replay buffer without mid-run expiration.
 4. **OpenTelemetry trace context** propagates across the Redis queue boundary, so traces span the full request lifecycle.
 
 ### Streaming run with crash recovery
@@ -294,8 +294,8 @@ sequenceDiagram
 |:----|:--------|:-----------|:--------|
 | `aegra:jobs` | Job queue (BLPOP) | API (RPUSH) | Worker (BLPOP) |
 | `aegra:run:{run_id}` | SSE live events | Worker (PUBLISH) | API (SUBSCRIBE) |
-| `aegra:run:cache:{run_id}` | SSE replay buffer | Worker (RPUSH) | API (LRANGE) |
-| `aegra:run:counter:{run_id}` | Event sequence counter | Worker (INCR) | API (GET) |
+| `aegra:run:cache:{run_id}` | SSE replay buffer (refreshed by heartbeat while active; 10m TTL after completion) | Worker (RPUSH) | API (LRANGE) |
+| `aegra:run:counter:{run_id}` | Event sequence counter (refreshed by heartbeat while active; 10m TTL after completion) | Worker (INCR) | API (GET) |
 | `aegra:run:cancel` | Cancel commands | API (PUBLISH) | Worker (SUBSCRIBE) |
 | `aegra:run:done:{run_id}` | Completion signal (TTL 1h) | Worker (SET) | API (EXISTS) |
 

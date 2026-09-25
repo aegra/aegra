@@ -231,6 +231,36 @@ async def test_default_cors_credentials_false_with_wildcard_origins(isolated_mod
 
 @pytest.mark.unit
 @pytest.mark.asyncio
+async def test_cors_credentials_false_with_mixed_wildcard_origins(
+    isolated_module_reload: Path,
+) -> None:
+    tmp_path = isolated_module_reload
+
+    config_file = tmp_path / "aegra.json"
+    config_file.write_text(
+        json.dumps(
+            {
+                "graphs": {"test": "./test.py:graph"},
+                "http": {
+                    "cors": {
+                        "allow_origins": ["*", "https://myapp.example.com"],
+                    },
+                },
+            }
+        )
+    )
+
+    main = reload_main_module()
+
+    cors_middleware = find_cors_middleware(main.app)
+    assert cors_middleware is not None, "CORS middleware should be present"
+    assert cors_middleware.kwargs.get("allow_credentials") is False, (
+        "allow_credentials should default to False when origins include a wildcard"
+    )
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
 async def test_cors_credentials_true_with_concrete_origins(isolated_module_reload: Path) -> None:
     """Test that allow_credentials defaults to True when concrete origins are set."""
     tmp_path = isolated_module_reload

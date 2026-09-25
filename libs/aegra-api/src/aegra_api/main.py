@@ -302,7 +302,7 @@ def _add_cors_middleware(app: FastAPI, cors_config: CorsConfig | None) -> None:
         origins = cors_config.get("allow_origins", ["*"])
         credentials = cors_config.get(
             "allow_credentials",
-            origins not in (["*"], "*"),
+            "*" not in origins,
         )
         app.add_middleware(
             CORSMiddleware,

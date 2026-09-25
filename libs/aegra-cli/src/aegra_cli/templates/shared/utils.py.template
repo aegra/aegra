@@ -1,7 +1,12 @@
 """Utility functions for $project_name."""
 
+import os
+
 from langchain.chat_models import init_chat_model
 from langchain_core.language_models import BaseChatModel
+from langchain_openai import ChatOpenAI
+
+ATLAS_CLOUD_BASE_URL = "https://api.atlascloud.ai/v1"
 
 
 def load_chat_model(fully_specified_name: str) -> BaseChatModel:
@@ -18,14 +23,23 @@ def load_chat_model(fully_specified_name: str) -> BaseChatModel:
         ValueError: If fully_specified_name is not in 'provider/model' format.
     """
     if not fully_specified_name or not fully_specified_name.strip():
-        raise ValueError("fully_specified_name must be in 'provider/model' format, got empty string")
-    if fully_specified_name.count("/") != 1:
+        raise ValueError(
+            "fully_specified_name must be in 'provider/model' format, got empty string"
+        )
+    if "/" not in fully_specified_name:
         raise ValueError(
             f"fully_specified_name must be in 'provider/model' format, got '{fully_specified_name}'"
         )
     provider, model = fully_specified_name.split("/", maxsplit=1)
-    if not provider.strip() or not model.strip():
+    provider = provider.strip()
+    model = model.strip()
+    if not provider or not model:
         raise ValueError(
             f"fully_specified_name must be in 'provider/model' format, got '{fully_specified_name}'"
         )
+    if provider.casefold() == "atlascloud":
+        api_key = os.getenv("ATLASCLOUD_API_KEY")
+        if not api_key:
+            raise ValueError("ATLASCLOUD_API_KEY is required for the Atlas Cloud provider")
+        return ChatOpenAI(model=model, api_key=api_key, base_url=ATLAS_CLOUD_BASE_URL)
     return init_chat_model(model, model_provider=provider)

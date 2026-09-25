@@ -102,6 +102,17 @@ Set `enable_custom_route_auth` in your config:
 }
 ```
 
+A request without valid credentials then gets `401` on every FastAPI HTTP route your app declares, including routes from included routers and from mounted FastAPI sub-apps. Auth runs before any other dependency on those routes, including app-level and router-level ones.
+
+Aegra's own routes are not affected: `/health`, `/live`, `/ready`, `/info` and the docs pages stay public, and the Agent Protocol routes keep their usual auth. Aegra's default `/` stays public too. If your app declares its own `/`, that is a custom route, and this setting protects it.
+
+This setting does not cover:
+
+- **Websocket routes.** Authentication here runs on the HTTP request, so websocket connections pass through. Authenticate them inside the handler.
+- **Plain Starlette routes** added with `app.add_route`, and **mounted non-FastAPI apps** such as `StaticFiles`. These take no FastAPI dependency.
+
+Aegra logs a startup warning that lists any of these it finds.
+
 ### Option 2: Apply auth to specific routes
 
 Use the `require_auth` dependency on individual routes:
@@ -147,6 +158,6 @@ The default is `allow_origins: ["*"]` with `allow_credentials: false`. When you 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
 | `http.app` | `string` | `None` | Import path to custom FastAPI app (`./file.py:variable`) |
-| `http.enable_custom_route_auth` | `bool` | `false` | Apply Aegra auth to all custom routes |
+| `http.enable_custom_route_auth` | `bool` | `false` | Require Aegra auth on every FastAPI route in the custom app |
 | `http.cors.allow_origins` | `list[str]` | `["*"]` | Allowed CORS origins |
 | `http.cors.allow_credentials` | `bool` | `false` when origins is `["*"]`, `true` otherwise | Allow credentials in CORS requests |

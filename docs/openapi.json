@@ -3866,6 +3866,18 @@
               }
             ],
             "title": "Thread Id"
+          },
+          "metadata": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Metadata"
           }
         },
         "type": "object",
@@ -4208,6 +4220,18 @@
               }
             ],
             "title": "Thread Id"
+          },
+          "metadata": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Metadata"
           },
           "enabled": {
             "anyOf": [

@@ -167,8 +167,6 @@ class TestEventsMode:
         config = {
             "configurable": {"run_id": "run-123"},
             "metadata": {"run_attempt": 1},
-            "interrupt_before": ["agent"],
-            "interrupt_after": ["tools"],
         }
 
         async for _mode, _payload in stream_graph_events(
@@ -176,6 +174,8 @@ class TestEventsMode:
             {"messages": []},
             config,
             stream_mode=["values"],
+            interrupt_before=["agent"],
+            interrupt_after=["tools"],
         ):
             pass
 
@@ -189,8 +189,6 @@ class TestEventsMode:
         config = {
             "configurable": {"run_id": "run-123"},
             "metadata": {"run_attempt": 1},
-            "interrupt_before": ["agent"],
-            "interrupt_after": ["tools"],
         }
 
         async for _mode, _payload in stream_graph_events(
@@ -198,6 +196,8 @@ class TestEventsMode:
             {"messages": []},
             config,
             stream_mode=["events"],
+            interrupt_before=["agent"],
+            interrupt_after=["tools"],
         ):
             pass
 
@@ -211,8 +211,6 @@ class TestEventsMode:
         config = {
             "configurable": {"run_id": "run-123"},
             "metadata": {"run_attempt": 1},
-            "interrupt_before": ["*"],
-            "interrupt_after": ["*"],
         }
 
         async for _mode, _payload in stream_graph_events(
@@ -220,6 +218,8 @@ class TestEventsMode:
             {"messages": []},
             config,
             stream_mode=["values"],
+            interrupt_before="*",
+            interrupt_after="*",
         ):
             pass
 
@@ -233,8 +233,6 @@ class TestEventsMode:
         config = {
             "configurable": {"run_id": "run-123"},
             "metadata": {"run_attempt": 1},
-            "interrupt_before": ["*"],
-            "interrupt_after": ["*"],
         }
 
         async for _mode, _payload in stream_graph_events(
@@ -242,6 +240,8 @@ class TestEventsMode:
             {"messages": []},
             config,
             stream_mode=["events"],
+            interrupt_before="*",
+            interrupt_after="*",
         ):
             pass
 

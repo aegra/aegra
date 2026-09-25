@@ -329,3 +329,73 @@ class TestOpenTelemetryProviderRuntime:
 
             meta = provider.get_metadata("run-1", "thread-1")
             assert meta == {}
+
+
+class TestAddSpanEnricher:
+    """Enrichers must work whether registered before or after setup()."""
+
+    def _provider(self) -> OpenTelemetryProvider:
+        with patch("aegra_api.observability.otel.settings") as mock_settings:
+            mock_settings.observability.OTEL_TARGETS = ""
+            mock_settings.observability.OTEL_CONSOLE_EXPORT = False
+            return OpenTelemetryProvider()
+
+    def test_enricher_registered_before_setup_is_kept(self) -> None:
+        provider = self._provider()
+
+        def enricher(span: object) -> dict[str, int]:
+            return {"a": 1}
+
+        provider.add_span_enricher(enricher)
+
+        assert enricher in provider._enrichment_processor._enrichers
+
+    def test_enricher_registered_after_setup_reaches_the_live_processor(self) -> None:
+        provider = self._provider()
+        processor_before_setup = provider._enrichment_processor
+
+        with (
+            patch("aegra_api.observability.otel.settings") as mock_settings,
+            patch("aegra_api.observability.otel.TracerProvider") as mock_tp,
+            patch("aegra_api.observability.otel.BatchSpanProcessor"),
+            patch("aegra_api.observability.otel.ConsoleSpanExporter"),
+            patch("aegra_api.observability.otel.LangChainInstrumentor"),
+            patch("aegra_api.observability.otel.trace"),
+        ):
+            mock_settings.observability.OTEL_SERVICE_NAME = "test"
+            mock_settings.observability.OTEL_CONSOLE_EXPORT = True
+            mock_settings.app.VERSION = "0.0.0"
+            mock_settings.app.ENV_MODE = "LOCAL"
+            provider.setup()
+
+        def enricher(span: object) -> dict[str, int]:
+            return {"a": 1}
+
+        provider.add_span_enricher(enricher)
+
+        # The processor attached to the tracer provider is the same object the
+        # late registration lands on, so no restart is needed.
+        assert provider._enrichment_processor is processor_before_setup
+        assert enricher in processor_before_setup._enrichers
+        mock_tp.return_value.add_span_processor.assert_any_call(processor_before_setup)
+
+    def test_setup_registers_the_enrichment_processor_before_the_exporters(self) -> None:
+        provider = self._provider()
+
+        with (
+            patch("aegra_api.observability.otel.settings") as mock_settings,
+            patch("aegra_api.observability.otel.TracerProvider") as mock_tp,
+            patch("aegra_api.observability.otel.BatchSpanProcessor") as mock_bsp,
+            patch("aegra_api.observability.otel.ConsoleSpanExporter"),
+            patch("aegra_api.observability.otel.LangChainInstrumentor"),
+            patch("aegra_api.observability.otel.trace"),
+        ):
+            mock_settings.observability.OTEL_SERVICE_NAME = "test"
+            mock_settings.observability.OTEL_CONSOLE_EXPORT = True
+            mock_settings.app.VERSION = "0.0.0"
+            mock_settings.app.ENV_MODE = "LOCAL"
+            provider.setup()
+
+            calls = mock_tp.return_value.add_span_processor.call_args_list
+            assert calls[0].args[0] is provider._enrichment_processor
+            assert mock_bsp.return_value in [c.args[0] for c in calls[1:]]

@@ -23,7 +23,8 @@ Usage::
 
 import contextvars
 import logging
-from typing import Any
+from collections.abc import Callable, Mapping, MutableMapping
+from typing import Any, cast
 
 import structlog
 from opentelemetry.context import Context
@@ -36,6 +37,9 @@ logger = logging.getLogger(__name__)
 # time, so we filter at this layer and emit an aegra-level warning
 # instead of letting drops happen invisibly inside the SDK.
 _PRIMITIVE_ATTR_TYPES: tuple[type, ...] = (str, int, float, bool)
+
+AttributeValue = str | int | float | bool
+SpanEnricher = Callable[[ReadableSpan], Mapping[str, AttributeValue] | None]
 
 # Per-request context variable holding span attributes to inject.
 # None means no trace context is set; on_start() is a no-op in that case.
@@ -58,6 +62,9 @@ class SpanEnrichmentProcessor(SpanProcessor):
     are created.
     """
 
+    def __init__(self) -> None:
+        self._enrichers: list[SpanEnricher] = []
+
     def on_start(self, span: Span, parent_context: Context | None = None) -> None:
         attrs = _trace_attrs.get()
         if not attrs:
@@ -65,8 +72,54 @@ class SpanEnrichmentProcessor(SpanProcessor):
         for key, value in attrs.items():
             span.set_attribute(key, value)
 
+    def add_enricher(self, enricher: SpanEnricher) -> None:
+        """Register a callback applied to every span once it ends."""
+        self._enrichers.append(enricher)
+
+    def clear_enrichers(self) -> None:
+        self._enrichers.clear()
+
     def on_end(self, span: ReadableSpan) -> None:
-        pass
+        """Apply registered enrichers to the ended span.
+
+        ``ReadableSpan`` exposes attributes through a read-only mapping proxy,
+        but the SDK hands the processor the span's own attribute container
+        rather than a copy, so writing through it reaches every exporter. The
+        contract test in ``test_span_enrichment.py`` fails loudly if a future
+        SDK release starts copying instead.
+        """
+        if not self._enrichers:
+            return
+
+        if span._attributes is None:
+            return
+        # Declared Mapping by the SDK, always a mutable BoundedAttributes at runtime.
+        attributes = cast(MutableMapping[str, AttributeValue], span._attributes)
+
+        for enricher in self._enrichers:
+            try:
+                produced = enricher(span)
+            except Exception:
+                logger.exception("Span enricher raised; skipping it for this span")
+                continue
+            if not produced:
+                continue
+            if not isinstance(produced, Mapping):
+                logger.warning(
+                    "Span enricher returned %s; expected a mapping of attributes",
+                    type(produced).__name__,
+                )
+                continue
+            for key, value in produced.items():
+                if not isinstance(value, _PRIMITIVE_ATTR_TYPES):
+                    logger.warning(
+                        "Span enricher key '%s' has non-primitive type %s; dropping "
+                        "(OTEL attributes accept str/int/float/bool only)",
+                        key,
+                        type(value).__name__,
+                    )
+                    continue
+                attributes[key] = value
 
     def shutdown(self) -> None:
         pass

@@ -13,6 +13,7 @@ from __future__ import annotations
 import inspect
 from collections.abc import Iterator
 from typing import Any
+from unittest.mock import AsyncMock, patch
 
 import pytest
 from fastapi import FastAPI
@@ -386,9 +387,9 @@ def test_stateless_run_also_authorizes_the_assistant(monkeypatch: pytest.MonkeyP
 def test_stateless_run_cannot_bypass_thread_handler(monkeypatch: pytest.MonkeyPatch) -> None:
     """Dropping the thread_id must not dodge an @auth.on.threads rule.
 
-    Asserts on the handler rather than the status code: the route mints its
-    ephemeral thread before authorizing, so a denial unwinds through real
-    cleanup that this mocked app cannot serve.
+    Asserts on the handler rather than the status code: a denial here still
+    unwinds through the real cleanup path (delete_thread_by_id), which this
+    mocked app cannot serve.
     """
     auth = Auth()
     seen: list[tuple[str, str]] = []
@@ -400,7 +401,10 @@ def test_stateless_run_cannot_bypass_thread_handler(monkeypatch: pytest.MonkeyPa
 
     app = _build_app(auth, monkeypatch)
 
-    with TestClient(app, raise_server_exceptions=False) as client:
+    with (
+        TestClient(app, raise_server_exceptions=False) as client,
+        patch("aegra_api.api.stateless_runs.delete_thread_by_id", new_callable=AsyncMock),
+    ):
         client.post("/runs", json={"assistant_id": "agent", "input": {}})
 
     assert ("threads", "create_run") in seen, "a stateless run reached execution without consulting @auth.on.threads"

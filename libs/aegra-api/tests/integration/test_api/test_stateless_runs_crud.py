@@ -387,9 +387,9 @@ class TestStatelessCreateRun:
         override_session_dependency(app, Session)
         client = make_client(app)
 
-        # Mock _delete_thread_by_id: assistant lookup raises 404, the cleanup
-        # path opens its own DB session via _get_session_maker which is not
-        # initialized in this test harness.
+        # Mock delete_thread_by_id: assistant lookup raises 404, and the
+        # cleanup path opens its own DB session via _get_session_maker,
+        # which is not initialized in this test harness.
         with patch("aegra_api.api.stateless_runs.delete_thread_by_id", new_callable=AsyncMock):
             resp = client.post(
                 "/runs",

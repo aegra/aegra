@@ -559,13 +559,13 @@ class TestStatelessWaitForRun:
 
     @pytest.mark.asyncio
     async def test_delegates_and_deletes_thread(self, mock_user: User) -> None:
-        """Delegates to wait_for_run and deletes ephemeral thread after stream."""
+        """Delegates to _wait_for_run (is_ephemeral=True) and deletes the thread after stream."""
         import json
 
         expected_output = {"result": "done"}
         request = RunCreate(assistant_id="agent", input={"msg": "hi"})
 
-        # wait_for_run now returns a StreamingResponse, so mock it accordingly
+        # _wait_for_run returns a StreamingResponse, so mock it accordingly
         mock_response = StreamingResponse(
             iter([json.dumps(expected_output).encode()]),
             media_type="application/json",
@@ -574,7 +574,7 @@ class TestStatelessWaitForRun:
         with (
             patch("aegra_api.api.stateless_runs.uuid4", return_value="eph-thread-1"),
             patch(
-                "aegra_api.api.stateless_runs.wait_for_run",
+                "aegra_api.api.stateless_runs._wait_for_run",
                 new_callable=AsyncMock,
                 return_value=mock_response,
             ) as mock_wait,
@@ -592,12 +592,12 @@ class TestStatelessWaitForRun:
                 body += chunk if isinstance(chunk, bytes) else chunk.encode()
 
             assert json.loads(body) == expected_output
-            mock_wait.assert_called_once_with("eph-thread-1", request, mock_user)
+            mock_wait.assert_called_once_with("eph-thread-1", request, mock_user, is_ephemeral=True)
             mock_delete.assert_called_once_with("eph-thread-1", mock_user.identity)
 
     @pytest.mark.asyncio
     async def test_keeps_thread_when_requested(self, mock_user: User) -> None:
-        """Thread is preserved when on_completion='keep'."""
+        """Thread is preserved (is_ephemeral=False) when on_completion='keep'."""
         import json
 
         request = RunCreate(assistant_id="agent", input={"msg": "hi"}, on_completion="keep")
@@ -610,10 +610,10 @@ class TestStatelessWaitForRun:
         with (
             patch("aegra_api.api.stateless_runs.uuid4", return_value="eph-thread-2"),
             patch(
-                "aegra_api.api.stateless_runs.wait_for_run",
+                "aegra_api.api.stateless_runs._wait_for_run",
                 new_callable=AsyncMock,
                 return_value=mock_response,
-            ),
+            ) as mock_wait,
             patch(
                 "aegra_api.api.stateless_runs.delete_thread_by_id",
                 new_callable=AsyncMock,
@@ -623,17 +623,18 @@ class TestStatelessWaitForRun:
 
         # Returns original response unchanged (no wrapper)
         assert result is mock_response
+        mock_wait.assert_called_once_with("eph-thread-2", request, mock_user, is_ephemeral=False)
         mock_delete.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_cleans_up_on_error(self, mock_user: User) -> None:
-        """Thread is deleted even when wait_for_run raises."""
+        """Thread is deleted even when _wait_for_run raises."""
         request = RunCreate(assistant_id="agent", input={"msg": "hi"})
 
         with (
             patch("aegra_api.api.stateless_runs.uuid4", return_value="eph-thread-3"),
             patch(
-                "aegra_api.api.stateless_runs.wait_for_run",
+                "aegra_api.api.stateless_runs._wait_for_run",
                 new_callable=AsyncMock,
                 side_effect=RuntimeError("boom"),
             ),
@@ -655,7 +656,7 @@ class TestStatelessWaitForRun:
         with (
             patch("aegra_api.api.stateless_runs.uuid4", return_value="eph-thread-err"),
             patch(
-                "aegra_api.api.stateless_runs.wait_for_run",
+                "aegra_api.api.stateless_runs._wait_for_run",
                 new_callable=AsyncMock,
                 side_effect=RuntimeError("original"),
             ),
@@ -694,7 +695,7 @@ class TestStatelessStreamRun:
         with (
             patch("aegra_api.api.stateless_runs.uuid4", return_value="eph-thread-4"),
             patch(
-                "aegra_api.api.stateless_runs.create_and_stream_run",
+                "aegra_api.api.stateless_runs._create_and_stream_run",
                 new_callable=AsyncMock,
                 return_value=mock_response,
             ) as mock_stream,
@@ -706,7 +707,7 @@ class TestStatelessStreamRun:
             result = await stateless_stream_run(request, mock_user)
 
             assert isinstance(result, EventSourceResponse)
-            mock_stream.assert_called_once_with("eph-thread-4", request, mock_user)
+            mock_stream.assert_called_once_with("eph-thread-4", request, mock_user, is_ephemeral=True)
             # Outer response must re-expose the inner close handler so real
             # http.disconnect still cancels the run.
             assert result.client_close_handler_callable is inner_close_handler
@@ -732,10 +733,10 @@ class TestStatelessStreamRun:
         with (
             patch("aegra_api.api.stateless_runs.uuid4", return_value="eph-thread-5"),
             patch(
-                "aegra_api.api.stateless_runs.create_and_stream_run",
+                "aegra_api.api.stateless_runs._create_and_stream_run",
                 new_callable=AsyncMock,
                 return_value=mock_response,
-            ),
+            ) as mock_stream,
             patch(
                 "aegra_api.api.stateless_runs.delete_thread_by_id",
                 new_callable=AsyncMock,
@@ -745,6 +746,7 @@ class TestStatelessStreamRun:
 
         # Should return original response, not wrapped
         assert result is mock_response
+        mock_stream.assert_called_once_with("eph-thread-5", request, mock_user, is_ephemeral=False)
         mock_delete.assert_not_called()
 
     @pytest.mark.asyncio
@@ -755,7 +757,7 @@ class TestStatelessStreamRun:
         with (
             patch("aegra_api.api.stateless_runs.uuid4", return_value="eph-thread-err"),
             patch(
-                "aegra_api.api.stateless_runs.create_and_stream_run",
+                "aegra_api.api.stateless_runs._create_and_stream_run",
                 new_callable=AsyncMock,
                 side_effect=RuntimeError("setup failed"),
             ),
@@ -793,10 +795,10 @@ class TestStatelessStreamRun:
         with (
             patch("aegra_api.api.stateless_runs.uuid4", return_value="eph-thread-disc"),
             patch(
-                "aegra_api.api.stateless_runs.create_and_stream_run",
+                "aegra_api.api.stateless_runs._create_and_stream_run",
                 new_callable=AsyncMock,
                 return_value=mock_response,
-            ),
+            ) as mock_stream,
             patch(
                 "aegra_api.api.stateless_runs.delete_thread_by_id",
                 new_callable=AsyncMock,
@@ -810,6 +812,10 @@ class TestStatelessStreamRun:
                     pass
 
         mock_delete.assert_not_called()
+        # is_ephemeral=True was set atomically at thread creation (inside
+        # _create_and_stream_run), independent of how the stream later
+        # behaves, so the orphan sweeper can still find this thread.
+        mock_stream.assert_called_once_with("eph-thread-disc", request, mock_user, is_ephemeral=True)
 
     @pytest.mark.asyncio
     async def test_slow_client_disconnect_with_finished_run_schedules_cleanup(
@@ -842,7 +848,7 @@ class TestStatelessStreamRun:
         with (
             patch("aegra_api.api.stateless_runs.uuid4", return_value="eph-thread-slow"),
             patch(
-                "aegra_api.api.stateless_runs.create_and_stream_run",
+                "aegra_api.api.stateless_runs._create_and_stream_run",
                 new_callable=AsyncMock,
                 return_value=mock_response,
             ),
@@ -903,7 +909,7 @@ class TestStatelessStreamRun:
         with (
             patch("aegra_api.api.stateless_runs.uuid4", return_value="eph-thread-active"),
             patch(
-                "aegra_api.api.stateless_runs.create_and_stream_run",
+                "aegra_api.api.stateless_runs._create_and_stream_run",
                 new_callable=AsyncMock,
                 return_value=mock_response,
             ),
@@ -955,7 +961,7 @@ class TestStatelessStreamRun:
         with (
             patch("aegra_api.api.stateless_runs.uuid4", return_value="eph-thread-noid"),
             patch(
-                "aegra_api.api.stateless_runs.create_and_stream_run",
+                "aegra_api.api.stateless_runs._create_and_stream_run",
                 new_callable=AsyncMock,
                 return_value=mock_response,
             ),
@@ -998,7 +1004,7 @@ class TestStatelessStreamRun:
         with (
             patch("aegra_api.api.stateless_runs.uuid4", return_value="eph-thread-cleanup"),
             patch(
-                "aegra_api.api.stateless_runs.create_and_stream_run",
+                "aegra_api.api.stateless_runs._create_and_stream_run",
                 new_callable=AsyncMock,
                 return_value=mock_response,
             ),
@@ -1052,7 +1058,7 @@ class TestStatelessCreateRun:
         with (
             patch("aegra_api.api.stateless_runs.uuid4", return_value="eph-thread-6"),
             patch(
-                "aegra_api.api.stateless_runs.create_run",
+                "aegra_api.api.stateless_runs._create_run",
                 new_callable=AsyncMock,
                 return_value=mock_run,
             ) as mock_create,
@@ -1061,7 +1067,7 @@ class TestStatelessCreateRun:
             result = await stateless_create_run(request, mock_user, mock_session)
 
         assert result.run_id == run_id
-        mock_create.assert_called_once_with("eph-thread-6", request, mock_user, mock_session)
+        mock_create.assert_called_once_with("eph-thread-6", request, mock_user, mock_session, is_ephemeral=True)
         mock_create_task.assert_called_once()
 
     @pytest.mark.asyncio
@@ -1084,15 +1090,16 @@ class TestStatelessCreateRun:
         with (
             patch("aegra_api.api.stateless_runs.uuid4", return_value="eph-thread-7"),
             patch(
-                "aegra_api.api.stateless_runs.create_run",
+                "aegra_api.api.stateless_runs._create_run",
                 new_callable=AsyncMock,
                 return_value=mock_run,
-            ),
+            ) as mock_create,
             patch("aegra_api.api.stateless_runs.asyncio.create_task") as mock_create_task,
         ):
             result = await stateless_create_run(request, mock_user, mock_session)
 
         assert result.run_id == run_id
+        mock_create.assert_called_once_with("eph-thread-7", request, mock_user, mock_session, is_ephemeral=False)
         mock_create_task.assert_not_called()
 
     @pytest.mark.asyncio
@@ -1103,7 +1110,7 @@ class TestStatelessCreateRun:
         with (
             patch("aegra_api.api.stateless_runs.uuid4", return_value="eph-thread-err"),
             patch(
-                "aegra_api.api.stateless_runs.create_run",
+                "aegra_api.api.stateless_runs._create_run",
                 new_callable=AsyncMock,
                 side_effect=RuntimeError("create failed"),
             ),

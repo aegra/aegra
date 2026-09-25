@@ -10,6 +10,7 @@ from aegra_api.settings import (
     AppSettings,
     CronSettings,
     DatabaseSettings,
+    OrphanThreadSettings,
     RedisSettings,
     ThreadTTLSettings,
     WorkerSettings,
@@ -663,6 +664,47 @@ class TestThreadTTLSettings:
         ttl = ThreadTTLSettings(_env_file=None)
 
         assert ttl.AEGRA_THREAD_TTL == '{"default_ttl": 60}'
+
+
+class TestOrphanThreadSettings:
+    """Orphan-thread sweeper timing/batch values are validated at startup."""
+
+    def _clear_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        for var in (
+            "ORPHAN_THREAD_SWEEP_INTERVAL_SECONDS",
+            "ORPHAN_THREAD_RETENTION_MINUTES",
+            "ORPHAN_THREAD_SWEEP_BATCH_SIZE",
+        ):
+            monkeypatch.delenv(var, raising=False)
+
+    def test_defaults_pass_validation(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        self._clear_env(monkeypatch)
+        cfg = OrphanThreadSettings(_env_file=None)
+
+        assert cfg.ORPHAN_THREAD_SWEEP_INTERVAL_SECONDS == 300
+        assert cfg.ORPHAN_THREAD_RETENTION_MINUTES == 60
+        assert cfg.ORPHAN_THREAD_SWEEP_BATCH_SIZE == 100
+
+    def test_rejects_non_positive_interval(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        self._clear_env(monkeypatch)
+        monkeypatch.setenv("ORPHAN_THREAD_SWEEP_INTERVAL_SECONDS", "0")
+
+        with pytest.raises((ValueError, ValidationError), match="ORPHAN_THREAD_SWEEP_INTERVAL_SECONDS"):
+            OrphanThreadSettings(_env_file=None)
+
+    def test_rejects_non_positive_retention(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        self._clear_env(monkeypatch)
+        monkeypatch.setenv("ORPHAN_THREAD_RETENTION_MINUTES", "-1")
+
+        with pytest.raises((ValueError, ValidationError), match="ORPHAN_THREAD_RETENTION_MINUTES"):
+            OrphanThreadSettings(_env_file=None)
+
+    def test_rejects_non_positive_batch_size(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        self._clear_env(monkeypatch)
+        monkeypatch.setenv("ORPHAN_THREAD_SWEEP_BATCH_SIZE", "0")
+
+        with pytest.raises((ValueError, ValidationError), match="ORPHAN_THREAD_SWEEP_BATCH_SIZE"):
+            OrphanThreadSettings(_env_file=None)
 
 
 class TestMaxSearchLimit:

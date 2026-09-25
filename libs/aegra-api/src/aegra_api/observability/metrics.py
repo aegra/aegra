@@ -40,6 +40,17 @@ THREAD_TTL_SWEPT = prometheus_client.Counter(
 for _outcome in ("deleted", "pruned", "error"):
     THREAD_TTL_SWEPT.labels(outcome=_outcome)
 
+ORPHAN_THREADS_SWEPT = prometheus_client.Counter(
+    "aegra_orphan_threads_swept_total",
+    "Ephemeral threads deleted by the orphan-thread sweeper, by outcome: "
+    "deleted (thread and checkpoints removed), error (item failed and will "
+    "be retried next tick).",
+    labelnames=["outcome"],
+)
+
+for _outcome in ("deleted", "error"):
+    ORPHAN_THREADS_SWEPT.labels(outcome=_outcome)
+
 
 def setup_prometheus_metrics(
     app: FastAPI,

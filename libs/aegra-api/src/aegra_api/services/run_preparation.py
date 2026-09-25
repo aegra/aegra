@@ -138,10 +138,14 @@ async def update_thread_metadata(
     *,
     user_id: str | None = None,
     input_data: dict[str, Any] | None = None,
+    is_ephemeral: bool = False,
 ) -> None:
     """Update thread metadata with assistant and graph information.
 
-    If thread doesn't exist, auto-creates it.
+    If thread doesn't exist, auto-creates it. ``is_ephemeral`` is only applied
+    on auto-create, atomically with the row's insert — stateless_runs.py
+    relies on this so the orphan-thread sweeper can find the thread even if
+    the process dies right after this commits.
     When *input_data* is provided and the thread has no name yet, the first
     human message content is used as ``thread_name``.
     Does NOT commit — the caller controls the transaction boundary.
@@ -170,6 +174,7 @@ async def update_thread_metadata(
             status="idle",
             metadata_json=metadata,
             user_id=user_id,
+            is_ephemeral=is_ephemeral,
         )
         session.add(thread_orm)
         return
@@ -216,12 +221,14 @@ async def _prepare_run(
     *,
     initial_status: str,
     event_streaming_v2: bool = False,
+    is_ephemeral: bool = False,
 ) -> tuple[str, Run, RunJob]:
     """Shared run-creation logic used by create, stream, and wait endpoints.
 
     Validates inputs, resolves the assistant, persists the RunORM record,
     builds a RunJob, submits it to the executor, and returns the triple
-    ``(run_id, run_model, job)``.
+    ``(run_id, run_model, job)``. ``is_ephemeral`` is forwarded to a
+    newly-created thread only; see update_thread_metadata.
     """
     await _validate_resume_command(session, thread_id, request.command)
 
@@ -268,7 +275,13 @@ async def _prepare_run(
 
     # Mark thread as busy and update metadata
     await update_thread_metadata(
-        session, thread_id, assistant.assistant_id, assistant.graph_id, user_id=user.identity, input_data=request.input
+        session,
+        thread_id,
+        assistant.assistant_id,
+        assistant.graph_id,
+        user_id=user.identity,
+        input_data=request.input,
+        is_ephemeral=is_ephemeral,
     )
     await set_thread_status(session, thread_id, "busy")
 

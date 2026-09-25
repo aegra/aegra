@@ -104,7 +104,21 @@ OPENAI_API_KEY=sk-...
 
 # Observability (optional)
 OTEL_TARGETS=LANGFUSE,PHOENIX
+
+# Stateless orphan thread cleanup (optional)
+# Reclaims disconnected stateless-run threads after they have no active runs.
+EPHEMERAL_THREAD_RETENTION_SECONDS=86400
+EPHEMERAL_THREAD_SWEEP_INTERVAL_SECONDS=300
+EPHEMERAL_THREAD_SWEEP_LIMIT=100
 ```
+
+Stateless runs normally remove their generated thread after completion. The API
+also starts a bounded background sweeper that reclaims explicitly marked
+temporary threads left by client disconnects. It waits for the configured
+retention period, skips threads with pending or running runs, and never marks
+`on_completion="keep"` or persistent threads for cleanup. See the
+[environment variable reference](../../docs/reference/environment-variables.mdx)
+for the complete configuration.
 
 ## API Endpoints
 

@@ -79,6 +79,45 @@ class TestValidateResumeCommand:
         session.scalar.assert_not_awaited()
 
 
+async def test_update_thread_metadata_persists_ephemeral_marker() -> None:
+    """Stateless preparation marks newly auto-created threads in the same transaction."""
+    session = AsyncMock()
+    session.scalar.return_value = None
+    session.add = MagicMock()
+
+    await mod.update_thread_metadata(
+        session,
+        "thread-1",
+        "assistant-1",
+        "graph-1",
+        user_id="user-1",
+        is_ephemeral=True,
+    )
+
+    created_thread = session.add.call_args.args[0]
+    assert created_thread.thread_id == "thread-1"
+    assert created_thread.user_id == "user-1"
+    assert created_thread.is_ephemeral is True
+
+
+async def test_update_thread_metadata_does_not_mark_existing_thread_ephemeral() -> None:
+    """Existing persistent threads must not become sweeper candidates."""
+    session = AsyncMock()
+    session.scalar.return_value = SimpleNamespace(metadata_json={}, is_ephemeral=False)
+
+    await mod.update_thread_metadata(
+        session,
+        "thread-1",
+        "assistant-1",
+        "graph-1",
+        user_id="user-1",
+        is_ephemeral=True,
+    )
+
+    update_values = session.execute.call_args.args[0]._values
+    assert "is_ephemeral" not in update_values
+
+
 _CHECKPOINT_ID = "1ef4f797-8335-6428-8001-8a1503f9b875"
 _OTHER_CHECKPOINT_ID = "1ef4f797-8335-6428-8001-8a1503f9b876"
 

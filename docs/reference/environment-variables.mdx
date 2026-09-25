@@ -193,7 +193,7 @@ AEGRA_THREAD_TTL='{"strategy": "keep_latest", "default_ttl": 1440, "sweep_interv
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `AEGRA_CHECKPOINT_DURABILITY` | — | Default checkpoint durability for runs that do not set one: `sync`, `async`, or `exit`. Wins over `checkpointer.durability` in `aegra.json`; a run's own `durability` wins over both. Unset keeps LangGraph's default (`async`) |
+| `AEGRA_CHECKPOINT_DURABILITY` | — | Default checkpoint durability for runs that do not set one: `sync`, `async`, or `exit`. Wins over `checkpointer.durability` in `aegra.json`; a run's own `durability` wins over both. When unset, `checkpointer.durability` applies, and LangGraph's default (`async`) only if that is unset too |
 
 ```bash
 # Write one checkpoint per run instead of one per step

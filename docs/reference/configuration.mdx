@@ -331,7 +331,7 @@ Sets when checkpoints are written for runs that do not choose a mode themselves.
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `durability` | `string` | unset | `sync`, `async`, or `exit`. Unset keeps LangGraph's default, `async`. |
+| `durability` | `string` | unset | `sync`, `async`, or `exit`. `AEGRA_CHECKPOINT_DURABILITY` overrides it. With neither set, runs keep LangGraph's default, `async`. |
 
 Resolution order for each run:
 

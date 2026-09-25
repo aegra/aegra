@@ -703,6 +703,7 @@ def create_run_config(
     thread_id: str,
     user: User | BaseUser | None,
     *,
+    graph_id: str | None = None,
     additional_config: dict[str, Any] | None = None,
     checkpoint: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
@@ -746,6 +747,9 @@ def create_run_config(
     if checkpoint and isinstance(checkpoint, dict):
         safe = strip_pinned_config_keys(checkpoint)
         cfg["configurable"].update({k: v for k, v in safe.items() if v is not None})
+
+    if graph_id is not None:
+        cfg["configurable"].setdefault("graph_id", graph_id)
 
     # Finally inject user context via existing helper
     return inject_user_context(user, cfg)

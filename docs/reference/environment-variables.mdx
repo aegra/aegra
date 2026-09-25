@@ -189,6 +189,19 @@ AEGRA_THREAD_TTL='{"strategy": "keep_latest", "default_ttl": 1440, "sweep_interv
 `AEGRA_THREAD_TTL` takes precedence. When set, the `checkpointer.ttl` block in `aegra.json` is ignored entirely and unset fields fall back to their defaults. See the [configuration reference](/reference/configuration#checkpointer) for field semantics.
 </Note>
 
+## Checkpoint durability
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `AEGRA_CHECKPOINT_DURABILITY` | — | Default checkpoint durability for runs that do not set one: `sync`, `async`, or `exit`. Wins over `checkpointer.durability` in `aegra.json`; a run's own `durability` wins over both. When unset, `checkpointer.durability` applies, and LangGraph's default (`async`) only if that is unset too |
+
+```bash
+# Write one checkpoint per run instead of one per step
+AEGRA_CHECKPOINT_DURABILITY=exit
+```
+
+An invalid value stops the server at startup. See [checkpoint durability](/guides/threads-and-state#checkpoint-durability) for the trade-offs.
+
 ## Prometheus metrics
 
 | Variable | Default | Description |

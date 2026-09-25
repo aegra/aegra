@@ -3,7 +3,7 @@ title: "Configuration"
 description: "Complete reference for the aegra.json configuration file."
 ---
 
-Aegra uses a JSON configuration file (`aegra.json`) to define graphs, authentication, HTTP settings, the semantic store, and checkpointer retention (thread TTL).
+Aegra uses a JSON configuration file (`aegra.json`) to define graphs, authentication, HTTP settings, the semantic store, and checkpointer settings (thread TTL and the default checkpoint durability).
 
 ## Config file resolution
 
@@ -55,7 +55,8 @@ aegra dev
       "default_ttl": 43200,
       "sweep_interval_minutes": 5,
       "sweep_limit": 10000
-    }
+    },
+    "durability": "async"
   }
 }
 ```
@@ -280,9 +281,12 @@ See [semantic store guide](/guides/semantic-store) for details.
 
 ## `checkpointer`
 
-Configure thread retention (TTL). When a `ttl` block is present, every newly
-created thread gets an expiry, and a background sweep deletes or compacts
-expired threads.
+Configure thread retention (TTL) and the default checkpoint durability.
+
+### `ttl`
+
+When a `ttl` block is present, every newly created thread gets an expiry, and
+a background sweep deletes or compacts expired threads.
 
 ```json
 {
@@ -312,6 +316,31 @@ Notes:
 - The `AEGRA_THREAD_TTL` environment variable replaces this block entirely when set — see [environment variables](/reference/environment-variables#thread-ttl).
 
 If neither `checkpointer.ttl` nor `AEGRA_THREAD_TTL` is configured, threads never expire.
+
+### `durability`
+
+Sets when checkpoints are written for runs that do not choose a mode themselves.
+
+```json
+{
+  "checkpointer": {
+    "durability": "exit"
+  }
+}
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `durability` | `string` | unset | `sync`, `async`, or `exit`. `AEGRA_CHECKPOINT_DURABILITY` overrides it. With neither set, runs keep LangGraph's default, `async`. |
+
+Resolution order for each run:
+
+1. The run's `durability` field (or the deprecated `checkpoint_during`).
+2. The `AEGRA_CHECKPOINT_DURABILITY` environment variable.
+3. `checkpointer.durability` in `aegra.json`.
+4. LangGraph's default.
+
+An invalid value stops the server at startup. LangGraph Platform has no server-wide durability setting, so this key is specific to Aegra. See [checkpoint durability](/guides/threads-and-state#checkpoint-durability) for what each mode trades off.
 
 ## Common configurations
 

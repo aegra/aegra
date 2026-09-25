@@ -694,3 +694,49 @@ class TestTimezoneField:
         call_args = mock_cron_service.create_cron.call_args
         request_obj = call_args.args[0]
         assert request_obj.timezone is None
+
+
+class TestCronDurability:
+    """Cron create/update declare the SDK's durability fields instead of dropping them."""
+
+    def test_create_passes_durability_fields_to_service(self, client: TestClient, mock_cron_service: AsyncMock) -> None:
+        mock_cron_service.create_cron.return_value = AsyncMock()
+
+        resp = client.post(
+            "/runs/crons",
+            json={
+                "input": {"q": 1},
+                "assistant_id": "asst-001",
+                "schedule": "*/5 * * * *",
+                "durability": "exit",
+                "checkpoint_during": True,
+            },
+        )
+
+        assert resp.status_code == 200
+        request = mock_cron_service.create_cron.call_args.args[0]
+        assert request.durability == "exit"
+        assert request.checkpoint_during is True
+
+    def test_create_rejects_unknown_durability(self, client: TestClient, mock_cron_service: AsyncMock) -> None:
+        resp = client.post(
+            "/runs/crons",
+            json={"input": {"q": 1}, "assistant_id": "asst-001", "schedule": "*/5 * * * *", "durability": "never"},
+        )
+
+        assert resp.status_code == 422
+        mock_cron_service.create_cron.assert_not_called()
+
+    def test_update_passes_durability_to_service(self, client: TestClient, mock_cron_service: AsyncMock) -> None:
+        mock_cron_service.update_cron.return_value = _cron_response()
+
+        resp = client.patch("/runs/crons/cron-001", json={"durability": "sync"})
+
+        assert resp.status_code == 200
+        assert mock_cron_service.update_cron.call_args.args[1].durability == "sync"
+
+    def test_update_rejects_unknown_durability(self, client: TestClient, mock_cron_service: AsyncMock) -> None:
+        resp = client.patch("/runs/crons/cron-001", json={"durability": "never"})
+
+        assert resp.status_code == 422
+        mock_cron_service.update_cron.assert_not_called()

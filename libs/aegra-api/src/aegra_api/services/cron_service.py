@@ -53,6 +53,8 @@ def _build_payload(request: CronCreate | CronUpdate) -> dict[str, Any]:
         "stream_mode",
         "stream_subgraphs",
         "timezone",
+        "durability",
+        "checkpoint_during",
     ):
         value = getattr(request, field, None)
         if value is not None:

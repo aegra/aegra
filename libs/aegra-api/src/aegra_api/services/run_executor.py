@@ -212,6 +212,7 @@ async def _stream_legacy(
         stream_mode=stream_modes,
         context=job.execution.context,
         subgraphs=job.behavior.subgraphs,
+        durability=job.execution.durability,
         on_checkpoint=lambda _: None,
         on_task_result=lambda _: None,
     ):
@@ -243,6 +244,7 @@ async def _stream_native_v2(
         input_data=execution_input,
         config=run_config,
         context=job.execution.context,
+        durability=job.execution.durability,
     ):
         event_id = await broker_manager.allocate_event_id(run_id)
         await streaming_service.put_to_broker(run_id, event_id, (method, event))

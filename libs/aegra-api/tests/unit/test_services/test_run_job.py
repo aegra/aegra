@@ -98,6 +98,18 @@ class TestRunJob:
         assert "run_id" not in params
         assert "thread_id" not in params
 
+    def test_after_seconds_roundtrips_in_execution_params(self, sample_job: RunJob) -> None:
+        delayed = sample_job.model_copy(update={"after_seconds": 30})
+        params = delayed.to_execution_params()
+
+        class FakeORM:
+            run_id = "run-1"
+            thread_id = "thread-1"
+            execution_params = params
+
+        restored = RunJob.from_run_orm(FakeORM())
+        assert restored.after_seconds == 30
+
     def test_extra_user_fields_preserved(self) -> None:
         """User model allows extra fields (ConfigDict extra='allow')."""
         job = RunJob(
@@ -124,6 +136,23 @@ class TestRunJob:
         assert job.execution.input_data is None
         assert job.behavior.subgraphs is False
         assert job.run_metadata == {}
+
+    def test_legacy_execution_params_without_after_seconds_default_to_zero(self, sample_job: RunJob) -> None:
+        params = sample_job.to_execution_params()
+        params.pop("after_seconds")
+
+        class LegacyORM:
+            run_id = "run-1"
+            thread_id = "thread-1"
+            execution_params = params
+
+        restored = RunJob.from_run_orm(LegacyORM())
+        assert restored.after_seconds == 0
+
+    @pytest.mark.parametrize("value", ["30", 30.0, -1, 2_147_483_648])
+    def test_rejects_invalid_after_seconds_values(self, sample_job: RunJob, value: object) -> None:
+        with pytest.raises(ValidationError):
+            RunJob.model_validate(sample_job.model_dump() | {"after_seconds": value})
 
     def test_run_metadata_roundtrip(self) -> None:
         """run_metadata round-trips through to_execution_params / from_run_orm."""

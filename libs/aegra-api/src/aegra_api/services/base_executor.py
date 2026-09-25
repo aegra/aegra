@@ -14,7 +14,7 @@ class BaseExecutor(ABC):
 
     @abstractmethod
     async def submit(self, job: RunJob) -> None:
-        """Enqueue a job for execution. Returns immediately."""
+        """Schedule a job for execution. Returns immediately, including delays."""
 
     @abstractmethod
     async def wait_for_completion(self, run_id: str, *, timeout: float = 300.0) -> None:

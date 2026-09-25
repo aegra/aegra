@@ -12,7 +12,7 @@ from datetime import UTC, datetime, timedelta
 
 import structlog
 from redis import RedisError
-from sqlalchemy import select, update
+from sqlalchemy import or_, select, update
 
 from aegra_api.core.orm import Run as RunORM
 from aegra_api.core.orm import _get_session_maker
@@ -95,6 +95,8 @@ class LeaseReaper:
         budget is only charged to crashed runs, not stuck pending ones.
         """
         now = datetime.now(UTC)
+        dispatch_lease_seconds = max(5, min(30, settings.worker.POSTGRES_POLL_INTERVAL_SECONDS * 2))
+        retry_after = now - timedelta(seconds=dispatch_lease_seconds)
         maker = _get_session_maker()
         async with maker() as session:
             crashed_result = await session.execute(
@@ -110,6 +112,8 @@ class LeaseReaper:
                 select(RunORM.run_id).where(
                     RunORM.status == "pending",
                     RunORM.claimed_by.is_(None),
+                    or_(RunORM.not_before.is_(None), RunORM.not_before <= now),
+                    or_(RunORM.dispatched_at.is_(None), RunORM.dispatched_at < retry_after),
                     RunORM.created_at < now - timedelta(seconds=settings.worker.STUCK_PENDING_THRESHOLD_SECONDS),
                 )
             )

@@ -1,4 +1,7 @@
+import asyncio
+
 import pytest
+from httpx import AsyncClient
 
 from aegra_api.settings import settings
 
@@ -96,6 +99,38 @@ async def test_runs_crud_and_join_e2e():
                 end_seen = True
                 break
         assert end_seen, "Expected an 'end' event when streaming a terminal run"
+
+
+@pytest.mark.e2e
+@pytest.mark.asyncio
+async def test_delayed_run_starts_after_requested_delay_e2e() -> None:
+    """A delayed run remains pending before its schedule and then completes."""
+    client = get_e2e_client()
+    thread = await client.threads.create()
+    thread_id = thread["thread_id"]
+
+    async with AsyncClient(base_url=settings.app.SERVER_URL, timeout=120.0) as http:
+        started = asyncio.get_running_loop().time()
+        response = await http.post(
+            f"/threads/{thread_id}/runs",
+            json={
+                "assistant_id": "agent",
+                "input": {"messages": [{"role": "user", "content": "Say delayed."}]},
+                "after_seconds": 2,
+            },
+        )
+    assert response.status_code == 200, response.text
+    run = response.json()
+    assert run["status"] == "pending"
+
+    await asyncio.sleep(0.5)
+    before_due = await client.runs.get(thread_id, run["run_id"])
+    assert before_due["status"] == "pending"
+
+    final_run = await await_terminal_run(client, thread_id, run["run_id"], timeout=30.0)
+    check_and_skip_if_geo_blocked(final_run)
+    assert asyncio.get_running_loop().time() - started >= 1.5
+    assert final_run["status"] in ("success", "error")
 
 
 @pytest.mark.e2e

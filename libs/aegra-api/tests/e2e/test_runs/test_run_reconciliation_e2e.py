@@ -30,6 +30,7 @@ async def _seed_run(
     run_status: str,
     thread_status: str,
     claimed_by: str | None = None,
+    claim_token: str | None = None,
     lease_expires_at: datetime | None = None,
     execution_params: dict[str, Any] | None = None,
     additional_run_status: str | None = None,
@@ -77,6 +78,7 @@ async def _seed_run(
                 user_id="anonymous",
                 execution_params=execution_params,
                 claimed_by=claimed_by,
+                claim_token=claim_token,
                 lease_expires_at=lease_expires_at,
                 created_at=now,
                 updated_at=now,
@@ -342,3 +344,48 @@ async def test_retry_exhaustion_marks_run_and_thread_error() -> None:
         assert run.claimed_by is None
         assert run.lease_expires_at is None
         assert thread.status == "error"
+
+
+@pytest.mark.e2e
+@pytest.mark.prod_only
+async def test_reaped_worker_cannot_terminalize_after_the_reaper_reclaims_its_run() -> None:
+    """Regression (#502): the reaper retires the expired attempt's claim token, so
+    a worker that comes back late can no longer write a result for the run."""
+    stale_token = str(uuid4())
+    expired = datetime.now(UTC) - timedelta(minutes=1)
+    async with _seed_run(
+        run_status="running",
+        thread_status="busy",
+        claimed_by="stalled-worker",
+        claim_token=stale_token,
+        lease_expires_at=expired,
+    ) as (thread_id, run_id):
+        deadline = asyncio.get_running_loop().time() + settings.worker.REAPER_INTERVAL_SECONDS * 2 + 5
+        while True:
+            run, _thread = await _read_state(thread_id, run_id)
+            if run.claim_token != stale_token or asyncio.get_running_loop().time() >= deadline:
+                break
+            await asyncio.sleep(0.5)
+
+        elog("Post-reap state", {"run_status": run.status, "claim_token": run.claim_token})
+        assert run.claim_token != stale_token, "reaper must retire the expired attempt's token"
+
+        engine = create_async_engine(settings.db.database_url)
+        maker = async_sessionmaker(engine, expire_on_commit=False)
+        try:
+            with patch("aegra_api.services.run_status._get_session_maker", return_value=maker):
+                finalized = await finalize_run(
+                    run_id,
+                    thread_id,
+                    user_id="anonymous",
+                    status="success",
+                    thread_status="idle",
+                    output={"from": "stalled-worker"},
+                    claim_token=stale_token,
+                )
+        finally:
+            await engine.dispose()
+
+        run, _thread = await _read_state(thread_id, run_id)
+        assert finalized is False
+        assert run.output != {"from": "stalled-worker"}

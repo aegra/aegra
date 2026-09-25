@@ -181,6 +181,10 @@ class Run(Base):
     claimed_by: Mapped[str | None] = mapped_column(Text, nullable=True)
     lease_expires_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True), nullable=True)
 
+    # Regenerated on every acquisition because reusable worker names cannot
+    # distinguish attempts; ownership-predicated writes match this token (#502).
+    claim_token: Mapped[str | None] = mapped_column(Text, nullable=True)
+
     # Indexes for performance
     __table_args__ = (
         Index("idx_runs_thread_id", "thread_id"),

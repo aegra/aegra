@@ -37,11 +37,14 @@ _TIMEOUT_ERROR = "Job exceeded maximum execution time"
 _TIMEOUT_SAFE_MESSAGE = "TimeoutError: execution failed"
 
 
-async def execute_run(job: RunJob) -> None:
+async def execute_run(job: RunJob, *, claim_token: str | None = None) -> None:
     """Execute a graph run, stream events to the broker, and update DB.
 
     Handles the full lifecycle: status transitions, event streaming,
     interrupt detection, cancellation, and error signaling.
+
+    ``claim_token`` fences every terminal write on the worker's acquisition of
+    this run; LocalExecutor holds no lease and passes none (#502).
     """
     run_id = job.identity.run_id
     thread_id = job.identity.thread_id
@@ -64,6 +67,7 @@ async def execute_run(job: RunJob) -> None:
                 status="interrupted",
                 thread_status="interrupted",
                 output=final_output.data,
+                claim_token=claim_token,
             )
         else:
             finalized = await finalize_run(
@@ -73,6 +77,7 @@ async def execute_run(job: RunJob) -> None:
                 status="success",
                 thread_status="idle",
                 output=final_output.data,
+                claim_token=claim_token,
             )
 
     except asyncio.CancelledError:
@@ -93,6 +98,7 @@ async def execute_run(job: RunJob) -> None:
                 thread_status="error",
                 output={},
                 error=_TIMEOUT_ERROR,
+                claim_token=claim_token,
             )
             if finalized:
                 await _best_effort_signal(
@@ -109,6 +115,7 @@ async def execute_run(job: RunJob) -> None:
                 status="interrupted",
                 thread_status="idle",
                 output={},
+                claim_token=claim_token,
             )
             if finalized:
                 await _best_effort_signal(streaming_service.signal_run_cancelled, run_id)
@@ -124,6 +131,7 @@ async def execute_run(job: RunJob) -> None:
             thread_status="error",
             output={},
             error=str(exc),
+            claim_token=claim_token,
         )
         if finalized:
             await _best_effort_signal(streaming_service.signal_run_error, run_id, safe_message, type(exc).__name__)
@@ -136,7 +144,9 @@ async def execute_run(job: RunJob) -> None:
         _shutdown_cancellations.discard(run_id)
         _timeout_cancellations.discard(run_id)
         active_runs.pop(run_id, None)
-        if not resumes_elsewhere:
+        # Only the attempt that won terminalization may tear the broker down:
+        # a rejected write means another attempt is still streaming (#502).
+        if not resumes_elsewhere and finalized:
             await streaming_service.cleanup_run(run_id)
             await _signal_run_done(run_id)
 

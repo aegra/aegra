@@ -141,6 +141,7 @@ class TestExecuteRunCancelledError:
             thread_status="error",
             output={},
             error="Job exceeded maximum execution time",
+            claim_token=None,
         )
         mock_streaming.signal_run_error.assert_awaited_once_with(
             "run-1",

@@ -88,15 +88,22 @@ Define your LangGraph agents.
 {
   "graphs": {
     "agent": "./src/react_agent/graph.py:graph",
-    "custom_agent": "./src/custom/graph.py:my_graph"
+    "custom_agent": {
+      "path": "./src/custom/graph.py:my_graph",
+      "description": "Handles custom workflows"
+    }
   }
 }
 ```
 
+Each value can be a string import path or an object with a required `path` and optional `description`. The string form remains supported for backwards compatibility.
+
 | Field | Type | Description |
 |-------|------|-------------|
 | Key | `string` | Graph ID (used in API calls to identify the graph) |
-| Value | `string` | Import path in format `./path/to/file.py:variable` |
+| Value | `string \| object` | String import path or graph configuration object |
+| `path` | `string` | Required in object form; import path in format `./path/to/file.py:variable` |
+| `description` | `string` | Optional graph description available to adapters and discovery tooling |
 
 The variable can be:
 

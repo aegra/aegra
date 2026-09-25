@@ -15,7 +15,7 @@ import sys
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Any, TypeVar
+from typing import Any, NotRequired, TypedDict, TypeVar, cast
 from uuid import uuid5
 
 import structlog
@@ -45,6 +45,21 @@ State = TypeVar("State")
 logger = structlog.get_logger(__name__)
 
 
+class GraphConfigEntry(TypedDict):
+    """Object form of a graph configuration entry."""
+
+    path: str
+    description: NotRequired[str]
+
+
+class GraphRegistryEntry(TypedDict):
+    """Normalized graph metadata used by graph consumers."""
+
+    file_path: str
+    export_name: str
+    description: NotRequired[str]
+
+
 def _module_name_for(graph_id: str) -> str:
     """Return a safe ``sys.modules`` key for a dynamically loaded graph.
 
@@ -54,6 +69,38 @@ def _module_name_for(graph_id: str) -> str:
     """
     safe_id = graph_id.replace(".", "_").replace("/", "_").replace("-", "_")
     return f"aegra_graphs.{safe_id}"
+
+
+def _parse_graph_config_entry(graph_id: str, graph_config: object) -> GraphRegistryEntry:
+    """Validate and normalize one graph configuration entry."""
+    description: str | None = None
+    if isinstance(graph_config, str):
+        graph_path = graph_config
+    elif isinstance(graph_config, dict):
+        graph_config_data = cast(dict[str, object], graph_config)
+        if "path" not in graph_config_data:
+            raise ValueError(f"Graph '{graph_id}' configuration is missing required 'path'")
+        graph_path = graph_config_data["path"]
+        if not isinstance(graph_path, str):
+            raise ValueError(f"Graph '{graph_id}' field 'path' must be a string")
+        if "description" in graph_config_data:
+            raw_description = graph_config_data["description"]
+            if not isinstance(raw_description, str):
+                raise ValueError(f"Graph '{graph_id}' field 'description' must be a string")
+            description = raw_description
+    else:
+        raise ValueError(f"Graph '{graph_id}' configuration must be a string or object")
+
+    if ":" not in graph_path:
+        raise ValueError(f"Invalid graph path format for '{graph_id}': {graph_path}")
+
+    file_path, export_name = graph_path.split(":", 1)
+    if not file_path or not export_name:
+        raise ValueError(f"Invalid graph path format for '{graph_id}': {graph_path}")
+    registry_entry = GraphRegistryEntry(file_path=file_path, export_name=export_name)
+    if description is not None:
+        registry_entry["description"] = description
+    return registry_entry
 
 
 class LangGraphService:
@@ -69,7 +116,7 @@ class LangGraphService:
         self.config_path = Path(config_path) if config_path else Path("aegra.json")
         self._explicit_config = config_path is not None
         self.config: dict[str, Any] | None = None
-        self._graph_registry: dict[str, Any] = {}
+        self._graph_registry: dict[str, GraphRegistryEntry] = {}
         # Cache for base graph definitions (without checkpointer/store).
         # For factory graphs, this holds the default-compiled graph (for schema extraction).
         self._base_graph_cache: dict[str, Pregel] = {}
@@ -127,7 +174,10 @@ class LangGraphService:
         """Load graph definitions from aegra.json"""
         if self.config is None:
             raise ValueError("Configuration not loaded")
-        graphs_config = self.config.get("graphs", {})
+        raw_graphs_config = self.config.get("graphs", {})
+        if not isinstance(raw_graphs_config, dict):
+            raise ValueError("Configuration field 'graphs' must be an object")
+        graphs_config = cast(dict[str, str | GraphConfigEntry], raw_graphs_config)
 
         # Detect graph_ids that collide after sanitisation (e.g. "a.b" and
         # "a_b" both map to aegra_graphs.a_b in sys.modules).
@@ -141,16 +191,8 @@ class LangGraphService:
                 )
             seen_modules[mod_name] = graph_id
 
-        for graph_id, graph_path in graphs_config.items():
-            # Parse path format: "./graphs/weather_agent.py:graph"
-            if ":" not in graph_path:
-                raise ValueError(f"Invalid graph path format: {graph_path}")
-
-            file_path, export_name = graph_path.split(":", 1)
-            self._graph_registry[graph_id] = {
-                "file_path": file_path,
-                "export_name": export_name,
-            }
+        for graph_id, graph_config in graphs_config.items():
+            self._graph_registry[graph_id] = _parse_graph_config_entry(graph_id, graph_config)
 
     async def _load_all_graph_modules(self) -> None:
         """Eagerly load all graph modules, classifying factories without calling them.
@@ -479,7 +521,7 @@ class LangGraphService:
 
         return await self._get_base_graph(graph_id)
 
-    async def _load_graph_from_file(self, graph_id: str, graph_info: dict[str, str]) -> Pregel | StateGraph | None:
+    async def _load_graph_from_file(self, graph_id: str, graph_info: GraphRegistryEntry) -> Pregel | StateGraph | None:
         """Load graph from filesystem.
 
         Paths are resolved relative to the config file's directory.

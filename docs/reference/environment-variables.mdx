@@ -141,7 +141,7 @@ In dev mode (`REDIS_BROKER_ENABLED=false`), runs execute as in-process asyncio t
 | `N_JOBS_PER_WORKER` | `10` | Maximum concurrent runs per worker loop |
 | `BG_JOB_TIMEOUT_SECS` | `3600` | Maximum execution time per run (seconds) |
 | `BG_JOB_MAX_RETRIES` | `3` | Maximum retry attempts before a crashed run is permanently failed |
-| `STUCK_PENDING_THRESHOLD_SECONDS` | `120` | How long a pending run can sit before the reaper re-enqueues it |
+| `STUCK_PENDING_THRESHOLD_SECONDS` | `120` | How long a pending run can sit before the reaper re-enqueues it, if it is no longer in the job queue |
 | `LEASE_DURATION_SECONDS` | `30` | Lease TTL before a crashed run is reclaimed |
 | `HEARTBEAT_INTERVAL_SECONDS` | `10` | How often workers extend their lease |
 | `REAPER_INTERVAL_SECONDS` | `15` | How often the reaper scans for expired leases |

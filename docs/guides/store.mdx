@@ -227,29 +227,35 @@ Add the node to your graph as usual — LangGraph injects the `store` parameter 
 
 Inside a graph, the store is **not** scoped: a graph writes to exactly the namespace it asks for. The REST API, on the other hand, always applies [namespace scoping](#namespace-scoping) to every request. Any namespace that does not already start with `["users", <your identity>]` (or a configured `store.scopes` prefix followed by your own attribute values) gets buried one level deeper.
 
-So a `StoreBackend` namespace **must be fully qualified**. The Deep Agents docs suggest `(rt.server_info.user.identity, "filesystem")`; on Aegra that writes to the physical prefix `<identity>.filesystem`, while a read through the API for `("<identity>", "filesystem")` is rewritten to `("users", "<identity>", "<identity>", "filesystem")` and returns nothing. The agent reads its own memories back, and the REST API sees an empty store. With auth disabled the identity is `anonymous`, so the graph writes to `anonymous.filesystem` and the API looks under `users.anonymous.anonymous.filesystem`.
+So a `StoreBackend` namespace **must be fully qualified**. The Deep Agents docs suggest `(rt.server_info.user.identity, "filesystem")`, which on Aegra writes to the physical prefix `<identity>.filesystem` — a read through the API for `("<identity>", "filesystem")` is rewritten to `("users", "<identity>", "<identity>", "filesystem")` and finds nothing, so the agent reads its own memories back while the REST API sees an empty store. With auth disabled the identity is `anonymous`: the graph writes to `anonymous.filesystem` and the API looks under `users.anonymous.anonymous.filesystem`.
 
-Prefix the namespace with `"users"` and both sides line up:
+`rt.server_info` is metadata injected by LangGraph Server, which Aegra doesn't run, so it is `None` here. Resolve the identity yourself in a [factory graph](/reference/configuration#factory-graphs) and capture it — `runtime.user` there is the full `User` model, including custom fields from your auth handler:
 
 ```python
 from deepagents import create_deep_agent
 from deepagents.backends import CompositeBackend, StateBackend, StoreBackend
+from langgraph_sdk.runtime import ServerRuntime
 
-graph = create_deep_agent(
-    model=model,
-    backend=CompositeBackend(
-        default=StateBackend(),
-        routes={
-            # Fully qualified: "users" + the caller's identity.
-            "/memories/": StoreBackend(
-                namespace=lambda rt: ("users", rt.server_info.user.identity, "filesystem")
-            )
-        },
-    ),
-)
+
+async def graph(runtime: ServerRuntime):
+    """Factory graph — runtime.user is the authenticated user."""
+    identity = runtime.user.identity
+
+    return create_deep_agent(
+        model=model,
+        backend=CompositeBackend(
+            default=StateBackend(),
+            routes={
+                # Fully qualified: "users" + the caller's identity.
+                "/memories/": StoreBackend(
+                    namespace=lambda rt: ("users", identity, "filesystem")
+                )
+            },
+        ),
+    )
 ```
 
-Because the namespace now starts with the caller's own identity, the API passes it through unchanged, so read, list, and edit all address the rows the agent wrote:
+Because the namespace now starts with `["users", <your identity>]`, the API passes it through unchanged, so read, list, and edit all address the rows the agent wrote:
 
 ```python
 await client.store.search_items(namespace_prefix=["users", "alice", "filesystem"])
@@ -263,32 +269,7 @@ await client.store.put_item(
 ```
 
 <Note>
-  The `namespace` lambda only receives the runtime, not the run config. If `rt.server_info` isn't available in your setup, resolve the identity once in a [factory graph](/reference/configuration#graph-factories) and capture it — `runtime.user` there is the full `User` model, including custom fields from your auth handler:
-
-  ```python
-  from langgraph_sdk.runtime import ServerRuntime
-
-
-  async def graph(runtime: ServerRuntime):
-      identity = runtime.user.identity
-      return create_deep_agent(
-          model=model,
-          backend=CompositeBackend(
-              default=StateBackend(),
-              routes={
-                  "/memories/": StoreBackend(
-                      namespace=lambda rt: ("users", identity, "filesystem")
-                  )
-              },
-          ),
-      )
-  ```
-
-  See [Accessing user data in your graph](/guides/authentication#accessing-user-data-in-your-graph).
-</Note>
-
-<Note>
   With a [configured scope](#configurable-scoping), qualify with that scope's prefix and your own attribute values instead — `("orgs", <your org_id>, "filesystem")` for a `"orgs": ["org_id"]` scope. Scopes are opt-in, so an unqualified namespace never resolves to one: it always falls back to per-user scope.
 </Note>
 
-This is the same isolation described in [Namespace scoping](#namespace-scoping), applied consistently. Alice can reach `["users", "alice", ...]`, and Bob's requests are buried under `["users", "bob", ...]` even when he asks for Alice's namespace, so he never sees her items. The `"users"` prefix stays reserved and cannot be remapped.
+Qualifying the namespace doesn't weaken the [isolation](#namespace-scoping) described above: Bob's requests are still buried under `["users", "bob", ...]` even when he asks for Alice's namespace, so he never sees her items.

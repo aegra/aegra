@@ -19,6 +19,7 @@ import inspect
 import typing
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
+from functools import cache
 from typing import Any, Literal, get_args, get_origin
 
 import structlog
@@ -31,6 +32,8 @@ from langgraph_sdk.runtime import (
     _ExecutionRuntime,
     _ReadRuntime,
 )
+from pydantic import TypeAdapter, ValidationError
+from pydantic.errors import PydanticSchemaGenerationError
 
 from aegra_api.core.auth_ctx import get_auth_ctx
 from aegra_api.models.auth import User
@@ -253,20 +256,111 @@ def is_for_execution(access_context: AccessContext) -> bool:
 
 
 # ---------------------------------------------------------------------------
-# Context coercion
+# Context validation and coercion
 # ---------------------------------------------------------------------------
+
+
+class ContextValidationError(ValueError):
+    """A context does not satisfy the context type declared by a graph factory.
+
+    Carries Pydantic-shaped ``errors`` (``loc``/``msg``/``type`` entries, ``loc``
+    rooted at ``context``) so the API layer can hand them to the caller as a
+    ``422`` body without re-deriving field locations.
+    """
+
+    def __init__(self, graph_id: str, context_type: type, errors: list[dict[str, Any]]) -> None:
+        self.graph_id = graph_id
+        self.context_type = context_type
+        self.errors = errors
+        super().__init__(f"context does not satisfy {context_type.__name__} declared by graph '{graph_id}'")
+
+
+def validate_context(context: dict[str, Any] | None, graph_id: str) -> None:
+    """Check *context* against the factory's declared context type ``T``.
+
+    A no-op when the graph declares no context type: an unannotated factory
+    accepts anything.
+
+    Raises:
+        ContextValidationError: If the graph declares ``ServerRuntime[T]`` and
+            *context* cannot be converted to ``T``.
+    """
+    ctx_type = _FACTORY_CONTEXT_TYPES.get(graph_id)
+    if context is None or ctx_type is None:
+        return
+
+    try:
+        _instantiate_context(context, ctx_type)
+    # A rejection only. ValidationError is a ValueError, a dataclass raises
+    # TypeError for a bad field, and anything else is the server's fault: it
+    # must stay a 500 rather than blame the caller and echo its message.
+    except (TypeError, ValueError) as exc:
+        raise ContextValidationError(graph_id, ctx_type, _context_errors(exc)) from exc
+
+
+@cache
+def _dataclass_validator(ctx_type: type) -> TypeAdapter | None:
+    """A cached field-type validator for a dataclass, or ``None`` if there can be one.
+
+    A dataclass with a field pydantic cannot describe has no schema to build, so
+    that type falls back to plain construction.
+    """
+    try:
+        return TypeAdapter(ctx_type)
+    except PydanticSchemaGenerationError:
+        return None
+
+
+def _instantiate_context(context: dict[str, Any], ctx_type: type) -> Any:
+    """Build a ``ctx_type`` from *context*, or return it unchanged.
+
+    A type with no known construction path gets the raw dict, not a guess.
+    """
+    if _is_pydantic_model(ctx_type):
+        return ctx_type.model_validate(context)
+    if dataclasses.is_dataclass(ctx_type):
+        # A dataclass does not enforce its own annotations, so ``ctx_type(**context)``
+        # would accept {"value": "abc"} for ``value: int`` and hand the graph a str.
+        validator = _dataclass_validator(ctx_type)
+        if validator is None:
+            return ctx_type(**context)
+        unexpected = sorted(set(context) - {f.name for f in dataclasses.fields(ctx_type)})
+        if unexpected:
+            # TypeAdapter ignores extras; __init__ is what refuses them.
+            raise TypeError(f"unexpected keyword argument {unexpected[0]!r}")
+        return validator.validate_python(context)
+    return context
+
+
+def _context_errors(exc: Exception) -> list[dict[str, Any]]:
+    """Render *exc* as Pydantic-shaped error entries rooted at ``context``.
+
+    Anything that is not a ``ValidationError`` — notably a dataclass's
+    ``TypeError`` — collapses to one entry. ``input`` is dropped rather than
+    echoing the submitted values back.
+    """
+    if isinstance(exc, ValidationError):
+        return [
+            {
+                "loc": ["context", *(entry.get("loc") or ())],
+                "msg": entry.get("msg", ""),
+                "type": entry.get("type", "value_error"),
+            }
+            for entry in exc.errors()
+        ]
+    return [{"loc": ["context"], "msg": str(exc), "type": "value_error"}]
 
 
 def coerce_context(context: dict[str, Any] | None, graph_id: str) -> Any:
     """Coerce a raw context dict to the factory's declared context type ``T``.
 
     If the factory declared ``ServerRuntime[T]``, the raw dict is converted
-    to an instance of ``T``:
-    - Pydantic ``BaseModel`` → ``T.model_validate(context)``
-    - ``dataclass`` → ``T(**context)``
+    to an instance of ``T``.
 
-    On failure (e.g., validation error or missing fields), logs a warning
-    and returns the raw dict for graceful degradation.
+    Contexts are checked by :func:`validate_context` when the run is created,
+    so a failure here means an unchecked context reached execution. Handing the
+    graph the raw dict instead would run it against something other than the
+    type it declared, so the failure is logged and re-raised.
 
     Args:
         context: The raw context dict from the request, or ``None``.
@@ -274,6 +368,9 @@ def coerce_context(context: dict[str, Any] | None, graph_id: str) -> Any:
 
     Returns:
         A coerced ``T`` instance, the raw dict, or ``None``.
+
+    Raises:
+        ContextValidationError: If *context* cannot be converted to ``T``.
     """
     if context is None:
         return None
@@ -283,19 +380,15 @@ def coerce_context(context: dict[str, Any] | None, graph_id: str) -> Any:
         return context
 
     try:
-        if _is_pydantic_model(ctx_type):
-            return ctx_type.model_validate(context)
-        if dataclasses.is_dataclass(ctx_type):
-            return ctx_type(**context)
-    except Exception as exc:
-        logger.warning(
+        return _instantiate_context(context, ctx_type)
+    except (TypeError, ValueError) as exc:
+        logger.error(
             "context_coercion_failed",
             graph_id=graph_id,
             context_type=ctx_type.__name__,
             exc=str(exc),
-            msg="Falling back to raw dict",
         )
-    return context
+        raise ContextValidationError(graph_id, ctx_type, _context_errors(exc)) from exc
 
 
 def _is_pydantic_model(cls: type) -> bool:

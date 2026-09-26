@@ -20,8 +20,10 @@ from aegra_api.core.orm import Run as RunORM
 from aegra_api.core.orm import Thread as ThreadORM
 from aegra_api.core.orm import _get_session_maker
 from aegra_api.models import Run, RunCreate, User
+from aegra_api.models.errors import DetailedHTTPException
 from aegra_api.models.run_job import RunBehavior, RunExecution, RunIdentity, RunJob
 from aegra_api.services.executor import executor
+from aegra_api.services.graph_factory import ContextValidationError, validate_context
 from aegra_api.services.langgraph_service import get_langgraph_service
 from aegra_api.services.run_status import set_thread_status
 from aegra_api.utils.assistants import resolve_assistant_id
@@ -201,6 +203,33 @@ async def update_thread_metadata(
     )
 
 
+def _format_context_errors(graph_id: str, errors: list[dict[str, Any]]) -> str:
+    """One-line 422 message naming each field that failed validation."""
+    parts = [f"{'.'.join(str(p) for p in entry['loc'])}: {entry['msg']}" for entry in errors]
+    return f"Invalid context for graph '{graph_id}': " + "; ".join(parts)
+
+
+def _validate_context_against_graph(context: dict[str, Any], graph_id: str) -> None:
+    """Reject a context the graph's declared context type cannot accept.
+
+    A factory annotated ``ServerRuntime[T]`` declares the shape of the context
+    its runs accept, so a context that is not a ``T`` asks for a run the graph
+    cannot perform. Rejecting here keeps that a request error rather than a
+    failed run: nothing is persisted or enqueued yet.
+
+    Graphs that declare no context type are unaffected — there is nothing to
+    validate against, and any context reaches them as a raw dict as before.
+    """
+    try:
+        validate_context(context, graph_id)
+    except ContextValidationError as exc:
+        raise DetailedHTTPException(
+            422,
+            detail=_format_context_errors(graph_id, exc.errors),
+            details={"errors": exc.errors},
+        ) from exc
+
+
 def _resolve_checkpoint(request: RunCreate) -> dict[str, Any] | None:
     """Fold the top-level ``checkpoint_id`` into ``checkpoint``; ``checkpoint`` keys win."""
     if request.checkpoint_id is None:
@@ -265,6 +294,8 @@ async def _prepare_run(
     available_graphs = langgraph_service.list_graphs()
     if assistant.graph_id not in available_graphs:
         raise HTTPException(404, f"Graph '{assistant.graph_id}' not found for assistant")
+
+    _validate_context_against_graph(context, assistant.graph_id)
 
     # Mark thread as busy and update metadata
     await update_thread_metadata(

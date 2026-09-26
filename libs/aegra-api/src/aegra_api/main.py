@@ -1,6 +1,7 @@
 """FastAPI application for Aegra (Agent Protocol Server)"""
 
-from collections.abc import AsyncIterator
+import re
+from collections.abc import AsyncIterator, Iterator
 from contextlib import asynccontextmanager
 from typing import Any
 
@@ -10,8 +11,9 @@ from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.dependencies.utils import get_parameterless_sub_dependant
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
-from fastapi.routing import APIRoute
+from fastapi.routing import APIRoute, APIRouter
 from starlette.requests import HTTPConnection
+from starlette.routing import compile_path
 
 from aegra_api import __version__
 from aegra_api.api.assistants import router as assistants_router
@@ -343,6 +345,91 @@ def _add_common_middleware(app: FastAPI, cors_config: CorsConfig | None) -> None
     app.add_middleware(ContentTypeFixMiddleware)
 
 
+def _api_routes(routes: list[Any], prefix: str = "") -> Iterator[tuple[str, APIRoute]]:
+    """Every ``APIRoute`` with the path it is served at, not the one it declares.
+
+    FastAPI wraps an included router rather than flattening it, so a custom app
+    built with ``include_router`` has no top-level routes at all, and the routes
+    inside carry their source path — a router included under a prefix declares
+    ``/assistants`` while serving ``/api/assistants``.
+    """
+    for route in routes:
+        if isinstance(route, APIRoute):
+            yield prefix + route.path, route
+            continue
+        nested = getattr(route, "original_router", None)
+        if nested is not None:
+            context = getattr(route, "include_context", None)
+            yield from _api_routes(list(nested.routes), prefix + getattr(context, "prefix", ""))
+        # Anything else holding routes — a Mount, a Host — is a separate
+        # application. This one does not publish its operations, so they cannot
+        # stand in for a core one: dropping the core route for them would leave
+        # the path served but undocumented.
+
+
+_GROUP_NAME = re.compile(r"\(\?P<[^>]+>")
+
+
+def _url_space(path: str) -> str:
+    """The requests *path* matches, so two spellings of one route compare equal.
+
+    Starlette decides what a converter means — ``{id}`` and ``{id:str}`` accept
+    the same requests, ``{p:path}`` does not — so the comparison is its compiled
+    pattern with the parameter names taken out.
+    """
+    pattern, _, _ = compile_path(path)
+    return _GROUP_NAME.sub("(", pattern.pattern)
+
+
+def _claimed_operations(app: FastAPI) -> set[tuple[str, str]]:
+    """The ``(path, method)`` pairs the app already serves, by URL space."""
+    return {(_url_space(path), method) for path, route in _api_routes(list(app.routes)) for method in route.methods}
+
+
+def _include_core_router(app: FastAPI, router: APIRouter, claimed: set[tuple[str, str]]) -> None:
+    """Include *router*, leaving out operations the app already declares.
+
+    The custom route already wins dispatch; dropping the core duplicate is what
+    stops the schema publishing the operation that no longer serves the path.
+    """
+    overridden = [route for route in router.routes if isinstance(route, APIRoute) and _overrides(route, claimed)]
+    if not overridden:
+        app.include_router(router)
+        return
+
+    for route in overridden:
+        logger.info(
+            "Custom app overrides core route",
+            path=route.path,
+            methods=sorted(route.methods),
+        )
+
+    kept = APIRouter()
+    kept.routes = [route for route in router.routes if route not in overridden]
+    app.include_router(kept)
+
+
+def _overrides(route: APIRoute, claimed: set[tuple[str, str]]) -> bool:
+    """Whether the app has taken over *route* entirely.
+
+    A partial claim keeps the route: losing an unclaimed method is worse than
+    the duplicate this filtering removes.
+    """
+    space = _url_space(route.path)
+    claimed_methods = {method for method in route.methods if (space, method) in claimed}
+    if not claimed_methods:
+        return False
+    if claimed_methods < route.methods:
+        logger.warning(
+            "Custom app claims only some methods of a core route; keeping it whole",
+            path=route.path,
+            claimed=sorted(claimed_methods),
+            declared=sorted(route.methods),
+        )
+        return False
+    return True
+
+
 def _include_core_routers(app: FastAPI) -> None:
     """Include all core API routers with auth dependency.
 
@@ -358,17 +445,23 @@ def _include_core_routers(app: FastAPI) -> None:
     Args:
         app: FastAPI application instance
     """
-    app.include_router(health_router)
-    app.include_router(assistants_router)
-    app.include_router(threads_router)
-    app.include_router(runs_router)
-    app.include_router(stateless_runs_router)
-    app.include_router(crons_router)
-    app.include_router(store_router)
-    app.include_router(event_streaming_router)
+    claimed = _claimed_operations(app)
+    for router in (
+        health_router,
+        assistants_router,
+        threads_router,
+        runs_router,
+        stateless_runs_router,
+        crons_router,
+        store_router,
+        event_streaming_router,
+    ):
+        _include_core_router(app, router, claimed)
 
     # Attach @auth.on dispatch from the route registry. Routes must opt out
     # explicitly; forgetting the in-body call no longer disables authorization.
+    # Keyed by path and method, so a custom app's overriding route is wired
+    # exactly as the core one it replaced.
     apply_auth_enforcement(app)
 
 

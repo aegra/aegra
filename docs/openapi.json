@@ -572,7 +572,7 @@
           "Assistants"
         ],
         "summary": "Get Assistant Schemas",
-        "description": "Get the JSON schemas for an assistant's graph.\n\nReturns the input, output, state, and config schemas derived from the\nunderlying graph's type annotations.",
+        "description": "Get the JSON schemas for an assistant's graph.\n\nReturns ``graph_id`` and the input, output, state, config and context\nschemas derived from the graph's type annotations. A schema the server\ncould not derive is ``null``; the key is always present.",
         "operationId": "get_assistant_schemas_assistants__assistant_id__schemas_get",
         "parameters": [
           {
@@ -3381,40 +3381,88 @@
       },
       "AgentSchemas": {
         "properties": {
+          "graph_id": {
+            "type": "string",
+            "title": "Graph Id",
+            "description": "Identifier of the graph these schemas describe."
+          },
           "input_schema": {
-            "additionalProperties": true,
-            "type": "object",
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
             "title": "Input Schema",
             "description": "JSON Schema for agent inputs"
           },
           "output_schema": {
-            "additionalProperties": true,
-            "type": "object",
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
             "title": "Output Schema",
             "description": "JSON Schema for agent outputs"
           },
           "state_schema": {
-            "additionalProperties": true,
-            "type": "object",
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
             "title": "State Schema",
             "description": "JSON Schema for agent state"
           },
           "config_schema": {
-            "additionalProperties": true,
-            "type": "object",
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
             "title": "Config Schema",
             "description": "JSON Schema for agent config"
+          },
+          "context_schema": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Context Schema",
+            "description": "JSON Schema for the run context declared by a graph factory"
           }
         },
         "type": "object",
         "required": [
+          "graph_id",
           "input_schema",
           "output_schema",
           "state_schema",
-          "config_schema"
+          "config_schema",
+          "context_schema"
         ],
         "title": "AgentSchemas",
-        "description": "Agent schema definitions for client integration"
+        "description": "Agent schema definitions for client integration.\n\nMirrors ``langgraph_sdk.schema.GraphSchema``. A schema the server could not\nderive from the graph is ``null``."
       },
       "Assistant": {
         "properties": {

@@ -225,9 +225,9 @@ Add the node to your graph as usual — LangGraph injects the `store` parameter 
 
 ### Deep Agents and StoreBackend
 
-A `StoreBackend` namespace must be fully qualified, because the REST API buries anything not already headed by `["users", <identity>]` — see [namespace scoping](#namespace-scoping).
+A `StoreBackend` namespace must be fully qualified: the REST API buries anything not already headed by `["users", <identity>]` (see [namespace scoping](#namespace-scoping)).
 
-An unqualified `("<identity>", "filesystem")` stores at the physical prefix `<identity>.filesystem`, while the same namespace over REST is rewritten to `("users", "<identity>", "<identity>", "filesystem")` and finds nothing. The agent reads its own memories; the API sees an empty store. With auth off the identity is `anonymous` — written to `anonymous.filesystem`, read from `users.anonymous.anonymous.filesystem`.
+An unqualified `("<identity>", "filesystem")` stores under `<identity>.filesystem`. Over REST that namespace is rewritten to `("users", "<identity>", "<identity>", "filesystem")` and finds nothing. The agent reads its own memories; the API sees an empty store. With auth off the identity is `anonymous` — written to `anonymous.filesystem`, read from `users.anonymous.anonymous.filesystem`.
 
 Deep Agents documents `rt.server_info.user.identity`. On Aegra `server_info` is `None`, so that path errors before any write. Use a [factory graph](/reference/configuration#factory-graphs) and `runtime.user` instead, which is `None` during introspection:
 
@@ -255,7 +255,7 @@ async def graph(runtime: ServerRuntime):
     )
 ```
 
-`("users", <identity>, ...)` passes through scoping unchanged, so `client.store.*` addresses the same rows. Keys are paths inside the routed directory — `/memories/` is stripped — and values use the backend's file shape:
+`("users", <identity>, ...)` passes through scoping unchanged, so `client.store.*` addresses the same rows. Keys are paths inside the routed directory (`/memories/` is stripped) and values use the backend's file shape:
 
 ```python
 await client.store.search_items(["users", "alice", "filesystem"])
@@ -272,4 +272,4 @@ await client.store.put_item(
   With a [configured scope](#configurable-scoping), qualify with that scope's prefix and your own attribute values instead — `("orgs", <your org_id>, "filesystem")` for a `"orgs": ["org_id"]` scope. Scopes are opt-in, so an unqualified namespace never resolves to one: it always falls back to per-user scope.
 </Note>
 
-Qualifying the namespace doesn't weaken the [isolation](#namespace-scoping) described above: Bob's requests are still buried under `["users", "bob", ...]`, so he never sees Alice's items.
+Qualifying the namespace doesn't weaken the [isolation](#namespace-scoping): Bob's requests are buried under `["users", "bob", ...]`, so he never sees Alice's items.

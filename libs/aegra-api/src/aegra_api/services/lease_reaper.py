@@ -75,16 +75,18 @@ class LeaseReaper:
                 pushed = await self._reenqueue(retryable)
                 REAPER_RECOVERED_RUNS.labels(outcome="crashed_retried").inc(len(pushed))
 
-        # Stuck pending: just re-enqueue (never executed, no retry budget)
+        lost: list[str] = []
         if stuck_pending:
-            logger.warning("Re-enqueueing stuck pending runs", count=len(stuck_pending), run_ids=stuck_pending)
-            pushed = await self._reenqueue(stuck_pending)
-            REAPER_RECOVERED_RUNS.labels(outcome="stuck_pending").inc(len(pushed))
+            lost = await self._missing_from_queue(stuck_pending)
+            if lost:
+                logger.warning("Re-enqueueing stuck pending runs", count=len(lost), run_ids=lost)
+                pushed = await self._reenqueue(lost)
+                REAPER_RECOVERED_RUNS.labels(outcome="stuck_pending").inc(len(pushed))
 
         logger.info(
             "Lease recovery complete",
             crashed_recovered=len(crashed),
-            stuck_reenqueued=len(stuck_pending),
+            stuck_reenqueued=len(lost),
         )
 
     @staticmethod
@@ -205,6 +207,18 @@ class LeaseReaper:
             await session.commit()
 
         return retryable, exhausted
+
+    @staticmethod
+    async def _missing_from_queue(run_ids: list[str]) -> list[str]:
+        """Pending runs gone from the job queue; a queued one is only waiting for a worker (#644)."""
+        try:
+            client = redis_manager.get_client()
+            queued = set(await client.lrange(settings.worker.WORKER_QUEUE_KEY, 0, -1))  # type: ignore[invalid-await]
+        except RedisError:
+            # Nothing can be pushed either; workers fall back to the Postgres poll.
+            logger.warning("Redis unavailable; cannot check stuck pending runs against the queue", run_ids=run_ids)
+            return []
+        return [run_id for run_id in run_ids if run_id not in queued]
 
     @staticmethod
     async def _reenqueue(run_ids: list[str]) -> list[str]:

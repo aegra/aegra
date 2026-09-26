@@ -470,3 +470,55 @@ class TestTerminalStateRaces:
             await execute_run(_make_job())
 
         mock_signal_end.assert_not_awaited()
+
+
+class TestBuildRunConfigAssistantId:
+    """The run's assistant reaches the graph config and the graph factory."""
+
+    def test_build_run_config_stamps_assistant_id(self) -> None:
+        job = RunJob(
+            identity=RunIdentity(run_id="run-1", thread_id="thread-1", graph_id="graph-1", assistant_id="asst-1"),
+            user=User(identity="user-1"),
+            execution=RunExecution(input_data={"msg": "hello"}),
+        )
+
+        config = run_executor_module._build_run_config(job)
+
+        assert config["configurable"]["assistant_id"] == "asst-1"
+
+    def test_build_run_config_ignores_client_assistant_id(self) -> None:
+        """A run config posted by the client cannot name a different assistant."""
+        job = RunJob(
+            identity=RunIdentity(run_id="run-1", thread_id="thread-1", graph_id="graph-1", assistant_id="asst-1"),
+            user=User(identity="user-1"),
+            execution=RunExecution(
+                input_data={"msg": "hello"},
+                config={"configurable": {"assistant_id": "victim-assistant"}},
+            ),
+        )
+
+        config = run_executor_module._build_run_config(job)
+
+        assert config["configurable"]["assistant_id"] == "asst-1"
+
+    @pytest.mark.asyncio
+    async def test_stream_graph_passes_assistant_id_to_the_factory(self) -> None:
+        job = RunJob(
+            identity=RunIdentity(run_id="run-1", thread_id="thread-1", graph_id="graph-1", assistant_id="asst-1"),
+            user=User(identity="user-1"),
+            execution=RunExecution(input_data={"msg": "hello"}),
+        )
+
+        mock_graph = MagicMock()
+        mock_graph.__aenter__ = AsyncMock(return_value=mock_graph)
+        mock_graph.__aexit__ = AsyncMock(return_value=False)
+        mock_service = MagicMock()
+        mock_service.get_graph = MagicMock(return_value=mock_graph)
+
+        with (
+            patch("aegra_api.services.run_executor.get_langgraph_service", return_value=mock_service),
+            patch("aegra_api.services.run_executor.stream_graph_events", return_value=_empty_async_gen()),
+        ):
+            await run_executor_module._stream_graph(job)
+
+        assert mock_service.get_graph.call_args.kwargs["assistant_id"] == "asst-1"

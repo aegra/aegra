@@ -346,6 +346,11 @@ Convenience shortcuts are also available directly on `config["configurable"]`:
 - `config["configurable"]["user_id"]` -- the user's identity
 - `config["configurable"]["user_display_name"]` -- the user's display name
 
+Runs also carry `config["configurable"]["assistant_id"]`, the assistant the run
+executes as. Like `thread_id` and `run_id` it is server-authoritative: a value
+in the request body is overwritten, so it can be used to scope per-assistant
+credentials. See [factory graphs](/reference/configuration#factory-graphs).
+
 ## Provider examples
 
 <Tabs>

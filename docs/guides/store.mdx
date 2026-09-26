@@ -227,9 +227,9 @@ Add the node to your graph as usual — LangGraph injects the `store` parameter 
 
 Inside a graph, the store is **not** scoped: a graph writes to exactly the namespace it asks for. The REST API, on the other hand, always applies [namespace scoping](#namespace-scoping) to every request. Any namespace that does not already start with `["users", <your identity>]` (or a configured `store.scopes` prefix followed by your own attribute values) gets buried one level deeper.
 
-So a `StoreBackend` namespace **must be fully qualified**. The Deep Agents docs suggest `(rt.server_info.user.identity, "filesystem")`, which on Aegra writes to the physical prefix `<identity>.filesystem` — a read through the API for `("<identity>", "filesystem")` is rewritten to `("users", "<identity>", "<identity>", "filesystem")` and finds nothing, so the agent reads its own memories back while the REST API sees an empty store. With auth disabled the identity is `anonymous`: the graph writes to `anonymous.filesystem` and the API looks under `users.anonymous.anonymous.filesystem`.
+So a `StoreBackend` namespace **must be fully qualified**. A graph writes to exactly the tuple it asks for, so with no `"users"` head the write lands on an unscoped prefix: an agent writing under `("<identity>", "filesystem")` stores at `<identity>.filesystem`, while a read through the API for that same namespace is rewritten to `("users", "<identity>", "<identity>", "filesystem")` and finds nothing. The agent reads its own memories back while the REST API sees an empty store. With auth disabled the identity is `anonymous`: the write lands on `anonymous.filesystem` and the API looks under `users.anonymous.anonymous.filesystem`.
 
-`rt.server_info` is metadata injected by LangGraph Server, which Aegra doesn't run, so it is `None` here. Resolve the identity yourself in a [factory graph](/reference/configuration#factory-graphs) and capture it — `runtime.user` there is the full `User` model, including custom fields from your auth handler:
+Separately, the identity itself has to come from somewhere Aegra populates. The Deep Agents docs suggest `rt.server_info.user.identity`, but `server_info` is metadata injected by LangGraph Server, which Aegra doesn't run, so it is `None` here and that expression fails before any write. Resolve the identity in a [factory graph](/reference/configuration#factory-graphs) instead — `runtime.user` there is the full `User` model, including custom fields from your auth handler. It can also be `None`, because Aegra calls the factory for introspection outside a request, so guard it:
 
 ```python
 from deepagents import create_deep_agent
@@ -238,8 +238,11 @@ from langgraph_sdk.runtime import ServerRuntime
 
 
 async def graph(runtime: ServerRuntime):
-    """Factory graph — runtime.user is the authenticated user."""
-    identity = runtime.user.identity
+    """Factory graph — runtime.user is None during Aegra's introspection calls."""
+    user = runtime.user
+    # Introspection passes no user; "anonymous" is the identity Aegra itself
+    # uses when auth is disabled, so those rows stay reachable over REST.
+    identity = user.identity if user else "anonymous"
 
     return create_deep_agent(
         model=model,
@@ -255,16 +258,17 @@ async def graph(runtime: ServerRuntime):
     )
 ```
 
-Because the namespace now starts with `["users", <your identity>]`, the API passes it through unchanged, so read, list, and edit all address the rows the agent wrote:
+Because the namespace now starts with `["users", <your identity>]`, the API passes it through unchanged, so read, list, and edit all address the rows the agent wrote. Keys are the file paths inside the routed directory, and values use the backend's file shape — `content` plus an `encoding`:
 
 ```python
-await client.store.search_items(namespace_prefix=["users", "alice", "filesystem"])
-await client.store.list_namespaces(prefix=["users", "alice"])
-await client.store.get_item(namespace=["users", "alice", "filesystem"], key="pref.txt")
+# The "/memories/" route prefix is stripped, so the key is "/pref.txt".
+await client.store.search_items(["users", "alice", "filesystem"])
+await client.store.list_namespaces(["users", "alice"])
+await client.store.get_item(["users", "alice", "filesystem"], "/pref.txt")
 await client.store.put_item(
-    namespace=["users", "alice", "filesystem"],
-    key="pref.txt",
-    value={"text": "Answer concisely."},
+    ["users", "alice", "filesystem"],
+    "/pref.txt",
+    {"content": "Answer concisely.", "encoding": "utf-8"},
 )
 ```
 

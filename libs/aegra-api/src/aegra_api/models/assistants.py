@@ -59,12 +59,29 @@ class Assistant(BaseModel):
     model_config = ConfigDict(from_attributes=True, populate_by_name=True)
 
 
+def _publish_the_not_null_columns(schema: dict[str, Any]) -> None:
+    """Publish ``name`` and ``graph_id`` as the endpoint takes them: never null.
+
+    Both back NOT NULL columns and are answered 422 when supplied empty. They
+    stay nullable on the model so a null arrives as supplied and gets that
+    answer rather than a generic type error.
+    """
+    for field in ("name", "graph_id"):
+        published = schema["properties"][field]
+        published.pop("anyOf", None)
+        published.pop("default", None)
+        published["type"] = "string"
+
+
 class AssistantUpdate(BaseModel):
     """Request model for partially updating assistants.
 
     Every field is optional and defaults to ``None`` so that an omitted field
     is distinguishable from an explicit one via ``model_dump(exclude_unset=True)``:
     omitting ``config`` keeps the stored config, sending ``{"config": {}}`` clears it.
+
+    A null clears ``description`` and reads as empty for the other dict fields.
+    ``name`` and ``graph_id`` back NOT NULL columns and refuse one.
     """
 
     name: str | None = Field(None, description="The name of the assistant. Unchanged when omitted.")
@@ -80,6 +97,8 @@ class AssistantUpdate(BaseModel):
     metadata: dict[str, Any] | None = Field(
         None, description="Metadata to merge into the assistant's existing metadata."
     )
+
+    model_config = ConfigDict(json_schema_extra=_publish_the_not_null_columns)
 
 
 class AssistantList(BaseModel):

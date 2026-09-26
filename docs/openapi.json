@@ -3750,14 +3750,7 @@
       "AssistantUpdate": {
         "properties": {
           "name": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
+            "type": "string",
             "title": "Name",
             "description": "The name of the assistant. Unchanged when omitted."
           },
@@ -3787,14 +3780,7 @@
             "description": "Configuration to use for the graph. Unchanged when omitted."
           },
           "graph_id": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
+            "type": "string",
             "title": "Graph Id",
             "description": "The ID of the graph. Unchanged when omitted."
           },
@@ -3827,7 +3813,7 @@
         },
         "type": "object",
         "title": "AssistantUpdate",
-        "description": "Request model for partially updating assistants.\n\nEvery field is optional and defaults to ``None`` so that an omitted field\nis distinguishable from an explicit one via ``model_dump(exclude_unset=True)``:\nomitting ``config`` keeps the stored config, sending ``{\"config\": {}}`` clears it."
+        "description": "Request model for partially updating assistants.\n\nEvery field is optional and defaults to ``None`` so that an omitted field\nis distinguishable from an explicit one via ``model_dump(exclude_unset=True)``:\nomitting ``config`` keeps the stored config, sending ``{\"config\": {}}`` clears it.\n\nA null clears ``description`` and reads as empty for the other dict fields.\n``name`` and ``graph_id`` back NOT NULL columns and refuse one."
       },
       "Body_set_assistant_latest_assistants__assistant_id__latest_post": {
         "properties": {

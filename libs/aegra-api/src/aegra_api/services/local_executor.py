@@ -41,10 +41,13 @@ class LocalExecutor(BaseExecutor):
         )
 
     async def wait_for_completion(self, run_id: str, *, timeout: float = 300.0) -> None:
+        """Raises TimeoutError past *timeout*, so callers can tell a slow run from a finished one."""
         task = active_runs.get(run_id)
         if task is None:
             return
-        with contextlib.suppress(TimeoutError, asyncio.CancelledError):
+        # Shielded: the run outlives a caller that stops waiting. Its own failure
+        # is recorded by execute_run, so only cancellation reaches here.
+        with contextlib.suppress(asyncio.CancelledError):
             await asyncio.wait_for(asyncio.shield(task), timeout=timeout)
 
     async def start(self) -> None:

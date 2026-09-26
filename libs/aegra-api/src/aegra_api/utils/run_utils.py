@@ -30,7 +30,7 @@ def map_command_to_langgraph(cmd: dict[str, Any]) -> Command:
 
     return Command(
         update=cmd_update,
-        goto=([it if isinstance(it, str) else Send(it["node"], it["input"]) for it in goto] if goto else None),
+        goto=([it if isinstance(it, str) else Send(it["node"], it.get("input")) for it in goto] if goto else None),
         resume=cmd.get("resume"),
     )
 

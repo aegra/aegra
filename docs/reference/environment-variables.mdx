@@ -14,7 +14,7 @@ cp .env.example .env
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `PROJECT_NAME` | `Aegra` | Application name |
-| `VERSION` | `0.10.5` | Application version |
+| `VERSION` | `0.10.7` | Application version |
 | `DEBUG` | `false` | Enable debug mode |
 | `AEGRA_CONFIG` | `aegra.json` | Path to the configuration file |
 | `MAX_SEARCH_LIMIT` | `1000` | Max `limit` for `POST /threads/search` and `POST /store/items/search`. Omitted or null `limit` uses `min(20, MAX_SEARCH_LIMIT)`. Default cap matches LangGraph Platform threads.search (`1..1000`). |
@@ -74,7 +74,7 @@ POSTGRES_USER=user
 | `POSTGRES_DB` | `aegra` | Database name |
 | `POSTGRES_HOST` | `localhost` | Database host |
 | `POSTGRES_PASSWORD` | `password` | Database password |
-| `POSTGRES_PORT` | `5432` | Database port |
+| `POSTGRES_PORT` | `5432` | Port for direct connections and Docker's host mapping; the Compose API container always connects on internal port `5432` |
 | `POSTGRES_USER` | `user` | Database user |
 | `DB_ECHO_LOG` | `false` | Log all SQL statements |
 
@@ -196,7 +196,7 @@ In dev mode (`REDIS_BROKER_ENABLED=false`), runs execute as in-process asyncio t
 | `N_JOBS_PER_WORKER` | `10` | Maximum concurrent runs per worker loop |
 | `BG_JOB_TIMEOUT_SECS` | `3600` | Maximum execution time per run (seconds) |
 | `BG_JOB_MAX_RETRIES` | `3` | Maximum retry attempts before a crashed run is permanently failed |
-| `STUCK_PENDING_THRESHOLD_SECONDS` | `120` | How long a pending run can sit before the reaper re-enqueues it |
+| `STUCK_PENDING_THRESHOLD_SECONDS` | `120` | How long a pending run can sit before the reaper re-enqueues it, if it is no longer in the job queue |
 | `LEASE_DURATION_SECONDS` | `30` | Lease TTL before a crashed run is reclaimed |
 | `HEARTBEAT_INTERVAL_SECONDS` | `10` | How often workers extend their lease |
 | `REAPER_INTERVAL_SECONDS` | `15` | How often the reaper scans for expired leases |

@@ -390,26 +390,25 @@ class AssistantService(Authenticated):
         return to_pydantic(await self._read_owned_assistant(assistant_id))
 
     async def update_assistant(self, assistant_id: str, request: AssistantUpdate) -> Assistant:
-        """Update assistant by ID"""
-        value = {**request.model_dump(), "assistant_id": assistant_id}
+        """Partially update an assistant.
+
+        Fields the caller omitted keep their stored value; supplied ``metadata``
+        is merged into the stored metadata, matching the LangGraph SDK contract.
+        Omission is read from ``exclude_unset`` rather than from ``None``, so a
+        caller can still clear a field by sending it empty (``{"config": {}}``).
+        """
+        supplied = request.model_dump(exclude_unset=True)
+        # Handlers inject by mutating value["metadata"] in place, so the dispatch
+        # payload keeps the dict shape the auth API documents even when unset.
+        value = {
+            **request.model_dump(),
+            "config": request.config or {},
+            "context": request.context or {},
+            "metadata": request.metadata or {},
+            "assistant_id": assistant_id,
+        }
         filters = await self._dispatch("update", value)
         request.metadata = _injected_metadata(request.metadata, value)
-
-        metadata = request.metadata or {}
-        config = request.config or {}
-        context = request.context or {}
-
-        if config.get("configurable") and context:
-            raise HTTPException(
-                status_code=400,
-                detail="Cannot specify both configurable and context. Use only one.",
-            )
-
-        # Keep config and context up to date with one another
-        if config.get("configurable"):
-            context = config["configurable"]
-        elif context:
-            config["configurable"] = context
 
         stmt = select(AssistantORM).where(
             AssistantORM.assistant_id == assistant_id,
@@ -422,6 +421,37 @@ class AssistantService(Authenticated):
         if not assistant:
             raise HTTPException(404, f"Assistant '{assistant_id}' not found")
 
+        # NOT NULL columns: an empty value cannot be stored, and falling back to
+        # the stored one silently is the bug this endpoint is fixing.
+        for field in ("name", "graph_id"):
+            if field in supplied and not supplied[field]:
+                raise HTTPException(
+                    status_code=422,
+                    detail=f"{field} must be a non-empty string when supplied; omit it to leave it unchanged",
+                )
+
+        config = (supplied["config"] or {}) if "config" in supplied else (assistant.config or {})
+        context = (supplied["context"] or {}) if "context" in supplied else (assistant.context or {})
+
+        if "config" in supplied and "context" in supplied and config.get("configurable") and context:
+            raise HTTPException(
+                status_code=400,
+                detail="Cannot specify both configurable and context. Use only one.",
+            )
+
+        metadata = {**(assistant.metadata_dict or {}), **(request.metadata or {})}
+
+        # context mirrors config["configurable"], so whichever one the caller
+        # supplied wins and the other is derived from it.
+        if "context" in supplied:
+            config = {**config, "configurable": context}
+        elif "config" in supplied:
+            context = config.get("configurable") or {}
+        elif config.get("configurable"):
+            context = config["configurable"]
+        elif context:
+            config = {**config, "configurable": context}
+
         now = datetime.now(UTC)
         version_stmt = select(func.max(AssistantVersionORM.version)).where(
             AssistantVersionORM.assistant_id == assistant_id
@@ -432,12 +462,14 @@ class AssistantService(Authenticated):
         new_version_details = {
             "assistant_id": assistant_id,
             "version": new_version,
-            "graph_id": request.graph_id or assistant.graph_id,
+            # .get returns a supplied null rather than the stored value, which
+            # is what lets an explicit null clear the nullable description.
+            "graph_id": supplied.get("graph_id", assistant.graph_id),
             "config": config,
             "context": context,
             "created_at": now,
-            "name": request.name or assistant.name,
-            "description": request.description or assistant.description,
+            "name": supplied.get("name", assistant.name),
+            "description": supplied.get("description", assistant.description),
             "metadata_dict": metadata,
         }
 

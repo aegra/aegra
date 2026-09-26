@@ -31,7 +31,7 @@ def _protocol_routes() -> list[tuple[str, str]]:
 
     Routers mount as nested router objects, so a flat scan of ``app.routes``
     misses entire files — the same blind spot that hid the unprotected routers.
-    Recurse the way ``_apply_auth_to_routes`` does.
+    Recurse the way ``apply_auth_enforcement`` does.
     """
     from aegra_api.main import app
 
@@ -209,6 +209,7 @@ _SPEC_TUPLES: dict[tuple[str, str], tuple[str, str]] = {
     ("DELETE", "/threads/{thread_id}/runs/{run_id}"): ("threads", "delete"),
     # stateless runs
     ("POST", "/runs"): ("threads", "create_run"),
+    ("POST", "/runs/cancel"): ("threads", "update"),
     ("POST", "/runs/stream"): ("threads", "create_run"),
     ("POST", "/runs/wait"): ("threads", "create_run"),
     # crons

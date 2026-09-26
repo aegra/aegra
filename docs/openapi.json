@@ -3,7 +3,7 @@
   "info": {
     "title": "Aegra",
     "description": "Production-ready Agent Protocol server",
-    "version": "0.10.5"
+    "version": "0.10.7"
   },
   "paths": {
     "/info": {
@@ -2067,7 +2067,7 @@
           "Thread Runs"
         ],
         "summary": "Join Run",
-        "description": "Wait for a run to complete and return its output.\n\nReturns a chunked ``application/json`` response. While the run is still\nexecuting, the server sends periodic ``\\n`` heartbeat bytes to keep the\nconnection alive through proxies and load balancers (AWS ALB, Cloudflare,\netc.). The final chunk is the JSON result. Leading whitespace is ignored\nby JSON parsers, so clients can parse the concatenated body normally.\n\nIf the run is already in a terminal state, the output is returned\nimmediately with no heartbeat overhead.\n\nSessions are managed manually (not via ``Depends``) to avoid holding a\npool connection during the long wait.",
+        "description": "Wait for a run to complete and return its output.\n\nReturns a chunked ``application/json`` response. While the run is still\nexecuting, the server sends periodic ``\\n`` heartbeat bytes to keep the\nconnection alive through proxies and load balancers (AWS ALB, Cloudflare,\netc.). The final chunk is the JSON result. Leading whitespace is ignored\nby JSON parsers, so clients can parse the concatenated body normally.\n\nIf the run is already in a terminal state, the output is returned\nimmediately with no heartbeat overhead.\n\nA run that failed, or that the wait gave up on, returns\n``{\"__error__\": {\"error\": ..., \"message\": ...}}`` instead of an output.\n``langgraph_sdk``'s ``runs.join`` hands that body back as-is, unlike\n``runs.wait``, which inspects the key and raises.\n\nSessions are managed manually (not via ``Depends``) to avoid holding a\npool connection during the long wait.",
         "operationId": "join_run_threads__thread_id__runs__run_id__join_get",
         "parameters": [
           {
@@ -2127,7 +2127,7 @@
           "Thread Runs"
         ],
         "summary": "Wait For Run",
-        "description": "Create a run, execute it, and wait for completion.\n\nReturns a chunked ``application/json`` response with periodic ``\\n``\nheartbeat bytes to keep the connection alive. The final chunk is the\nJSON result. Uses ``BG_JOB_TIMEOUT_SECS`` (default 1 hour) as the\nsafety-net timeout.\n\nSessions are managed manually (not via ``Depends``) to avoid holding a\npool connection during the long wait.",
+        "description": "Create a run, execute it, and wait for completion.\n\nReturns a chunked ``application/json`` response with periodic ``\\n``\nheartbeat bytes to keep the connection alive. The final chunk is the\nJSON result. Uses ``BG_JOB_TIMEOUT_SECS`` (default 1 hour) as the\nsafety-net timeout.\n\nA run that failed, or that the wait gave up on, returns\n``{\"__error__\": {\"error\": ..., \"message\": ...}}`` instead of an output;\nthe LangGraph SDK reads that key and raises.\n\nSessions are managed manually (not via ``Depends``) to avoid holding a\npool connection during the long wait.",
         "operationId": "wait_for_run_threads__thread_id__runs_wait_post",
         "parameters": [
           {
@@ -2359,6 +2359,69 @@
                 }
               }
             }
+          },
+          "404": {
+            "description": "Resource not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AgentProtocolError"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/runs/cancel": {
+      "post": {
+        "tags": [
+          "Thread Runs"
+        ],
+        "summary": "Cancel Runs",
+        "description": "Cancel several runs at once, by status or by thread_id plus run_ids.\n\nRuns the caller does not own or that already finished are skipped. The\nthread must exist for the run_ids form; unknown run ids are ignored.",
+        "operationId": "cancel_runs_runs_cancel_post",
+        "parameters": [
+          {
+            "name": "action",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "enum": [
+                "cancel",
+                "interrupt"
+              ],
+              "type": "string",
+              "description": "Cancellation strategy: 'cancel' for hard cancel, 'interrupt' for cooperative interrupt.",
+              "default": "interrupt",
+              "title": "Action"
+            },
+            "description": "Cancellation strategy: 'cancel' for hard cancel, 'interrupt' for cooperative interrupt."
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RunsCancel"
+              }
+            }
+          }
+        },
+        "responses": {
+          "204": {
+            "description": "Successful Response"
           },
           "404": {
             "description": "Resource not found",
@@ -3441,14 +3504,17 @@
           "assistant_id": {
             "anyOf": [
               {
-                "type": "string"
+                "type": "string",
+                "maxLength": 255,
+                "minLength": 1,
+                "pattern": "\\S"
               },
               {
                 "type": "null"
               }
             ],
             "title": "Assistant Id",
-            "description": "Unique assistant identifier (auto-generated if not provided)"
+            "description": "Optional client-provided assistant ID. Omit or null to let the server generate a UUID. When set, 1-255 characters and not blank (must fit PostgreSQL btree keys uncompressed)."
           },
           "name": {
             "anyOf": [
@@ -3693,7 +3759,7 @@
               }
             ],
             "title": "Name",
-            "description": "The name of the assistant (auto-generated if not provided)"
+            "description": "The name of the assistant. Unchanged when omitted."
           },
           "description": {
             "anyOf": [
@@ -3705,7 +3771,7 @@
               }
             ],
             "title": "Description",
-            "description": "The description of the assistant. Defaults to null."
+            "description": "The description of the assistant. Unchanged when omitted."
           },
           "config": {
             "anyOf": [
@@ -3718,13 +3784,19 @@
               }
             ],
             "title": "Config",
-            "description": "Configuration to use for the graph."
+            "description": "Configuration to use for the graph. Unchanged when omitted."
           },
           "graph_id": {
-            "type": "string",
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
             "title": "Graph Id",
-            "description": "The ID of the graph",
-            "default": "agent"
+            "description": "The ID of the graph. Unchanged when omitted."
           },
           "context": {
             "anyOf": [
@@ -3737,7 +3809,7 @@
               }
             ],
             "title": "Context",
-            "description": "The context to use for the graph. Useful when graph is configurable."
+            "description": "The context to use for the graph. Useful when graph is configurable. Unchanged when omitted."
           },
           "metadata": {
             "anyOf": [
@@ -3750,12 +3822,12 @@
               }
             ],
             "title": "Metadata",
-            "description": "Metadata to use for searching and filtering assistants."
+            "description": "Metadata to merge into the assistant's existing metadata."
           }
         },
         "type": "object",
         "title": "AssistantUpdate",
-        "description": "Request model for creating assistants"
+        "description": "Request model for partially updating assistants.\n\nEvery field is optional and defaults to ``None`` so that an omitted field\nis distinguishable from an explicit one via ``model_dump(exclude_unset=True)``:\nomitting ``config`` keeps the stored config, sending ``{\"config\": {}}`` clears it."
       },
       "Body_set_assistant_latest_assistants__assistant_id__latest_post": {
         "properties": {
@@ -3794,6 +3866,18 @@
               }
             ],
             "title": "Thread Id"
+          },
+          "metadata": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Metadata"
           }
         },
         "type": "object",
@@ -4136,6 +4220,18 @@
               }
             ],
             "title": "Thread Id"
+          },
+          "metadata": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Metadata"
           },
           "enabled": {
             "anyOf": [
@@ -4717,6 +4813,19 @@
             "title": "Checkpoint",
             "description": "Checkpoint configuration (e.g., {'checkpoint_id': '...', 'checkpoint_ns': ''})"
           },
+          "checkpoint_id": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "uuid"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Checkpoint Id",
+            "description": "Checkpoint to run from. Short form of checkpoint={'checkpoint_id': ...}; 'checkpoint' wins if both set."
+          },
           "stream": {
             "type": "boolean",
             "title": "Stream",
@@ -4896,6 +5005,57 @@
         ],
         "title": "RunStatus",
         "description": "Simple run status response"
+      },
+      "RunsCancel": {
+        "properties": {
+          "status": {
+            "anyOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "pending",
+                  "running",
+                  "all"
+                ]
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Status",
+            "description": "Cancel every active run of the caller in this status. 'all' means pending and running."
+          },
+          "thread_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Thread Id",
+            "description": "Thread that owns the runs listed in run_ids."
+          },
+          "run_ids": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Run Ids",
+            "description": "Runs to cancel; requires thread_id."
+          }
+        },
+        "type": "object",
+        "title": "RunsCancel",
+        "description": "Selector for ``POST /runs/cancel``: a status filter, or thread_id plus run_ids."
       },
       "StoreDeleteRequest": {
         "properties": {
@@ -5373,14 +5533,17 @@
           "threadId": {
             "anyOf": [
               {
-                "type": "string"
+                "type": "string",
+                "maxLength": 255,
+                "minLength": 1,
+                "pattern": "\\S"
               },
               {
                 "type": "null"
               }
             ],
             "title": "Threadid",
-            "description": "Optional client-provided thread ID for idempotent creation"
+            "description": "Optional client-provided thread ID for idempotent creation. Omit or null to let the server generate a UUID. When set, 1\u2013255 characters and not blank (must fit PostgreSQL btree keys uncompressed)."
           },
           "ifExists": {
             "anyOf": [

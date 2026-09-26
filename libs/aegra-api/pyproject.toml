@@ -1,6 +1,6 @@
 [project]
 name = "aegra-api"
-version = "0.10.6"
+version = "0.10.7"
 description = "Aegra core API - Self-hosted Agent Protocol server"
 readme = "README.md"
 requires-python = ">=3.12"
@@ -24,6 +24,8 @@ dependencies = [
     "pydantic>=2.11.7",
     "pydantic-settings>=2.14.2",
     "sse-starlette>=3.3.4,<4.0.0",
+    # Imported directly for CancelScope(shield=True); same floor sse-starlette sets
+    "anyio>=4.7.0",
 
     # LangGraph
     "langgraph>=1.0.3",

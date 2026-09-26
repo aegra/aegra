@@ -210,11 +210,7 @@ class LeaseReaper:
 
     @staticmethod
     async def _missing_from_queue(run_ids: list[str]) -> list[str]:
-        """Return the pending runs that are no longer in the job queue.
-
-        A pending run still in the queue is waiting for a free worker. Pushing it
-        again on every sweep floods the queue and starves new runs (#644).
-        """
+        """Pending runs gone from the job queue; a queued one is only waiting for a worker (#644)."""
         try:
             client = redis_manager.get_client()
             queued = set(await client.lrange(settings.worker.WORKER_QUEUE_KEY, 0, -1))  # type: ignore[invalid-await]

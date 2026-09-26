@@ -125,9 +125,64 @@ Aegra uses two connection pools: one for SQLAlchemy (metadata) and one for LangG
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `REDIS_BROKER_ENABLED` | `false` | Enable Redis for multi-instance SSE streaming and worker job dispatch |
-| `REDIS_URL` | `redis://localhost:6379/0` | Redis connection URL |
+| `REDIS_URL` | `redis://localhost:6379/0` | Redis connection URL. `redis+sentinel://` connects through Sentinel -- see below |
 | `REDIS_CHANNEL_PREFIX` | `aegra:run:` | Prefix for Redis pub/sub channels |
 | `REDIS_MAX_CONNECTIONS` | `250` | Maximum Redis connection pool size |
+
+### Sentinel
+
+For a Sentinel-managed HA Redis, give `REDIS_URL` the `redis+sentinel://` scheme instead of an endpoint. Aegra then asks the sentinels for the current master at connect time, and re-resolves it after a failover.
+
+```bash
+REDIS_URL=redis+sentinel://sentinel-a:26379,sentinel-b:26379,sentinel-c:26379/mymaster/0
+```
+
+```text
+redis+sentinel://[username:password@]host[:port][,host[:port]...]/<master_name>[/<db>][?sentinel_username=&sentinel_password=]
+```
+
+| Part | Meaning |
+|------|---------|
+| host list | Comma-separated sentinel endpoints. Port defaults to `26379`. IPv6 literals take brackets: `[::1]:26379` |
+| `master_name` | The monitored master's name, as the sentinels know it. Required |
+| `db` | Database index on the data nodes. Defaults to `0` |
+| userinfo | Credentials for the **data nodes**, exactly as in a plain `redis://` URL |
+| `sentinel_username` / `sentinel_password` | Credentials for the **sentinels**, which usually differ from the data nodes' |
+
+Sentinel is opt-in and changes nothing else: a `redis://` or `rediss://` URL takes the direct path as before. A malformed sentinel URL is rejected at startup rather than at the first connection.
+
+#### TLS
+
+Use the `rediss+sentinel://` scheme. TLS then wraps **both** hops -- the sentinel discovery traffic and the connection to the master it returns. Wrapping only the master would leave the discovery exchange, and the sentinel AUTH that goes with it, in the clear.
+
+```bash
+REDIS_URL=rediss+sentinel://sentinel-a:26379,sentinel-b:26379/mymaster/0?ssl_ca_certs=/certs/ca.pem
+```
+
+The `ssl_*` query parameters are named as redis-py names them on a `rediss://` URL, so the two schemes stay consistent:
+
+| Parameter | Meaning |
+|-----------|---------|
+| `ssl_cert_reqs` | `none`, `optional` or `required`. Defaults to `required` |
+| `ssl_ca_certs` | Path to the CA bundle |
+| `ssl_ca_path` | Directory of CA certificates |
+| `ssl_certfile` / `ssl_keyfile` | Client certificate and key, for mutual TLS |
+| `ssl_password` | Password for an encrypted `ssl_keyfile` |
+| `ssl_check_hostname` | Verify the certificate against the hostname. Defaults to `true` |
+
+They are only accepted on `rediss+sentinel://`; passing them to the plaintext scheme is an error rather than a silent no-op.
+
+<Warning>
+  **Sentinel returns the master's IP address, not its hostname.** With the default `ssl_check_hostname=true`, TLS verification then compares the certificate against an IP and fails, typically with `certificate verify failed: IP address mismatch`.
+
+  Three ways out, best first:
+
+  1. Configure Redis with `sentinel announce-hostnames yes` and `sentinel resolve-hostnames yes` (Redis 6.2+) so the sentinels report names your certificate actually covers.
+  2. Issue the data-node certificates with IP SANs.
+  3. Set `ssl_check_hostname=false` and rely on CA verification alone. This is the weakest option -- it still proves the peer holds a certificate your CA signed, but no longer that it is the host you meant to reach.
+
+  Aegra will not weaken verification for you. `ssl_check_hostname` is pinned to `true` unless you set it, because redis-py's *async* client defaulted it to `false` before 6.0 and Aegra supports redis-py from 5.0 -- inheriting that default would have turned hostname verification off silently on older installs.
+</Warning>
 
 ## Workers
 

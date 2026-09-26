@@ -95,7 +95,7 @@ All store operations are automatically scoped to the authenticated user's namesp
 
 This ensures users can never access each other's data, even if they craft a request with another user's namespace.
 
-Scoping only applies to the REST API. Code running inside a graph writes to the namespace it asks for, so a graph namespace must already be fully qualified to line up with the API — see [Deep Agents and StoreBackend](#deep-agents-and-storebackend).
+Scoping applies only to the REST API; a graph writes whatever namespace it asks for. See [Deep Agents and StoreBackend](#deep-agents-and-storebackend).
 
 ### Configurable scoping
 
@@ -225,11 +225,11 @@ Add the node to your graph as usual — LangGraph injects the `store` parameter 
 
 ### Deep Agents and StoreBackend
 
-Inside a graph, the store is **not** scoped: a graph writes to exactly the namespace it asks for. The REST API, on the other hand, always applies [namespace scoping](#namespace-scoping) to every request. Any namespace that does not already start with `["users", <your identity>]` (or a configured `store.scopes` prefix followed by your own attribute values) gets buried one level deeper.
+A `StoreBackend` namespace must be fully qualified, because the REST API buries anything not already headed by `["users", <identity>]` — see [namespace scoping](#namespace-scoping).
 
-So a `StoreBackend` namespace **must be fully qualified**. A graph writes to exactly the tuple it asks for, so with no `"users"` head the write lands on an unscoped prefix: an agent writing under `("<identity>", "filesystem")` stores at `<identity>.filesystem`, while a read through the API for that same namespace is rewritten to `("users", "<identity>", "<identity>", "filesystem")` and finds nothing. The agent reads its own memories back while the REST API sees an empty store. With auth disabled the identity is `anonymous`: the write lands on `anonymous.filesystem` and the API looks under `users.anonymous.anonymous.filesystem`.
+An unqualified `("<identity>", "filesystem")` stores at the physical prefix `<identity>.filesystem`, while the same namespace over REST is rewritten to `("users", "<identity>", "<identity>", "filesystem")` and finds nothing. The agent reads its own memories; the API sees an empty store. With auth off the identity is `anonymous` — written to `anonymous.filesystem`, read from `users.anonymous.anonymous.filesystem`.
 
-Separately, the identity itself has to come from somewhere Aegra populates. The Deep Agents docs suggest `rt.server_info.user.identity`, but `server_info` is metadata injected by LangGraph Server, which Aegra doesn't run, so it is `None` here and that expression fails before any write. Resolve the identity in a [factory graph](/reference/configuration#factory-graphs) instead — `runtime.user` there is the full `User` model, including custom fields from your auth handler. It can also be `None`, because Aegra calls the factory for introspection outside a request, so guard it:
+Deep Agents documents `rt.server_info.user.identity`. On Aegra `server_info` is `None`, so that path errors before any write. Use a [factory graph](/reference/configuration#factory-graphs) and `runtime.user` instead, which is `None` during introspection:
 
 ```python
 from deepagents import create_deep_agent
@@ -238,10 +238,8 @@ from langgraph_sdk.runtime import ServerRuntime
 
 
 async def graph(runtime: ServerRuntime):
-    """Factory graph — runtime.user is None during Aegra's introspection calls."""
-    user = runtime.user
-    # Introspection passes no user; "anonymous" is the identity Aegra itself
-    # uses when auth is disabled, so those rows stay reachable over REST.
+    """Factory graph."""
+    user = runtime.user  # None during Aegra introspection
     identity = user.identity if user else "anonymous"
 
     return create_deep_agent(
@@ -249,7 +247,6 @@ async def graph(runtime: ServerRuntime):
         backend=CompositeBackend(
             default=StateBackend(),
             routes={
-                # Fully qualified: "users" + the caller's identity.
                 "/memories/": StoreBackend(
                     namespace=lambda rt: ("users", identity, "filesystem")
                 )
@@ -258,10 +255,9 @@ async def graph(runtime: ServerRuntime):
     )
 ```
 
-Because the namespace now starts with `["users", <your identity>]`, the API passes it through unchanged, so read, list, and edit all address the rows the agent wrote. Keys are the file paths inside the routed directory, and values use the backend's file shape — `content` plus an `encoding`:
+`("users", <identity>, ...)` passes through scoping unchanged, so `client.store.*` addresses the same rows. Keys are paths inside the routed directory — `/memories/` is stripped — and values use the backend's file shape:
 
 ```python
-# The "/memories/" route prefix is stripped, so the key is "/pref.txt".
 await client.store.search_items(["users", "alice", "filesystem"])
 await client.store.list_namespaces(["users", "alice"])
 await client.store.get_item(["users", "alice", "filesystem"], "/pref.txt")
@@ -276,4 +272,4 @@ await client.store.put_item(
   With a [configured scope](#configurable-scoping), qualify with that scope's prefix and your own attribute values instead — `("orgs", <your org_id>, "filesystem")` for a `"orgs": ["org_id"]` scope. Scopes are opt-in, so an unqualified namespace never resolves to one: it always falls back to per-user scope.
 </Note>
 
-Qualifying the namespace doesn't weaken the [isolation](#namespace-scoping) described above: Bob's requests are still buried under `["users", "bob", ...]` even when he asks for Alice's namespace, so he never sees her items.
+Qualifying the namespace doesn't weaken the [isolation](#namespace-scoping) described above: Bob's requests are still buried under `["users", "bob", ...]`, so he never sees Alice's items.

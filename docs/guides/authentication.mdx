@@ -315,6 +315,8 @@ user["team_id"]        # "team42" (custom field, dict-style access)
 user.to_dict()         # full dict including all custom fields
 ```
 
+If you use `user.identity` to build a [store](/guides/store) namespace, qualify it with `"users"` — the API scopes every request, so an unqualified namespace is unreachable through `client.store.*`. See [Deep Agents and StoreBackend](/guides/store#deep-agents-and-storebackend).
+
 <Note>
   Factory graphs get user data in **two places**:
   - **Factory time** (`runtime.user` on `ServerRuntime`): for structural decisions

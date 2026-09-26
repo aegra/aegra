@@ -280,7 +280,7 @@ async def my_node(state: State, config: RunnableConfig) -> dict:
 
 ### From factory graphs
 
-[Factory graphs](/reference/configuration#graph-factories) receive a `ServerRuntime`
+[Factory graphs](/reference/configuration#factory-graphs) receive a `ServerRuntime`
 object that includes `runtime.user` with the authenticated user's data. This is
 available at **factory time** (when deciding graph structure) before the graph executes:
 
@@ -314,6 +314,8 @@ user.role              # "admin" (custom field, attribute access)
 user["team_id"]        # "team42" (custom field, dict-style access)
 user.to_dict()         # full dict including all custom fields
 ```
+
+Building a store namespace from `user.identity`? Qualify it with `"users"` or it's unreachable over REST. See [Deep Agents and StoreBackend](/guides/store#deep-agents-and-storebackend).
 
 <Note>
   Factory graphs get user data in **two places**:

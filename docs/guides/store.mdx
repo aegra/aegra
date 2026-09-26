@@ -95,6 +95,8 @@ All store operations are automatically scoped to the authenticated user's namesp
 
 This ensures users can never access each other's data, even if they craft a request with another user's namespace.
 
+Scoping applies only to the REST API; a graph writes whatever namespace it asks for. See [Deep Agents and StoreBackend](#deep-agents-and-storebackend).
+
 ### Configurable scoping
 
 Beyond the default per-user scope, you can define **configurable scopes**: a map of **namespace prefix → list of User attributes** under `store.scopes` in `aegra.json`. A namespace starting with a configured prefix is isolated under `[prefix, *<user attribute values>]`, where the values come from the authenticated user populated by [your auth handler](/guides/authentication).
@@ -220,3 +222,54 @@ def my_node(state, *, store: BaseStore):
 ```
 
 Add the node to your graph as usual — LangGraph injects the `store` parameter automatically when the graph is compiled with a store backend (which Aegra provides).
+
+### Deep Agents and StoreBackend
+
+A `StoreBackend` namespace must be fully qualified: the REST API buries anything not already headed by `["users", <identity>]` (see [namespace scoping](#namespace-scoping)).
+
+An unqualified `("<identity>", "filesystem")` stores under `<identity>.filesystem`. Over REST that namespace is rewritten to `("users", "<identity>", "<identity>", "filesystem")` and finds nothing. The agent reads its own memories; the API sees an empty store. With auth off the identity is `anonymous` — written to `anonymous.filesystem`, read from `users.anonymous.anonymous.filesystem`.
+
+Deep Agents documents `rt.server_info.user.identity`. On Aegra `server_info` is `None`, so that path errors before any write. Use a [factory graph](/reference/configuration#factory-graphs) and `runtime.user` instead, which is `None` during introspection:
+
+```python
+from deepagents import create_deep_agent
+from deepagents.backends import CompositeBackend, StateBackend, StoreBackend
+from langgraph_sdk.runtime import ServerRuntime
+
+
+async def graph(runtime: ServerRuntime):
+    """Factory graph."""
+    user = runtime.user  # None during Aegra introspection
+    identity = user.identity if user else "anonymous"
+
+    return create_deep_agent(
+        model=model,
+        backend=CompositeBackend(
+            default=StateBackend(),
+            routes={
+                "/memories/": StoreBackend(
+                    namespace=lambda rt: ("users", identity, "filesystem")
+                )
+            },
+        ),
+    )
+```
+
+`("users", <identity>, ...)` passes through scoping unchanged, so `client.store.*` addresses the same rows. Keys are paths inside the routed directory (`/memories/` is stripped) and values use the backend's file shape:
+
+```python
+await client.store.search_items(["users", "alice", "filesystem"])
+await client.store.list_namespaces(["users", "alice"])
+await client.store.get_item(["users", "alice", "filesystem"], "/pref.txt")
+await client.store.put_item(
+    ["users", "alice", "filesystem"],
+    "/pref.txt",
+    {"content": "Answer concisely.", "encoding": "utf-8"},
+)
+```
+
+<Note>
+  With a [configured scope](#configurable-scoping), qualify with that scope's prefix and your own attribute values instead — `("orgs", <your org_id>, "filesystem")` for a `"orgs": ["org_id"]` scope. Scopes are opt-in, so an unqualified namespace never resolves to one: it always falls back to per-user scope.
+</Note>
+
+Qualifying the namespace doesn't weaken the [isolation](#namespace-scoping): Bob's requests are buried under `["users", "bob", ...]`, so he never sees Alice's items.

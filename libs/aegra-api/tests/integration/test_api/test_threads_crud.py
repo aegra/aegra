@@ -543,6 +543,52 @@ class TestDeleteThread:
         assert deleted == []
         assert committed == []
 
+    def test_delete_thread_drops_queued_run_before_deleting(self, mock_checkpointer: AsyncMock) -> None:
+        """A parked run has no task to cancel: it is dropped with a guarded UPDATE before the
+        active runs are cancelled, so their finalize cannot promote it onto the doomed thread."""
+        app = create_test_app(include_runs=False, include_threads=True)
+
+        thread = _thread_row("test-123")
+        queued_run = MagicMock()
+        queued_run.run_id = "q1"
+        queued_run.status = "queued"
+        executed: list[str] = []
+
+        class Session(DummySessionBase):
+            async def scalar(self, _stmt):
+                return thread
+
+            async def execute(self, _stmt):
+                executed.append(str(_stmt.compile(compile_kwargs={"literal_binds": True})))
+
+            async def scalars(self, _stmt):
+                # Only surface the queued run if the cleanup query's status filter
+                # actually includes 'queued' — so dropping it from threads.py reds this test.
+                compiled = str(_stmt.compile(compile_kwargs={"literal_binds": True}))
+                rows = [queued_run] if "queued" in compiled else []
+
+                class Result:
+                    def all(self):
+                        return rows
+
+                return Result()
+
+            async def delete(self, obj):
+                pass
+
+            async def commit(self):
+                pass
+
+        with patch("aegra_api.api.threads.streaming_service.cancel_run", new_callable=AsyncMock) as mock_cancel:
+            app.dependency_overrides[core_get_session] = override_get_session_dep(Session)
+            client = make_client(app)
+            resp = client.delete("/threads/test-123")
+
+        assert resp.status_code == 200
+        mock_cancel.assert_not_awaited()  # nothing executes a parked run; the broker has no task for it
+        drop = next(s for s in executed if s.startswith("UPDATE runs"))
+        assert "'interrupted'" in drop and "runs.status = 'queued'" in drop  # guarded drop, before deletion
+
 
 class TestSearchThreads:
     """Test POST /threads/search endpoint"""

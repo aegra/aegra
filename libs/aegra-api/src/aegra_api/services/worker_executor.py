@@ -145,6 +145,7 @@ class WorkerExecutor(BaseExecutor):
 
     async def start(self) -> None:
         self._running = True
+        self._accepting = True
         count = settings.worker.WORKER_COUNT
         if count == 0:
             logger.warning(
@@ -166,6 +167,9 @@ class WorkerExecutor(BaseExecutor):
 
     async def stop(self) -> None:
         self._running = False
+        # No new queued-run promotions past this point; an in-flight one finishes its
+        # rpush first, so the job it promoted lands on a live instance, not in limbo.
+        await self._begin_shutdown()
         drain_timeout = settings.worker.WORKER_DRAIN_TIMEOUT
 
         # Wait for in-flight job tasks to finish

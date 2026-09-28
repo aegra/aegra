@@ -70,9 +70,10 @@ def _make_app(
     user = User(identity=_USER)
     app.dependency_overrides[require_auth] = lambda: user
     app.dependency_overrides[get_current_user] = lambda: user
-    # Routes open short-lived sessions via _get_session_maker(); patch it (per
-    # test, auto-restored) to return a maker yielding the in-memory test session.
+    # Routes (and commands.py's interrupt settle poll) open short-lived sessions via
+    # _get_session_maker(); patch it to yield the in-memory test session.
     monkeypatch.setattr(es_module, "_get_session_maker", lambda: lambda: _Session(owner=owner, run_ids=run_ids))
+    monkeypatch.setattr(cmd_module, "_get_session_maker", lambda: lambda: _Session(owner=owner, run_ids=run_ids))
     app.include_router(es_module.router)
     return app
 

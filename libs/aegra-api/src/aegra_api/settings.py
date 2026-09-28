@@ -1,6 +1,6 @@
 import logging
 import re
-from typing import Annotated
+from typing import Annotated, Literal
 from urllib.parse import parse_qsl, quote_plus, urlencode
 
 from pydantic import BeforeValidator, Field, computed_field, model_validator
@@ -464,6 +464,13 @@ class EventStreamingSettings(EnvBase):
     FF_V2_EVENT_STREAMING: bool = True
 
 
+class MultitaskSettings(EnvBase):
+    """Double-texting admission policy: MULTITASK_PAUSED_THREAD_POLICY decides whether fresh input on
+    a thread paused at ``interrupt()`` is rejected (409) or admitted; see docs/guides/double-texting.mdx."""
+
+    MULTITASK_PAUSED_THREAD_POLICY: Literal["reject", "admit"] = "reject"
+
+
 class Settings:
     """Container object that instantiates all application settings groups."""
 
@@ -475,6 +482,7 @@ class Settings:
         self.observability = ObservabilitySettings()
         self.redis = RedisSettings()
         self.worker = WorkerSettings()
+        self.multitask = MultitaskSettings()
         self.cron = CronSettings()
         self.thread_ttl = ThreadTTLSettings()
         self.event_streaming = EventStreamingSettings()

@@ -5,11 +5,13 @@ import contextlib
 from collections.abc import AsyncGenerator, MutableMapping
 from typing import Any
 
+import anyio
 import structlog
 from fastapi import APIRouter, Depends, Header, HTTPException, Query
 from fastapi.responses import StreamingResponse
 from redis import RedisError
 from sqlalchemy import delete, select
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sse_starlette import EventSourceResponse
 
@@ -25,7 +27,14 @@ from aegra_api.models.enums import RunCancellationAction
 from aegra_api.models.errors import CONFLICT, NOT_FOUND, SSE_RESPONSE
 from aegra_api.services.broker import broker_manager
 from aegra_api.services.run_preparation import _prepare_run
-from aegra_api.services.run_status import interrupt_unowned_run
+from aegra_api.services.run_status import (
+    ACTIVE_RUN_STATES,
+    QUEUED_RUN_STATE,
+    cancel_queued_run,
+    cancel_queued_run_by_id,
+    dispatch_next_queued_run,
+    interrupt_unowned_run,
+)
 from aegra_api.services.run_waiters import TERMINAL_STATES, encode_output, heartbeat_wait_body, run_result_body
 from aegra_api.services.streaming_service import streaming_service
 from aegra_api.settings import settings
@@ -41,16 +50,59 @@ logger = structlog.getLogger(__name__)
 # Default stream modes for background run execution
 DEFAULT_STREAM_MODES = ["values"]
 
+# cancel?wait=1 and force-delete poll for the run to reach a terminal state: 20 x 0.5s.
+_SETTLE_ATTEMPTS = 20
+_SETTLE_INTERVAL_SECONDS = 0.5
+
+
+async def _reread_run(session: AsyncSession, run_id: str, thread_id: str, user_id: str) -> RunORM | None:
+    """Re-query rather than ``refresh()``: a row deleted meanwhile must read as None, not 500."""
+    session.expire_all()  # sync method, clears cache
+    return await session.scalar(
+        select(RunORM).where(
+            RunORM.run_id == str(run_id),
+            RunORM.thread_id == thread_id,
+            RunORM.user_id == user_id,
+        )
+    )
+
+
+async def _wait_for_run_to_settle(session: AsyncSession, run_id: str) -> bool:
+    """Poll until the run is terminal or its row is gone. False when the window expired."""
+    for _ in range(_SETTLE_ATTEMPTS):
+        await asyncio.sleep(_SETTLE_INTERVAL_SECONDS)
+        session.expire_all()  # sync method, clears cache
+        fresh = await session.scalar(select(RunORM).where(RunORM.run_id == run_id))
+        if fresh is None or fresh.status in TERMINAL_STATES:
+            return True
+    return False
+
 
 async def _request_run_interruption(
     session: AsyncSession,
     run_orm: RunORM,
     action: RunCancellationAction,
 ) -> None:
-    """Interrupt a run without overwriting a terminal or live-owned run."""
+    """Interrupt a run without overwriting a terminal or live-owned one: a parked (``queued``) run
+    is dropped in place, and one promoted since the caller's read is cancelled as the active run."""
     if run_orm.status in TERMINAL_STATES:
         return
 
+    if run_orm.status == QUEUED_RUN_STATE:
+        if await cancel_queued_run(session, run_orm.run_id, run_orm.thread_id, user_id=run_orm.user_id):
+            # Nothing executes a queued run, but a client may be streaming it: close
+            # that stream. Best-effort — the cancellation itself is already committed.
+            try:
+                await streaming_service.signal_run_cancelled(run_orm.run_id)
+            except (RedisError, OSError):
+                logger.exception("Failed to signal queued run cancellation", run_id=run_orm.run_id)
+            return
+        # Promoted meanwhile: fall through and cancel it like any active run.
+        await session.refresh(run_orm)
+        if run_orm.status in TERMINAL_STATES:
+            return
+
+    claimed_by = run_orm.claimed_by
     reconciled = await interrupt_unowned_run(
         session,
         run_orm.run_id,
@@ -71,6 +123,10 @@ async def _request_run_interruption(
             # Database reconciliation has already committed. A broker outage
             # must not turn the successful interruption into an API error.
             logger.exception("Failed to signal reconciled run interruption", run_id=run_orm.run_id)
+        # Promote only when no local task or worker can still be executing this run; otherwise
+        # its exit (a finalize losing the CAS) dispatches, and promoting here would run two graphs.
+        if active_runs.get(run_orm.run_id) is None and claimed_by is None:
+            await dispatch_next_queued_run(run_orm.thread_id)
         return
 
     await session.refresh(run_orm)
@@ -169,6 +225,18 @@ async def create_and_stream_run(
     cancel_on_disconnect = (request.on_disconnect or "cancel").lower() == "cancel"
 
     async def _cancel_on_client_close(_msg: MutableMapping[str, Any]) -> None:
+        # A parked (queued) run has no task for the broker to cancel, so drop it in the database;
+        # kept separate from the broker step so a failure in one cannot skip the other.
+        try:
+            # sse-starlette's anyio cancel punches through asyncio.shield (#530): shield the
+            # checkout so a disconnect mid-query cannot leak the pooled connection.
+            with anyio.CancelScope(shield=True):
+                dropped = await cancel_queued_run_by_id(run_id, thread_id, user_id=user.identity)
+        except SQLAlchemyError:
+            dropped = False
+            logger.exception("Failed to drop queued run on client disconnect", run_id=run_id)
+        if dropped:
+            return
         try:
             await broker_manager.request_cancel(run_id, "cancel")
         except (RedisError, OSError):
@@ -524,18 +592,15 @@ async def cancel_run_endpoint(
     logger.info(f"[cancel_run] request {action} run_id={run_id} user={user.identity} thread_id={thread_id}")
     await _request_run_interruption(session, run_orm, action)
 
-    # Optionally wait for the run to settle
+    # Optionally wait for the run to settle (bounded, ~10s)
     if wait:
-        # Poll DB until the run reaches a terminal state (or 10s timeout).
-        for _ in range(20):
-            await asyncio.sleep(0.5)
-            session.expire_all()  # sync method, clears cache
-            fresh = await session.scalar(select(RunORM).where(RunORM.run_id == run_id))
-            if fresh and fresh.status in TERMINAL_STATES:
-                break
+        await _wait_for_run_to_settle(session, run_id)
 
-    await session.refresh(run_orm)
-    return Run.model_validate(run_orm)
+    fresh = await _reread_run(session, run_id, thread_id, user.identity)
+    if fresh is None:
+        # Deleted while the cancel was in flight: the cancellation landed, the run is gone.
+        raise HTTPException(404, f"Run '{run_id}' not found")
+    return Run.model_validate(fresh)
 
 
 @router.post("/runs/cancel", status_code=204, responses={**NOT_FOUND})
@@ -555,7 +620,11 @@ async def cancel_runs(
     """
     stmt = select(RunORM).where(RunORM.user_id == user.identity)
     if request.status is not None:
-        active = ["pending", "running"] if request.status == "all" else [request.status]
+        # Runs parked behind another (internal queued) are reported as pending, so a
+        # client cancelling its pending runs expects them included.
+        active = ["pending", QUEUED_RUN_STATE, "running"] if request.status == "all" else [request.status]
+        if request.status == "pending":
+            active.append(QUEUED_RUN_STATE)
         stmt = stmt.where(RunORM.status.in_(active))
     else:
         thread_exists = await session.scalar(
@@ -593,9 +662,10 @@ async def delete_run(
 ) -> None:
     """Delete a run record.
 
-    If the run is active (pending or running) and `force=0`, returns 409
-    Conflict. Set `force=1` to cancel the run first (best-effort) and then
-    delete it. Returns 204 No Content on success.
+    If the run is active (pending, running or enqueued) and `force=0`, returns 409
+    Conflict. Set `force=1` to cancel the run first and then delete it; a worker-owned
+    run that has not stopped within ~10 seconds is left in place with 409 for a retry.
+    Returns 204 No Content on success.
     """
     # Deleting a run authorizes as a thread delete (Agent Protocol has no `runs`
     # resource); @auth.on.threads.delete covers it.
@@ -614,21 +684,40 @@ async def delete_run(
         raise HTTPException(404, f"Run '{run_id}' not found")
 
     # If active and not forcing, reject deletion
-    if run_orm.status in ["pending", "running"] and not force:
+    if run_orm.status in (*ACTIVE_RUN_STATES, QUEUED_RUN_STATE) and not force:
         raise HTTPException(
             status_code=409,
             detail="Run is active. Retry with force=1 to cancel and delete.",
         )
 
-    # If forcing and active, cancel first
-    if force and run_orm.status in ["pending", "running"]:
+    # Force: cancel first. A queued run is dropped in place, a live one is asked to stop
+    # (see _request_run_interruption).
+    was_active = run_orm.status in (*ACTIVE_RUN_STATES, QUEUED_RUN_STATE)
+    if force and was_active:
         logger.info(f"[delete_run] force-cancelling active run run_id={run_id}")
-        await streaming_service.cancel_run(run_id)
+        await _request_run_interruption(session, run_orm, "cancel")
         # Best-effort: wait for bg task to settle
         task = active_runs.get(run_id)
         if task:
             with contextlib.suppress(asyncio.CancelledError, Exception):
                 await task
+        fresh = await _reread_run(session, run_id, thread_id, user.identity)
+        # A row deleted meanwhile needs no wait: the DELETE below matches nothing and 204
+        # stays the honest answer for "this run is gone".
+        if (
+            fresh is not None
+            and fresh.status in ACTIVE_RUN_STATES
+            and not await _wait_for_run_to_settle(session, run_id)
+        ):
+            # Still executing on a worker after the bounded wait: never delete a row a live worker
+            # owns or promote behind it while it may still write checkpoints. The client retries.
+            raise HTTPException(
+                status_code=409,
+                detail="Run is still executing; cancellation was requested but has not completed. "
+                "Retry the delete once the run has stopped.",
+            )
+        # Terminal now (or never had a task): its own finalize / the reconciliation above has
+        # already reset the thread, so nothing is left to converge here but the row itself.
 
     # Delete the record
     await session.execute(
@@ -644,6 +733,10 @@ async def delete_run(
     task = active_runs.pop(run_id, None)
     if task and not task.done():
         task.cancel()
+
+    if was_active:
+        # Whatever was parked behind the deleted run may start now.
+        await dispatch_next_queued_run(thread_id)
 
     # 204 No Content
     return

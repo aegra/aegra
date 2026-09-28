@@ -170,6 +170,14 @@ Set `CRON_ENABLED=false` to disable scheduling without removing cron records. Jo
 Cron firing is **at-least-once**: if a worker crashes after claiming a cron but before the run setup commits, the claim eventually expires (after `CRON_CLAIM_DURATION_SECONDS`) and another tick re-fires the cron. Make agent runs idempotent if duplicate firings are unacceptable.
 </Note>
 
+## Double-texting
+
+Controls how a run carrying fresh input is admitted onto a thread paused at a human-in-the-loop `interrupt()`. The per-request `multitask_strategy` itself is covered in the [double-texting guide](/guides/double-texting).
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `MULTITASK_PAUSED_THREAD_POLICY` | `reject` | `reject` answers `409 Conflict` until a `command={"resume": ...}` run clears the pause; `admit` starts the run from `__start__` and discards the pending interrupt, matching LangGraph Platform |
+
 ## Thread TTL
 
 | Variable | Default | Description |

@@ -471,6 +471,61 @@ class TestWorkerExecutorSubmit:
 
         mock_client.rpush.assert_awaited_once_with("aegra:jobs", "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee")
 
+    @pytest.mark.asyncio
+    async def test_delayed_run_is_not_pushed_before_not_before(self) -> None:
+        mock_client = AsyncMock()
+        job = _make_run_job()
+        delayed_job = job.model_copy(update={"after_seconds": 30})
+
+        with patch(f"{MODULE}.redis_manager.get_client", return_value=mock_client):
+            await WorkerExecutor().submit(delayed_job)
+
+        mock_client.rpush.assert_not_awaited()
+
+
+class TestDelayedRunDispatch:
+    @pytest.mark.asyncio
+    async def test_dispatches_only_due_pending_rows(self) -> None:
+        session = AsyncMock()
+        result = MagicMock()
+        result.fetchall.return_value = [("run-due",)]
+        session.execute.return_value = result
+        mock_client = AsyncMock()
+
+        with (
+            patch(f"{MODULE}._get_session_maker", return_value=_make_session_maker(session)),
+            patch(f"{MODULE}.redis_manager.get_client", return_value=mock_client),
+            patch(f"{MODULE}.settings") as mock_settings,
+        ):
+            mock_settings.worker.WORKER_QUEUE_KEY = "aegra:jobs"
+            mock_settings.worker.STUCK_PENDING_THRESHOLD_SECONDS = 120
+            mock_settings.worker.POSTGRES_POLL_INTERVAL_SECONDS = 5
+            await WorkerExecutor()._dispatch_due_runs()
+
+        mock_client.rpush.assert_awaited_once_with("aegra:jobs", "run-due")
+
+    @pytest.mark.asyncio
+    async def test_preserves_lease_for_runs_already_pushed_when_redis_fails_mid_batch(self) -> None:
+        session = AsyncMock()
+        result = MagicMock()
+        result.fetchall.return_value = [("run-1",), ("run-2",)]
+        session.execute.side_effect = [result, MagicMock(), MagicMock()]
+        mock_client = AsyncMock()
+        mock_client.rpush.side_effect = [1, RedisConnectionError("connection reset")]
+
+        with (
+            patch(f"{MODULE}._get_session_maker", return_value=_make_session_maker(session)),
+            patch(f"{MODULE}.redis_manager.get_client", return_value=mock_client),
+            patch(f"{MODULE}.settings") as mock_settings,
+        ):
+            mock_settings.worker.WORKER_QUEUE_KEY = "aegra:jobs"
+            mock_settings.worker.POSTGRES_POLL_INTERVAL_SECONDS = 5
+            await WorkerExecutor()._dispatch_due_runs()
+
+        reset_statement = session.execute.await_args_list[2].args[0]
+        reset_params = reset_statement.compile().params
+        assert reset_params["run_id_1"] == ["run-2"]
+
 
 # ------------------------------------------------------------------
 # WorkerExecutor.wait_for_completion

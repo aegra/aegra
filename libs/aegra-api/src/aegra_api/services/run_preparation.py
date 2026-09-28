@@ -5,6 +5,9 @@ resume-command validation, and config/context merging logic.
 """
 
 import asyncio
+from collections.abc import Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
 from datetime import UTC, datetime
 from typing import Any
 from uuid import uuid4
@@ -12,7 +15,7 @@ from uuid import uuid4
 import structlog
 from asgi_correlation_id import correlation_id
 from fastapi import HTTPException
-from sqlalchemy import ColumnElement, case, func, literal_column, or_, select, update
+from sqlalchemy import case, func, literal_column, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from aegra_api.core.orm import Assistant as AssistantORM
@@ -29,6 +32,18 @@ from aegra_api.utils.jsonb import jsonb_patch, jsonb_shallow_merge
 from aegra_api.utils.run_utils import _merge_jsonb
 
 logger = structlog.getLogger(__name__)
+
+_EPHEMERAL_RUN = ContextVar("aegra_ephemeral_run", default=False)
+
+
+@contextmanager
+def ephemeral_run_context() -> Iterator[None]:
+    """Mark the next run prepared in this task as a stateless ephemeral run."""
+    token = _EPHEMERAL_RUN.set(True)
+    try:
+        yield
+    finally:
+        _EPHEMERAL_RUN.reset(token)
 
 
 # The interrupt reaches the client (via the broker/SSE) before the run executor
@@ -138,6 +153,7 @@ async def update_thread_metadata(
     *,
     user_id: str | None = None,
     input_data: dict[str, Any] | None = None,
+    is_ephemeral: bool = False,
 ) -> None:
     """Update thread metadata with assistant and graph information.
 
@@ -170,31 +186,32 @@ async def update_thread_metadata(
             status="idle",
             metadata_json=metadata,
             user_id=user_id,
+            is_ephemeral=is_ephemeral,
         )
         session.add(thread_orm)
         return
-
-    patches: list[ColumnElement[Any]] = [
-        jsonb_patch({"assistant_id": str(assistant_id), "graph_id": graph_id}, "metadata_patch")
-    ]
-    if thread_name:
-        # Only name a thread that has no name yet. The condition is evaluated at
-        # write time against the row the UPDATE locks, not against the read above.
-        patches.append(
-            case(
-                (
-                    func.coalesce(ThreadORM.metadata_json["thread_name"].astext, "") == "",
-                    jsonb_patch({"thread_name": thread_name}, "thread_name_patch"),
-                ),
-                else_=literal_column("'{}'::jsonb"),
-            )
-        )
 
     await session.execute(
         update(ThreadORM)
         .where(ThreadORM.thread_id == thread_id)
         .values(
-            metadata_json=jsonb_shallow_merge(ThreadORM.metadata_json, *patches),
+            metadata_json=jsonb_shallow_merge(
+                ThreadORM.metadata_json,
+                jsonb_patch({"assistant_id": str(assistant_id), "graph_id": graph_id}, "metadata_patch"),
+                *(
+                    [
+                        case(
+                            (
+                                func.coalesce(ThreadORM.metadata_json["thread_name"].astext, "") == "",
+                                jsonb_patch({"thread_name": thread_name}, "thread_name_patch"),
+                            ),
+                            else_=literal_column("'{}'::jsonb"),
+                        )
+                    ]
+                    if thread_name
+                    else []
+                ),
+            ),
             updated_at=datetime.now(UTC),
         )
         .execution_options(synchronize_session=False)
@@ -268,7 +285,13 @@ async def _prepare_run(
 
     # Mark thread as busy and update metadata
     await update_thread_metadata(
-        session, thread_id, assistant.assistant_id, assistant.graph_id, user_id=user.identity, input_data=request.input
+        session,
+        thread_id,
+        assistant.assistant_id,
+        assistant.graph_id,
+        user_id=user.identity,
+        input_data=request.input,
+        is_ephemeral=_EPHEMERAL_RUN.get(),
     )
     await set_thread_status(session, thread_id, "busy")
 

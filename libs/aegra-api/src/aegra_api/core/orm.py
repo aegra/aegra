@@ -145,11 +145,15 @@ class Thread(Base):
     # Database column is 'metadata_json' (per database.py). ORM attribute 'metadata_json' must map to that column.
     metadata_json: Mapped[dict] = mapped_column("metadata_json", JsonbSafe, server_default=text("'{}'::jsonb"))
     user_id: Mapped[str] = mapped_column(Text, nullable=False)
+    is_ephemeral: Mapped[bool] = mapped_column(Boolean, server_default=text("false"), nullable=False)
     created_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), server_default=text("now()"))
     updated_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), server_default=text("now()"))
 
     # Indexes for performance
-    __table_args__ = (Index("idx_thread_user", "user_id"),)
+    __table_args__ = (
+        Index("idx_thread_user", "user_id"),
+        Index("idx_thread_ephemeral_updated", "is_ephemeral", "updated_at"),
+    )
 
 
 class Run(Base):

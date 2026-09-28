@@ -106,6 +106,7 @@ async for chunk in client.runs.stream(
 - **[Human-in-the-loop](https://docs.aegra.dev/guides/human-in-the-loop)** - Approval gates and user intervention points
 - **[Streaming](https://docs.aegra.dev/guides/streaming)** - Real-time SSE streaming with cross-instance pub/sub and automatic reconnection with event replay. Supports both the legacy run-scoped stream and **Agent Protocol v2** thread-scoped streaming (content-block events, per-subgraph lifecycle, HITL resume) for the latest LangGraph SDKs and `useStream()`
 - **[Persistent state](https://docs.aegra.dev/guides/threads-and-state)** - PostgreSQL checkpoints via LangGraph
+- **Stateless run cleanup** - Disconnect-safe reclamation of orphaned temporary threads
 - **[Configurable auth](https://docs.aegra.dev/guides/authentication)** - JWT, OAuth, Firebase, or none
 - **[Unified Observability](https://docs.aegra.dev/guides/observability)** - Fan-out tracing support via OpenTelemetry
 - **[Semantic store](https://docs.aegra.dev/guides/semantic-store)** - Vector embeddings with pgvector
@@ -137,6 +138,7 @@ aegra version           # Show version info
 | [Worker Architecture](https://docs.aegra.dev/guides/worker-architecture) | Redis job queue, crash recovery, horizontal scaling |
 | [Scheduled cron jobs](https://docs.aegra.dev/guides/cron) | Trigger runs on a schedule with timezone support and multi-instance safe claim |
 | [Streaming](https://docs.aegra.dev/guides/streaming) | 8 SSE stream modes with reconnection |
+| [Environment variables](https://docs.aegra.dev/reference/environment-variables) | Server settings, including stateless orphan-thread cleanup |
 | [Store](https://docs.aegra.dev/guides/store) | Key-value and semantic search storage |
 | [Observability](https://docs.aegra.dev/guides/observability) | Fan-out tracing to Langfuse, Phoenix, or any OTLP backend |
 | [Deployment](https://docs.aegra.dev/guides/deployment) | Docker, PaaS, and Kubernetes deployment |

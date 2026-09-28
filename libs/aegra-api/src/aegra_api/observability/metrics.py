@@ -37,6 +37,15 @@ THREAD_TTL_SWEPT = prometheus_client.Counter(
     labelnames=["outcome"],
 )
 
+EPHEMERAL_THREAD_SWEPT = prometheus_client.Counter(
+    "aegra_ephemeral_thread_swept_total",
+    "Stateless-run threads processed by the orphan sweeper, by outcome.",
+    labelnames=["outcome"],
+)
+
+for _outcome in ("deleted", "error"):
+    EPHEMERAL_THREAD_SWEPT.labels(outcome=_outcome)
+
 for _outcome in ("deleted", "pruned", "error"):
     THREAD_TTL_SWEPT.labels(outcome=_outcome)
 

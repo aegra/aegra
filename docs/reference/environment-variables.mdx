@@ -189,6 +189,20 @@ AEGRA_THREAD_TTL='{"strategy": "keep_latest", "default_ttl": 1440, "sweep_interv
 `AEGRA_THREAD_TTL` takes precedence. When set, the `checkpointer.ttl` block in `aegra.json` is ignored entirely and unset fields fall back to their defaults. See the [configuration reference](/reference/configuration#checkpointer) for field semantics.
 </Note>
 
+## Stateless orphan thread cleanup
+
+Stateless runs normally delete their generated thread after completion. If a
+client disconnects while terminal events are being delivered, the background
+sweeper reclaims the explicitly marked thread after its retention period. It
+never reclaims persistent threads or stateless runs using
+`on_completion="keep"`, and it skips threads with pending or running runs.
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `EPHEMERAL_THREAD_RETENTION_SECONDS` | `86400` | Minimum age before an orphaned stateless thread can be reclaimed |
+| `EPHEMERAL_THREAD_SWEEP_INTERVAL_SECONDS` | `300` | Delay between cleanup passes |
+| `EPHEMERAL_THREAD_SWEEP_LIMIT` | `100` | Maximum number of threads considered per pass |
+
 ## Prometheus metrics
 
 | Variable | Default | Description |

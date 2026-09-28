@@ -141,6 +141,7 @@ class CronSearchRequest(BaseModel):
 
     assistant_id: str | None = None
     thread_id: str | None = None
+    metadata: dict[str, Any] | None = None
     enabled: bool | None = None
     limit: int = Field(10, ge=1, le=1000)
     offset: int = Field(0, ge=0)
@@ -153,3 +154,4 @@ class CronCountRequest(BaseModel):
 
     assistant_id: str | None = None
     thread_id: str | None = None
+    metadata: dict[str, Any] | None = None

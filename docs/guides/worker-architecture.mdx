@@ -192,6 +192,8 @@ The reaper resets the run to `pending` and re-enqueues it.
 The new worker resumes from the last checkpoint.
 Once retries are exhausted, the reaper marks the run `error`, clears ownership, and marks the thread `error` in the same transaction when no other run is active.
 
+The reaper also re-enqueues `pending` runs older than `STUCK_PENDING_THRESHOLD_SECONDS`, but only when they are missing from the job queue. A run still in the queue is waiting for a free worker and is left alone.
+
 <a href="https://mermaid.live/view#pako:eNptk09PwkAQxb_K2FOJiCbeGjVpocIBpRZJLyZm3Y6wge7W_aMkxO_uLK2CQE9N9r3fezPtbgKuSgwiCAx-OJQcB4LNNateJNBTM20FFzWTFooYmIFC6SVqiI_Ps6E_z5Sxc43Tp_GxIkdWk5dU7VuoJCSdE8JGUwpzokayVyN5kY2iiC_u7rJhBP0VExVoJyFcITN4K9XX-fWV6ezpijiCdI3cWQSatV70er0DzAgp8g2ZhRDXFmUJW1rnN-9RkVd9UgUP6-fxdAThZPJwuRSrVeeUZkc0VtXmGORjxz4EcF0LjQZIa333X22ztbbhNB2n_WcoRmmeEpJZZ25pbCnkHOLHQdMXboDmD9tC2ZC8DSSCe-Voqiaq9As7OxEyywbx8x--pj0Qvguc4LpJODDlEeTZjJZBwFdRQqjxAiX9WW63uyJphMk4m2St33-VJGpdezJfIuYfjkqCxK_9zO25N-VoXIXwrlUFfIF8WSsh7QHk_yTGcY7GBF0IKtQVEyVdgU1gF1htL0PJ9DL4_v4BvGz9cA==" target="_blank" rel="noopener">View fullscreen ↗</a>
 
 ```mermaid
@@ -311,7 +313,7 @@ All worker settings are configured via environment variables. See the [environme
 | `N_JOBS_PER_WORKER` | `10` | Concurrent runs per worker loop |
 | `BG_JOB_TIMEOUT_SECS` | `3600` | Max execution time per run (1 hour) |
 | `BG_JOB_MAX_RETRIES` | `3` | Max retry attempts before a crashed run is permanently failed |
-| `STUCK_PENDING_THRESHOLD_SECONDS` | `120` | How long a pending run can sit before the reaper re-enqueues it |
+| `STUCK_PENDING_THRESHOLD_SECONDS` | `120` | How long a pending run can sit before the reaper re-enqueues it, if it is no longer in the job queue |
 | `LEASE_DURATION_SECONDS` | `30` | Lease TTL before reaper reclaims |
 | `HEARTBEAT_INTERVAL_SECONDS` | `10` | Lease extension frequency |
 | `REAPER_INTERVAL_SECONDS` | `15` | Expired lease scan frequency |

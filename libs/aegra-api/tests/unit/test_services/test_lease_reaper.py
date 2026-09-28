@@ -202,6 +202,37 @@ class TestReenqueue:
         assert pushed == []
 
 
+class TestMissingFromQueue:
+    @pytest.mark.asyncio
+    async def test_returns_only_runs_absent_from_the_queue(self) -> None:
+        mock_client = AsyncMock()
+        mock_client.lrange = AsyncMock(return_value=["run-1", "run-9"])
+
+        with (
+            patch("aegra_api.services.lease_reaper.redis_manager") as mock_rm,
+            patch("aegra_api.services.lease_reaper.settings") as mock_settings,
+        ):
+            mock_settings.worker.WORKER_QUEUE_KEY = "aegra:jobs"
+            mock_rm.get_client.return_value = mock_client
+
+            missing = await LeaseReaper._missing_from_queue(["run-1", "run-2"])
+
+        mock_client.lrange.assert_awaited_once_with("aegra:jobs", 0, -1)
+        assert missing == ["run-2"]
+
+    @pytest.mark.asyncio
+    async def test_returns_empty_when_redis_unavailable(self) -> None:
+        mock_client = AsyncMock()
+        mock_client.lrange = AsyncMock(side_effect=RedisError("connection reset"))
+
+        with patch("aegra_api.services.lease_reaper.redis_manager") as mock_rm:
+            mock_rm.get_client.return_value = mock_client
+
+            missing = await LeaseReaper._missing_from_queue(["run-1"])
+
+        assert missing == []
+
+
 class TestReap:
     @pytest.mark.asyncio
     async def test_crashed_runs_are_classified_before_becoming_claimable(self) -> None:
@@ -228,6 +259,7 @@ class TestReap:
 
         with (
             patch.object(LeaseReaper, "_find_recoverable", new_callable=AsyncMock, return_value=([], ["run-3"])),
+            patch.object(LeaseReaper, "_missing_from_queue", new_callable=AsyncMock, return_value=["run-3"]),
             patch.object(LeaseReaper, "_recover_crashed_runs", new_callable=AsyncMock) as mock_recover,
             patch.object(LeaseReaper, "_reenqueue", new_callable=AsyncMock, return_value=["run-3"]) as mock_reenqueue,
         ):
@@ -282,6 +314,7 @@ class TestReapMetrics:
             patch.object(
                 LeaseReaper, "_find_recoverable", new_callable=AsyncMock, return_value=([], ["run-3", "run-4"])
             ),
+            patch.object(LeaseReaper, "_missing_from_queue", new_callable=AsyncMock, return_value=["run-3", "run-4"]),
             patch.object(LeaseReaper, "_reenqueue", new_callable=AsyncMock, return_value=["run-3", "run-4"]),
         ):
             await reaper._reap()
@@ -324,6 +357,7 @@ class TestReapMetrics:
 
         with (
             patch.object(LeaseReaper, "_find_recoverable", new_callable=AsyncMock, return_value=([], ["run-3"])),
+            patch.object(LeaseReaper, "_missing_from_queue", new_callable=AsyncMock, return_value=["run-3"]),
             patch.object(LeaseReaper, "_reenqueue", new_callable=AsyncMock, return_value=[]),
         ):
             await reaper._reap()
@@ -361,6 +395,54 @@ class TestReapMetrics:
             await reaper._reap()
 
         assert _recovered_count("crashed_exhausted") == before
+
+
+class _FakeQueue:
+    """The job queue as a list: RPUSH appends, LRANGE reads, and nothing drains it."""
+
+    def __init__(self, entries: list[str] | None = None) -> None:
+        self.entries: list[str] = list(entries or [])
+
+    async def rpush(self, _key: str, value: str) -> int:
+        self.entries.append(value)
+        return len(self.entries)
+
+    async def lrange(self, _key: str, start: int, end: int) -> list[str]:
+        assert (start, end) == (0, -1)
+        return list(self.entries)
+
+
+async def _sweep(queue: _FakeQueue, stuck: list[str], *, sweeps: int, replicas: int = 1) -> None:
+    """Run the real stuck-pending path while every worker stays busy, so the same runs stay stuck."""
+    reapers = [LeaseReaper() for _ in range(replicas)]
+    with (
+        patch.object(LeaseReaper, "_find_recoverable", new_callable=AsyncMock, return_value=([], stuck)),
+        patch("aegra_api.services.lease_reaper.redis_manager") as mock_rm,
+    ):
+        mock_rm.get_client.return_value = queue
+        for _ in range(sweeps):
+            for reaper in reapers:
+                await reaper._reap()
+
+
+class TestStuckPendingBacklog:
+    @pytest.mark.asyncio
+    async def test_run_lost_from_queue_is_pushed_once_across_sweeps(self) -> None:
+        queue = _FakeQueue()
+
+        await _sweep(queue, ["run-1"], sweeps=100)
+
+        assert queue.entries == ["run-1"]
+
+    @pytest.mark.asyncio
+    async def test_queued_backlog_is_not_pushed_again(self) -> None:
+        backlog = [f"run-{i}" for i in range(60)]
+        queue = _FakeQueue(backlog)
+
+        # 15 minutes of 15-second sweeps on two replicas
+        await _sweep(queue, backlog, sweeps=60, replicas=2)
+
+        assert queue.entries == backlog
 
 
 class TestStartStop:

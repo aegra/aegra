@@ -159,6 +159,10 @@ crons = await client.crons.search(thread_id="<thread_id>")
 
 # Count matching crons
 total = await client.crons.count(assistant_id="agent")
+
+# Filter by metadata
+crons = await client.crons.search(metadata={"team": "research"})
+total = await client.crons.count(metadata={"team": "research"})
 ```
 
 ## Updating a cron

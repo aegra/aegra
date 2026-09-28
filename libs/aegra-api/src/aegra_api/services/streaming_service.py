@@ -194,6 +194,7 @@ class StreamingService:
 
     async def cleanup_run(self, run_id: str) -> None:
         """Clean up streaming resources for a run."""
+        self.event_counters.pop(run_id, None)
         broker_manager.cleanup_broker(run_id)
 
     async def _convert_raw_to_sse(self, event_id: str, raw_event: Any) -> str | None:

@@ -10,7 +10,7 @@ from uuid import uuid4
 
 import httpx
 import pytest
-from sqlalchemy import delete
+from sqlalchemy import delete, update
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from aegra_api.core.orm import Assistant as AssistantORM
@@ -109,6 +109,19 @@ async def _seed_run(
         await engine.dispose()
 
 
+async def _expire_lease(run_id: str) -> None:
+    engine = create_async_engine(settings.db.database_url)
+    try:
+        async with engine.begin() as conn:
+            await conn.execute(
+                update(RunORM)
+                .where(RunORM.run_id == run_id)
+                .values(lease_expires_at=datetime.now(UTC) - timedelta(minutes=1))
+            )
+    finally:
+        await engine.dispose()
+
+
 async def _request_interruption(
     client: httpx.AsyncClient,
     endpoint: InterruptionEndpoint,
@@ -188,17 +201,20 @@ async def test_stale_owner_interruption_reconciles_run_thread_and_lease(
 @pytest.mark.e2e
 @pytest.mark.prod_only
 async def test_stale_owner_interruption_closes_existing_stream() -> None:
-    expired = datetime.now(UTC) - timedelta(minutes=1)
+    # Expire the lease only right before the cancel: an expired lease seeded up front can be
+    # recovered by the background reaper while the stream starts, and the cancel then misses.
+    live = datetime.now(UTC) + timedelta(minutes=1)
     async with _seed_run(
         run_status="running",
         thread_status="busy",
         claimed_by="delayed-worker",
-        lease_expires_at=expired,
+        lease_expires_at=live,
     ) as (thread_id, run_id):
         stream_started = asyncio.Event()
         stream_task = asyncio.create_task(_wait_for_end_event(thread_id, run_id, stream_started))
         await asyncio.wait_for(stream_started.wait(), timeout=5.0)
         await asyncio.sleep(0.25)
+        await _expire_lease(run_id)
 
         async with httpx.AsyncClient(base_url=settings.app.SERVER_URL, timeout=10.0) as client:
             response = await client.post(f"/threads/{thread_id}/runs/{run_id}/cancel")

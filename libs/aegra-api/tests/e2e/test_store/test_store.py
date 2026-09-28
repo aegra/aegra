@@ -1,6 +1,8 @@
 import pytest
+from httpx import AsyncClient
 from langgraph_sdk.errors import PermissionDeniedError
 
+from aegra_api.settings import settings
 from tests.e2e._utils import elog, get_e2e_client
 
 
@@ -39,6 +41,37 @@ async def test_store_endpoints_via_sdk():
     # Ensure deleted
     with pytest.raises(Exception):  # noqa: B017 - SDK doesn't expose specific exception type
         await client.store.get_item(ns, key=key)
+
+
+@pytest.mark.e2e
+@pytest.mark.asyncio
+async def test_store_search_accepts_sdk_page_size_500() -> None:
+    """LangGraph SDK clients page store search with limit=500; must not 422."""
+    client = get_e2e_client()
+    ns = ["notes"]
+    key = "e2e-limit-500"
+    await client.store.put_item(ns, key=key, value={"title": "limit-500"})
+    try:
+        search = await client.store.search_items(["notes"], limit=500)
+        elog("store.search_items limit=500", search)
+        assert isinstance(search, dict)
+        assert "items" in search
+        assert any(item.get("key") == key for item in search["items"])
+    finally:
+        await client.store.delete_item(ns, key=key)
+
+
+@pytest.mark.e2e
+@pytest.mark.asyncio
+async def test_store_search_returns_422_when_limit_exceeds_cap() -> None:
+    """limit above MAX_SEARCH_LIMIT is rejected before the store query."""
+    async with AsyncClient(base_url=settings.app.SERVER_URL, timeout=30.0) as http_client:
+        resp = await http_client.post(
+            "/store/items/search",
+            json={"namespace_prefix": ["notes"], "limit": settings.app.MAX_SEARCH_LIMIT + 1},
+        )
+    assert resp.status_code == 422, resp.text
+    assert "limit" in resp.text
 
 
 @pytest.mark.e2e

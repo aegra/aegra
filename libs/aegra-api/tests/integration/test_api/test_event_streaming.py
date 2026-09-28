@@ -4,14 +4,19 @@ from __future__ import annotations
 
 import asyncio
 import json
+import threading
 import uuid
-from collections.abc import Iterator
+from collections.abc import AsyncIterator, Iterator, Mapping, MutableMapping
 from functools import partial
 from typing import Any
+from unittest.mock import AsyncMock
 
+import httpx
 import pytest
+import uvicorn
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from sse_starlette import EventSourceResponse
 
 from aegra_api.api import event_streaming as es_module
 from aegra_api.core.auth_deps import get_current_user, require_auth
@@ -113,6 +118,101 @@ class TestCommandRoute:
         }
         assert captured_requests[0].context == {"tenant_id": "acme"}
 
+    def test_run_start_forks_from_configurable_checkpoint_id(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        captured_requests: list[RunCreate] = []
+
+        async def fake_prepare(*_args: Any, **_kwargs: Any) -> tuple[str, object, object]:
+            captured_requests.append(_args[2])
+            return "run-1", object(), object()
+
+        monkeypatch.setattr(cmd_module, "_prepare_run", fake_prepare)
+        client = TestClient(_make_app(monkeypatch))
+        checkpoint_id = "1ef4f797-8335-6428-8001-8a1503f9b875"
+
+        resp = client.post(
+            "/threads/t1/commands",
+            json={
+                "id": 1,
+                "method": "run.start",
+                "params": {"assistant_id": "agent", "config": {"configurable": {"checkpoint_id": checkpoint_id}}},
+            },
+        )
+        assert resp.status_code == 200
+        assert resp.json()["type"] == "success"
+        assert captured_requests[0].checkpoint == {"checkpoint_id": checkpoint_id}
+        assert captured_requests[0].input is None
+
+    def test_run_start_rejects_malformed_checkpoint_id(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        prepare = AsyncMock()
+        monkeypatch.setattr(cmd_module, "_prepare_run", prepare)
+        client = TestClient(_make_app(monkeypatch))
+
+        resp = client.post(
+            "/threads/t1/commands",
+            json={
+                "id": 1,
+                "method": "run.start",
+                "params": {"assistant_id": "agent", "config": {"configurable": {"checkpoint_id": "not-a-uuid"}}},
+            },
+        )
+        assert resp.status_code == 200
+        assert resp.json()["error"] == "invalid_argument"
+        prepare.assert_not_called()
+
+    def test_input_respond_forwards_update_goto_and_context(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        captured_requests: list[RunCreate] = []
+
+        async def fake_prepare(*_args: Any, **_kwargs: Any) -> tuple[str, object, object]:
+            captured_requests.append(_args[2])
+            return "run-2", object(), object()
+
+        monkeypatch.setattr(cmd_module, "_prepare_run", fake_prepare)
+        client = TestClient(_make_app(monkeypatch))
+
+        resp = client.post(
+            "/threads/t1/commands",
+            json={
+                "id": 2,
+                "method": "input.respond",
+                "params": {
+                    "assistant_id": "agent",
+                    "interrupt_id": "a" * 32,
+                    "namespace": [],
+                    "response": {"approved": True},
+                    "update": {"reviewed_by": "alice"},
+                    "goto": "finalize",
+                    "context": {"reasoning_effort": "high"},
+                },
+            },
+        )
+        assert resp.status_code == 200
+        assert resp.json()["type"] == "success"
+        request = captured_requests[0]
+        assert request.command == {
+            "resume": {"a" * 32: {"approved": True}},
+            "update": {"reviewed_by": "alice"},
+            "goto": "finalize",
+        }
+        assert request.context == {"reasoning_effort": "high"}
+
+    def test_input_respond_rejects_non_object_update(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        prepare = AsyncMock()
+        monkeypatch.setattr(cmd_module, "_prepare_run", prepare)
+        client = TestClient(_make_app(monkeypatch))
+
+        resp = client.post(
+            "/threads/t1/commands",
+            json={
+                "id": 3,
+                "method": "input.respond",
+                "params": {"assistant_id": "agent", "response": 1, "update": ["not", "an", "object"]},
+            },
+        )
+        assert resp.status_code == 200
+        assert resp.json()["type"] == "error"
+        assert resp.json()["error"] == "invalid_argument"
+        prepare.assert_not_called()
+
     def test_unknown_command_returns_error_envelope_on_200(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Protocol errors ride HTTP 200 so envelope-parsing clients see the code."""
         client = TestClient(_make_app(monkeypatch))
@@ -181,6 +281,11 @@ class TestStreamRoute:
             await broker.put(f"{run_id}_event_4", ("end", {"status": "success"}))
 
         asyncio.run(seed())
+        monkeypatch.setattr(
+            es_module,
+            "ThreadEventSession",
+            partial(ThreadEventSession, idle_grace_seconds=0.01),
+        )
         client = TestClient(_make_app(monkeypatch, run_ids=[run_id]))
 
         with client.stream("POST", "/threads/t1/stream/events", json={"channels": ["messages", "lifecycle"]}) as resp:
@@ -240,3 +345,82 @@ class TestStreamRoute:
             "value": interrupt_value,
             "payload": interrupt_value,
         }
+
+    async def test_lister_session_close_survives_sse_cancel(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Disconnect during a lister poll must still run session ``__aexit__``."""
+        poll_started = threading.Event()
+        closed = threading.Event()
+        # Set and awaited on the server loop, so it fires before cancel_on_finish cancels the stream.
+        disconnected = asyncio.Event()
+        state = {"aexit_cancelled": False, "aexits": 0}
+
+        class _SlowSession(_Session):
+            async def execute(self, _stmt: Any) -> Any:
+                poll_started.set()
+                await disconnected.wait()
+                return await super().execute(_stmt)
+
+            async def __aexit__(self, *_exc: Any) -> None:
+                try:
+                    await asyncio.sleep(0)
+                except asyncio.CancelledError:
+                    state["aexit_cancelled"] = True
+                    raise
+                state["aexits"] += 1
+                # Ownership check closes first; the second close is the in-stream poll.
+                if state["aexits"] >= 2:
+                    closed.set()
+
+        monkeypatch.setattr(
+            es_module,
+            "ThreadEventSession",
+            partial(ThreadEventSession, idle_grace_seconds=5),
+        )
+        make_sse_response = es_module.make_sse_response
+
+        async def on_disconnect(_message: MutableMapping[str, Any]) -> None:
+            disconnected.set()
+
+        def make_sse_response_with_close_handler(
+            body: AsyncIterator[bytes], *, headers: Mapping[str, str]
+        ) -> EventSourceResponse:
+            return make_sse_response(body, headers=headers, close_handler=on_disconnect)
+
+        monkeypatch.setattr(es_module, "make_sse_response", make_sse_response_with_close_handler)
+        app = _make_app(monkeypatch)
+        monkeypatch.setattr(es_module, "_get_session_maker", lambda: lambda: _SlowSession(owner=_USER))
+        # Separate loop: uvicorn.serve() cancels every task on its running loop. asyncio.run
+        # also cancels leftovers such as sse-starlette's shutdown watcher before closing it.
+        server = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=0, log_level="error", lifespan="off"))
+        thread = threading.Thread(target=asyncio.run, args=(server.serve(),), daemon=True)
+        thread.start()
+        try:
+            for _ in range(50):
+                if server.started and server.servers:
+                    break
+                await asyncio.sleep(0.02)
+            else:
+                raise RuntimeError("uvicorn did not bind a port")
+            port = server.servers[0].sockets[0].getsockname()[1]
+            async with (
+                httpx.AsyncClient(timeout=None) as client,
+                client.stream(
+                    "POST",
+                    f"http://127.0.0.1:{port}/threads/t1/stream/events",
+                    json={"channels": ["messages"]},
+                ) as resp,
+            ):
+                assert resp.status_code == 200
+                if not await asyncio.to_thread(poll_started.wait, 1.5):
+                    raise TimeoutError("lister poll did not start")
+                await resp.aclose()
+            if not await asyncio.to_thread(closed.wait, 1.5):
+                raise TimeoutError("lister session was not closed")
+        finally:
+            server.should_exit = True
+            thread.join(timeout=3)
+            # A hung shutdown fails the test: a generator stuck in shielded polls looks like this.
+            if thread.is_alive():
+                raise TimeoutError("uvicorn did not shut down")
+
+        assert not state["aexit_cancelled"]

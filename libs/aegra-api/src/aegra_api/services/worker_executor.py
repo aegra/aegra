@@ -23,6 +23,7 @@ from asgi_correlation_id import correlation_id
 from redis import RedisError
 from redis import TimeoutError as RedisTimeoutError
 from sqlalchemy import or_, select, update
+from sqlalchemy.exc import SQLAlchemyError
 
 from aegra_api.core.active_runs import active_runs, explicit_run_cancellations
 from aegra_api.core.orm import Run as RunORM
@@ -276,7 +277,7 @@ class WorkerExecutor(BaseExecutor):
 
         logger.info("Worker stopped", worker=worker_name)
 
-    async def _dispatch_loop(self) -> None:
+    async def _dispatch_loop(self: "WorkerExecutor") -> None:
         """Push persisted delayed runs once their not-before time arrives."""
         interval = max(0.1, min(1.0, settings.worker.POSTGRES_POLL_INTERVAL_SECONDS))
         while self._running:
@@ -285,11 +286,11 @@ class WorkerExecutor(BaseExecutor):
                 await asyncio.sleep(interval)
             except asyncio.CancelledError:
                 break
-            except Exception:
+            except (RedisError, SQLAlchemyError, OSError):
                 logger.exception("Unexpected error dispatching delayed runs")
                 await asyncio.sleep(interval)
 
-    async def _dispatch_due_runs(self) -> None:
+    async def _dispatch_due_runs(self: "WorkerExecutor") -> None:
         maker = _get_session_maker()
         now = datetime.now(UTC)
         dispatch_lease_seconds = max(5, min(30, settings.worker.POSTGRES_POLL_INTERVAL_SECONDS * 2))
@@ -326,7 +327,7 @@ class WorkerExecutor(BaseExecutor):
         try:
             client = redis_manager.get_client()
             for run_id in run_ids:
-                await client.rpush(settings.worker.WORKER_QUEUE_KEY, run_id)  # type: ignore[arg-type]
+                await client.rpush(settings.worker.WORKER_QUEUE_KEY, run_id)
                 pushed_ids.append(run_id)
                 logger.info("Dispatched delayed run", run_id=run_id)
         except RedisError:

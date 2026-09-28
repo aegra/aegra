@@ -33,6 +33,10 @@ async def main():
 asyncio.run(main())
 ```
 
+<Note>
+  A client-provided `thread_id` must be 1–255 non-blank characters. Omit the field (or send `null`) to let the server generate a UUID. Longer or blank values are rejected with 422 before they hit PostgreSQL's btree key limit (~2704 bytes).
+</Note>
+
 ## Thread status
 
 Threads have a status that reflects their current state:
@@ -114,6 +118,20 @@ state = await client.threads.get_state(
 
 This is useful for debugging, replaying, or branching conversations from a previous point.
 
+### Run from a specific checkpoint
+
+Pass `checkpoint_id` (or the full `checkpoint` object) to start a run from an earlier checkpoint. `input` is optional: without it the run replays from that point, with it the run branches with new input.
+
+```python
+run = await client.runs.create(
+    thread_id,
+    "agent",
+    checkpoint_id="your-checkpoint-id",
+)
+```
+
+If both are set, keys in `checkpoint` win over `checkpoint_id`. A `checkpoint_id` that is not a UUID returns `422`.
+
 ## Searching threads
 
 Find threads by status or metadata:
@@ -135,6 +153,8 @@ threads = await client.threads.search(
     offset=0,
 )
 ```
+
+`limit` accepts 1 through `MAX_SEARCH_LIMIT` (default 1000, matching LangGraph Platform). Omitted or null `limit` uses `min(20, MAX_SEARCH_LIMIT)`. Values above the cap return 422.
 
 ## Listing threads
 

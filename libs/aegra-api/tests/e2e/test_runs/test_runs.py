@@ -110,7 +110,6 @@ async def test_delayed_run_starts_after_requested_delay_e2e() -> None:
     thread_id = thread["thread_id"]
 
     async with AsyncClient(base_url=settings.app.SERVER_URL, timeout=120.0) as http:
-        started = asyncio.get_running_loop().time()
         response = await http.post(
             f"/threads/{thread_id}/runs",
             json={
@@ -119,6 +118,7 @@ async def test_delayed_run_starts_after_requested_delay_e2e() -> None:
                 "after_seconds": 2,
             },
         )
+        created_at = asyncio.get_running_loop().time()
     assert response.status_code == 200, response.text
     run = response.json()
     assert run["status"] == "pending"
@@ -129,7 +129,7 @@ async def test_delayed_run_starts_after_requested_delay_e2e() -> None:
 
     final_run = await await_terminal_run(client, thread_id, run["run_id"], timeout=30.0)
     check_and_skip_if_geo_blocked(final_run)
-    assert asyncio.get_running_loop().time() - started >= 1.5
+    assert asyncio.get_running_loop().time() - created_at >= 1.5
     assert final_run["status"] in ("success", "error")
 
 

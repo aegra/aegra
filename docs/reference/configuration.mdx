@@ -246,7 +246,7 @@ Configure custom routes and CORS.
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `app` | `string` | `None` | Import path to custom FastAPI app |
-| `enable_custom_route_auth` | `bool` | `false` | Apply Aegra auth to all custom routes |
+| `enable_custom_route_auth` | `bool` | `false` | Require Aegra auth on every FastAPI route in the custom app. See [custom routes](/guides/custom-routes#authentication-on-custom-routes) for what it covers |
 | `cors.allow_origins` | `list[str]` | `["*"]` | Allowed CORS origins |
 | `cors.allow_credentials` | `bool` | `false` when origins is `["*"]`, `true` otherwise | Allow credentials in CORS requests |
 

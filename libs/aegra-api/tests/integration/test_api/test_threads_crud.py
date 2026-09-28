@@ -1,8 +1,10 @@
 """Integration tests for threads CRUD operations"""
 
+import secrets
 from contextlib import asynccontextmanager
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, Mock, patch
+from uuid import uuid4
 
 import pytest
 from fastapi import FastAPI
@@ -13,13 +15,15 @@ from sqlalchemy.dialects import postgresql
 
 from aegra_api.api import threads as threads_module
 from aegra_api.core.orm import get_session as core_get_session
+from aegra_api.settings import settings
 from tests.fixtures.clients import create_test_app, make_client
 from tests.fixtures.database import (
     DummyScalarResult,
     DummySessionBase,
+    apply_thread_metadata_merge,
     override_get_session_dep,
 )
-from tests.fixtures.session_fixtures import BasicSession, override_session_dependency
+from tests.fixtures.session_fixtures import BasicSession, ThreadSession, override_session_dependency
 from tests.fixtures.test_helpers import DummyRun, DummyThread
 
 
@@ -199,6 +203,33 @@ class TestCreateThread:
         assert resp.status_code == 200
         data = resp.json()
         assert data["thread_id"] == custom_id
+
+    def test_create_thread_rejects_oversized_random_id(self, client: TestClient) -> None:
+        """Oversized ids 422 at validation; they must not reach Postgres btree."""
+        resp = client.post("/threads", json={"thread_id": secrets.token_hex(2500)})
+        assert resp.status_code == 422
+        assert "thread_id" in resp.text
+
+    def test_create_thread_rejects_empty_id(self, client: TestClient) -> None:
+        resp = client.post("/threads", json={"thread_id": ""})
+        assert resp.status_code == 422
+        assert "thread_id" in resp.text
+
+    def test_create_thread_rejects_blank_id(self, client: TestClient) -> None:
+        resp = client.post("/threads", json={"thread_id": "   "})
+        assert resp.status_code == 422
+        assert "thread_id" in resp.text
+
+    def test_create_thread_accepts_uuid(self, client: TestClient) -> None:
+        thread_id = str(uuid4())
+        resp = client.post("/threads", json={"thread_id": thread_id})
+        assert resp.status_code == 200
+        assert resp.json()["thread_id"] == thread_id
+
+    def test_create_thread_omitted_id_still_200(self, client: TestClient) -> None:
+        resp = client.post("/threads", json={})
+        assert resp.status_code == 200
+        assert resp.json()["thread_id"]
 
     def test_create_thread_if_exists_do_nothing(self):
         """Test ifExists='do_nothing' returns existing thread"""
@@ -637,6 +668,87 @@ class TestSearchThreads:
         resp = client.post("/threads/search", json={"metadata": {"active": True}})
         assert resp.status_code == 200
         assert isinstance(resp.json(), list)
+
+    def test_search_accepts_limit_500(self, client: TestClient) -> None:
+        """LangGraph SDK clients page with limit=500; must not 422."""
+        resp = client.post("/threads/search", json={"limit": 500})
+        assert resp.status_code == 200
+        assert isinstance(resp.json(), list)
+
+    def test_search_accepts_limit_at_cap(self, client: TestClient) -> None:
+        resp = client.post("/threads/search", json={"limit": settings.app.MAX_SEARCH_LIMIT})
+        assert resp.status_code == 200
+        assert isinstance(resp.json(), list)
+
+    def test_search_accepts_null_limit(self, client: TestClient) -> None:
+        resp = client.post("/threads/search", json={"limit": None})
+        assert resp.status_code == 200
+        assert isinstance(resp.json(), list)
+
+    def test_search_omitted_limit_honors_cap_below_default(
+        self: "TestSearchThreads", monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(settings.app, "MAX_SEARCH_LIMIT", 10)
+        captured: list[int | None] = []
+        app = create_test_app(include_runs=False, include_threads=True)
+        threads = [_thread_row("thread-1")]
+
+        class Session(ThreadSession):
+            async def scalars(self: "Session", stmt: Any = None) -> Any:
+                if stmt is not None and hasattr(stmt, "_limit"):
+                    captured.append(stmt._limit)
+                return await super().scalars(stmt)
+
+        override_session_dependency(app, Session, threads=threads)
+        client = make_client(app)
+        resp = client.post("/threads/search", json={})
+        assert resp.status_code == 200
+        assert captured == [10]
+
+    def test_search_null_limit_honors_cap_below_default(
+        self: "TestSearchThreads", monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(settings.app, "MAX_SEARCH_LIMIT", 10)
+        captured: list[int | None] = []
+        app = create_test_app(include_runs=False, include_threads=True)
+        threads = [_thread_row("thread-1")]
+
+        class Session(ThreadSession):
+            async def scalars(self: "Session", stmt: Any = None) -> Any:
+                if stmt is not None and hasattr(stmt, "_limit"):
+                    captured.append(stmt._limit)
+                return await super().scalars(stmt)
+
+        override_session_dependency(app, Session, threads=threads)
+        client = make_client(app)
+        resp = client.post("/threads/search", json={"limit": None})
+        assert resp.status_code == 200
+        assert captured == [10]
+
+    def test_search_returns_422_when_limit_exceeds_cap(self, client: TestClient) -> None:
+        """limit above MAX_SEARCH_LIMIT is rejected at the request model."""
+        cap = settings.app.MAX_SEARCH_LIMIT
+        resp = client.post("/threads/search", json={"limit": cap + 1})
+        assert resp.status_code == 422
+        detail = resp.json()["detail"]
+        assert any(
+            error.get("loc") == ["body", "limit"]
+            and error.get("type") == "less_than_equal"
+            and error.get("ctx", {}).get("le") == cap
+            for error in detail
+        )
+
+    @pytest.mark.parametrize("limit", [0, -1])
+    def test_search_returns_422_when_limit_is_zero_or_negative(self, client: TestClient, limit: int) -> None:
+        resp = client.post("/threads/search", json={"limit": limit})
+        assert resp.status_code == 422
+        assert "limit" in resp.text
+
+    @pytest.mark.parametrize("limit", ["abc", [], {}, 20.5])
+    def test_search_returns_422_when_limit_is_not_an_integer(self, client: TestClient, limit: object) -> None:
+        resp = client.post("/threads/search", json={"limit": limit})
+        assert resp.status_code == 422
+        assert "limit" in resp.text
 
 
 class TestThreadGetState:
@@ -1112,11 +1224,14 @@ class TestUpdateThread:
             async def scalar(self, _stmt):
                 return thread
 
+            async def execute(self, stmt, *args, **kwargs):
+                # The merge happens in the database; stand in for it.
+                apply_thread_metadata_merge(stmt, thread)
+
             async def commit(self):
                 pass
 
             async def refresh(self, obj):
-                # In a real DB, refresh updates the object; here we just simulate it
                 pass
 
         app.dependency_overrides[core_get_session] = override_get_session_dep(Session)
@@ -1148,6 +1263,9 @@ class TestUpdateThread:
         class Session(DummySessionBase):
             async def scalar(self, _stmt):
                 return thread
+
+            async def execute(self, stmt, *args, **kwargs):
+                apply_thread_metadata_merge(stmt, thread)
 
             async def commit(self):
                 pass
@@ -1189,6 +1307,9 @@ class TestUpdateThread:
         class Session(DummySessionBase):
             async def scalar(self, _stmt):
                 return thread
+
+            async def execute(self, stmt, *args, **kwargs):
+                apply_thread_metadata_merge(stmt, thread)
 
             async def commit(self):
                 pass

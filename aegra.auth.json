@@ -8,6 +8,6 @@
   },
   "http": {
     "app": "./examples/custom_routes_example.py:app",
-    "enable_custom_route_auth": false
+    "enable_custom_route_auth": true
   }
 }

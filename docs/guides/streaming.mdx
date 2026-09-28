@@ -170,6 +170,18 @@ print(result)
 
 This calls `POST /threads/{thread_id}/runs/wait` and returns the final output.
 
+If the run fails, the body is an error envelope instead of an output:
+
+```json
+{"__error__": {"error": "Error", "message": "KeyError: 'topic'"}}
+```
+
+`client.runs.wait()` raises on that envelope by default; pass `raise_error=False` to get it
+back as a dict. The same envelope is returned when the wait gives up before the run reaches a
+terminal state (`TimeoutError` or `IncompleteRun`), and by `client.runs.join()`, which returns it
+rather than raising. An interrupted run is not a failure — it returns its partial output with
+`__interrupt__`.
+
 ## Subgraph streaming
 
 If your graph uses subgraphs, you can stream events from them too:
@@ -246,6 +258,20 @@ Cancellation is asynchronous while a live worker owns the run.
 The cancel response may therefore still show `pending` or `running`; poll, join, or stream the run until it reaches a terminal status.
 Use the REST endpoint with `wait=1` when the caller needs the request to wait briefly for the worker to settle.
 
+### Cancelling several runs
+
+`POST /runs/cancel` cancels many runs in one call. Select them by `thread_id` plus `run_ids`, or by status (`pending`, `running`, or `all`). The SDK exposes it as `cancel_many`:
+
+```python
+# Stop specific runs on a thread
+await client.runs.cancel_many(thread_id=thread_id, run_ids=[run_a, run_b], action="interrupt")
+
+# Stop every active run you own
+await client.runs.cancel_many(status="all")
+```
+
+Runs that already finished are skipped, and only the caller's runs are affected. `action` accepts `cancel` and `interrupt`, the same values as the per-run endpoint. The response is `204 No Content`.
+
 ## SSE reconnection
 
 Aegra stores streaming events in a replay buffer (Redis Lists when `REDIS_BROKER_ENABLED=true`, in-memory list in dev mode) for replay. If your connection drops:
@@ -254,7 +280,7 @@ Aegra stores streaming events in a replay buffer (Redis Lists when `REDIS_BROKER
 2. Reconnect to `GET /threads/{thread_id}/runs/{run_id}/stream` with `Last-Event-ID` header
 3. You'll receive all events from where you left off
 
-Events are retained for 1 hour after the run completes.
+Events are retained for 10 minutes after the run completes, in both dev and production.
 
 <Note>
   In production deployments, SSE events are delivered via Redis pub/sub from workers — the client's SSE connection and the worker executing the run can be on different instances. See the [worker architecture guide](/guides/worker-architecture) for details on how this works.
@@ -311,7 +337,13 @@ curl -X POST http://localhost:8000/threads/$THREAD/commands \
 # → {"type": "success", "id": 1, "result": {"run_id": "..."}}
 ```
 
-`context` is forwarded to both the graph factory through `ServerRuntime[T]` and graph nodes through `Runtime[T]`.
+`context` is forwarded to both the graph factory through `ServerRuntime[T]` and graph nodes through `Runtime[T]`. It is an Aegra extension: the Agent Protocol `run.start` params are `assistant_id`, `input`, `config`, `metadata`, and `langsmith_tracer`. For a payload that also works against LangGraph Platform, put the same values under `config.configurable`; when `context` is absent the server copies `configurable` into it.
+
+To fork or time travel, set `config.configurable.checkpoint_id` to a checkpoint of the thread. The run replays from that checkpoint, and `input` is optional in that case. The JS SDK `forkFrom` option (the regenerate button in `useStream` and assistant-ui) sends this field. A value that is not a UUID string returns `invalid_argument`.
+
+`langsmith_tracer` is accepted and ignored. Aegra traces through OpenTelemetry, see [Observability](/guides/observability).
+
+Params outside the documented set are logged at warning level with their key names and otherwise ignored.
 
 ### Streaming events
 
@@ -359,6 +391,37 @@ When you subscribe to the `input` channel, a graph interrupt arrives as an `inpu
 ```
 
 `payload` is the Agent Protocol field consumed by the JavaScript SDK and Vue/React `useStream()` integrations. `value` mirrors it for current Python SDKs, including `ts.interrupts[].value`. If the source interrupt has no value, both content fields are omitted; explicit `null`, empty, and falsy values are preserved under both fields.
+
+### Responding to an interrupt
+
+`input.respond` resumes the interrupted run. Only `response` is required; `interrupt_id` targets one interrupt when several are pending.
+
+```bash
+curl -X POST http://localhost:8000/threads/$THREAD/commands   -H "Content-Type: application/json"   -d '{
+        "id": 2,
+        "method": "input.respond",
+        "params": {
+          "interrupt_id": "interrupt-id",
+          "namespace": [],
+          "response": {"action": "approve"},
+          "update": {"reviewed_by": "alice"},
+          "goto": "finalize"
+        }
+      }'
+```
+
+| Param | Effect |
+|:--|:--|
+| `response` | The value returned from `interrupt()` inside the graph. |
+| `interrupt_id` | Targets one pending interrupt. Omit it only when a single interrupt is pending. |
+| `responses` | Batch form: a list of `{interrupt_id, response}` entries resumed in one run. Replaces `response` and `interrupt_id`. |
+| `update` | State update applied in the same superstep as the resume, as `Command(update=...)`. Must be an object. |
+| `goto` | Node name, `{node}` or `{node, input}` object, or a list of those, applied as `Command(goto=...)`. `input` is optional. |
+| `config`, `metadata` | Per-run overrides, same as `run.start`. |
+| `context` | Aegra extension, same semantics as on `run.start`. |
+| `namespace` | Accepted for protocol compatibility. Interrupt ids already encode the subgraph namespace, so the server does not read it. |
+
+`update` and `goto` fold into the same `Command` as the resume, so the resumed run writes a single checkpoint.
 
 <Note>
   This first release covers the HTTP SSE + commands path the JS/Python SDKs use, verified end-to-end against the stock `langgraph-sdk`. The WebSocket transport and the `agent.getTree` / `state.fork` / `subscription.*` commands are not yet implemented; SSE filtering via the POST body covers the `useStream()` path without them.

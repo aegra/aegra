@@ -137,6 +137,19 @@ class TestDockerGenerators:
         assert "postgres:" in compose
         assert "myapp-postgres" in compose
 
+    def test_docker_compose_keeps_container_db_port_fixed(self: TestDockerGenerators) -> None:
+        compose = get_docker_compose("myapp")
+        assert '"${POSTGRES_PORT:-5432}:5432"' in compose
+        assert "- POSTGRES_PORT=5432" in compose
+
+    def test_repository_compose_uses_host_port_only_for_publishing(
+        self: TestDockerGenerators,
+    ) -> None:
+        root = Path(__file__).parents[3]
+        compose = (root / "docker-compose.yml").read_text(encoding="utf-8")
+        assert '"${POSTGRES_PORT:-5432}:5432"' in compose
+        assert "- POSTGRES_PORT=5432" in compose
+
     def test_docker_compose_has_api_service(self: TestDockerGenerators) -> None:
         compose = get_docker_compose("myapp")
         assert "myapp:" in compose

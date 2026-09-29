@@ -9,6 +9,8 @@ Input:
   {"delay": 2.0, "steps": 3, "fail": false, "interrupt": false, "_m": "marker"}
   ("interrupt": true pauses on a HITL interrupt(); "_m" tags the echo so tests
   can assert which runs executed and in what order.)
+  Optional "_cancellation_probe" supplies a scoped store namespace, label, and
+  hold_cancellation flag for the pre-emption E2E tests.
 
 Output:
   Echoes back with metadata about execution (node count, total delay).
@@ -16,13 +18,18 @@ Output:
 
 import asyncio
 import json
+import logging
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Annotated, Any
 
 from langchain_core.messages import AIMessage, AnyMessage
+from langgraph.config import get_store
 from langgraph.graph import StateGraph, add_messages
+from langgraph.store.base import BaseStore
 from langgraph.types import interrupt
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -48,12 +55,47 @@ def _parse_config(state: State) -> dict[str, Any]:
     return defaults
 
 
+async def _hold_cancellation(store: BaseStore, namespace: tuple[str, ...]) -> None:
+    deadline = asyncio.get_running_loop().time() + 60
+    while asyncio.get_running_loop().time() < deadline:
+        try:
+            released = await store.aget(namespace, "release")
+            if released is not None:
+                return
+            await asyncio.sleep(0.05)
+        except asyncio.CancelledError:
+            # Heartbeat lease loss can cancel twice; the caller re-raises after release.
+            logger.info("Deferring repeated cancellation until the test releases the probe")
+    raise TimeoutError("Cancellation probe was not released within 60 seconds")
+
+
+async def _simulate_work(delay: float, probe: dict[str, Any] | None) -> None:
+    if probe is None:
+        await asyncio.sleep(delay)
+        return
+
+    store = get_store()
+    namespace = tuple(probe["namespace"])
+    label = probe["label"]
+    predecessor_exited = await store.aget(namespace, "A.exited")
+    await store.aput(namespace, f"{label}.started", {"predecessor_exited": predecessor_exited is not None})
+    try:
+        await asyncio.sleep(delay)
+    except asyncio.CancelledError:
+        await store.aput(namespace, f"{label}.cancelling", {"seen": True})
+        if probe.get("hold_cancellation"):
+            await _hold_cancellation(store, namespace)
+        raise
+    finally:
+        await store.aput(namespace, f"{label}.exited", {"seen": True})
+
+
 async def process_step(state: State) -> dict[str, Any]:
     """Simulate work with a configurable delay."""
     config = _parse_config(state)
     delay = float(config["delay"])
 
-    await asyncio.sleep(delay)
+    await _simulate_work(delay, config.get("_cancellation_probe"))
 
     # Optional human-in-the-loop pause (LLM-free HITL fixture), AFTER the simulated work so a
     # caller can enqueue behind a still-running run before it pauses. Stays paused until resumed.

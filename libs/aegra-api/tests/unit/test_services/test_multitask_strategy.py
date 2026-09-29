@@ -13,6 +13,9 @@ import pytest
 from fastapi import HTTPException
 from sqlalchemy.dialects import postgresql
 
+from aegra_api.core.active_runs import active_runs
+from aegra_api.core.orm import Run as RunORM
+from aegra_api.core.orm import Thread as ThreadORM
 from aegra_api.models.auth import User
 from aegra_api.services import run_preparation as run_preparation_mod
 from aegra_api.services.base_executor import BaseExecutor
@@ -282,6 +285,129 @@ class _RecordingExecutor(BaseExecutor):
 
     async def stop(self) -> None:
         return None
+
+
+def _session_with_mutable_runs(runs: list[MagicMock]) -> AsyncMock:
+    """Apply the query's status filter to rows mutated by earlier admission calls."""
+    session = AsyncMock()
+
+    def matching_runs(stmt: Any) -> list[MagicMock]:
+        params = stmt.compile(dialect=postgresql.dialect()).params
+        statuses = params["status_1"]
+        if isinstance(statuses, str):
+            statuses = [statuses]
+        return [run for run in runs if run.status in statuses]
+
+    async def scalars(stmt: Any) -> MagicMock:
+        result = MagicMock()
+        result.all.return_value = matching_runs(stmt)
+        return result
+
+    async def scalar(stmt: Any) -> object:
+        column = stmt.column_descriptions[0]
+        if column["entity"] is ThreadORM:
+            return MagicMock(status="busy")
+        assert column["entity"] is RunORM
+        matching = matching_runs(stmt)
+        if not matching:
+            return None
+        return matching[0].run_id if column["name"] == "run_id" else matching[0]
+
+    session.scalars.side_effect = scalars
+    session.scalar.side_effect = scalar
+    return session
+
+
+@pytest.fixture
+async def running_task_with_delayed_cancellation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> AsyncIterator[tuple[asyncio.Task[None], asyncio.Event]]:
+    started = asyncio.Event()
+    cancelling = asyncio.Event()
+    release = asyncio.Event()
+
+    async def execute() -> None:
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            cancelling.set()
+            await release.wait()
+            raise
+
+    task = asyncio.create_task(execute())
+    monkeypatch.setitem(active_runs, "run-a", task)
+    try:
+        await asyncio.wait_for(started.wait(), timeout=1)
+        yield task, cancelling
+    finally:
+        release.set()
+        if not task.done() and not task.cancelling():
+            task.cancel()
+        await asyncio.wait_for(asyncio.gather(task, return_exceptions=True), timeout=1)
+
+
+class TestPreemptionWhileCancellationInProgress:
+    @pytest.mark.parametrize("strategy", ["interrupt", "rollback"])
+    @pytest.mark.asyncio
+    async def test_third_request_waits_until_preempted_task_exits(
+        self,
+        strategy: str,
+        running_task_with_delayed_cancellation: tuple[asyncio.Task[None], asyncio.Event],
+    ) -> None:
+        task, cancelling = running_task_with_delayed_cancellation
+        original = _fake_run("run-a", "running")
+        original.execution_params = {}
+        runs = [original]
+        session = _session_with_mutable_runs(runs)
+
+        should_run, cancel_ids, _ = await _apply_multitask_strategy(session, "thread-1", strategy, _USER)
+        assert should_run is False
+        assert cancel_ids == ["run-a"]
+        runs.append(_fake_run("run-b", "queued"))
+        await session.commit()
+        task.cancel()
+        await asyncio.wait_for(cancelling.wait(), timeout=1)
+
+        should_run, _, _ = await _apply_multitask_strategy(session, "thread-1", strategy, _USER)
+
+        assert not task.done()
+        assert should_run is False, "Run C must wait while pre-empted run A is still exiting"
+
+    @pytest.mark.parametrize("strategy", ["interrupt", "rollback"])
+    @pytest.mark.asyncio
+    async def test_queue_promotion_waits_until_preempted_task_exits(
+        self,
+        strategy: str,
+        running_task_with_delayed_cancellation: tuple[asyncio.Task[None], asyncio.Event],
+    ) -> None:
+        task, cancelling = running_task_with_delayed_cancellation
+        original = _fake_run("run-a", "running")
+        original.execution_params = {}
+        runs = [original]
+        session = _session_with_mutable_runs(runs)
+        executor = _RecordingExecutor()
+        replacement = _fake_run("run-b", "queued")
+        fake_job = MagicMock()
+        fake_job.identity.run_id = "run-b"
+
+        should_run, cancel_ids, _ = await _apply_multitask_strategy(session, "thread-1", strategy, _USER)
+        assert should_run is False
+        assert cancel_ids == ["run-a"]
+        runs.append(replacement)
+        await session.commit()
+        task.cancel()
+        await asyncio.wait_for(cancelling.wait(), timeout=1)
+
+        with (
+            patch("aegra_api.services.base_executor._get_session_maker", return_value=_make_session_maker(session)),
+            patch("aegra_api.services.base_executor.RunJob.from_run_orm", return_value=fake_job),
+        ):
+            await executor.dispatch_next_for_thread("thread-1")
+
+        assert not task.done()
+        assert executor.submitted == [], "Recovery must not dispatch run B while pre-empted run A is still exiting"
+        assert replacement.status == "queued"
 
 
 class TestDispatchNextForThread:

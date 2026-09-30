@@ -26,6 +26,7 @@ import logging
 from typing import Any
 
 import structlog
+from asgi_correlation_id import correlation_id
 from opentelemetry.context import Context
 from opentelemetry.sdk.trace import ReadableSpan, Span, SpanProcessor
 
@@ -174,6 +175,7 @@ def make_run_trace_context(
     user_identity: str | None,
     *,
     extra_metadata: dict[str, Any] | None = None,
+    correlation_id_value: str | None = None,
 ) -> contextvars.Context:
     """Return an isolated context copy with trace context pre-set for a run.
 
@@ -182,18 +184,24 @@ def make_run_trace_context(
     (``run_id``, ``thread_id``, ``graph_id``, ``user_id``).  Pass the
     returned context to ``asyncio.create_task(..., context=ctx)`` so the
     background task starts with the correct trace data and every log line
-    it emits carries the run identifiers automatically — mirroring the
-    worker path's ``_restore_trace_context``.
+    it emits carries the run identifiers automatically.  Used by both
+    ``LocalExecutor`` and ``WorkerExecutor``.
 
     User-supplied ``extra_metadata`` is merged with the system runtime keys
     (``run_id``, ``thread_id``, ``graph_id``) for the OTEL attributes.
     System keys win on collision — see :func:`merge_run_metadata`.
+
+    When ``correlation_id_value`` is non-empty, the ``asgi_correlation_id``
+    context variable is set and ``original_request_id`` is added to both
+    the OTEL metadata and structlog bindings.
     """
     system_metadata: dict[str, str | int | float | bool] = {
         "run_id": run_id,
         "thread_id": thread_id,
         "graph_id": graph_id,
     }
+    if correlation_id_value:
+        system_metadata["original_request_id"] = correlation_id_value
     metadata = merge_run_metadata(extra_metadata, system_metadata)
     ctx = contextvars.copy_context()
     ctx.run(
@@ -203,12 +211,11 @@ def make_run_trace_context(
         trace_name=graph_id,
         metadata=metadata,
     )
-    # Bind structlog context vars inside the same isolated context so
-    # background-task logs include the run identifiers. Run via ``ctx.run``
-    # so the binding lands in the returned context, not the caller's.
-    # ``user_id`` is only bound when present, matching the OTEL path above
-    # (``set_trace_context`` guards on truthy ``user_id``) — anonymous runs
-    # omit the key rather than logging ``user_id=None``.
+    if correlation_id_value:
+        ctx.run(correlation_id.set, correlation_id_value)
+    # Clear inherited structlog bindings so stale keys from the copied
+    # context cannot bleed into the run's log lines.
+    ctx.run(structlog.contextvars.clear_contextvars)
     structlog_bindings: dict[str, str] = {
         "run_id": run_id,
         "thread_id": thread_id,
@@ -216,5 +223,7 @@ def make_run_trace_context(
     }
     if user_identity is not None:
         structlog_bindings["user_id"] = user_identity
+    if correlation_id_value:
+        structlog_bindings["original_request_id"] = correlation_id_value
     ctx.run(structlog.contextvars.bind_contextvars, **structlog_bindings)
     return ctx

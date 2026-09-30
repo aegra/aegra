@@ -17,7 +17,6 @@ import socket
 from datetime import UTC, datetime, timedelta
 
 import structlog
-from asgi_correlation_id import correlation_id
 from redis import RedisError
 from redis import TimeoutError as RedisTimeoutError
 from sqlalchemy import select, update
@@ -27,7 +26,7 @@ from aegra_api.core.orm import Run as RunORM
 from aegra_api.core.orm import _get_session_maker
 from aegra_api.core.redis_manager import redis_manager
 from aegra_api.models.run_job import RunJob
-from aegra_api.observability.span_enrichment import merge_run_metadata, set_trace_context
+from aegra_api.observability.span_enrichment import make_run_trace_context
 from aegra_api.services.base_executor import BaseExecutor
 from aegra_api.services.run_executor import (
     _lease_loss_cancellations,
@@ -345,7 +344,14 @@ class WorkerExecutor(BaseExecutor):
             logger.debug("Lease not acquired or job missing, skipping", run_id=run_id, worker=worker_name)
             return
 
-        _restore_trace_context(run_id, loaded.job, loaded.trace)
+        trace_ctx = make_run_trace_context(
+            run_id,
+            loaded.job.identity.thread_id,
+            loaded.job.identity.graph_id,
+            loaded.job.user.identity,
+            extra_metadata=loaded.job.run_metadata,
+            correlation_id_value=loaded.trace.get("correlation_id", ""),
+        )
         logger.info(
             "Worker picked up run",
             worker=worker_name,
@@ -354,10 +360,10 @@ class WorkerExecutor(BaseExecutor):
         )
         # Wrap execute_run in a task so the heartbeat can cancel it on
         # lease loss, preventing double execution by a second worker.
-        job_task = asyncio.create_task(execute_run(loaded.job))
+        job_task = asyncio.create_task(execute_run(loaded.job), context=trace_ctx)
         heartbeat_task = asyncio.create_task(
             _heartbeat_loop(run_id, worker_name, job_task=job_task),
-            context=contextvars.copy_context(),
+            context=trace_ctx.run(contextvars.copy_context),
         )
 
         try:
@@ -588,44 +594,3 @@ async def _is_run_terminal(run_id: str) -> bool:
         if run_orm is None:
             return True
         return run_orm.status in _TERMINAL_STATUSES
-
-
-def _restore_trace_context(run_id: str, job: RunJob, trace: dict[str, str]) -> None:
-    """Restore OTEL and structlog trace context for a worker-executed run.
-
-    Clears previous context first to prevent bleed between concurrent
-    jobs processed by the same worker.  User-supplied ``run_metadata`` is
-    merged with the system runtime keys; system keys win on collision —
-    see :func:`merge_run_metadata`.
-    """
-    structlog.contextvars.clear_contextvars()
-
-    original_request_id = trace.get("correlation_id", "")
-    if original_request_id:
-        correlation_id.set(original_request_id)
-
-    system_metadata: dict[str, str | int | float | bool] = {
-        "run_id": run_id,
-        "thread_id": job.identity.thread_id,
-        "graph_id": job.identity.graph_id,
-    }
-    # Gate on non-empty: requests without an upstream correlation-id header
-    # leave ``original_request_id`` as ``""`` — including the empty string
-    # would emit a noisy ``langfuse.trace.metadata.original_request_id=""``
-    # attribute on every such trace.
-    if original_request_id:
-        system_metadata["original_request_id"] = original_request_id
-    set_trace_context(
-        user_id=job.user.identity,
-        session_id=job.identity.thread_id,
-        trace_name=job.identity.graph_id,
-        metadata=merge_run_metadata(job.run_metadata, system_metadata),
-    )
-
-    structlog.contextvars.bind_contextvars(
-        run_id=run_id,
-        thread_id=job.identity.thread_id,
-        graph_id=job.identity.graph_id,
-        user_id=job.user.identity,
-        original_request_id=original_request_id,
-    )

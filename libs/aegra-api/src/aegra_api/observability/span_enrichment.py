@@ -213,9 +213,6 @@ def make_run_trace_context(
     )
     if correlation_id_value:
         ctx.run(correlation_id.set, correlation_id_value)
-    # Clear inherited structlog bindings so stale keys from the copied
-    # context cannot bleed into the run's log lines.
-    ctx.run(structlog.contextvars.clear_contextvars)
     structlog_bindings: dict[str, str] = {
         "run_id": run_id,
         "thread_id": thread_id,

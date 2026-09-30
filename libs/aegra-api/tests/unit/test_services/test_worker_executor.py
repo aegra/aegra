@@ -13,6 +13,7 @@ from redis import TimeoutError as RedisTimeoutError
 from aegra_api.core.active_runs import active_runs, explicit_run_cancellations
 from aegra_api.models.auth import User
 from aegra_api.models.run_job import RunBehavior, RunExecution, RunIdentity, RunJob
+from aegra_api.observability.span_enrichment import make_run_trace_context as real_make_run_trace_context
 from aegra_api.services.run_executor import _shutdown_cancellations, _timeout_cancellations
 from aegra_api.services.worker_executor import (
     WorkerExecutor,
@@ -421,9 +422,7 @@ class TestExecuteWithLeaseTraceContext:
         mock_loaded.job = _make_run_job()
         mock_loaded.trace = {"correlation_id": "req-abc"}
 
-        from aegra_api.observability.span_enrichment import make_run_trace_context as real_make
-
-        real_ctx = real_make(
+        real_ctx = real_make_run_trace_context(
             run_id,
             mock_loaded.job.identity.thread_id,
             mock_loaded.job.identity.graph_id,

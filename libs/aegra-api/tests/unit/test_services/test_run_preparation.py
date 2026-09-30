@@ -1,14 +1,22 @@
 """Unit tests for run_preparation helpers."""
 
+from collections.abc import Iterator
 from types import SimpleNamespace
+from typing import Any, cast
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from fastapi import HTTPException
 
+from aegra_api.config import CheckpointerConfig
 from aegra_api.models.runs import RunCreate
 from aegra_api.services import run_preparation as mod
-from aegra_api.services.run_preparation import _resolve_checkpoint, _validate_resume_command
+from aegra_api.services.run_preparation import (
+    _resolve_checkpoint,
+    _resolve_durability,
+    _validate_resume_command,
+    get_default_durability,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -106,3 +114,78 @@ class TestResolveCheckpoint:
             checkpoint={"checkpoint_id": _OTHER_CHECKPOINT_ID},
         )
         assert _resolve_checkpoint(request) == {"checkpoint_id": _OTHER_CHECKPOINT_ID}
+
+
+def _durability_sources(
+    monkeypatch: pytest.MonkeyPatch, *, env: str | None, checkpointer: CheckpointerConfig | None
+) -> None:
+    monkeypatch.setattr(mod.settings.checkpointer, "AEGRA_CHECKPOINT_DURABILITY", env)
+    monkeypatch.setattr(mod, "load_checkpointer_config", lambda: checkpointer)
+
+
+@pytest.fixture
+def _fresh_default_durability() -> Iterator[None]:
+    get_default_durability.cache_clear()
+    yield
+    get_default_durability.cache_clear()
+
+
+@pytest.mark.usefixtures("_fresh_default_durability")
+class TestGetDefaultDurability:
+    def test_none_when_nothing_is_configured(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        _durability_sources(monkeypatch, env=None, checkpointer=None)
+        assert get_default_durability() is None
+
+    def test_none_when_checkpointer_block_has_no_durability(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        _durability_sources(monkeypatch, env=None, checkpointer={"ttl": None})
+        assert get_default_durability() is None
+
+    def test_reads_aegra_json_key(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        _durability_sources(monkeypatch, env=None, checkpointer={"durability": "exit"})
+        assert get_default_durability() == "exit"
+
+    def test_env_var_wins_over_aegra_json(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        _durability_sources(monkeypatch, env="sync", checkpointer={"durability": "exit"})
+        assert get_default_durability() == "sync"
+
+    def test_blank_env_var_falls_through_to_aegra_json(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        _durability_sources(monkeypatch, env="  ", checkpointer={"durability": "async"})
+        assert get_default_durability() == "async"
+
+    def test_env_var_is_stripped(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        _durability_sources(monkeypatch, env=" exit\n", checkpointer=None)
+        assert get_default_durability() == "exit"
+
+    @pytest.mark.parametrize("value", ["EXIT", "never", "0"])
+    def test_invalid_env_var_raises_naming_the_variable(self, monkeypatch: pytest.MonkeyPatch, value: str) -> None:
+        _durability_sources(monkeypatch, env=value, checkpointer=None)
+        with pytest.raises(ValueError, match="AEGRA_CHECKPOINT_DURABILITY"):
+            get_default_durability()
+
+    @pytest.mark.parametrize("value", ["eventually", True, 1, {"mode": "exit"}])
+    def test_invalid_aegra_json_value_raises_naming_the_key(self, monkeypatch: pytest.MonkeyPatch, value: Any) -> None:
+        _durability_sources(monkeypatch, env=None, checkpointer=cast(CheckpointerConfig, {"durability": value}))
+        with pytest.raises(ValueError, match=r"checkpointer\.durability"):
+            get_default_durability()
+
+
+class TestResolveDurability:
+    @pytest.fixture(autouse=True)
+    def _server_default(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(mod, "get_default_durability", lambda: "sync")
+
+    def test_run_durability_wins_over_alias_and_server_default(self) -> None:
+        request = RunCreate(assistant_id="agent", input={"x": 1}, durability="async", checkpoint_during=False)
+        assert _resolve_durability(request) == "async"
+
+    @pytest.mark.parametrize(("checkpoint_during", "expected"), [(True, "async"), (False, "exit")])
+    def test_checkpoint_during_maps_like_langgraph(self, checkpoint_during: bool, expected: str) -> None:
+        request = RunCreate(assistant_id="agent", input={"x": 1}, checkpoint_during=checkpoint_during)
+        assert _resolve_durability(request) == expected
+
+    def test_falls_back_to_server_default(self) -> None:
+        assert _resolve_durability(RunCreate(assistant_id="agent", input={"x": 1})) == "sync"
+
+    def test_none_without_run_value_or_server_default(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(mod, "get_default_durability", lambda: None)
+        assert _resolve_durability(RunCreate(assistant_id="agent", input={"x": 1})) is None

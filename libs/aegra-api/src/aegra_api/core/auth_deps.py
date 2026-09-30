@@ -7,6 +7,10 @@ from fastapi import Depends, HTTPException, Request
 from aegra_api.core.auth_middleware import get_auth_backend
 from aegra_api.models.auth import User
 
+# Several dependencies on one request can call require_auth; the backend must run once
+# because a credential may be single-use.
+_AUTH_RESULT_SCOPE_KEY = "aegra.auth_result"
+
 
 def _extract_user_data(user_obj: Any) -> dict[str, Any]:
     """Extract user data from various object types.
@@ -70,6 +74,10 @@ async def require_auth(request: Request) -> User:
     Raises:
         HTTPException: If user is not authenticated
     """
+    cached = request.scope.get(_AUTH_RESULT_SCOPE_KEY)
+    if cached is not None:
+        return cached
+
     backend = get_auth_backend()
 
     try:
@@ -92,8 +100,9 @@ async def require_auth(request: Request) -> User:
     if not hasattr(request, "user"):
         request.user = user
 
-    # Convert to User model
-    return _to_user_model(user)
+    user_model = _to_user_model(user)
+    request.scope[_AUTH_RESULT_SCOPE_KEY] = user_model
+    return user_model
 
 
 # Type alias for cleaner route signatures

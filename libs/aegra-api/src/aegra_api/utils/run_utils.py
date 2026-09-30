@@ -6,10 +6,8 @@ from langgraph.types import Command, Send
 
 logger = structlog.getLogger(__name__)
 
-# A body-supplied thread_id overrides the route-verified one (the checkpointer
-# keys on thread_id alone), and a body-supplied assistant_id would name another
-# tenant's assistant to a factory that keys configuration off it. The server
-# pins these instead of trusting them.
+# thread_id alone keys the checkpointer, and a factory keys its configuration off
+# assistant_id, so a client-supplied value reaches another tenant's. Pinned, not trusted.
 SERVER_PINNED_CONFIG_KEYS: frozenset[str] = frozenset({"thread_id", "run_id", "assistant_id"})
 
 

@@ -123,6 +123,4 @@ class AgentSchemas(BaseModel):
     output_schema: dict[str, Any] | None = Field(..., description="JSON Schema for agent outputs")
     state_schema: dict[str, Any] | None = Field(..., description="JSON Schema for agent state")
     config_schema: dict[str, Any] | None = Field(..., description="JSON Schema for agent config")
-    context_schema: dict[str, Any] | None = Field(
-        ..., description="JSON Schema for the run context declared by a graph factory"
-    )
+    context_schema: dict[str, Any] | None = Field(..., description="JSON Schema for the graph's run context")

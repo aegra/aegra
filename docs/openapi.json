@@ -3449,7 +3449,7 @@
               }
             ],
             "title": "Context Schema",
-            "description": "JSON Schema for the run context declared by a graph factory"
+            "description": "JSON Schema for the graph's run context"
           }
         },
         "type": "object",

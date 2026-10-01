@@ -18,6 +18,8 @@ from collections.abc import AsyncIterator
 from functools import lru_cache
 from typing import Any
 
+from aegra_api.models.runs import Durability
+
 
 @lru_cache(maxsize=1)
 def _extra_transformers() -> list[Any]:
@@ -64,6 +66,7 @@ async def stream_native_v3_events(
     interrupt_before: str | list[str] | None = None,
     interrupt_after: str | list[str] | None = None,
     context: dict[str, Any] | None = None,
+    durability: Durability | None = None,
 ) -> AsyncIterator[tuple[str, dict[str, Any]]]:
     """Yield ``(method, protocol_event)`` pairs from a native v3 run.
 
@@ -71,6 +74,8 @@ async def stream_native_v3_events(
     it. ``messages`` payloads are unwrapped to their event dict; a message
     event we can't reconstruct is dropped rather than forwarded malformed.
     """
+    # v3 forwards extra kwargs to astream; omitted when unset to keep LangGraph's default.
+    durability_kwargs: dict[str, Durability] = {"durability": durability} if durability is not None else {}
     run_stream = await graph.astream_events(
         input_data,
         config,
@@ -79,6 +84,7 @@ async def stream_native_v3_events(
         transformers=_extra_transformers(),
         interrupt_before=interrupt_before,
         interrupt_after=interrupt_after,
+        **durability_kwargs,
     )
     async with run_stream as stream:
         async for event in stream:

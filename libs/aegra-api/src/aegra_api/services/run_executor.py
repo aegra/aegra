@@ -7,10 +7,9 @@ Single source of truth for executing a graph run. Both LocalExecutor
 """
 
 import asyncio
-from typing import Any, cast
+from typing import Any
 
 import structlog
-from langchain_core.runnables import RunnableConfig
 
 from aegra_api.core.active_runs import active_runs
 from aegra_api.core.auth_ctx import with_auth_ctx
@@ -229,12 +228,13 @@ async def _stream_legacy(
     async for event_type, event_data in stream_graph_events(
         graph=graph,
         input_data=execution_input,
-        config=cast(RunnableConfig, run_config),
+        config=run_config,
         stream_mode=stream_modes,
         interrupt_before=interrupt_before,
         interrupt_after=interrupt_after,
         context=job.execution.context,
         subgraphs=job.behavior.subgraphs,
+        durability=job.execution.durability,
         on_checkpoint=lambda _: None,
         on_task_result=lambda _: None,
     ):
@@ -271,6 +271,7 @@ async def _stream_native_v2(
         interrupt_before=interrupt_before,
         interrupt_after=interrupt_after,
         context=job.execution.context,
+        durability=job.execution.durability,
     ):
         event_id = await broker_manager.allocate_event_id(run_id)
         await streaming_service.put_to_broker(run_id, event_id, (method, event))

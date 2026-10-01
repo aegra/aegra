@@ -31,6 +31,7 @@ from langgraph.pregel.debug import CheckpointPayload, TaskResultPayload
 from pydantic import ValidationError
 from pydantic.v1 import ValidationError as ValidationErrorLegacy
 
+from aegra_api.models.runs import Durability
 from aegra_api.utils.run_utils import _filter_context_by_schema
 
 logger = structlog.getLogger(__name__)
@@ -107,6 +108,7 @@ async def stream_graph_events(
     context: dict[str, Any] | None = None,
     subgraphs: bool = False,
     output_keys: list[str] | None = None,
+    durability: Durability | None = None,
     on_checkpoint: Callable[[CheckpointPayload | None], None] = lambda _: None,
     on_task_result: Callable[[TaskResultPayload], None] = lambda _: None,
 ) -> AnyStream:
@@ -124,6 +126,7 @@ async def stream_graph_events(
         context: Optional context dictionary
         subgraphs: Whether to include subgraph namespaces in event types
         output_keys: Optional output channel keys for astream
+        durability: Checkpoint durability mode; None keeps LangGraph's default
         on_checkpoint: Callback invoked when checkpoint events are received
         on_task_result: Callback invoked when task result events are received
 
@@ -131,6 +134,8 @@ async def stream_graph_events(
         Tuples of (mode, payload) where mode is the stream mode and payload is the event data
     """
     run_id = str(config.get("configurable", {}).get("run_id", uuid.uuid4()))
+    # Omitted when unset so the call is unchanged for runs that never asked for a mode.
+    durability_kwargs: dict[str, Durability] = {"durability": durability} if durability is not None else {}
     # Prepare stream modes
     stream_modes_set: set[str] = set(stream_mode) - {"events"}
     if "debug" not in stream_modes_set:
@@ -189,6 +194,7 @@ async def stream_graph_events(
                 subgraphs=subgraphs,
                 interrupt_before=interrupt_before,
                 interrupt_after=interrupt_after,
+                **durability_kwargs,
             )
         ) as stream:
             async for event in stream:
@@ -277,6 +283,7 @@ async def stream_graph_events(
                 subgraphs=subgraphs,
                 interrupt_before=interrupt_before,
                 interrupt_after=interrupt_after,
+                **durability_kwargs,
             )
         ) as stream:
             async for event in stream:

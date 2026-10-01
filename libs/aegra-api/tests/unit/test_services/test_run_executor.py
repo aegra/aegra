@@ -9,6 +9,7 @@ import pytest
 
 from aegra_api.models.auth import User
 from aegra_api.models.run_job import RunBehavior, RunExecution, RunIdentity, RunJob
+from aegra_api.models.runs import Durability
 from aegra_api.services import run_executor as run_executor_module
 from aegra_api.services.run_executor import (
     _build_run_config,
@@ -18,6 +19,7 @@ from aegra_api.services.run_executor import (
     _shutdown_cancellations,
     _signal_end_event,
     _signal_run_done,
+    _stream_legacy,
     _stream_native_v2,
     _timeout_cancellations,
     execute_run,
@@ -278,6 +280,36 @@ class TestStreamNativeV2InterruptDetection:
 
         assert captured_kwargs["interrupt_before"] == ["agent"]
         assert captured_kwargs["interrupt_after"] == ["tools"]
+
+
+class TestDurabilityForwarding:
+    """The job's resolved durability reaches both stream producers."""
+
+    @staticmethod
+    def _job(durability: Durability | None) -> RunJob:
+        return RunJob(
+            identity=RunIdentity(run_id="run-1", thread_id="thread-1", graph_id="graph-1"),
+            user=User(identity="user-1"),
+            execution=RunExecution(input_data={"msg": "hello"}, durability=durability),
+        )
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("durability", ["exit", None])
+    async def test_legacy_stream_receives_job_durability(self, durability: Durability | None) -> None:
+        stream = MagicMock(return_value=_empty_async_gen())
+        with patch.object(run_executor_module, "stream_graph_events", stream):
+            await _stream_legacy(self._job(durability), MagicMock(), {"msg": "x"}, {}, ["values"], _GraphResult())
+
+        assert stream.call_args.kwargs["durability"] == durability
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("durability", ["exit", None])
+    async def test_native_v2_stream_receives_job_durability(self, durability: Durability | None) -> None:
+        stream = MagicMock(return_value=_empty_async_gen())
+        with patch.object(run_executor_module, "stream_native_v3_events", stream):
+            await _stream_native_v2(self._job(durability), MagicMock(), {"msg": "x"}, {}, _GraphResult())
+
+        assert stream.call_args.kwargs["durability"] == durability
 
 
 class TestSignalEndEvent:

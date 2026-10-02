@@ -162,6 +162,8 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write  # Required for creating releases
+    outputs:
+      tag: ${{ steps.release-info.outputs.tag }}
 
     steps:
       - uses: actions/checkout@v4
@@ -202,3 +204,26 @@ jobs:
           name: ${{ steps.release-info.outputs.name }}
           generateReleaseNotes: true
           commit: ${{ github.sha }}
+
+  # ---------------------------------------------------------------
+  # Discord — a release made with GITHUB_TOKEN does not trigger
+  # `on: release` workflows, so the post has to live in this one.
+  # ---------------------------------------------------------------
+  notify-discord:
+    needs: [create-release]
+    if: always() && needs.create-release.result == 'success'
+    runs-on: ubuntu-latest
+    continue-on-error: true  # a Discord outage must not mark a published release as failed
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Post release notes to Discord
+        env:
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_RELEASE_WEBHOOK }}
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.create-release.outputs.tag }}
+          PACKAGE: ${{ inputs.package }}
+        run: |
+          gh release view "$TAG" --json name,url,body > release.json
+          python3 scripts/notify_discord_release.py release.json

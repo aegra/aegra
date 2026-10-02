@@ -26,7 +26,8 @@ _CHANGE_LINE = re.compile(
 _NEW_CONTRIBUTOR_LINE = re.compile(
     r"^\*\s+@(?P<author>\S+)\s+made their first contribution in\s+\S+/pull/(?P<number>\d+)"
 )
-_IDENTIFIER = re.compile(r"\b\w+_\w+\b")
+# Skips words inside URLs and paths, where backticks would break the link.
+_IDENTIFIER = re.compile(r"(?<![\w/.:-])\w+_\w+(?![\w/.-])")
 
 # Types not listed here (chore, ci, test, refactor, ...) are internal and left out of the post.
 _SECTIONS: list[tuple[str, frozenset[str]]] = [
@@ -98,25 +99,22 @@ def build_payload(*, name: str, url: str, body: str, package: str) -> dict[str, 
     thanked = [author for author in dict.fromkeys(change.author for change in shown) if author not in new_authors]
     credits = [f"🙌 Thanks {_join_names(thanked)}"] if thanked else []
     credits += [f"🎉 First contribution from {m['author']} in #{m['number']}" for m in newcomers]
-    if credits:
-        credits.append("")
 
-    entries: list[tuple[str, bool]] = []
+    entries: list[str] = []
     for title, items in sections:
-        entries += [(f"**{title}**", False), *((change.line(), True) for change in items), ("", False)]
+        entries += [f"**{title}**", *(change.line() for change in items), ""]
+    entries += [*credits, ""] if credits else []
 
     lines: list[str] = []
-    used = len(install) + sum(len(line) + 1 for line in credits)
-    listed = 0
-    for text, is_change in entries:
+    used = len(install)
+    for text in entries:
         if used + len(text) + 1 > _DESCRIPTION_BUDGET:
-            lines += [f"…and {len(shown) - listed} more in the release notes", ""]
+            lines += ["…and more in the release notes", ""]
             break
         lines.append(text)
         used += len(text) + 1
-        listed += is_change
 
-    description = "\n".join([*lines, *credits, install]).strip()
+    description = "\n".join([*lines, install]).strip()
     embed: dict[str, Any] = {
         "title": f"🚀 {name} is out",
         "url": url,
@@ -151,8 +149,13 @@ class _RejectRedirects(urllib.request.HTTPRedirectHandler):
 
 
 def post(webhook_url: str, payload: dict[str, Any]) -> None:
+    # The token is part of the URL, so plain http would leak it on the first request.
+    if not webhook_url.startswith("https://"):
+        raise ValueError("DISCORD_WEBHOOK_URL must be an https:// URL")
+    # Without wait=true Discord answers 204 even when it drops the message.
+    separator = "&" if "?" in webhook_url else "?"
     request = urllib.request.Request(
-        webhook_url,
+        f"{webhook_url}{separator}wait=true",
         data=json.dumps(payload).encode(),
         # Discord's edge rejects the default urllib user agent with a 403.
         headers={"Content-Type": "application/json", "User-Agent": "aegra-release-notifier"},

@@ -28,7 +28,7 @@ RELEASE_BODY = f"""## What's Changed
 * feat(api): honor durability on runs by @artur in {PR}/645
 * fix(deps): upgrade vulnerable packages by @ibby in {PR}/662
 * perf(store): batch namespace reads by @ibby in {PR}/670
-* docs: document store scopes by @ben in {PR}/671
+* docs: document store_scopes at https://docs.test/store_scopes by @ben in {PR}/671
 * feat(api)!: drop the legacy batch_runs endpoint by @newbie in {PR}/672
 * test(api): add store e2e by @ibby in {PR}/673
 * chore(release): v0.10.8 by @ibby in {PR}/663
@@ -58,7 +58,7 @@ def test_build_payload_groups_changes_by_type_and_hides_internal_ones() -> None:
         f"• Batch namespace reads ([#670]({PR}/670))\n"
         "\n"
         "**📚 Docs**\n"
-        f"• Document store scopes ([#671]({PR}/671))\n"
+        f"• Document `store_scopes` at https://docs.test/store_scopes ([#671]({PR}/671))\n"
         "\n"
         "🙌 Thanks artur, ibby and ben\n"
         "🎉 First contribution from newbie in #672\n"
@@ -90,10 +90,12 @@ def test_build_payload_install_line_matches_published_package(package: str, comm
     assert payload["embeds"][0]["description"].endswith(f"```\n{command}\n```")
 
 
-def test_build_payload_reports_overflow_instead_of_cutting_silently() -> None:
-    body = "\n".join(
-        f"* fix: change {i} {'x' * 80} by @x in https://github.com/aegra/aegra/pull/{i}" for i in range(100)
-    )
+# "chore" changes are hidden, so that case overflows on first-contribution lines alone.
+@pytest.mark.parametrize("change_type", ["fix", "chore"])
+def test_build_payload_reports_overflow_instead_of_cutting_silently(change_type: str) -> None:
+    changes = [f"* {change_type}: change {i} {'x' * 80} by @user{i} in {PR}/{i}" for i in range(100)]
+    newcomers = [f"* @user{i} made their first contribution in {PR}/{i}" for i in range(100)]
+    body = "\n".join([*changes, "## New Contributors", *newcomers])
 
     payload = notify.build_payload(name="Aegra v1", url="https://example.test/r", body=body, package="both")
 
@@ -138,7 +140,13 @@ def test_post_sends_json_payload(monkeypatch: pytest.MonkeyPatch) -> None:
     notify.post("https://discord.test/api/webhooks/1/x", {"embeds": [{"title": "Aegra v1"}]})
 
     assert fake.requests[0].get_method() == "POST"
+    assert fake.requests[0].full_url == "https://discord.test/api/webhooks/1/x?wait=true"
     assert json.loads(fake.requests[0].data) == {"embeds": [{"title": "Aegra v1"}]}
+
+
+def test_post_refuses_plain_http_so_the_token_is_never_sent_in_clear() -> None:
+    with pytest.raises(ValueError, match="https"):
+        notify.post("http://discord.test/api/webhooks/1/x", {"embeds": []})
 
 
 def test_post_raises_on_redirect_instead_of_reporting_success(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -26,6 +26,7 @@ _CHANGE_LINE = re.compile(
 _NEW_CONTRIBUTOR_LINE = re.compile(
     r"^\*\s+@(?P<author>\S+)\s+made their first contribution in\s+\S+/pull/(?P<number>\d+)"
 )
+_IDENTIFIER = re.compile(r"\b\w+_\w+\b")
 
 # Types not listed here (chore, ci, test, refactor, ...) are internal and left out of the post.
 _SECTIONS: list[tuple[str, frozenset[str]]] = [
@@ -51,7 +52,11 @@ class Change:
     url: str
 
     def line(self) -> str:
-        return f"{self.subject[:1].upper()}{self.subject[1:]} ([#{self.number}]({self.url})) · {self.author}"
+        subject = f"{self.subject[:1].upper()}{self.subject[1:]}"
+        if "`" not in subject:
+            # snake_case words in PR titles are almost always API names
+            subject = _IDENTIFIER.sub(r"`\g<0>`", subject)
+        return f"• {subject} ([#{self.number}]({self.url}))"
 
 
 def parse_changes(body: str) -> list[Change]:
@@ -79,22 +84,30 @@ def _sections(changes: list[Change]) -> list[tuple[str, list[Change]]]:
     return [(title, items) for title, items in sections if items]
 
 
+def _join_names(names: list[str]) -> str:
+    return names[0] if len(names) == 1 else f"{', '.join(names[:-1])} and {names[-1]}"
+
+
 def build_payload(*, name: str, url: str, body: str, package: str) -> dict[str, Any]:
     install = f"```\n{_INSTALL_COMMANDS.get(package, _INSTALL_COMMANDS['both'])}\n```"
     sections = _sections(parse_changes(body))
     shown = [change for _, items in sections for change in items]
-    newcomers = [
+    credits = [
         f"🎉 First contribution from {m['author']} in #{m['number']}"
         for m in (_NEW_CONTRIBUTOR_LINE.match(line.strip()) for line in body.splitlines())
         if m is not None
     ]
+    if shown:
+        credits.insert(0, f"🙌 Thanks {_join_names(list(dict.fromkeys(change.author for change in shown)))}")
+    if credits:
+        credits.append("")
 
     entries: list[tuple[str, bool]] = []
     for title, items in sections:
         entries += [(f"**{title}**", False), *((change.line(), True) for change in items), ("", False)]
 
     lines: list[str] = []
-    used = len(install) + sum(len(n) + 1 for n in newcomers)
+    used = len(install) + sum(len(line) + 1 for line in credits)
     listed = 0
     for text, is_change in entries:
         if used + len(text) + 1 > _DESCRIPTION_BUDGET:
@@ -104,9 +117,7 @@ def build_payload(*, name: str, url: str, body: str, package: str) -> dict[str, 
         used += len(text) + 1
         listed += is_change
 
-    if newcomers:
-        newcomers.append("")
-    description = "\n".join([*lines, *newcomers, install]).strip()
+    description = "\n".join([*lines, *credits, install]).strip()
     embed: dict[str, Any] = {
         "title": f"🚀 {name} is out",
         "url": url,

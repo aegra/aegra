@@ -29,7 +29,7 @@ RELEASE_BODY = f"""## What's Changed
 * fix(deps): upgrade vulnerable packages by @ibby in {PR}/662
 * perf(store): batch namespace reads by @ibby in {PR}/670
 * docs: document store scopes by @ben in {PR}/671
-* feat(api)!: drop the legacy batch endpoint by @newbie in {PR}/672
+* feat(api)!: drop the legacy batch_runs endpoint by @newbie in {PR}/672
 * test(api): add store e2e by @ibby in {PR}/673
 * chore(release): v0.10.8 by @ibby in {PR}/663
 
@@ -48,18 +48,19 @@ def test_build_payload_groups_changes_by_type_and_hides_internal_ones() -> None:
     assert embed["title"] == "🚀 Aegra v0.10.8 is out"
     assert embed["description"] == (
         "**⚠️ Breaking**\n"
-        f"Drop the legacy batch endpoint ([#672]({PR}/672)) · newbie\n"
+        f"• Drop the legacy `batch_runs` endpoint ([#672]({PR}/672))\n"
         "\n"
         "**✨ New**\n"
-        f"Honor durability on runs ([#645]({PR}/645)) · artur\n"
+        f"• Honor durability on runs ([#645]({PR}/645))\n"
         "\n"
         "**🐛 Fixes**\n"
-        f"Upgrade vulnerable packages ([#662]({PR}/662)) · ibby\n"
-        f"Batch namespace reads ([#670]({PR}/670)) · ibby\n"
+        f"• Upgrade vulnerable packages ([#662]({PR}/662))\n"
+        f"• Batch namespace reads ([#670]({PR}/670))\n"
         "\n"
         "**📚 Docs**\n"
-        f"Document store scopes ([#671]({PR}/671)) · ben\n"
+        f"• Document store scopes ([#671]({PR}/671))\n"
         "\n"
+        "🙌 Thanks newbie, artur, ibby and ben\n"
         "🎉 First contribution from newbie in #672\n"
         "\n"
         "```\npip install -U aegra-api aegra-cli\n```"

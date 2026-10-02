@@ -74,8 +74,6 @@ class _RejectRedirects(urllib.request.HTTPRedirectHandler):
 
 
 def post(webhook_url: str, payload: dict[str, Any]) -> None:
-    if not webhook_url.startswith("https://"):
-        raise ValueError("DISCORD_WEBHOOK_URL must be an https:// URL")
     request = urllib.request.Request(
         webhook_url,
         data=json.dumps(payload).encode(),
@@ -88,16 +86,13 @@ def post(webhook_url: str, payload: dict[str, Any]) -> None:
         print(f"Discord responded {response.status}")
 
 
-def main(argv: list[str]) -> int:
+def main(release_path: str) -> None:
     webhook_url = os.environ.get("DISCORD_WEBHOOK_URL", "")
     if not webhook_url:
         print("DISCORD_WEBHOOK_URL is not set; skipping the Discord post")
-        return 0
-    if len(argv) != 2:
-        print("usage: notify_discord_release.py <release.json>", file=sys.stderr)
-        return 2
+        return
 
-    release = json.loads(Path(argv[1]).read_text(encoding="utf-8"))
+    release = json.loads(Path(release_path).read_text(encoding="utf-8"))
     payload = build_payload(
         name=release["name"],
         url=release["url"],
@@ -105,8 +100,7 @@ def main(argv: list[str]) -> int:
         package=os.environ.get("PACKAGE", "both"),
     )
     post(webhook_url, payload)
-    return 0
 
 
 if __name__ == "__main__":
-    sys.exit(main(sys.argv))
+    main(sys.argv[1])

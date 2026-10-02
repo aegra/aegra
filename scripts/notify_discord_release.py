@@ -10,15 +10,29 @@ import os
 import re
 import sys
 import urllib.request
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 # Embed description limit is 4096; leave room for the install line and the overflow note.
 _DESCRIPTION_BUDGET = 3800
-_EMBED_COLOR = 0x5865F2
+_EMBED_COLOR = 0x534AB7
 
-# Matches GitHub's generated notes: "* <title> by @<user> in https://github.com/<repo>/pull/<n>"
-_CHANGE_LINE = re.compile(r"^\*\s+(?P<title>.+?)\s+by\s+@\S+\s+in\s+\S+/pull/(?P<number>\d+)\s*$")
+# GitHub's generated notes; PR titles are Conventional Commits (enforced by conventional-commits.yml).
+_CHANGE_LINE = re.compile(
+    r"^\*\s+(?P<type>[a-z]+)(?:\([^)]*\))?(?P<breaking>!)?:\s*(?P<subject>.+?)"
+    r"\s+by\s+@(?P<author>\S+)\s+in\s+(?P<url>\S+/pull/(?P<number>\d+))\s*$"
+)
+_NEW_CONTRIBUTOR_LINE = re.compile(
+    r"^\*\s+@(?P<author>\S+)\s+made their first contribution in\s+\S+/pull/(?P<number>\d+)"
+)
+
+# Types not listed here (chore, ci, test, refactor, ...) are internal and left out of the post.
+_SECTIONS: list[tuple[str, frozenset[str]]] = [
+    ("✨ New", frozenset({"feat"})),
+    ("🐛 Fixes", frozenset({"fix", "perf"})),
+    ("📚 Docs", frozenset({"docs"})),
+]
 
 _INSTALL_COMMANDS: dict[str, str] = {
     "aegra-api": "pip install -U aegra-api",
@@ -27,32 +41,85 @@ _INSTALL_COMMANDS: dict[str, str] = {
 }
 
 
-def parse_changes(body: str) -> list[str]:
-    changes: list[str] = []
+@dataclass(frozen=True)
+class Change:
+    type: str
+    breaking: bool
+    subject: str
+    author: str
+    number: str
+    url: str
+
+    def line(self) -> str:
+        return f"{self.subject[:1].upper()}{self.subject[1:]} ([#{self.number}]({self.url})) · {self.author}"
+
+
+def parse_changes(body: str) -> list[Change]:
+    changes: list[Change] = []
     for line in body.splitlines():
         match = _CHANGE_LINE.match(line.strip())
-        if match is None or match["title"].startswith("chore(release)"):
+        if match is None:
             continue
-        changes.append(f"• {match['title']} (#{match['number']})")
+        changes.append(
+            Change(
+                type=match["type"],
+                breaking=match["breaking"] is not None,
+                subject=match["subject"],
+                author=match["author"],
+                number=match["number"],
+                url=match["url"],
+            )
+        )
     return changes
+
+
+def _sections(changes: list[Change]) -> list[tuple[str, list[Change]]]:
+    sections = [("⚠️ Breaking", [c for c in changes if c.breaking])]
+    sections += [(title, [c for c in changes if not c.breaking and c.type in types]) for title, types in _SECTIONS]
+    return [(title, items) for title, items in sections if items]
 
 
 def build_payload(*, name: str, url: str, body: str, package: str) -> dict[str, Any]:
     install = f"```\n{_INSTALL_COMMANDS.get(package, _INSTALL_COMMANDS['both'])}\n```"
-    changes = parse_changes(body)
+    sections = _sections(parse_changes(body))
+    shown = [change for _, items in sections for change in items]
+    newcomers = [
+        f"🎉 First contribution from {m['author']} in #{m['number']}"
+        for m in (_NEW_CONTRIBUTOR_LINE.match(line.strip()) for line in body.splitlines())
+        if m is not None
+    ]
+
+    entries: list[tuple[str, bool]] = []
+    for title, items in sections:
+        entries += [(f"**{title}**", False), *((change.line(), True) for change in items), ("", False)]
 
     lines: list[str] = []
-    used = len(install)
-    for index, change in enumerate(changes):
-        if used + len(change) + 1 > _DESCRIPTION_BUDGET:
-            lines.append(f"…and {len(changes) - index} more in the release notes")
+    used = len(install) + sum(len(n) + 1 for n in newcomers)
+    listed = 0
+    for text, is_change in entries:
+        if used + len(text) + 1 > _DESCRIPTION_BUDGET:
+            lines += [f"…and {len(shown) - listed} more in the release notes", ""]
             break
-        lines.append(change)
-        used += len(change) + 1
+        lines.append(text)
+        used += len(text) + 1
+        listed += is_change
 
-    description = "\n".join([*lines, "", install]) if lines else install
+    if newcomers:
+        newcomers.append("")
+    description = "\n".join([*lines, *newcomers, install]).strip()
+    embed: dict[str, Any] = {
+        "title": f"🚀 {name} is out",
+        "url": url,
+        "description": description,
+        "color": _EMBED_COLOR,
+    }
+    if shown:
+        authors = len({change.author for change in shown})
+        embed["footer"] = {
+            "text": f"{len(shown)} change{'s' * (len(shown) != 1)} from {authors} contributor{'s' * (authors != 1)}"
+        }
     return {
-        "embeds": [{"title": name, "url": url, "description": description, "color": _EMBED_COLOR}],
+        "embeds": [embed],
         # PR titles are user-controlled; never let one ping @everyone or a role.
         "allowed_mentions": {"parse": []},
     }

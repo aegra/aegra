@@ -58,6 +58,21 @@ def build_payload(*, name: str, url: str, body: str, package: str) -> dict[str, 
     }
 
 
+class _RejectRedirects(urllib.request.HTTPRedirectHandler):
+    """urllib replays a redirected POST as a bodyless GET, which would report success with nothing posted."""
+
+    def redirect_request(
+        self,
+        req: urllib.request.Request,
+        fp: Any,
+        code: int,
+        msg: str,
+        headers: Any,
+        newurl: str,
+    ) -> None:
+        return None
+
+
 def post(webhook_url: str, payload: dict[str, Any]) -> None:
     if not webhook_url.startswith("https://"):
         raise ValueError("DISCORD_WEBHOOK_URL must be an https:// URL")
@@ -68,7 +83,8 @@ def post(webhook_url: str, payload: dict[str, Any]) -> None:
         headers={"Content-Type": "application/json", "User-Agent": "aegra-release-notifier"},
         method="POST",
     )
-    with urllib.request.urlopen(request, timeout=30) as response:  # nosec B310 - scheme is checked above
+    opener = urllib.request.build_opener(_RejectRedirects())
+    with opener.open(request, timeout=30) as response:
         print(f"Discord responded {response.status}")
 
 

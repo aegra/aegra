@@ -210,7 +210,7 @@ jobs:
   # `on: release` workflows, so the post has to live in this one.
   # ---------------------------------------------------------------
   notify-discord:
-    needs: [create-release]
+    needs: [create-release, publish-api, publish-cli]
     if: always() && needs.create-release.result == 'success'
     runs-on: ubuntu-latest
     continue-on-error: true  # a Discord outage must not mark a published release as failed
@@ -223,7 +223,8 @@ jobs:
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_RELEASE_WEBHOOK }}
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ needs.create-release.outputs.tag }}
-          PACKAGE: ${{ inputs.package }}
+          # Only advertise what reached PyPI: with `both`, the CLI publish can fail after the API one succeeds.
+          PACKAGE: ${{ (needs.publish-api.result == 'success' && needs.publish-cli.result == 'success') && 'both' || (needs.publish-api.result == 'success' && 'aegra-api' || 'aegra-cli') }}
         run: |
           gh release view "$TAG" --json name,url,body > release.json
           python3 scripts/notify_discord_release.py release.json

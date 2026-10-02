@@ -1,5 +1,10 @@
+import email.message
 import importlib.util
+import io
 import json
+import urllib.error
+import urllib.request
+import urllib.response
 from pathlib import Path
 from types import ModuleType
 from typing import Any
@@ -146,3 +151,48 @@ def test_main_posts_payload_built_from_release_file(monkeypatch: pytest.MonkeyPa
 def test_post_rejects_non_https_webhook(url: str) -> None:
     with pytest.raises(ValueError, match="https"):
         notify.post(url, {"embeds": []})
+
+
+class _FakeDiscord(urllib.request.BaseHandler):
+    handler_order = 100  # ahead of the default HTTPSHandler, so no request leaves the process
+
+    def __init__(self, status: int, location: str | None = None) -> None:
+        self.status = status
+        self.location = location
+        self.requests: list[urllib.request.Request] = []
+
+    def https_open(self, req: urllib.request.Request) -> urllib.response.addinfourl:
+        self.requests.append(req)
+        headers = email.message.Message()
+        if self.location:
+            headers["Location"] = self.location
+        response = urllib.response.addinfourl(io.BytesIO(b""), headers, req.full_url, self.status)
+        response.msg = "fake"
+        return response
+
+
+def _route_to(monkeypatch: pytest.MonkeyPatch, fake: _FakeDiscord) -> None:
+    real_build_opener = urllib.request.build_opener
+    monkeypatch.setattr(notify.urllib.request, "build_opener", lambda *handlers: real_build_opener(*handlers, fake))
+
+
+def test_post_sends_json_payload(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    fake = _FakeDiscord(status=204)
+    _route_to(monkeypatch, fake)
+
+    notify.post("https://discord.test/api/webhooks/1/x", {"embeds": [{"title": "Aegra v1"}]})
+
+    assert fake.requests[0].get_method() == "POST"
+    assert json.loads(fake.requests[0].data) == {"embeds": [{"title": "Aegra v1"}]}
+    assert "Discord responded 204" in capsys.readouterr().out
+
+
+def test_post_raises_on_redirect_instead_of_reporting_success(monkeypatch: pytest.MonkeyPatch) -> None:
+    fake = _FakeDiscord(status=302, location="https://elsewhere.test/")
+    _route_to(monkeypatch, fake)
+
+    with pytest.raises(urllib.error.HTTPError) as exc_info:
+        notify.post("https://discord.test/api/webhooks/1/x", {"embeds": []})
+
+    assert exc_info.value.code == 302
+    assert len(fake.requests) == 1

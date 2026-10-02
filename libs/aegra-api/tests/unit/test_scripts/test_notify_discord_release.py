@@ -60,7 +60,7 @@ def test_build_payload_groups_changes_by_type_and_hides_internal_ones() -> None:
         "**📚 Docs**\n"
         f"• Document store scopes ([#671]({PR}/671))\n"
         "\n"
-        "🙌 Thanks newbie, artur, ibby and ben\n"
+        "🙌 Thanks artur, ibby and ben\n"
         "🎉 First contribution from newbie in #672\n"
         "\n"
         "```\npip install -U aegra-api aegra-cli\n```"

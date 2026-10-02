@@ -92,13 +92,12 @@ def build_payload(*, name: str, url: str, body: str, package: str) -> dict[str, 
     install = f"```\n{_INSTALL_COMMANDS.get(package, _INSTALL_COMMANDS['both'])}\n```"
     sections = _sections(parse_changes(body))
     shown = [change for _, items in sections for change in items]
-    credits = [
-        f"🎉 First contribution from {m['author']} in #{m['number']}"
-        for m in (_NEW_CONTRIBUTOR_LINE.match(line.strip()) for line in body.splitlines())
-        if m is not None
-    ]
-    if shown:
-        credits.insert(0, f"🙌 Thanks {_join_names(list(dict.fromkeys(change.author for change in shown)))}")
+    newcomers = [m for m in (_NEW_CONTRIBUTOR_LINE.match(line.strip()) for line in body.splitlines()) if m is not None]
+    # Newcomers get their own line below, so they are not thanked twice.
+    new_authors = {m["author"] for m in newcomers}
+    thanked = [author for author in dict.fromkeys(change.author for change in shown) if author not in new_authors]
+    credits = [f"🙌 Thanks {_join_names(thanked)}"] if thanked else []
+    credits += [f"🎉 First contribution from {m['author']} in #{m['number']}" for m in newcomers]
     if credits:
         credits.append("")
 

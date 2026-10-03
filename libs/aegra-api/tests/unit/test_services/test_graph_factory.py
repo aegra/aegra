@@ -20,6 +20,8 @@ from pydantic import BaseModel
 from aegra_api.services.graph_factory import (
     _FACTORY_CONTEXT_TYPES,
     _FACTORY_KWARGS,
+    AegraExecutionRuntime,
+    AegraReadRuntime,
     _classify_factory,
     _extract_context_type,
     _is_runtime_annotation,
@@ -353,15 +355,17 @@ class TestBuildServerRuntime:
 class TestInvokeFactory:
     """Test factory invocation."""
 
-    def test_invoke_no_args_factory(self) -> None:
-        """Factory with no dispatch hook → called with no args."""
-        mock_graph = Mock()
-        factory = Mock(return_value=mock_graph)
+    def test_an_unclassified_graph_id_is_refused_rather_than_called_bare(self) -> None:
+        """A missing hook means fn and graph_id do not belong together.
 
-        result = invoke_factory(factory, "unregistered_graph", {}, Mock())
+        A zero-argument factory is resolved at load time, so it never arrives here.
+        """
+        factory = Mock()
 
-        factory.assert_called_once_with()
-        assert result is mock_graph
+        with pytest.raises(KeyError, match="no dispatch hook"):
+            invoke_factory(factory, "unregistered_graph", {}, Mock())
+
+        factory.assert_not_called()
 
     def test_invoke_config_factory(self) -> None:
         """Config factory → called with config kwarg."""
@@ -675,6 +679,84 @@ class TestBuildServerRuntimeWithContext:
 
         assert isinstance(runtime, _ReadRuntime)
         assert not hasattr(runtime, "context")
+
+
+# ---------------------------------------------------------------------------
+# build_server_runtime — assistant identity
+# ---------------------------------------------------------------------------
+
+
+class TestBuildServerRuntimeAssistantId:
+    """The runtime carries the assistant a run executes as."""
+
+    def test_execution_runtime_carries_assistant_id(self) -> None:
+        runtime = build_server_runtime(
+            access_context="threads.create_run",
+            store=Mock(),
+            user=Mock(),
+            assistant_id="asst-1",
+        )
+
+        assert isinstance(runtime, AegraExecutionRuntime)
+        assert isinstance(runtime, _ExecutionRuntime)
+        assert runtime.assistant_id == "asst-1"
+
+    def test_execution_runtime_without_assistant_id(self) -> None:
+        runtime = build_server_runtime(
+            access_context="threads.create_run",
+            store=Mock(),
+            user=Mock(),
+        )
+
+        assert runtime.assistant_id is None
+
+    @pytest.mark.parametrize("access_context", ["threads.read", "threads.update", "assistants.read"])
+    def test_read_runtime_assistant_id_is_none(self, access_context: str) -> None:
+        """Read paths have no run and therefore no assistant."""
+        runtime = build_server_runtime(
+            access_context=access_context,  # type: ignore[arg-type]
+            store=None,
+            user=Mock(),
+            assistant_id="asst-1",
+        )
+
+        assert isinstance(runtime, AegraReadRuntime)
+        assert isinstance(runtime, _ReadRuntime)
+        assert runtime.assistant_id is None
+
+    def test_runtime_only_factory_reads_assistant_id(self) -> None:
+        """The zero-config factory signature can read the assistant without a config param."""
+        seen: dict[str, Any] = {}
+
+        def make_graph(runtime: ServerRuntime) -> str:
+            # ServerRuntime is the SDK's union and does not declare assistant_id;
+            # Aegra's subclasses add it. Narrowing needs an exported Aegra type.
+            seen["assistant_id"] = runtime.assistant_id  # type: ignore[union-attr]
+            return "graph"
+
+        classify_factory(make_graph, "assistant_rt_graph")
+        runtime = build_server_runtime(
+            access_context="threads.create_run",
+            store=Mock(),
+            user=Mock(),
+            assistant_id="asst-1",
+        )
+
+        assert invoke_factory(make_graph, "assistant_rt_graph", {}, runtime) == "graph"
+        assert seen["assistant_id"] == "asst-1"
+
+    def test_read_path_factory_does_not_raise(self) -> None:
+        """A factory reading assistant_id still works for schema extraction."""
+
+        def make_graph(runtime: ServerRuntime) -> str | None:
+            # ServerRuntime is the SDK's union and does not declare assistant_id;
+            # Aegra's subclasses add it. Narrowing needs an exported Aegra type.
+            return runtime.assistant_id  # type: ignore[union-attr]
+
+        classify_factory(make_graph, "assistant_read_graph")
+        runtime = build_server_runtime(access_context="assistants.read", store=None, user=None)
+
+        assert invoke_factory(make_graph, "assistant_read_graph", {}, runtime) is None
 
 
 # ---------------------------------------------------------------------------

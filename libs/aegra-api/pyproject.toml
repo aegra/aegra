@@ -120,6 +120,7 @@ markers = [
     "e2e: end-to-end tests requiring a running server",
     "prod_only: tests that require Redis workers (skipped in dev mode)",
     "auth_only: tests that require an auth-enabled server (run with -m auth_only)",
+    "manual_auth: auth tests that need extra server config, run by hand (run with -m manual_auth)",
 ]
 
 [dependency-groups]

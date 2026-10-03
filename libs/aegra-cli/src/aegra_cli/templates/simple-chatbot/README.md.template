@@ -10,6 +10,17 @@ uv sync                    # Install dependencies
 uv run aegra dev           # Start developing!
 ```
 
+## Model Configuration
+
+Set `Context.model` in `src/$slug/context.py` using `provider/model`, for example
+`openai/gpt-4o-mini`. Only the first slash separates the provider from the model ID;
+`openai/deepseek-ai/DeepSeek-V3` uses provider `openai` and model ID
+`deepseek-ai/DeepSeek-V3`.
+
+For an OpenAI-compatible gateway, set `OPENAI_BASE_URL` to its API endpoint and
+`OPENAI_API_KEY` to its API key in `.env`. The provider and model must both be
+nonempty; values such as `openai/`, `/gpt-4o`, and `gpt-4o` are rejected.
+
 ## Project Structure
 
 ```

@@ -190,7 +190,10 @@ Every instance runs a `LeaseReaper` background task that scans for runs with exp
 When a worker crashes (OOM, kill signal, network partition), its heartbeat stops and the lease expires.
 The reaper resets the run to `pending` and re-enqueues it.
 The new worker resumes from the last checkpoint.
+A run created with `durability="exit"` writes no checkpoints until it ends, so it starts over from the thread's state before the run (see [checkpoint durability](/guides/threads-and-state#checkpoint-durability)).
 Once retries are exhausted, the reaper marks the run `error`, clears ownership, and marks the thread `error` in the same transaction when no other run is active.
+
+The reaper also re-enqueues `pending` runs older than `STUCK_PENDING_THRESHOLD_SECONDS`, but only when they are missing from the job queue. A run still in the queue is waiting for a free worker and is left alone.
 
 <a href="https://mermaid.live/view#pako:eNptk09PwkAQxb_K2FOJiCbeGjVpocIBpRZJLyZm3Y6wge7W_aMkxO_uLK2CQE9N9r3fezPtbgKuSgwiCAx-OJQcB4LNNateJNBTM20FFzWTFooYmIFC6SVqiI_Ps6E_z5Sxc43Tp_GxIkdWk5dU7VuoJCSdE8JGUwpzokayVyN5kY2iiC_u7rJhBP0VExVoJyFcITN4K9XX-fWV6ezpijiCdI3cWQSatV70er0DzAgp8g2ZhRDXFmUJW1rnN-9RkVd9UgUP6-fxdAThZPJwuRSrVeeUZkc0VtXmGORjxz4EcF0LjQZIa333X22ztbbhNB2n_WcoRmmeEpJZZ25pbCnkHOLHQdMXboDmD9tC2ZC8DSSCe-Voqiaq9As7OxEyywbx8x--pj0Qvguc4LpJODDlEeTZjJZBwFdRQqjxAiX9WW63uyJphMk4m2St33-VJGpdezJfIuYfjkqCxK_9zO25N-VoXIXwrlUFfIF8WSsh7QHk_yTGcY7GBF0IKtQVEyVdgU1gF1htL0PJ9DL4_v4BvGz9cA==" target="_blank" rel="noopener">View fullscreen ↗</a>
 
@@ -224,6 +227,16 @@ sequenceDiagram
 ```
 
 The reaper runs on every instance (default every 15 seconds). This is safe — the atomic lease acquisition prevents duplicate execution.
+
+## Graceful shutdown
+
+On SIGTERM (rolling deploy, pod reschedule, node drain) the executor waits up to `WORKER_DRAIN_TIMEOUT` (default 30s) for in-flight runs to finish. Runs still executing when the window closes are **handed back to the queue**, not finalized: the run is reset to `pending` with its lease cleared and re-enqueued, so another instance resumes it from the last checkpoint — the same guarantee the crash path provides. Clients streaming the run stay connected and pick up events from the resuming worker.
+
+- A user-initiated cancel that races the shutdown still wins: explicitly cancelled runs are finalized as `interrupted`, never resurrected.
+- If Redis is unreachable during the hand-off, the rows are already `pending` and unclaimed, so a surviving instance's reaper re-enqueues them after `STUCK_PENDING_THRESHOLD_SECONDS`.
+- Drain hand-offs do not consume the crash retry budget (`BG_JOB_MAX_RETRIES`).
+
+Set your orchestrator's grace period a few seconds above `WORKER_DRAIN_TIMEOUT` (on Kubernetes: `terminationGracePeriodSeconds`), so the requeue completes before the pod is killed. Runs longer than the drain window survive the deploy either way; the timeout only decides how long the old pod waits before handing them off.
 
 ## Cross-instance cancellation
 
@@ -301,12 +314,12 @@ All worker settings are configured via environment variables. See the [environme
 | `N_JOBS_PER_WORKER` | `10` | Concurrent runs per worker loop |
 | `BG_JOB_TIMEOUT_SECS` | `3600` | Max execution time per run (1 hour) |
 | `BG_JOB_MAX_RETRIES` | `3` | Max retry attempts before a crashed run is permanently failed |
-| `STUCK_PENDING_THRESHOLD_SECONDS` | `120` | How long a pending run can sit before the reaper re-enqueues it |
+| `STUCK_PENDING_THRESHOLD_SECONDS` | `120` | How long a pending run can sit before the reaper re-enqueues it, if it is no longer in the job queue |
 | `LEASE_DURATION_SECONDS` | `30` | Lease TTL before reaper reclaims |
 | `HEARTBEAT_INTERVAL_SECONDS` | `10` | Lease extension frequency |
 | `REAPER_INTERVAL_SECONDS` | `15` | Expired lease scan frequency |
 | `POSTGRES_POLL_INTERVAL_SECONDS` | `5` | Fallback poll interval when Redis is unavailable |
-| `WORKER_DRAIN_TIMEOUT` | `30.0` | Graceful shutdown wait time (seconds) |
+| `WORKER_DRAIN_TIMEOUT` | `30.0` | Graceful shutdown wait (seconds) before in-flight runs are requeued for another instance |
 
 <Note>
   When Redis is unavailable, workers fall back to polling PostgreSQL for pending runs at `POSTGRES_POLL_INTERVAL_SECONDS` intervals. This keeps the system functional during Redis outages, though with higher latency.

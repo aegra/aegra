@@ -7,12 +7,15 @@ import pytest
 
 from aegra_api.models.auth import User
 from aegra_api.models.run_job import RunExecution, RunIdentity, RunJob
+from aegra_api.models.runs import Durability
 from aegra_api.services import run_executor as run_executor_module
 from aegra_api.services.run_executor import (
     _GraphResult,
     _lease_loss_cancellations,
+    _shutdown_cancellations,
     _signal_end_event,
     _signal_run_done,
+    _stream_legacy,
     _stream_native_v2,
     _timeout_cancellations,
     execute_run,
@@ -224,6 +227,36 @@ class TestStreamNativeV2InterruptDetection:
         assert await self._run(("values", event)) is False
 
 
+class TestDurabilityForwarding:
+    """The job's resolved durability reaches both stream producers."""
+
+    @staticmethod
+    def _job(durability: Durability | None) -> RunJob:
+        return RunJob(
+            identity=RunIdentity(run_id="run-1", thread_id="thread-1", graph_id="graph-1"),
+            user=User(identity="user-1"),
+            execution=RunExecution(input_data={"msg": "hello"}, durability=durability),
+        )
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("durability", ["exit", None])
+    async def test_legacy_stream_receives_job_durability(self, durability: Durability | None) -> None:
+        stream = MagicMock(return_value=_empty_async_gen())
+        with patch.object(run_executor_module, "stream_graph_events", stream):
+            await _stream_legacy(self._job(durability), MagicMock(), {"msg": "x"}, {}, ["values"], _GraphResult())
+
+        assert stream.call_args.kwargs["durability"] == durability
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("durability", ["exit", None])
+    async def test_native_v2_stream_receives_job_durability(self, durability: Durability | None) -> None:
+        stream = MagicMock(return_value=_empty_async_gen())
+        with patch.object(run_executor_module, "stream_native_v3_events", stream):
+            await _stream_native_v2(self._job(durability), MagicMock(), {"msg": "x"}, {}, _GraphResult())
+
+        assert stream.call_args.kwargs["durability"] == durability
+
+
 class TestSignalEndEvent:
     @pytest.mark.asyncio
     async def test_publishes_end_event(self) -> None:
@@ -371,6 +404,69 @@ class TestLeaseLossCancellation:
         # Done-key and cleanup MUST happen on normal cancel
         mock_signal_done.assert_awaited_once_with("run-1")
         mock_streaming.cleanup_run.assert_awaited_once_with("run-1")
+
+
+class TestShutdownDrainCancellation:
+    @pytest.mark.asyncio
+    async def test_shutdown_cancel_skips_finalize_and_signal(self) -> None:
+        """A drain cancel goes back to the queue: finalizing it as interrupted
+        would make graceful shutdown lose runs a plain crash recovers (#474)."""
+        mock_start = AsyncMock(return_value=True)
+        mock_finalize = AsyncMock()
+        mock_signal_done = AsyncMock()
+
+        with (
+            patch("aegra_api.services.run_executor.start_run", mock_start),
+            patch("aegra_api.services.run_executor.finalize_run", mock_finalize),
+            patch("aegra_api.services.run_executor.streaming_service") as mock_streaming,
+            patch("aegra_api.services.run_executor._signal_run_done", mock_signal_done),
+            patch(
+                "aegra_api.services.run_executor._stream_graph",
+                new_callable=AsyncMock,
+                side_effect=asyncio.CancelledError,
+            ),
+        ):
+            mock_streaming.signal_run_cancelled = AsyncMock()
+            mock_streaming.cleanup_run = AsyncMock()
+
+            _shutdown_cancellations.add("run-1")
+            try:
+                with pytest.raises(asyncio.CancelledError):
+                    await execute_run(_make_job())
+            finally:
+                _shutdown_cancellations.discard("run-1")
+
+        # finalize_run must NOT be called — the run is requeued for another instance
+        mock_finalize.assert_not_awaited()
+        # SSE cancel signal must NOT be sent — clients should stay connected
+        mock_streaming.signal_run_cancelled.assert_not_awaited()
+        # Done-key must NOT be set — wait_for_completion would return early
+        mock_signal_done.assert_not_awaited()
+        # Broker must NOT be cleaned up — the resuming worker needs it
+        mock_streaming.cleanup_run.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_shutdown_flag_is_cleared_after_cancel(self) -> None:
+        """The provenance flag must not leak into a later run with the same id."""
+        with (
+            patch("aegra_api.services.run_executor.start_run", new_callable=AsyncMock, return_value=True),
+            patch("aegra_api.services.run_executor.finalize_run", new_callable=AsyncMock),
+            patch("aegra_api.services.run_executor.streaming_service") as mock_streaming,
+            patch("aegra_api.services.run_executor._signal_run_done", new_callable=AsyncMock),
+            patch(
+                "aegra_api.services.run_executor._stream_graph",
+                new_callable=AsyncMock,
+                side_effect=asyncio.CancelledError,
+            ),
+        ):
+            mock_streaming.signal_run_cancelled = AsyncMock()
+            mock_streaming.cleanup_run = AsyncMock()
+
+            _shutdown_cancellations.add("run-1")
+            with pytest.raises(asyncio.CancelledError):
+                await execute_run(_make_job())
+
+        assert "run-1" not in _shutdown_cancellations
 
 
 class TestTerminalStateRaces:

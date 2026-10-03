@@ -1,11 +1,26 @@
 """Database fixtures for tests"""
 
 from collections.abc import AsyncIterator, Callable
+from datetime import UTC, datetime
 from types import SimpleNamespace
 from typing import Any
 
-from sqlalchemy import Insert
+from sqlalchemy import DateTime, Insert, Update, inspect
 from sqlalchemy.dialects import postgresql
+from sqlalchemy.exc import NoInspectionAvailable
+
+
+def _orm_attribute_names(stmt: Insert) -> dict[str, str]:
+    """Map column names to the ORM attributes a handler reads them back through.
+
+    Assistant stores metadata in a column named ``metadata`` behind the
+    ``metadata_dict`` attribute, so echoing the bound keys verbatim is not enough.
+    """
+    try:
+        mapper = inspect(stmt.entity_description["type"])
+    except (KeyError, TypeError, NoInspectionAvailable):
+        return {}
+    return {column.key: prop.key for prop in mapper.column_attrs for column in prop.columns}
 
 
 def echo_inserted_row(stmt: Insert) -> Any:
@@ -15,7 +30,17 @@ def echo_inserted_row(stmt: Insert) -> Any:
     object it built itself, so a session mock has to echo the bound values back.
     """
     params = stmt.compile(dialect=postgresql.dialect()).params
-    return SimpleNamespace(**params)
+    attributes = _orm_attribute_names(stmt)
+    row = {attributes.get(key, key): value for key, value in params.items()}
+
+    # Postgres fills the timestamps the statement left out; without them a row
+    # read straight back through Pydantic fails on missing created_at/updated_at.
+    now = datetime.now(UTC)
+    for column in stmt.table.columns:
+        if column.key not in params and isinstance(column.type, DateTime):
+            row.setdefault(attributes.get(column.key, column.key), now)
+
+    return SimpleNamespace(**row)
 
 
 class DummyScalarResult:
@@ -73,3 +98,20 @@ def override_get_session_dep(
         yield session_factory()
 
     return _dep
+
+
+def apply_thread_metadata_merge(stmt: Update, row: Any) -> None:
+    """Apply a thread UPDATE to *row* the way Postgres would.
+
+    ``PATCH /threads/{id}`` merges metadata in SQL (``metadata_json ||
+    :metadata_patch``) so that concurrent writers cannot overwrite each other,
+    which leaves a session mock standing in for the database: bound scalars are
+    assigned and the bound patch is merged over the row's existing metadata,
+    as ``jsonb || jsonb`` does at the top level.
+    """
+    params = stmt.compile(dialect=postgresql.dialect()).params
+    patch = params.get("metadata_patch")
+    if patch is not None:
+        row.metadata_json = {**(getattr(row, "metadata_json", None) or {}), **patch}
+    if "updated_at" in params:
+        row.updated_at = params["updated_at"]

@@ -56,6 +56,8 @@ Aegra accepts the graph ID directly in `assistant_id` for cron creation and reso
 
 `input` is required: every firing starts a run built from the cron payload, so a request without `input` is rejected with a 422. Pass `input={}` for graphs that need no input.
 
+Pass `durability` (or the deprecated `checkpoint_during`) to control when every fired run writes checkpoints. For example, `durability="exit"` writes one checkpoint per run. See [checkpoint durability](/guides/threads-and-state#checkpoint-durability).
+
 By default, each stateless cron run deletes its ephemeral thread after the run completes, including the immediate first run that is triggered when the cron is created.
 
 <Note>
@@ -80,7 +82,7 @@ run = await client.crons.create(
 print(run["cron_id"])
 ```
 
-When you keep stateless cron threads, you are responsible for cleaning them up. For long-lived deployments, use thread TTL policies or a separate cleanup job if you do not want preserved threads to accumulate.
+When you keep stateless cron threads, you are responsible for cleaning them up. For long-lived deployments, use [thread TTL policies](/guides/threads-and-state#thread-ttl) or a separate cleanup job if you do not want preserved threads to accumulate.
 
 ## Creating a thread-bound cron
 
@@ -159,6 +161,10 @@ crons = await client.crons.search(thread_id="<thread_id>")
 
 # Count matching crons
 total = await client.crons.count(assistant_id="agent")
+
+# Filter by metadata
+crons = await client.crons.search(metadata={"team": "research"})
+total = await client.crons.count(metadata={"team": "research"})
 ```
 
 ## Updating a cron
@@ -171,7 +177,7 @@ updated = await client.crons.update(
 )
 ```
 
-Supported update fields: `schedule`, `enabled`, `input`, `config`, `metadata`, `timezone`.
+Supported update fields: `schedule`, `enabled`, `input`, `config`, `metadata`, `timezone`, `durability`.
 
 ## Disabling and re-enabling
 

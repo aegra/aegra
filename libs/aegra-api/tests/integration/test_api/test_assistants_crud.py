@@ -1,6 +1,10 @@
 """Integration tests for assistants CRUD operations"""
 
+import secrets
+from uuid import uuid4
+
 import pytest
+from fastapi.testclient import TestClient
 
 from aegra_api.services.assistant_service import get_assistant_service
 from tests.fixtures.clients import create_test_app, make_client
@@ -22,6 +26,42 @@ def client(mock_assistant_service):
 
     app.dependency_overrides[get_assistant_service] = lambda: mock_assistant_service
     yield make_client(app)
+
+
+class TestCreateAssistantIdValidation:
+    """Client-provided assistant_id must be non-blank and fit PostgreSQL btree keys."""
+
+    def test_create_assistant_rejects_oversized_random_id(self, client: TestClient) -> None:
+        """Oversized ids 422 at validation; they must not reach Postgres btree."""
+        resp = client.post("/assistants", json={"graph_id": "agent", "assistant_id": secrets.token_hex(2500)})
+        assert resp.status_code == 422
+        assert "assistant_id" in resp.text
+
+    def test_create_assistant_rejects_empty_id(self, client: TestClient) -> None:
+        resp = client.post("/assistants", json={"graph_id": "agent", "assistant_id": ""})
+        assert resp.status_code == 422
+        assert "assistant_id" in resp.text
+
+    def test_create_assistant_rejects_blank_id(self, client: TestClient) -> None:
+        resp = client.post("/assistants", json={"graph_id": "agent", "assistant_id": "   "})
+        assert resp.status_code == 422
+        assert "assistant_id" in resp.text
+
+    def test_create_assistant_accepts_uuid(self, client: TestClient, mock_assistant_service) -> None:
+        assistant_id = str(uuid4())
+        mock_assistant_service.create_assistant.return_value = make_assistant(assistant_id=assistant_id)
+
+        resp = client.post("/assistants", json={"graph_id": "agent", "assistant_id": assistant_id})
+
+        assert resp.status_code == 200
+        assert resp.json()["assistant_id"] == assistant_id
+
+    def test_create_assistant_omitted_id_still_200(self, client: TestClient, mock_assistant_service) -> None:
+        mock_assistant_service.create_assistant.return_value = make_assistant()
+
+        resp = client.post("/assistants", json={"graph_id": "agent"})
+
+        assert resp.status_code == 200
 
 
 class TestCreateAssistant:
@@ -673,23 +713,37 @@ class TestGetAssistantSchemas:
     """Test GET /assistants/{assistant_id}/schemas"""
 
     def test_get_assistant_schemas(self, client, mock_assistant_service):
-        """Test getting assistant schemas"""
+        """Every key the service derives has to survive the response model."""
         schemas = {
+            "graph_id": "agent",
             "input_schema": {"type": "object", "properties": {}},
             "output_schema": {"type": "object", "properties": {}},
             "config_schema": {"type": "object", "properties": {}},
             "state_schema": {"type": "object", "properties": {}},
+            "context_schema": {"type": "object", "properties": {"prompt_version": {"type": "integer"}}},
         }
         mock_assistant_service.get_assistant_schemas.return_value = schemas
 
         resp = client.get("/assistants/test-assistant-123/schemas")
 
         assert resp.status_code == 200
-        data = resp.json()
-        assert "input_schema" in data
-        assert "output_schema" in data
-        assert "config_schema" in data
-        assert "state_schema" in data
+        assert resp.json() == schemas
+
+    def test_get_assistant_schemas_with_an_underivable_schema(self, client, mock_assistant_service):
+        """The service answers None when it cannot introspect the graph."""
+        mock_assistant_service.get_assistant_schemas.return_value = {
+            "graph_id": "agent",
+            "input_schema": None,
+            "output_schema": None,
+            "config_schema": None,
+            "state_schema": None,
+            "context_schema": None,
+        }
+
+        resp = client.get("/assistants/test-assistant-123/schemas")
+
+        assert resp.status_code == 200
+        assert resp.json()["input_schema"] is None
 
 
 class TestGetAssistantGraph:

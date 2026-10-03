@@ -12,10 +12,13 @@ from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
 from fastapi import HTTPException
+from sqlalchemy.dialects import postgresql
 
+from aegra_api.core.orm import AssistantVersion as AssistantVersionORM
 from aegra_api.models import Assistant, AssistantCreate, AssistantUpdate
 from aegra_api.models.auth import User
 from aegra_api.services.assistant_service import AssistantService, to_pydantic
+from tests.fixtures.database import DummyScalarResult, echo_inserted_row
 
 
 @pytest.fixture
@@ -24,6 +27,34 @@ def mock_session() -> AsyncMock:
     session = AsyncMock()
     session.add = Mock()  # session.add is synchronous
     return session
+
+
+def insert_wins(session: AsyncMock) -> None:
+    """The atomic create reads its row back out of ``INSERT ... RETURNING``."""
+    session.scalars.side_effect = lambda stmt: DummyScalarResult([echo_inserted_row(stmt)])
+
+
+def insert_loses(session: AsyncMock, incumbent: Any | None) -> None:
+    """ON CONFLICT DO NOTHING wrote nothing; ``incumbent`` is what the scoped read finds."""
+    session.scalars.side_effect = lambda stmt: DummyScalarResult()
+    session.scalar.return_value = incumbent
+
+
+def stored_assistant() -> Mock:
+    """The row that won the insert, distinguishable from any caller's payload."""
+    incumbent = Mock()
+    incumbent.assistant_id = "existing-id"
+    incumbent.name = "Existing Assistant"
+    incumbent.description = "Existing description"
+    incumbent.user_id = "user-123"
+    incumbent.graph_id = "test-graph"
+    incumbent.version = 1
+    incumbent.created_at = datetime.now(UTC)
+    incumbent.updated_at = datetime.now(UTC)
+    incumbent.config = {}
+    incumbent.context = {}
+    incumbent.metadata_dict = {"marker": "winner"}
+    return incumbent
 
 
 @pytest.fixture
@@ -253,45 +284,73 @@ class TestAssistantServiceCreate:
         assistant_service.langgraph_service.list_graphs.return_value = {"test-graph": {}}
         assistant_service.langgraph_service.get_graph_for_validation.return_value = Mock()
 
-        # Mock database operations
-        assistant_service.session.scalar.return_value = None  # No existing assistant
-        mock_assistant = Mock()
-        mock_assistant.assistant_id = "test-id"
-        mock_assistant.name = "Test Assistant"
-        mock_assistant.description = "Test description"
-        mock_assistant.user_id = "user-123"
-        mock_assistant.graph_id = "test-graph"
-        mock_assistant.version = 1
-        mock_assistant.created_at = datetime.now(UTC)
-        mock_assistant.updated_at = datetime.now(UTC)
-        mock_assistant.config = {}
-        mock_assistant.context = {}
-        mock_assistant.metadata_dict = {}
-
-        assistant_service.session.add = Mock()
-        assistant_service.session.commit = AsyncMock()
-
-        # Mock refresh to populate the mock object with attributes
-        def mock_refresh(obj: Mock) -> None:
-            obj.assistant_id = "test-id"
-            obj.name = "Test Assistant"
-            obj.description = "Test description"
-            obj.user_id = "user-123"
-            obj.graph_id = "test-graph"
-            obj.version = 1
-            obj.created_at = datetime.now(UTC)
-            obj.updated_at = datetime.now(UTC)
-            obj.config = {}
-            obj.context = {}
-            obj.metadata_dict = {}
-
-        assistant_service.session.refresh = AsyncMock(side_effect=mock_refresh)
+        insert_wins(assistant_service.session)
 
         result = await assistant_service.create_assistant(sample_assistant_create)
 
         assert isinstance(result, Assistant)
+        assert result.name == "Test Assistant"
+        assert result.graph_id == "test-graph"
+        assert result.user_id == "user-123"
+        assert result.version == 1
         assistant_service.langgraph_service.list_graphs.assert_called_once()
         assistant_service.langgraph_service.get_graph_for_validation.assert_called_once_with("test-graph")
+
+    @pytest.mark.asyncio
+    async def test_create_assistant_insert_tolerates_every_unique_index(
+        self,
+        assistant_service: AssistantService,
+        sample_assistant_create: AssistantCreate,
+    ) -> None:
+        """The create is a single INSERT that no unique violation can turn into a 500.
+
+        A bare ON CONFLICT DO NOTHING is required: naming one index would leave
+        collisions on the other two raising UniqueViolationError.
+        """
+        insert_wins(assistant_service.session)
+
+        await assistant_service.create_assistant(sample_assistant_create)
+
+        stmt = assistant_service.session.scalars.call_args.args[0]
+        compiled = str(stmt.compile(dialect=postgresql.dialect()))
+        assert "INSERT INTO assistant" in compiled
+        assert "ON CONFLICT DO NOTHING" in compiled
+        assert "ON CONFLICT (" not in compiled
+        assert "RETURNING" in compiled
+
+    @pytest.mark.asyncio
+    async def test_create_assistant_commits_version_row_with_the_assistant(
+        self,
+        assistant_service: AssistantService,
+        sample_assistant_create: AssistantCreate,
+    ) -> None:
+        """Both rows land in one transaction.
+
+        Committing the assistant on its own leaves a live assistant whose version 1
+        never arrives if the process dies in between, and list_assistant_versions
+        then 404s for it.
+        """
+        insert_wins(assistant_service.session)
+
+        await assistant_service.create_assistant(sample_assistant_create)
+
+        assistant_service.session.commit.assert_awaited_once()
+        added = assistant_service.session.add.call_args.args[0]
+        assert isinstance(added, AssistantVersionORM)
+        assert added.version == 1
+
+    @pytest.mark.asyncio
+    async def test_create_assistant_does_not_read_before_inserting(
+        self,
+        assistant_service: AssistantService,
+        sample_assistant_create: AssistantCreate,
+    ) -> None:
+        """No SELECT precedes the INSERT — that gap is what two creates raced through."""
+        insert_wins(assistant_service.session)
+
+        await assistant_service.create_assistant(sample_assistant_create)
+
+        assistant_service.session.scalar.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_create_assistant_graph_not_found(
@@ -353,25 +412,7 @@ class TestAssistantServiceCreate:
 
         assistant_service.langgraph_service.list_graphs.return_value = {"test-graph": {}}
         assistant_service.langgraph_service.get_graph_for_validation.return_value = Mock()
-        assistant_service.session.scalar.return_value = None
-        assistant_service.session.add = Mock()
-        assistant_service.session.commit = AsyncMock()
-
-        # Mock refresh to populate the mock object with attributes
-        def mock_refresh(obj: Mock) -> None:
-            obj.assistant_id = "test-id"
-            obj.name = "Test Assistant"
-            obj.description = "Test description"
-            obj.user_id = "user-123"
-            obj.graph_id = "test-graph"
-            obj.version = 1
-            obj.created_at = datetime.now(UTC)
-            obj.updated_at = datetime.now(UTC)
-            obj.config = {"configurable": {"key": "value"}}
-            obj.context = {"key": "value"}
-            obj.metadata_dict = {}
-
-        assistant_service.session.refresh = AsyncMock(side_effect=mock_refresh)
+        insert_wins(assistant_service.session)
 
         result = await assistant_service.create_assistant(request)
 
@@ -389,25 +430,7 @@ class TestAssistantServiceCreate:
 
         assistant_service.langgraph_service.list_graphs.return_value = {"test-graph": {}}
         assistant_service.langgraph_service.get_graph_for_validation.return_value = Mock()
-        assistant_service.session.scalar.return_value = None
-        assistant_service.session.add = Mock()
-        assistant_service.session.commit = AsyncMock()
-
-        # Mock refresh to populate the mock object with attributes
-        def mock_refresh(obj: Mock) -> None:
-            obj.assistant_id = "test-id"
-            obj.name = "Test Assistant"
-            obj.description = "Test description"
-            obj.user_id = "user-123"
-            obj.graph_id = "test-graph"
-            obj.version = 1
-            obj.created_at = datetime.now(UTC)
-            obj.updated_at = datetime.now(UTC)
-            obj.config = {"configurable": {"key": "value"}}
-            obj.context = {"key": "value"}
-            obj.metadata_dict = {}
-
-        assistant_service.session.refresh = AsyncMock(side_effect=mock_refresh)
+        insert_wins(assistant_service.session)
 
         result = await assistant_service.create_assistant(request)
 
@@ -423,37 +446,21 @@ class TestAssistantServiceCreate:
         """Test duplicate assistant handling with do_nothing policy"""
         request = AssistantCreate(
             graph_id="test-graph",
+            name="Losing Assistant",
+            metadata={"marker": "loser"},
             if_exists="do_nothing",
         )
 
-        # Mock existing assistant
-        existing_assistant = Mock()
-        existing_assistant.assistant_id = "existing-id"
-        existing_assistant.name = "Existing Assistant"
-        existing_assistant.description = "Existing description"
-        existing_assistant.user_id = "user-123"
-        existing_assistant.graph_id = "test-graph"
-        existing_assistant.version = 1
-        existing_assistant.created_at = datetime.now(UTC)
-        existing_assistant.updated_at = datetime.now(UTC)
-        existing_assistant.config = {}
-        existing_assistant.context = {}
-        existing_assistant.metadata_dict = {}
-
-        mock_table = Mock()
-        mock_column = Mock()
-        mock_column.name = "assistant_id"
-        mock_table.columns = [mock_column]
-        existing_assistant.__table__ = mock_table
-
         assistant_service.langgraph_service.list_graphs.return_value = {"test-graph": {}}
         assistant_service.langgraph_service.get_graph_for_validation.return_value = Mock()
-        assistant_service.session.scalar.return_value = existing_assistant
+        insert_loses(assistant_service.session, stored_assistant())
 
         result = await assistant_service.create_assistant(request)
 
+        # do_nothing owes the caller the stored row, not an echo of its own payload
         assert result.assistant_id == "existing-id"
         assert result.name == "Existing Assistant"
+        assert result.metadata == {"marker": "winner"}
 
     @pytest.mark.asyncio
     async def test_create_assistant_duplicate_handling_error(
@@ -467,19 +474,57 @@ class TestAssistantServiceCreate:
             if_exists="error",
         )
 
-        # Mock existing assistant
-        existing_assistant = Mock()
-        existing_assistant.assistant_id = "existing-id"
-
         assistant_service.langgraph_service.list_graphs.return_value = {"test-graph": {}}
         assistant_service.langgraph_service.get_graph_for_validation.return_value = Mock()
-        assistant_service.session.scalar.return_value = existing_assistant
+        insert_loses(assistant_service.session, stored_assistant())
 
         with pytest.raises(HTTPException) as exc_info:
             await assistant_service.create_assistant(request)
 
         assert exc_info.value.status_code == 409
         assert "already exists" in str(exc_info.value.detail)
+
+    @pytest.mark.asyncio
+    async def test_create_assistant_conflicts_when_id_is_owned_by_another_user(
+        self,
+        assistant_service: AssistantService,
+    ) -> None:
+        """A foreign owner loses the insert but is invisible to the scoped read.
+
+        assistant_pkey is global, so this used to surface as an unhandled
+        UniqueViolationError. It must answer 409 — and never adopt the row.
+        """
+        request = AssistantCreate(
+            assistant_id="taken-by-someone-else",
+            graph_id="test-graph",
+            if_exists="do_nothing",
+        )
+
+        assistant_service.langgraph_service.list_graphs.return_value = {"test-graph": {}}
+        assistant_service.langgraph_service.get_graph_for_validation.return_value = Mock()
+        insert_loses(assistant_service.session, None)
+
+        with pytest.raises(HTTPException) as exc_info:
+            await assistant_service.create_assistant(request)
+
+        assert exc_info.value.status_code == 409
+        assert "taken-by-someone-else" in str(exc_info.value.detail)
+
+    @pytest.mark.asyncio
+    async def test_create_assistant_skips_version_record_when_insert_loses(
+        self,
+        assistant_service: AssistantService,
+    ) -> None:
+        """A create that wrote no assistant must not write a version row for it."""
+        request = AssistantCreate(graph_id="test-graph", if_exists="do_nothing")
+
+        assistant_service.langgraph_service.list_graphs.return_value = {"test-graph": {}}
+        assistant_service.langgraph_service.get_graph_for_validation.return_value = Mock()
+        insert_loses(assistant_service.session, stored_assistant())
+
+        await assistant_service.create_assistant(request)
+
+        assistant_service.session.add.assert_not_called()
 
 
 class TestAssistantServiceGet:
@@ -668,6 +713,189 @@ class TestAssistantServiceUpdate:
 
         assert exc_info.value.status_code == 400
         assert "Cannot specify both configurable and context" in str(exc_info.value.detail)
+
+
+class TestAssistantServicePartialUpdate:
+    """PATCH /assistants/{id} is a partial update: a field the caller left out
+    keeps its stored value, and supplied metadata merges into what is stored,
+    which is the contract langgraph_sdk's assistants.update documents."""
+
+    @staticmethod
+    def stored_row() -> Mock:
+        """A row whose every field differs from the request payloads below."""
+        row = Mock()
+        row.assistant_id = "asst-1"
+        row.name = "Stored Assistant"
+        row.description = "Stored description"
+        row.user_id = "user-123"
+        row.graph_id = "stored-graph"
+        row.version = 1
+        row.created_at = datetime.now(UTC)
+        row.updated_at = datetime.now(UTC)
+        row.config = {"configurable": {"model": "stored"}, "recursion_limit": 7}
+        row.context = {"model": "stored"}
+        row.metadata_dict = {"owner": "team-a"}
+        return row
+
+    @staticmethod
+    async def send_patch(service: AssistantService, payload: dict[str, Any], row: Mock) -> tuple[Any, dict[str, Any]]:
+        """PATCH ``payload`` over ``row``; return its version row and UPDATE values.
+
+        The payload goes through ``model_validate`` rather than the constructor
+        so that omitted fields are genuinely unset, as they are over HTTP.
+        """
+        service.session.scalar.side_effect = [row, 1, row]
+        service.session.execute = AsyncMock()
+        service.session.commit = AsyncMock()
+
+        await service.update_assistant(row.assistant_id, AssistantUpdate.model_validate(payload))
+
+        version_row = service.session.add.call_args.args[0]
+        executed_stmt = service.session.execute.call_args.args[0]
+        values = {
+            getattr(column, "name", None): getattr(value, "value", value)
+            for column, value in executed_stmt._values.items()
+        }
+        return version_row, values
+
+    @pytest.mark.asyncio
+    async def test_rename_keeps_every_omitted_field(self, assistant_service: AssistantService) -> None:
+        """What the SDK sends for client.assistants.update(id, name=...)."""
+        row = self.stored_row()
+
+        _, values = await self.send_patch(assistant_service, {"name": "Renamed"}, row)
+
+        assert values["name"] == "Renamed"
+        assert values["description"] == "Stored description"
+        assert values["graph_id"] == "stored-graph"
+        assert values["config"] == {"configurable": {"model": "stored"}, "recursion_limit": 7}
+        assert values["context"] == {"model": "stored"}
+        assert values["metadata"] == {"owner": "team-a"}
+
+    @pytest.mark.asyncio
+    async def test_version_row_records_the_merged_result(self, assistant_service: AssistantService) -> None:
+        """The version history has to be replayable: it stores the assistant as
+        it now is, not the sparse payload that produced it."""
+        row = self.stored_row()
+
+        version_row, _ = await self.send_patch(assistant_service, {"name": "Renamed"}, row)
+
+        assert version_row.name == "Renamed"
+        assert version_row.graph_id == "stored-graph"
+        assert version_row.config == {"configurable": {"model": "stored"}, "recursion_limit": 7}
+        assert version_row.context == {"model": "stored"}
+        assert version_row.metadata_dict == {"owner": "team-a"}
+
+    @pytest.mark.asyncio
+    async def test_supplied_metadata_merges_into_stored_metadata(self, assistant_service: AssistantService) -> None:
+        row = self.stored_row()
+
+        _, values = await self.send_patch(assistant_service, {"metadata": {"env": "prod"}}, row)
+
+        assert values["metadata"] == {"owner": "team-a", "env": "prod"}
+
+    @pytest.mark.asyncio
+    async def test_supplied_metadata_overwrites_only_the_keys_it_names(
+        self, assistant_service: AssistantService
+    ) -> None:
+        row = self.stored_row()
+        row.metadata_dict = {"owner": "team-a", "env": "staging"}
+
+        _, values = await self.send_patch(assistant_service, {"metadata": {"env": "prod"}}, row)
+
+        assert values["metadata"] == {"owner": "team-a", "env": "prod"}
+
+    @pytest.mark.asyncio
+    async def test_handler_injected_metadata_merges_too(self, assistant_service: AssistantService) -> None:
+        """An @auth.on handler injects by mutating value["metadata"] in place,
+        which must land on top of the stored metadata like a caller's would."""
+        row = self.stored_row()
+
+        async def inject(_ctx: Any, value: dict[str, Any]) -> None:
+            value["metadata"]["updated_by"] = "user-123"
+
+        with patch(_DISPATCH, new=AsyncMock(side_effect=inject)):
+            _, values = await self.send_patch(assistant_service, {"name": "Renamed"}, row)
+
+        assert values["metadata"] == {"owner": "team-a", "updated_by": "user-123"}
+
+    @pytest.mark.asyncio
+    async def test_empty_config_clears_config(self, assistant_service: AssistantService) -> None:
+        """An explicitly empty dict is a request to clear, which is the
+        distinction a defaulted field cannot express."""
+        row = self.stored_row()
+
+        _, values = await self.send_patch(assistant_service, {"config": {}}, row)
+
+        assert values["config"] == {}
+        assert values["context"] == {}
+
+    @pytest.mark.asyncio
+    async def test_supplied_context_updates_the_config_mirror(self, assistant_service: AssistantService) -> None:
+        row = self.stored_row()
+
+        _, values = await self.send_patch(assistant_service, {"context": {"model": "sonnet"}}, row)
+
+        assert values["context"] == {"model": "sonnet"}
+        assert values["config"] == {"configurable": {"model": "sonnet"}, "recursion_limit": 7}
+
+    @pytest.mark.asyncio
+    async def test_supplied_configurable_updates_the_context_mirror(self, assistant_service: AssistantService) -> None:
+        row = self.stored_row()
+
+        _, values = await self.send_patch(assistant_service, {"config": {"configurable": {"model": "sonnet"}}}, row)
+
+        assert values["context"] == {"model": "sonnet"}
+        assert values["config"] == {"configurable": {"model": "sonnet"}}
+
+    @pytest.mark.asyncio
+    async def test_graph_id_survives_a_config_only_update(self, assistant_service: AssistantService) -> None:
+        """The pre-fix default repointed the assistant at a graph called "agent"
+        on any request that did not name one."""
+        row = self.stored_row()
+
+        version_row, values = await self.send_patch(assistant_service, {"config": {"recursion_limit": 1}}, row)
+
+        assert values["graph_id"] == "stored-graph"
+        assert version_row.graph_id == "stored-graph"
+
+    @pytest.mark.asyncio
+    async def test_an_explicit_null_clears_the_description(self, assistant_service: AssistantService) -> None:
+        """description is nullable, so a supplied null is a request to clear it."""
+        row = self.stored_row()
+
+        _, values = await self.send_patch(assistant_service, {"description": None}, row)
+
+        assert values["description"] is None
+
+    @pytest.mark.asyncio
+    async def test_an_empty_description_is_stored_not_ignored(self, assistant_service: AssistantService) -> None:
+        """An empty string is a value the caller chose, not an absent field."""
+        row = self.stored_row()
+
+        _, values = await self.send_patch(assistant_service, {"description": ""}, row)
+
+        assert values["description"] == ""
+
+    @pytest.mark.parametrize("value", ["", None])
+    @pytest.mark.parametrize("field", ["name", "graph_id"])
+    @pytest.mark.asyncio
+    async def test_should_return_422_when_a_non_null_field_is_supplied_empty(
+        self, assistant_service: AssistantService, field: str, value: str | None
+    ) -> None:
+        """Neither column can hold this, so refuse rather than silently ignore.
+
+        The old code fell back to the stored value here, which is the silent
+        fallback this endpoint exists to remove.
+        """
+        row = self.stored_row()
+        assistant_service.session.scalar.side_effect = [row, 1, row]
+
+        with pytest.raises(HTTPException) as exc_info:
+            await assistant_service.update_assistant(row.assistant_id, AssistantUpdate.model_validate({field: value}))
+
+        assert exc_info.value.status_code == 422
+        assert field in exc_info.value.detail
 
 
 class TestAssistantServiceDelete:

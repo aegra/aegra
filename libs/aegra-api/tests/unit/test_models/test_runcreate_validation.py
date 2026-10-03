@@ -1,9 +1,14 @@
 """Tests for RunCreate model validation."""
 
+from typing import Any
+from uuid import UUID
+
 import pytest
 from pydantic import ValidationError
 
 from aegra_api.models.runs import RunCreate
+
+_CHECKPOINT_ID = "1ef4f797-8335-6428-8001-8a1503f9b875"
 
 
 class TestRunCreateValidation:
@@ -30,6 +35,48 @@ class TestRunCreateValidation:
         """Ensure payloads with no input, command, or checkpoint are rejected."""
         with pytest.raises(ValueError, match="Must specify at least one of 'input', 'command', or 'checkpoint'"):
             RunCreate(assistant_id="agent")
+
+    def test_top_level_checkpoint_id_counts_as_a_checkpoint(self) -> None:
+        run_create = RunCreate(assistant_id="agent", checkpoint_id=_CHECKPOINT_ID)
+
+        assert run_create.checkpoint_id == UUID(_CHECKPOINT_ID)
+        assert run_create.input is None
+
+    @pytest.mark.parametrize("checkpoint_id", ["", "not-a-uuid", 123, ["a"]])
+    def test_rejects_malformed_checkpoint_id(self, checkpoint_id: Any) -> None:
+        with pytest.raises(ValidationError):
+            RunCreate(assistant_id="agent", input={"x": 1}, checkpoint_id=checkpoint_id)
+
+
+class TestRunCreateDurability:
+    """``durability`` and its deprecated ``checkpoint_during`` alias are declared, not dropped."""
+
+    def test_defaults_leave_both_unset(self) -> None:
+        run_create = RunCreate(assistant_id="agent", input={"x": 1})
+
+        assert run_create.durability is None
+        assert run_create.checkpoint_during is None
+
+    @pytest.mark.parametrize("mode", ["sync", "async", "exit"])
+    def test_accepts_every_langgraph_mode(self, mode: str) -> None:
+        run_create = RunCreate(assistant_id="agent", input={"x": 1}, durability=mode)
+
+        assert run_create.durability == mode
+
+    @pytest.mark.parametrize("mode", ["", "SYNC", "eventual", 1, True])
+    def test_rejects_unknown_mode(self, mode: Any) -> None:
+        with pytest.raises(ValidationError, match="durability"):
+            RunCreate(assistant_id="agent", input={"x": 1}, durability=mode)
+
+    @pytest.mark.parametrize("value", [True, False])
+    def test_accepts_checkpoint_during_bool(self, value: bool) -> None:
+        run_create = RunCreate(assistant_id="agent", input={"x": 1}, checkpoint_during=value)
+
+        assert run_create.checkpoint_during is value
+
+    def test_rejects_non_bool_checkpoint_during(self) -> None:
+        with pytest.raises(ValidationError, match="checkpoint_during"):
+            RunCreate(assistant_id="agent", input={"x": 1}, checkpoint_during="sometimes")
 
 
 class TestRunCreateMetadataValidation:

@@ -23,6 +23,7 @@ from fastapi import Depends, HTTPException
 from langchain_core.runnables.utils import create_model
 from pydantic import TypeAdapter
 from sqlalchemy import func, or_, select, update
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from aegra_api.core.auth_deps import get_current_user
@@ -200,40 +201,35 @@ class AssistantService(Authenticated):
         # Generate name if not provided
         name = request.name or f"Assistant for {graph_id}"
 
-        # Check if an assistant already exists for this user, graph and config pair
-        existing_stmt = select(AssistantORM).where(
-            AssistantORM.user_id == self.user.identity,
-            or_(
-                (AssistantORM.graph_id == graph_id) & (AssistantORM.config == config),
-                AssistantORM.assistant_id == assistant_id,
-            ),
+        metadata = request.metadata or {}
+
+        # Insert first and let the unique indexes arbitrate: a SELECT-then-INSERT lets
+        # two creates collide, and the loser's UniqueViolationError 500s past if_exists.
+        insert_stmt = (
+            pg_insert(AssistantORM)
+            .values(
+                assistant_id=assistant_id,
+                name=name,
+                description=request.description,
+                config=config,
+                context=context,
+                graph_id=graph_id,
+                user_id=self.user.identity,
+                metadata_dict=metadata,
+                version=1,
+            )
+            # No conflict target: assistant_pkey, idx_assistant_user_assistant and
+            # idx_assistant_user_graph_config all have to yield the same outcome.
+            .on_conflict_do_nothing()
+            .returning(AssistantORM)
         )
-        existing = await self.session.scalar(existing_stmt)
+        created = (await self.session.scalars(insert_stmt)).first()
 
-        if existing:
-            if request.if_exists == "do_nothing":
-                return to_pydantic(existing)
-            else:  # error (default)
-                raise HTTPException(409, f"Assistant '{assistant_id}' already exists")
+        if created is None:
+            return await self._resolve_create_conflict(assistant_id, graph_id, config, request.if_exists)
 
-        # Create assistant record
-        assistant_orm = AssistantORM(
-            assistant_id=assistant_id,
-            name=name,
-            description=request.description,
-            config=config,
-            context=context,
-            graph_id=graph_id,
-            user_id=self.user.identity,
-            metadata_dict=request.metadata,
-            version=1,
-        )
-
-        self.session.add(assistant_orm)
-        await self.session.commit()
-        await self.session.refresh(assistant_orm)
-
-        # Create initial version record
+        # Version 1 commits with the assistant it describes: an assistant whose only
+        # version went missing 404s out of list_assistant_versions while it is live.
         assistant_version_orm = AssistantVersionORM(
             assistant_id=assistant_id,
             version=1,
@@ -243,12 +239,37 @@ class AssistantService(Authenticated):
             created_at=datetime.now(UTC),
             name=name,
             description=request.description,
-            metadata_dict=request.metadata,
+            metadata_dict=metadata,
         )
         self.session.add(assistant_version_orm)
         await self.session.commit()
 
-        return to_pydantic(assistant_orm)
+        return to_pydantic(created)
+
+    async def _resolve_create_conflict(
+        self,
+        assistant_id: str,
+        graph_id: str,
+        config: dict[str, Any] | None,
+        if_exists: str | None,
+    ) -> Assistant:
+        """Apply ``if_exists`` to the row that won the insert, or 409."""
+        # Scoped to the caller while assistant_pkey is global, so an incumbent owned
+        # by someone else is deliberately not found and conflicts instead of being adopted.
+        existing = await self.session.scalar(
+            select(AssistantORM).where(
+                AssistantORM.user_id == self.user.identity,
+                or_(
+                    (AssistantORM.graph_id == graph_id) & (AssistantORM.config == config),
+                    AssistantORM.assistant_id == assistant_id,
+                ),
+            )
+        )
+
+        if existing is not None and if_exists == "do_nothing":
+            return to_pydantic(existing)
+
+        raise HTTPException(409, f"Assistant '{assistant_id}' already exists")
 
     async def list_assistants(self) -> list[Assistant]:
         """List user's assistants and system assistants.
@@ -369,26 +390,25 @@ class AssistantService(Authenticated):
         return to_pydantic(await self._read_owned_assistant(assistant_id))
 
     async def update_assistant(self, assistant_id: str, request: AssistantUpdate) -> Assistant:
-        """Update assistant by ID"""
-        value = {**request.model_dump(), "assistant_id": assistant_id}
+        """Partially update an assistant.
+
+        Fields the caller omitted keep their stored value; supplied ``metadata``
+        is merged into the stored metadata, matching the LangGraph SDK contract.
+        Omission is read from ``exclude_unset`` rather than from ``None``, so a
+        caller can still clear a field by sending it empty (``{"config": {}}``).
+        """
+        supplied = request.model_dump(exclude_unset=True)
+        # Handlers inject by mutating value["metadata"] in place, so the dispatch
+        # payload keeps the dict shape the auth API documents even when unset.
+        value = {
+            **request.model_dump(),
+            "config": request.config or {},
+            "context": request.context or {},
+            "metadata": request.metadata or {},
+            "assistant_id": assistant_id,
+        }
         filters = await self._dispatch("update", value)
         request.metadata = _injected_metadata(request.metadata, value)
-
-        metadata = request.metadata or {}
-        config = request.config or {}
-        context = request.context or {}
-
-        if config.get("configurable") and context:
-            raise HTTPException(
-                status_code=400,
-                detail="Cannot specify both configurable and context. Use only one.",
-            )
-
-        # Keep config and context up to date with one another
-        if config.get("configurable"):
-            context = config["configurable"]
-        elif context:
-            config["configurable"] = context
 
         stmt = select(AssistantORM).where(
             AssistantORM.assistant_id == assistant_id,
@@ -401,6 +421,37 @@ class AssistantService(Authenticated):
         if not assistant:
             raise HTTPException(404, f"Assistant '{assistant_id}' not found")
 
+        # NOT NULL columns: an empty value cannot be stored, and falling back to
+        # the stored one silently is the bug this endpoint is fixing.
+        for field in ("name", "graph_id"):
+            if field in supplied and not supplied[field]:
+                raise HTTPException(
+                    status_code=422,
+                    detail=f"{field} must be a non-empty string when supplied; omit it to leave it unchanged",
+                )
+
+        config = (supplied["config"] or {}) if "config" in supplied else (assistant.config or {})
+        context = (supplied["context"] or {}) if "context" in supplied else (assistant.context or {})
+
+        if "config" in supplied and "context" in supplied and config.get("configurable") and context:
+            raise HTTPException(
+                status_code=400,
+                detail="Cannot specify both configurable and context. Use only one.",
+            )
+
+        metadata = {**(assistant.metadata_dict or {}), **(request.metadata or {})}
+
+        # context mirrors config["configurable"], so whichever one the caller
+        # supplied wins and the other is derived from it.
+        if "context" in supplied:
+            config = {**config, "configurable": context}
+        elif "config" in supplied:
+            context = config.get("configurable") or {}
+        elif config.get("configurable"):
+            context = config["configurable"]
+        elif context:
+            config = {**config, "configurable": context}
+
         now = datetime.now(UTC)
         version_stmt = select(func.max(AssistantVersionORM.version)).where(
             AssistantVersionORM.assistant_id == assistant_id
@@ -411,12 +462,14 @@ class AssistantService(Authenticated):
         new_version_details = {
             "assistant_id": assistant_id,
             "version": new_version,
-            "graph_id": request.graph_id or assistant.graph_id,
+            # .get returns a supplied null rather than the stored value, which
+            # is what lets an explicit null clear the nullable description.
+            "graph_id": supplied.get("graph_id", assistant.graph_id),
             "config": config,
             "context": context,
             "created_at": now,
-            "name": request.name or assistant.name,
-            "description": request.description or assistant.description,
+            "name": supplied.get("name", assistant.name),
+            "description": supplied.get("description", assistant.description),
             "metadata_dict": metadata,
         }
 

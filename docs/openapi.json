@@ -3,7 +3,7 @@
   "info": {
     "title": "Aegra",
     "description": "Production-ready Agent Protocol server",
-    "version": "0.10.6"
+    "version": "0.10.8"
   },
   "paths": {
     "/info": {
@@ -1554,6 +1554,11 @@
         "summary": "Prune Threads",
         "description": "Immediately apply TTL policies to the caller's expired threads.\n\nThreads whose TTL has expired are deleted (strategy `delete`) or have\ntheir checkpoint history compacted (strategy `keep_latest`). Threads with\nactive runs are skipped and handled once their runs settle.",
         "operationId": "prune_threads_threads_prune_post",
+        "security": [
+          {
+            "APIKeyHeader": []
+          }
+        ],
         "responses": {
           "200": {
             "description": "Successful Response",
@@ -3281,6 +3286,13 @@
     }
   },
   "components": {
+    "securitySchemes": {
+      "APIKeyHeader": {
+        "type": "apiKey",
+        "in": "header",
+        "name": "Authorization"
+      }
+    },
     "schemas": {
       "AgentProtocolError": {
         "properties": {
@@ -5871,6 +5883,20 @@
             ],
             "title": "Default Ttl",
             "description": "Thread TTL in minutes; also accepted under the key \"ttl\" (LangGraph SDK compatibility). Falls back to the server default when omitted"
+          },
+          "ttl": {
+            "anyOf": [
+              {
+                "type": "number",
+                "maximum": 1000000000.0,
+                "exclusiveMinimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ttl",
+            "description": "Alias for \"default_ttl\" accepted by the LangGraph SDK."
           },
           "strategy": {
             "anyOf": [

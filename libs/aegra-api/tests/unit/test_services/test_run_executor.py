@@ -387,7 +387,9 @@ class TestLeaseLossCancellation:
 
 class TestShutdownDrainCancellation:
     @pytest.mark.asyncio
-    async def test_shutdown_cancel_skips_finalize_and_signal(self) -> None:
+    async def test_shutdown_cancel_skips_finalize_and_signal(
+        self: "TestShutdownDrainCancellation",
+    ) -> None:
         """A drain cancel goes back to the queue: finalizing it as interrupted
         would make graceful shutdown lose runs a plain crash recovers (#474)."""
         mock_start = AsyncMock(return_value=True)
@@ -425,7 +427,9 @@ class TestShutdownDrainCancellation:
         mock_streaming.cleanup_run.assert_not_awaited()
 
     @pytest.mark.asyncio
-    async def test_shutdown_flag_is_cleared_after_cancel(self) -> None:
+    async def test_shutdown_flag_is_cleared_after_cancel(
+        self: "TestShutdownDrainCancellation",
+    ) -> None:
         """The provenance flag must not leak into a later run with the same id."""
         with (
             patch("aegra_api.services.run_executor.start_run", new_callable=AsyncMock, return_value=True),

@@ -16,6 +16,23 @@ from aegra_api.utils.status_compat import validate_thread_status
 MAX_TTL_MINUTES = 1_000_000_000
 
 
+def _thread_ttl_json_schema_extra(schema: dict[str, Any]) -> None:
+    """Add the LangGraph SDK's TTL alias without replacing generated fields."""
+    properties = schema.setdefault("properties", {})
+    properties["ttl"] = {
+        "anyOf": [
+            {
+                "type": "number",
+                "exclusiveMinimum": 0,
+                "maximum": MAX_TTL_MINUTES,
+            },
+            {"type": "null"},
+        ],
+        "title": "Ttl",
+        "description": 'Alias for "default_ttl" accepted by the LangGraph SDK.',
+    }
+
+
 class ThreadTTLSpec(BaseModel):
     """Per-thread TTL override supplied on thread creation.
 
@@ -23,7 +40,10 @@ class ThreadTTLSpec(BaseModel):
     it "default_ttl" — AliasChoices accepts both spellings.
     """
 
-    model_config = ConfigDict(populate_by_name=True)
+    model_config = ConfigDict(
+        populate_by_name=True,
+        json_schema_extra=_thread_ttl_json_schema_extra,
+    )
 
     default_ttl: float | None = Field(
         None,

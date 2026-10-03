@@ -676,7 +676,7 @@ class TestLangGraphServiceConfigs:
 
         assert result["configurable"]["graph_id"] == "agent"
 
-    def test_create_run_config_preserves_client_graph_id(self) -> None:
+    def test_create_run_config_overrides_client_graph_id(self) -> None:
         mock_user = Mock()
         mock_user.identity = "user-123"
         mock_user.display_name = "Test User"
@@ -694,7 +694,7 @@ class TestLangGraphServiceConfigs:
                 additional_config=additional_config,
             )
 
-        assert result["configurable"]["graph_id"] == "client-agent"
+        assert result["configurable"]["graph_id"] == "server-agent"
 
     def test_create_run_config_ignores_client_thread_id_override(self):
         """A client-supplied configurable.thread_id must not redirect execution.

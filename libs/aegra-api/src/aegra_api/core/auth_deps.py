@@ -3,9 +3,12 @@
 from typing import Annotated, Any
 
 from fastapi import Depends, HTTPException, Request
+from fastapi.security import APIKeyHeader
 
 from aegra_api.core.auth_middleware import get_auth_backend
 from aegra_api.models.auth import User
+
+_authorization_header = APIKeyHeader(name="Authorization", auto_error=False)
 
 
 def _extract_user_data(user_obj: Any) -> dict[str, Any]:
@@ -55,7 +58,10 @@ def _to_user_model(user: Any) -> User:
     return User(**user_data)
 
 
-async def require_auth(request: Request) -> User:
+async def require_auth(
+    request: Request,
+    _authorization: str | None = Depends(_authorization_header),
+) -> User:
     """FastAPI dependency for authentication.
 
     Replaces Starlette AuthenticationMiddleware by calling the auth backend directly.

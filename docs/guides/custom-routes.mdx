@@ -51,12 +51,13 @@ Custom routes follow this priority order:
 
 | Priority | Routes | Behavior |
 |----------|--------|----------|
-| 1 | `/health`, `/ready`, `/live`, `/docs`, `/openapi.json` | Always accessible, cannot be overridden |
+| 1 | `/docs`, `/openapi.json` | Always accessible |
+| 1 | `/health`, `/ready`, `/live` | Overridable, like any other core route |
 | 2 | Your custom routes | Take precedence over shadowable routes |
 | 3 | `/`, `/info` | Can be overridden by custom routes |
-| 4 | `/assistants`, `/threads`, `/runs`, `/store` | Core Agent Protocol routes, cannot be overridden |
+| 4 | `/assistants`, `/threads`, `/runs`, `/store` | Core Agent Protocol routes, overridable — see below |
 
-You can override the root route `/` and `/info`, but you cannot override the Agent Protocol endpoints or health checks.
+You can override the root route `/` and `/info`:
 
 ```python
 # This works — overrides the default root
@@ -64,6 +65,25 @@ You can override the root route `/` and `/info`, but you cannot override the Age
 async def custom_root():
     return {"message": "Custom Aegra Server", "custom": True}
 ```
+
+### Overriding an Agent Protocol route
+
+Declaring a path and method that a core route already serves replaces it. The core operation is not registered, your handler serves the requests, and `/openapi.json` describes your handler rather than the one it replaced. Each replacement is logged at startup:
+
+```
+Custom app overrides core route  path=/assistants methods=['POST']
+```
+
+That log line is worth watching: a path collision you did not intend takes over an Agent Protocol endpoint just as effectively as one you did.
+
+Only the methods you declare are replaced. Declaring `POST /assistants` leaves `GET /assistants` served by Aegra.
+
+<Warning>
+  Most core routes authorize inside their own handler, so a replacement that
+  does not call the core handler dispatches no `@auth.on` event at all. If you
+  override one to add validation, delegate to the Aegra handler once your check
+  passes — otherwise you have removed the authorization along with the route.
+</Warning>
 
 ## Authentication on custom routes
 

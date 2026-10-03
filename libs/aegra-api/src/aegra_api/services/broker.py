@@ -190,6 +190,10 @@ class BrokerManager(BaseBrokerManager):
         """Return the current event sequence from the in-memory counter."""
         return self._event_counters.get(run_id, 0)
 
+    async def refresh_replay_ttl(self, run_id: str) -> None:
+        """No-op for in-memory broker; unfinished runs are never swept."""
+        return None
+
     def sweep_expired_brokers(self, retention_seconds: float = REPLAY_RETENTION_SECONDS) -> list[str]:
         """Drop finished brokers past the replay window. Returns the removed run ids."""
         expired = [

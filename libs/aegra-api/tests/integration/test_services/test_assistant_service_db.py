@@ -4,6 +4,7 @@ These tests verify service interactions with real database operations.
 """
 
 from datetime import UTC, datetime
+from types import SimpleNamespace
 from unittest.mock import Mock
 
 import pytest
@@ -153,10 +154,13 @@ class TestAssistantServiceDatabase:
             graph_id="test-graph",
         )
         original_assistant = await assistant_service.create_assistant(create_request)
+        # The update resolves omitted fields against the stored row through ORM
+        # attributes (metadata_dict), so that row has to be ORM-shaped.
+        stored_row = SimpleNamespace(**original_assistant.model_dump(by_alias=True))
 
         # Mock scalar calls: first returns assistant, second returns max version, third returns updated assistant
         assistant_service.session.scalar.side_effect = [
-            original_assistant,
+            stored_row,
             1,
             original_assistant,
         ]  # max version = 1

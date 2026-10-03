@@ -1,12 +1,14 @@
 """Tests for v2 command dispatch (run.start, input.respond, errors)."""
 
 from typing import Any
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
 from aegra_api.models import User
 from aegra_api.services.event_streaming import commands as cmd
+
+_CHECKPOINT_ID = "1ef4f797-8335-6428-8001-8a1503f9b875"
 
 
 @pytest.fixture
@@ -138,6 +140,81 @@ class TestRunStart:
         assert request.command == {"resume": {"answer": 42}}
         assert request.input is None
 
+    async def test_run_start_forks_from_configurable_checkpoint_id_without_input(
+        self, prepared_run: AsyncMock, user: User
+    ) -> None:
+        resp, run_id = await _dispatch(
+            {
+                "id": 1,
+                "method": "run.start",
+                "params": {"assistant_id": "agent", "config": {"configurable": {"checkpoint_id": _CHECKPOINT_ID}}},
+            },
+            user,
+        )
+        assert resp["type"] == "success"
+        assert run_id == "run-xyz"
+        request = prepared_run.call_args.args[2]
+        assert request.checkpoint == {"checkpoint_id": _CHECKPOINT_ID}
+        assert request.input is None
+
+    async def test_run_start_forks_with_input(self, prepared_run: AsyncMock, user: User) -> None:
+        await _dispatch(
+            {
+                "id": 1,
+                "method": "run.start",
+                "params": {
+                    "assistant_id": "agent",
+                    "input": {"x": 1},
+                    "config": {"configurable": {"checkpoint_id": _CHECKPOINT_ID}},
+                },
+            },
+            user,
+        )
+        request = prepared_run.call_args.args[2]
+        assert request.checkpoint == {"checkpoint_id": _CHECKPOINT_ID}
+        assert request.input == {"x": 1}
+
+    async def test_run_start_without_checkpoint_id_sets_no_checkpoint(
+        self, prepared_run: AsyncMock, user: User
+    ) -> None:
+        await _dispatch(
+            {
+                "id": 1,
+                "method": "run.start",
+                "params": {"assistant_id": "agent", "input": {"x": 1}, "config": {"configurable": {"k": "v"}}},
+            },
+            user,
+        )
+        assert prepared_run.call_args.args[2].checkpoint is None
+
+    @pytest.mark.parametrize("checkpoint_id", ["", "   ", "not-a-uuid", 123, ["a"], {"id": "a"}, False])
+    async def test_run_start_rejects_invalid_checkpoint_id(
+        self, prepared_run: AsyncMock, user: User, checkpoint_id: Any
+    ) -> None:
+        resp, run_id = await _dispatch(
+            {
+                "id": 1,
+                "method": "run.start",
+                "params": {"assistant_id": "agent", "config": {"configurable": {"checkpoint_id": checkpoint_id}}},
+            },
+            user,
+        )
+        assert resp["error"] == "invalid_argument"
+        assert "checkpoint_id" in resp["message"]
+        assert run_id is None
+        prepared_run.assert_not_called()
+
+    @pytest.mark.parametrize("config", [None, {}, {"configurable": None}, {"configurable": []}, {"configurable": {}}])
+    async def test_run_start_without_input_or_fork_target_is_invalid(
+        self, prepared_run: AsyncMock, user: User, config: Any
+    ) -> None:
+        resp, run_id = await _dispatch(
+            {"id": 1, "method": "run.start", "params": {"assistant_id": "agent", "config": config}}, user
+        )
+        assert resp["error"] == "invalid_argument"
+        assert run_id is None
+        prepared_run.assert_not_called()
+
 
 class TestInputRespond:
     async def test_input_respond_resumes_with_command(self, prepared_run: AsyncMock, user: User) -> None:
@@ -245,6 +322,123 @@ class TestInputRespond:
         )
         assert resp["error"] == "invalid_argument"
         prepared_run.assert_not_called()
+
+
+class TestInputRespondCommandFields:
+    """update / goto / context ride along with the resume (protocol InputRespondParams)."""
+
+    async def test_input_respond_folds_update_and_goto_into_command(self, prepared_run: AsyncMock, user: User) -> None:
+        resp, _ = await _dispatch(
+            {
+                "id": 2,
+                "method": "input.respond",
+                "params": {
+                    "assistant_id": "agent",
+                    "response": "approve",
+                    "update": {"approved": True},
+                    "goto": "finalize",
+                },
+            },
+            user,
+        )
+        assert resp["type"] == "success"
+        assert prepared_run.call_args.args[2].command == {
+            "resume": "approve",
+            "update": {"approved": True},
+            "goto": "finalize",
+        }
+
+    async def test_input_respond_accepts_send_objects_in_goto(self, prepared_run: AsyncMock, user: User) -> None:
+        goto = [{"node": "tool", "input": {"call": 1}}, {"node": "summarize"}]
+        resp, _ = await _dispatch(
+            {"id": 2, "method": "input.respond", "params": {"assistant_id": "agent", "response": 1, "goto": goto}},
+            user,
+        )
+        assert resp["type"] == "success"
+        assert prepared_run.call_args.args[2].command["goto"] == goto
+
+    async def test_input_respond_omits_update_and_goto_when_absent(self, prepared_run: AsyncMock, user: User) -> None:
+        await _dispatch({"id": 2, "method": "input.respond", "params": {"assistant_id": "agent", "response": 1}}, user)
+        assert prepared_run.call_args.args[2].command == {"resume": 1}
+
+    async def test_input_respond_non_object_update_is_invalid(self, prepared_run: AsyncMock, user: User) -> None:
+        resp, run_id = await _dispatch(
+            {"id": 2, "method": "input.respond", "params": {"assistant_id": "agent", "response": 1, "update": "x"}},
+            user,
+        )
+        assert resp["error"] == "invalid_argument"
+        assert run_id is None
+        prepared_run.assert_not_called()
+
+    @pytest.mark.parametrize("goto", [42, "", {"input": {}}, {"node": ""}, ["ok", 7]])
+    async def test_input_respond_malformed_goto_is_invalid(
+        self, prepared_run: AsyncMock, user: User, goto: Any
+    ) -> None:
+        resp, _ = await _dispatch(
+            {"id": 2, "method": "input.respond", "params": {"assistant_id": "agent", "response": 1, "goto": goto}},
+            user,
+        )
+        assert resp["error"] == "invalid_argument"
+        prepared_run.assert_not_called()
+
+    async def test_input_respond_forwards_context(self, prepared_run: AsyncMock, user: User) -> None:
+        await _dispatch(
+            {
+                "id": 2,
+                "method": "input.respond",
+                "params": {"assistant_id": "agent", "response": 1, "context": {"reasoning_effort": "high"}},
+            },
+            user,
+        )
+        assert prepared_run.call_args.args[2].context == {"reasoning_effort": "high"}
+
+    async def test_input_respond_omitted_context_is_empty(self, prepared_run: AsyncMock, user: User) -> None:
+        await _dispatch({"id": 2, "method": "input.respond", "params": {"assistant_id": "agent", "response": 1}}, user)
+        assert prepared_run.call_args.args[2].context == {}
+
+    async def test_input_respond_non_object_context_is_invalid(self, prepared_run: AsyncMock, user: User) -> None:
+        resp, _ = await _dispatch(
+            {"id": 2, "method": "input.respond", "params": {"assistant_id": "agent", "response": 1, "context": "x"}},
+            user,
+        )
+        assert resp["error"] == "invalid_argument"
+        prepared_run.assert_not_called()
+
+
+class TestUnknownParamKeys:
+    """Keys outside the handler's declared set are logged, never dropped in silence."""
+
+    @pytest.mark.parametrize(
+        ("method", "params"),
+        [
+            ("run.start", {"assistant_id": "agent", "input": {}, "webhook": "https://x", "durability": "sync"}),
+            ("input.respond", {"assistant_id": "agent", "response": 1, "webhook": "https://x", "durability": "sync"}),
+        ],
+    )
+    async def test_unknown_keys_are_logged_with_names(
+        self, prepared_run: AsyncMock, user: User, monkeypatch: pytest.MonkeyPatch, method: str, params: dict
+    ) -> None:
+        warning = MagicMock()
+        monkeypatch.setattr(cmd.logger, "warning", warning)
+        resp, _ = await _dispatch({"id": 1, "method": method, "params": params}, user)
+        assert resp["type"] == "success"
+        warning.assert_called_once()
+        assert warning.call_args.kwargs == {"method": method, "keys": ["durability", "webhook"]}
+
+    async def test_declared_keys_are_not_logged(
+        self, prepared_run: AsyncMock, user: User, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        warning = MagicMock()
+        monkeypatch.setattr(cmd.logger, "warning", warning)
+        await _dispatch(
+            {
+                "id": 1,
+                "method": "input.respond",
+                "params": {"interrupt_id": "a" * 32, "namespace": [], "response": 1, "assistant_id": "agent"},
+            },
+            user,
+        )
+        warning.assert_not_called()
 
 
 class TestErrors:

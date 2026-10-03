@@ -183,6 +183,8 @@ Two ways to configure the database connection:
     POSTGRES_PORT=5432
     POSTGRES_USER=myuser
     ```
+
+    For Docker Compose, `POSTGRES_PORT` selects the host-published port; the API container connects to PostgreSQL on its internal port, `5432`.
   </Tab>
 </Tabs>
 

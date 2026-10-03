@@ -13,11 +13,14 @@ import structlog
 
 from aegra_api.core.active_runs import active_runs
 from aegra_api.models.enums import RunCancellationAction
-from aegra_api.services.base_broker import BaseBrokerManager, BaseRunBroker
+from aegra_api.services.base_broker import REPLAY_RETENTION_SECONDS, BaseBrokerManager, BaseRunBroker
 from aegra_api.settings import settings
 from aegra_api.utils import generate_event_id
 
 logger = structlog.getLogger(__name__)
+
+# Sweep often enough that an expired broker is freed close to its deadline.
+_SWEEP_INTERVAL_SECONDS = 60
 
 
 class RunBroker(BaseRunBroker):
@@ -35,6 +38,7 @@ class RunBroker(BaseRunBroker):
         self._replay_buffer: list[tuple[str, Any]] = []
         self._subscribers: set[asyncio.Queue[tuple[str, Any]]] = set()
         self._created_at = asyncio.get_running_loop().time()
+        self._finished_at: float | None = None
 
     async def put(self, event_id: str, payload: Any, *, resumable: bool = True) -> None:
         if self.finished.is_set():
@@ -92,6 +96,9 @@ class RunBroker(BaseRunBroker):
         return list(self._replay_buffer)
 
     def mark_finished(self) -> None:
+        if self.finished.is_set():
+            return
+        self._finished_at = asyncio.get_running_loop().time()
         self.finished.set()
         logger.debug(f"Broker for run {self.run_id} marked as finished")
 
@@ -103,6 +110,12 @@ class RunBroker(BaseRunBroker):
 
     def get_age(self) -> float:
         return asyncio.get_running_loop().time() - self._created_at
+
+    def get_finished_age(self) -> float | None:
+        """Seconds since the run finished, or None while it is still running."""
+        if self._finished_at is None:
+            return None
+        return asyncio.get_running_loop().time() - self._finished_at
 
 
 class BrokerManager(BaseBrokerManager):
@@ -177,19 +190,25 @@ class BrokerManager(BaseBrokerManager):
         """Return the current event sequence from the in-memory counter."""
         return self._event_counters.get(run_id, 0)
 
+    def sweep_expired_brokers(self, retention_seconds: float = REPLAY_RETENTION_SECONDS) -> list[str]:
+        """Drop finished brokers past the replay window. Returns the removed run ids."""
+        expired = [
+            run_id
+            for run_id, broker in self._brokers.items()
+            if broker.is_empty()
+            and (finished_age := broker.get_finished_age()) is not None
+            and finished_age > retention_seconds
+        ]
+        for run_id in expired:
+            self.remove_broker(run_id)
+            logger.info(f"Cleaned up expired broker for run {run_id}")
+        return expired
+
     async def _cleanup_old_brokers(self) -> None:
-        """Remove finished brokers older than 1 hour every 5 minutes."""
         while True:
             try:
-                await asyncio.sleep(300)
-                to_remove = [
-                    run_id
-                    for run_id, broker in self._brokers.items()
-                    if broker.is_finished() and broker.is_empty() and broker.get_age() > 3600
-                ]
-                for run_id in to_remove:
-                    self.remove_broker(run_id)
-                    logger.info(f"Cleaned up old broker for run {run_id}")
+                await asyncio.sleep(_SWEEP_INTERVAL_SECONDS)
+                self.sweep_expired_brokers()
             except asyncio.CancelledError:
                 break
             except Exception:

@@ -10,6 +10,10 @@ from aegra_api.models.auth import User
 
 _authorization_header = APIKeyHeader(name="Authorization", auto_error=False)
 
+# Several dependencies on one request can call require_auth; the backend must run once
+# because a credential may be single-use.
+_AUTH_RESULT_SCOPE_KEY = "aegra.auth_result"
+
 
 def _extract_user_data(user_obj: Any) -> dict[str, Any]:
     """Extract user data from various object types.
@@ -74,8 +78,12 @@ async def require_auth(
         User object with authentication context including any extra fields
 
     Raises:
-        HTTPException: If user is not authenticated
+        HTTPException: If no authentication context was attached to the request
     """
+    cached = request.scope.get(_AUTH_RESULT_SCOPE_KEY)
+    if cached is not None:
+        return cached
+
     backend = get_auth_backend()
 
     try:
@@ -98,8 +106,9 @@ async def require_auth(
     if not hasattr(request, "user"):
         request.user = user
 
-    # Convert to User model
-    return _to_user_model(user)
+    user_model = _to_user_model(user)
+    request.scope[_AUTH_RESULT_SCOPE_KEY] = user_model
+    return user_model
 
 
 # Type alias for cleaner route signatures
@@ -130,6 +139,9 @@ def get_current_user(request: Request) -> User:
     Raises:
         HTTPException: If user is not authenticated
     """
+    cached = request.scope.get(_AUTH_RESULT_SCOPE_KEY)
+    if cached is not None:
+        return cached
     # Try reading from request.scope first (set by require_auth dependency)
     user = request.scope.get("user")
     if user is None:
@@ -138,11 +150,9 @@ def get_current_user(request: Request) -> User:
             raise HTTPException(status_code=401, detail="Authentication required")
         user = request.user
 
-    if hasattr(user, "is_authenticated") and not user.is_authenticated:
-        raise HTTPException(status_code=401, detail="Invalid authentication")
-
-    # Convert to User model
-    return _to_user_model(user)
+    user_model = _to_user_model(user)
+    request.scope[_AUTH_RESULT_SCOPE_KEY] = user_model
+    return user_model
 
 
 def get_user_id(user: User = Depends(get_current_user)) -> str:

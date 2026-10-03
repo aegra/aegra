@@ -28,8 +28,8 @@ async def call_model(state: State, runtime: Runtime[Context]) -> dict:
         await model.ainvoke([system_message, *state.messages]),
     )
 
-    # Handle the case when it's the last step and the model still wants to use a tool
-    if state.is_last_step and response.tool_calls:
+    # remaining_steps counts this step; a tool call needs two more (tools, then this node)
+    if state.remaining_steps < 3 and response.tool_calls:
         return {
             "messages": [
                 AIMessage(

@@ -218,6 +218,7 @@ services:
       - POSTGRES_USER=${{POSTGRES_USER:-{slug}}}
       - POSTGRES_PASSWORD=${{POSTGRES_PASSWORD:-{slug}_secret}}
       - POSTGRES_HOST=postgres
+      - POSTGRES_PORT=5432
       - POSTGRES_DB=${{POSTGRES_DB:-{slug}}}
       - AEGRA_CONFIG=aegra.json
       - AUTH_TYPE=${{AUTH_TYPE:-noop}}

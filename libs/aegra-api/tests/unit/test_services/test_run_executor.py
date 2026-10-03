@@ -226,6 +226,16 @@ class TestStreamNativeV2InterruptDetection:
         event = {"params": {"data": {"messages": []}}}
         assert await self._run(("values", event)) is False
 
+    @pytest.mark.asyncio
+    async def test_interrupt_via_empty_updates_dunder_interrupt(self) -> None:
+        event = {"params": {"data": {"__interrupt__": ()}}}
+        assert await self._run(("updates", event)) is True
+
+    @pytest.mark.asyncio
+    async def test_interrupt_via_empty_list_updates_dunder_interrupt(self) -> None:
+        event = {"params": {"data": {"__interrupt__": []}}}
+        assert await self._run(("updates", event)) is True
+
 
 class TestDurabilityForwarding:
     """The job's resolved durability reaches both stream producers."""
@@ -255,6 +265,47 @@ class TestDurabilityForwarding:
             await _stream_native_v2(self._job(durability), MagicMock(), {"msg": "x"}, {}, _GraphResult())
 
         assert stream.call_args.kwargs["durability"] == durability
+
+
+class TestStreamLegacyInterruptDetection:
+    """_stream_legacy must detect interrupts including empty __interrupt__."""
+
+    async def _run(self, *events: tuple[str, dict]) -> bool:
+        async def gen(**_kwargs):
+            for event_type, event_data in events:
+                yield event_type, event_data
+
+        result = _GraphResult()
+        with (
+            patch.object(run_executor_module, "stream_graph_events", gen),
+            patch.object(run_executor_module, "broker_manager") as bm,
+            patch.object(run_executor_module, "streaming_service") as ss,
+        ):
+            bm.allocate_event_id = AsyncMock(return_value="run-1_event_1")
+            ss.put_to_broker = AsyncMock()
+            await _stream_legacy(_make_job(), MagicMock(), {"msg": "x"}, {}, ["values"], result)
+        return result.has_interrupt
+
+    @pytest.mark.asyncio
+    async def test_interrupt_with_empty_tuple(self) -> None:
+        # Static breakpoint case
+        assert await self._run(("updates", {"__interrupt__": ()})) is True
+
+    @pytest.mark.asyncio
+    async def test_interrupt_with_empty_list(self) -> None:
+        assert await self._run(("updates", {"__interrupt__": []})) is True
+
+    @pytest.mark.asyncio
+    async def test_interrupt_with_values_and_empty_tuple(self) -> None:
+        assert await self._run(("values", {"__interrupt__": ()})) is True
+
+    @pytest.mark.asyncio
+    async def test_interrupt_with_non_empty(self) -> None:
+        assert await self._run(("updates", {"__interrupt__": [{"id": "1"}]})) is True
+
+    @pytest.mark.asyncio
+    async def test_no_interrupt(self) -> None:
+        assert await self._run(("values", {"data": "ok"})) is False
 
 
 class TestSignalEndEvent:

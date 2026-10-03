@@ -2,7 +2,6 @@
 
 import asyncio
 from collections.abc import AsyncIterator
-from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -26,7 +25,7 @@ from aegra_api.services.run_executor import (
 )
 
 
-async def _empty_async_gen():  # type: ignore[no-untyped-def]
+async def _empty_async_gen() -> AsyncIterator[None]:
     return
     yield  # noqa: RET504 — makes this an async generator
 
@@ -47,9 +46,13 @@ def _patch_execute_run_deps() -> dict[str, MagicMock | AsyncMock]:
 class TestRunInterruptConfiguration:
     @pytest.mark.parametrize(
         ("value", "expected"),
-        [(["agent"], ["agent"]), (["*"], "*"), ("agent", ["agent"]), (None, None)],
+        [(["agent"], ["agent"]), (["*"], "*"), ("agent", ["agent"]), ("*", "*"), (None, None)],
     )
-    def test_normalizes_interrupt_value(self, value: str | list[str] | None, expected: str | list[str] | None) -> None:
+    def test_normalizes_interrupt_value(
+        self: "TestRunInterruptConfiguration",
+        value: str | list[str] | None,
+        expected: str | list[str] | None,
+    ) -> None:
         assert _normalize_interrupt_value(value) == expected
 
     def test_interrupts_do_not_enter_run_config(self) -> None:
@@ -249,37 +252,96 @@ class TestStreamNativeV2InterruptDetection:
         assert await self._run(("values", event)) is False
 
     @pytest.mark.asyncio
-    async def test_forwards_interrupt_kwargs_to_native_stream(self) -> None:
-        captured_kwargs: dict[str, Any] = {}
-
-        async def stream_native_v3_events(
-            **kwargs: Any,
-        ) -> AsyncIterator[tuple[str, dict[str, Any]]]:
-            captured_kwargs.update(kwargs)
-            empty_events: tuple[tuple[str, dict[str, Any]], ...] = ()
-            for event in empty_events:
-                yield event
-
-        result = _GraphResult()
+    async def test_forwards_interrupt_kwargs_to_native_stream(
+        self: "TestStreamNativeV2InterruptDetection",
+    ) -> None:
+        job = _make_job().model_copy(
+            update={"behavior": RunBehavior(interrupt_before=["agent"], interrupt_after=["tools"])}
+        )
+        stream = MagicMock(return_value=_empty_async_gen())
         with (
-            patch.object(run_executor_module, "stream_native_v3_events", stream_native_v3_events),
+            patch.object(run_executor_module, "stream_native_v3_events", stream),
             patch.object(run_executor_module, "broker_manager") as bm,
             patch.object(run_executor_module, "streaming_service") as ss,
         ):
             bm.allocate_event_id = AsyncMock(return_value="run-1_event_1")
             ss.put_to_broker = AsyncMock()
             await _stream_native_v2(
-                _make_job(),
+                job,
                 MagicMock(),
                 {"msg": "x"},
                 {},
-                result,
-                interrupt_before=["agent"],
-                interrupt_after=["tools"],
+                _GraphResult(),
             )
 
-        assert captured_kwargs["interrupt_before"] == ["agent"]
-        assert captured_kwargs["interrupt_after"] == ["tools"]
+        assert stream.call_args.kwargs["interrupt_before"] == ["agent"]
+        assert stream.call_args.kwargs["interrupt_after"] == ["tools"]
+
+
+class TestInterruptForwarding:
+    """Both stream producers read normalized interrupt settings from the job."""
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("interrupt_before", "interrupt_after", "expected_before", "expected_after"),
+        [
+            (["agent"], None, ["agent"], None),
+            (None, ["tools"], None, ["tools"]),
+            ("*", None, "*", None),
+            (None, "*", None, "*"),
+            (None, None, None, None),
+        ],
+    )
+    async def test_legacy_stream_reads_job_behavior(
+        self: "TestInterruptForwarding",
+        interrupt_before: str | list[str] | None,
+        interrupt_after: str | list[str] | None,
+        expected_before: str | list[str] | None,
+        expected_after: str | list[str] | None,
+    ) -> None:
+        job = _make_job().model_copy(
+            update={"behavior": RunBehavior(interrupt_before=interrupt_before, interrupt_after=interrupt_after)}
+        )
+        stream = MagicMock(return_value=_empty_async_gen())
+        with patch.object(run_executor_module, "stream_graph_events", stream):
+            await _stream_legacy(job, MagicMock(), {"msg": "x"}, {}, ["values"], _GraphResult())
+
+        assert stream.call_args.kwargs["interrupt_before"] == expected_before
+        assert stream.call_args.kwargs["interrupt_after"] == expected_after
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("interrupt_before", "interrupt_after", "expected_before", "expected_after"),
+        [
+            (["agent"], None, ["agent"], None),
+            (None, ["tools"], None, ["tools"]),
+            ("*", None, "*", None),
+            (None, "*", None, "*"),
+            (None, None, None, None),
+        ],
+    )
+    async def test_native_stream_reads_job_behavior(
+        self: "TestInterruptForwarding",
+        interrupt_before: str | list[str] | None,
+        interrupt_after: str | list[str] | None,
+        expected_before: str | list[str] | None,
+        expected_after: str | list[str] | None,
+    ) -> None:
+        job = _make_job().model_copy(
+            update={"behavior": RunBehavior(interrupt_before=interrupt_before, interrupt_after=interrupt_after)}
+        )
+        stream = MagicMock(return_value=_empty_async_gen())
+        with (
+            patch.object(run_executor_module, "stream_native_v3_events", stream),
+            patch.object(run_executor_module, "broker_manager") as bm,
+            patch.object(run_executor_module, "streaming_service") as ss,
+        ):
+            bm.allocate_event_id = AsyncMock(return_value="run-1_event_1")
+            ss.put_to_broker = AsyncMock()
+            await _stream_native_v2(job, MagicMock(), {"msg": "x"}, {}, _GraphResult())
+
+        assert stream.call_args.kwargs["interrupt_before"] == expected_before
+        assert stream.call_args.kwargs["interrupt_after"] == expected_after
 
 
 class TestDurabilityForwarding:

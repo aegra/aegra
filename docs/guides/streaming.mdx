@@ -396,8 +396,6 @@ Interrupt IDs are deduplicated within each run so the same interrupt is not emit
 
 ### Responding to an interrupt
 
-Run-level `interrupt_before` and `interrupt_after` settings are forwarded to both legacy and native Protocol v2 streaming. Pass a node name, a list of node names, or `"*"` to pause before or after the selected nodes.
-
 `input.respond` resumes the interrupted run. Only `response` is required; `interrupt_id` targets one interrupt when several are pending.
 
 ```bash

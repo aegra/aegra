@@ -178,6 +178,8 @@ async for chunk in client.runs.stream(
 
 You can also set interrupt points without modifying the graph code, using the `interrupt_before` and `interrupt_after` parameters on the run:
 
+These run-level settings work with both streaming protocols. Pass a node name, a list of node names, or `"*"` to pause before or after the selected nodes.
+
 ```python
 # Pause before the "tools" node executes
 async for chunk in client.runs.stream(

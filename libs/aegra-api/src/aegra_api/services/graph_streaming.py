@@ -123,6 +123,8 @@ async def stream_graph_events(
         input_data: Input data for graph execution
         config: RunnableConfig for execution
         stream_mode: List of stream modes (e.g., ["messages", "values", "debug"])
+        interrupt_before: Node name(s) to interrupt before, or "*" for every node
+        interrupt_after: Node name(s) to interrupt after, or "*" for every node
         context: Optional context dictionary
         subgraphs: Whether to include subgraph namespaces in event types
         output_keys: Optional output channel keys for astream

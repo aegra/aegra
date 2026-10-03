@@ -387,7 +387,7 @@ class TestProcessStreamEvent:
         # Should return None (filtered out)
         assert results is None
 
-    def test_empty_interrupt_list_not_filtered(self):
+    def test_empty_interrupt_list_not_filtered(self) -> None:
         """Test updates with empty interrupt list are forwarded (static breakpoints)."""
         chunk = {"__interrupt__": []}
 
@@ -407,7 +407,7 @@ class TestProcessStreamEvent:
         assert results[0][0] == "values"
         assert results[0][1] == chunk
 
-    def test_empty_interrupt_tuple_not_filtered(self):
+    def test_empty_interrupt_tuple_not_filtered(self) -> None:
         """Test updates with empty interrupt tuple are forwarded (static breakpoints)."""
         chunk = {"__interrupt__": ()}
 
@@ -967,7 +967,7 @@ class TestProcessStreamEventMessagesTupleNormalization:
         serialized = converted_msg.model_dump()
         assert serialized["type"] == "AIMessageChunk"
 
-    def test_empty_interrupt_tuple_with_updates_explicitly_requested(self):
+    def test_empty_interrupt_tuple_with_updates_explicitly_requested(self) -> None:
         """Test empty interrupt tuple when updates mode explicitly requested."""
         chunk = {"__interrupt__": ()}
 

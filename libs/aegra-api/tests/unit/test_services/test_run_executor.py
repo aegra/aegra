@@ -1,12 +1,15 @@
 """Unit tests for run_executor service."""
 
 import asyncio
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from langgraph.graph import StateGraph
+from typing_extensions import TypedDict
 
 from aegra_api.models.auth import User
-from aegra_api.models.run_job import RunExecution, RunIdentity, RunJob
+from aegra_api.models.run_job import RunBehavior, RunExecution, RunIdentity, RunJob
 from aegra_api.models.runs import Durability
 from aegra_api.services import run_executor as run_executor_module
 from aegra_api.services.run_executor import (
@@ -271,7 +274,7 @@ class TestStreamLegacyInterruptDetection:
     """_stream_legacy must detect interrupts including empty __interrupt__."""
 
     async def _run(self, *events: tuple[str, dict]) -> bool:
-        async def gen(**_kwargs):
+        async def gen(**_kwargs: Any) -> Any:
             for event_type, event_data in events:
                 yield event_type, event_data
 
@@ -306,6 +309,27 @@ class TestStreamLegacyInterruptDetection:
     @pytest.mark.asyncio
     async def test_no_interrupt(self) -> None:
         assert await self._run(("values", {"data": "ok"})) is False
+
+    @pytest.mark.asyncio
+    async def test_static_breakpoint_preserves_partial_output(self) -> None:
+        """Empty interrupt marker must not overwrite saved partial output."""
+        result = _GraphResult()
+
+        async def gen(**_kwargs: Any) -> Any:
+            yield "values", {"state": "after_a"}
+            yield "updates", {"__interrupt__": ()}
+
+        with (
+            patch.object(run_executor_module, "stream_graph_events", gen),
+            patch.object(run_executor_module, "broker_manager") as bm,
+            patch.object(run_executor_module, "streaming_service") as ss,
+        ):
+            bm.allocate_event_id = AsyncMock(return_value="run-1_event_1")
+            ss.put_to_broker = AsyncMock()
+            await _stream_legacy(_make_job(), MagicMock(), {"msg": "x"}, {}, ["values"], result)
+
+        assert result.has_interrupt is True
+        assert result.data == {"state": "after_a"}
 
 
 class TestSignalEndEvent:
@@ -553,3 +577,49 @@ class TestTerminalStateRaces:
             await execute_run(_make_job())
 
         mock_signal_end.assert_not_awaited()
+
+
+class TestStaticBreakpointWithRealGraph:
+    """Test static breakpoints with real LangGraph graphs."""
+
+    @pytest.mark.asyncio
+    async def test_static_breakpoint_interrupt_before_with_real_graph(self) -> None:
+        """Test that interrupt_before with empty marker is handled correctly."""
+
+        class State(TypedDict):
+            value: int
+
+        def node_a(state: State) -> State:
+            return {"value": state["value"] + 1}
+
+        def node_b(state: State) -> State:
+            return {"value": state["value"] + 10}
+
+        builder = StateGraph(State)
+        builder.add_node("a", node_a)
+        builder.add_node("b", node_b)
+        builder.set_entry_point("a")
+        builder.add_edge("a", "b")
+        builder.add_edge("b", "__end__")
+        graph = builder.compile()
+
+        result = _GraphResult()
+
+        job = RunJob(
+            identity=RunIdentity(run_id="run-1", thread_id="thread-1", graph_id="graph-1"),
+            user=User(identity="user-1"),
+            execution=RunExecution(input_data={"value": 1}),
+            behavior=RunBehavior(interrupt_before=["b"]),
+        )
+
+        await _stream_legacy(
+            job,
+            graph,
+            {"value": 1},
+            {"configurable": {"thread_id": "thread-1", "run_id": "run-1"}, "interrupt_before": ["b"]},
+            ["values"],
+            result,
+        )
+
+        assert result.has_interrupt is True
+        assert result.data is not None

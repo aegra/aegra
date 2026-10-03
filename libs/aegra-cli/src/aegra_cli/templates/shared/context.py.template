@@ -23,7 +23,13 @@ class Context:
             "description": "The system prompt for the agent.",
         },
     )
-    model: Annotated[str, {"description": "LLM model as 'provider/model'."}] = field(
+    model: Annotated[
+        str,
+        {
+            "description": "LLM model as 'provider/model'. The model id may contain "
+            "slashes for gateway routes, e.g. 'openai/deepseek-ai/DeepSeek-V3'."
+        },
+    ] = field(
         default="openai/gpt-4o-mini",
     )
 

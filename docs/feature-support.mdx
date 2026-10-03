@@ -28,7 +28,7 @@ description: "What Aegra supports today, what's coming soon, and what's not yet 
 |:--|:--|:--|
 | Thread CRUD | Supported | Create, read, update, delete, and search threads. |
 | State persistence | Supported | PostgreSQL checkpoints via LangGraph. |
-| Thread state inspection | Supported | Get current state, values, and next nodes for any thread. |
+| Thread state inspection | Supported | Get current state, values, and next nodes for any thread. Thread objects also carry the latest `values` and `interrupts`, refreshed when a run ends with success or an interrupt and on `update_state`. |
 | Thread history | Supported | Full checkpoint history with replay capability. |
 
 ### Runs and execution

@@ -13,6 +13,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import defer
 
 from aegra_api.core.active_runs import active_runs
 from aegra_api.core.auth_deps import auth_dependency, get_current_user
@@ -35,12 +36,15 @@ from aegra_api.models import (
     ThreadState,
     ThreadStateUpdate,
     ThreadStateUpdateResponse,
+    ThreadSummary,
     ThreadTTLSpec,
     ThreadUpdate,
     User,
 )
 from aegra_api.models.errors import CONFLICT, NOT_FOUND, AgentProtocolError
 from aegra_api.models.search_limit import effective_search_limit
+from aegra_api.services.langgraph_service import create_thread_config
+from aegra_api.services.run_status import set_thread_values
 from aegra_api.services.streaming_service import streaming_service
 from aegra_api.services.thread_state_service import ThreadStateService
 from aegra_api.services.thread_ttl import get_thread_ttl_config, prune_expired_threads_for_user
@@ -92,9 +96,9 @@ def _resolve_sort(request: ThreadSearchRequest) -> tuple[Any, bool]:
 # --- Helper for safe ORM -> Pydantic conversion (Test/Mock compatible) ---
 
 
-def _serialize_thread(thread_orm: ThreadORM, default_metadata: dict[str, Any] | None = None) -> Thread:
+def _serialize_thread_summary(thread_orm: ThreadORM, default_metadata: dict[str, Any] | None = None) -> ThreadSummary:
     """
-    Safely converts ThreadORM to Thread model using dictionary construction.
+    Safely converts ThreadORM to ThreadSummary model using dictionary construction.
     This handles None values and MagicMocks that appear in tests, preventing
     Pydantic V2 ValidationErrors.
     """
@@ -144,7 +148,7 @@ def _serialize_thread(thread_orm: ThreadORM, default_metadata: dict[str, Any] | 
         u_at = datetime.now(UTC)
 
     # Validate from dict (more robust than validate(orm_obj) for partial mocks)
-    return Thread.model_validate(
+    return ThreadSummary.model_validate(
         {
             "thread_id": t_id,
             "status": status,
@@ -154,6 +158,34 @@ def _serialize_thread(thread_orm: ThreadORM, default_metadata: dict[str, Any] | 
             "updated_at": u_at,
         }
     )
+
+
+def _serialize_thread(thread_orm: ThreadORM, default_metadata: dict[str, Any] | None = None) -> Thread:
+    """Convert ThreadORM to Thread, adding the cached latest-checkpoint values and interrupts."""
+    summary = _serialize_thread_summary(thread_orm, default_metadata)
+    values_source = getattr(thread_orm, "values_json", None)
+    interrupts_source = getattr(thread_orm, "interrupts_json", None)
+    return Thread.model_validate(
+        {
+            **summary.model_dump(),
+            "values": values_source if isinstance(values_source, dict) else None,
+            "interrupts": interrupts_source if isinstance(interrupts_source, dict) else {},
+        }
+    )
+
+
+async def _refresh_thread_values(graph: Any, session: AsyncSession, thread_id: str, user: User) -> None:
+    """Re-cache the thread's latest values and interrupts after its state changed.
+
+    Best-effort: the checkpoint is already written, so a failed refresh must not fail the request.
+    """
+    try:
+        snapshot = await graph.aget_state(create_thread_config(thread_id, user))
+        thread_values = thread_state_service.extract_thread_values(snapshot)
+        await set_thread_values(session, thread_id, thread_values, user_id=user.identity)
+        await session.commit()
+    except Exception:
+        logger.warning("Failed to refresh cached thread values", thread_id=thread_id, exc_info=True)
 
 
 # --- Endpoints ---
@@ -281,15 +313,20 @@ async def list_threads(
 ) -> ThreadList:
     """List all threads owned by the authenticated user.
 
-    Returns every thread without filtering. Use the search endpoint for
-    filtered queries.
+    Returns every thread without filtering or state values. Use the search
+    endpoint for filtered, paginated queries that include each thread's values.
     """
     # Authorization check (search action for listing)
     ctx = build_auth_context(user, "threads", "search")
     value = {}
     filters = await handle_event(ctx, value)
 
-    stmt = select(ThreadORM).where(ThreadORM.user_id == user.identity)
+    # Unpaginated, so the cached state columns stay unloaded; raiseload makes an accidental read fail loudly.
+    stmt = (
+        select(ThreadORM)
+        .where(ThreadORM.user_id == user.identity)
+        .options(defer(ThreadORM.values_json, raiseload=True), defer(ThreadORM.interrupts_json, raiseload=True))
+    )
     auth_filter = build_metadata_filter(ThreadORM.metadata_json, filters)
     if auth_filter is not None:
         stmt = stmt.where(auth_filter)
@@ -297,7 +334,7 @@ async def list_threads(
     rows = result.all()
 
     # Use safe serialization
-    user_threads = [_serialize_thread(t) for t in rows]
+    user_threads = [_serialize_thread_summary(t) for t in rows]
     return ThreadList(threads=user_threads, total=len(user_threads))
 
 
@@ -551,10 +588,10 @@ async def update_thread_state(
                 config=config,
                 access_context="threads.update",
                 user=user,
-            ) as agent:
+            ) as graph:
                 # Update state using aupdate_state method
                 # This creates a new checkpoint with the updated values
-                agent = agent.with_config(config)
+                agent = graph.with_config(config)
 
                 # Handle values - can be dict or list of dicts
                 update_values = request.values
@@ -613,6 +650,9 @@ async def update_thread_state(
                     thread_id,
                     checkpoint_info.get("checkpoint_id"),
                 )
+
+                # Unbound graph: the request's checkpoint_id/ns must not pin the latest-state read.
+                await _refresh_thread_values(graph, session, thread_id, user)
 
                 return ThreadStateUpdateResponse(checkpoint=checkpoint_info)
 

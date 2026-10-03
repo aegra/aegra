@@ -10,6 +10,7 @@ from aegra_api.models.run_job import RunExecution, RunIdentity, RunJob
 from aegra_api.models.runs import Durability
 from aegra_api.services import run_executor as run_executor_module
 from aegra_api.services.run_executor import (
+    _capture_thread_values,
     _GraphResult,
     _lease_loss_cancellations,
     _shutdown_cancellations,
@@ -20,6 +21,8 @@ from aegra_api.services.run_executor import (
     _timeout_cancellations,
     execute_run,
 )
+from aegra_api.services.thread_state_service import ThreadValues
+from tests.fixtures.langgraph import make_interrupt, make_snapshot, make_task
 
 
 async def _empty_async_gen():  # type: ignore[no-untyped-def]
@@ -79,6 +82,67 @@ class TestExecuteRunSuccess:
         assert mock_finalize.await_args.kwargs["status"] == "success"
 
         mock_signal_end.assert_awaited_once_with("run-1", "success")
+
+
+class TestExecuteRunThreadValues:
+    @pytest.mark.parametrize(("has_interrupt", "status"), [(False, "success"), (True, "interrupted")])
+    @pytest.mark.asyncio
+    async def test_passes_captured_thread_values_to_finalize(self, has_interrupt: bool, status: str) -> None:
+        graph_result = _GraphResult()
+        graph_result.has_interrupt = has_interrupt
+        graph_result.thread_values = ThreadValues(values={"messages": []}, interrupts={}, checkpoint_id="cp-1")
+        mock_finalize = AsyncMock(return_value=True)
+
+        with (
+            patch("aegra_api.services.run_executor.start_run", new_callable=AsyncMock, return_value=True),
+            patch("aegra_api.services.run_executor.finalize_run", mock_finalize),
+            patch("aegra_api.services.run_executor._stream_graph", new_callable=AsyncMock, return_value=graph_result),
+            patch("aegra_api.services.run_executor.streaming_service") as mock_streaming,
+            patch("aegra_api.services.run_executor._signal_end_event", new_callable=AsyncMock),
+            patch("aegra_api.services.run_executor._signal_run_done", new_callable=AsyncMock),
+        ):
+            mock_streaming.cleanup_run = AsyncMock()
+            await execute_run(_make_job())
+
+        assert mock_finalize.await_args.kwargs["status"] == status
+        assert mock_finalize.await_args.kwargs["thread_values"] is graph_result.thread_values
+
+
+class TestCaptureThreadValues:
+    @pytest.mark.asyncio
+    async def test_reads_latest_checkpoint_not_the_pinned_one(self) -> None:
+        job = RunJob(
+            identity=RunIdentity(run_id="run-1", thread_id="thread-1", graph_id="graph-1"),
+            user=User(identity="user-1"),
+            execution=RunExecution(input_data=None, checkpoint={"checkpoint_id": "old-cp"}),
+        )
+        snapshot = make_snapshot(
+            {"messages": ["done"]},
+            {"configurable": {"checkpoint_id": "cp-2"}},
+            tasks=(make_task(id="task-1", interrupts=(make_interrupt(value="ok?", interrupt_id="int-1"),)),),
+        )
+        graph = MagicMock()
+        graph.aget_state = AsyncMock(return_value=snapshot)
+
+        result = await _capture_thread_values(graph, job)
+
+        config = graph.aget_state.await_args.args[0]
+        assert config["configurable"]["thread_id"] == "thread-1"
+        assert "checkpoint_id" not in config["configurable"]
+        assert result == ThreadValues(
+            values={"messages": ["done"]},
+            interrupts={"task-1": [{"value": "ok?", "id": "int-1"}]},
+            checkpoint_id="cp-2",
+        )
+
+    @pytest.mark.asyncio
+    async def test_returns_none_when_state_read_fails(self) -> None:
+        graph = MagicMock()
+        graph.aget_state = AsyncMock(side_effect=RuntimeError("checkpointer down"))
+
+        result = await _capture_thread_values(graph, _make_job())
+
+        assert result is None
 
 
 class TestExecuteRunCancelledError:

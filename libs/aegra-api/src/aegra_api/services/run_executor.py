@@ -18,13 +18,16 @@ from aegra_api.models.run_job import RunJob
 from aegra_api.services.broker import broker_manager
 from aegra_api.services.event_streaming.native_stream import stream_native_v3_events
 from aegra_api.services.graph_streaming import stream_graph_events
-from aegra_api.services.langgraph_service import create_run_config, get_langgraph_service
+from aegra_api.services.langgraph_service import create_run_config, create_thread_config, get_langgraph_service
 from aegra_api.services.run_status import finalize_run, start_run
 from aegra_api.services.streaming_service import streaming_service
+from aegra_api.services.thread_state_service import ThreadStateService, ThreadValues
 from aegra_api.settings import settings
 from aegra_api.utils.run_utils import map_command_to_langgraph
 
 logger = structlog.getLogger(__name__)
+
+_thread_state_service = ThreadStateService()
 
 _DEFAULT_STREAM_MODES = ["values"]
 
@@ -64,6 +67,7 @@ async def execute_run(job: RunJob) -> None:
                 status="interrupted",
                 thread_status="interrupted",
                 output=final_output.data,
+                thread_values=final_output.thread_values,
             )
         else:
             finalized = await finalize_run(
@@ -73,6 +77,7 @@ async def execute_run(job: RunJob) -> None:
                 status="success",
                 thread_status="idle",
                 output=final_output.data,
+                thread_values=final_output.thread_values,
             )
 
     except asyncio.CancelledError:
@@ -161,11 +166,12 @@ async def _best_effort_signal(fn: Any, *args: Any) -> None:
 class _GraphResult:
     """Accumulates output and interrupt state during graph streaming."""
 
-    __slots__ = ("data", "has_interrupt")
+    __slots__ = ("data", "has_interrupt", "thread_values")
 
     def __init__(self) -> None:
         self.data: dict[str, Any] = {}
         self.has_interrupt: bool = False
+        self.thread_values: ThreadValues | None = None
 
 
 async def _stream_graph(job: RunJob) -> _GraphResult:
@@ -191,8 +197,24 @@ async def _stream_graph(job: RunJob) -> _GraphResult:
             await _stream_native_v2(job, graph, execution_input, run_config, result)
         else:
             await _stream_legacy(job, graph, execution_input, run_config, stream_modes, result)
+        result.thread_values = await _capture_thread_values(graph, job)
 
     return result
+
+
+async def _capture_thread_values(graph: Any, job: RunJob) -> ThreadValues | None:
+    """Read the thread's latest checkpoint so Thread responses can expose values and interrupts.
+
+    Best-effort: a failed read must not fail a run whose graph already finished.
+    """
+    # Thread-level config, not run_config: a run pinned to an old checkpoint_id would read that one back.
+    config = create_thread_config(job.identity.thread_id, job.user)
+    try:
+        snapshot = await graph.aget_state(config)
+        return _thread_state_service.extract_thread_values(snapshot)
+    except Exception:
+        logger.warning("Failed to read final thread state", run_id=job.identity.run_id, exc_info=True)
+        return None
 
 
 async def _stream_legacy(

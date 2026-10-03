@@ -86,8 +86,8 @@ class ThreadPruneResponse(BaseModel):
     pruned: int = Field(0, description="Expired threads whose history was pruned (strategy 'keep_latest')")
 
 
-class Thread(BaseModel):
-    """Thread entity model
+class ThreadSummary(BaseModel):
+    """Thread entity without its state, for the unpaginated GET /threads listing
 
     Status values: idle, busy, interrupted, error
     """
@@ -110,10 +110,24 @@ class Thread(BaseModel):
         return validate_thread_status(v)
 
 
+class Thread(ThreadSummary):
+    """Thread entity model, including the cached latest values and interrupts"""
+
+    values: dict[str, Any] | None = Field(
+        None,
+        description="State values of the latest checkpoint, refreshed when a run finishes or the state is "
+        "updated. Null until the thread's first run completes.",
+    )
+    interrupts: dict[str, list[dict[str, Any]]] = Field(
+        default_factory=dict,
+        description="Pending interrupts of the latest checkpoint, keyed by the task ID that raised them.",
+    )
+
+
 class ThreadList(BaseModel):
     """Response model for listing threads"""
 
-    threads: list[Thread]
+    threads: list[ThreadSummary]
     total: int
 
 

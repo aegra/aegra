@@ -57,6 +57,22 @@ print(thread["status"])  # "idle", "busy", "interrupted", "error"
   The snippets below assume you are inside an `async def` function with an initialized `client` — see the example above.
 </Note>
 
+## Latest values on the thread
+
+Thread objects returned by `threads.create`, `threads.get`, `threads.update` and `threads.search` also carry a snapshot of the latest checkpoint:
+
+- `values`: the state values, serialized like `get_state()["values"]`.
+- `interrupts`: pending interrupts keyed by the ID of the task that raised them, e.g. `{"<task_id>": [{"value": ..., "id": ...}]}`. Empty when nothing is pending.
+
+```python
+thread = await client.threads.get(thread_id)
+last_message = (thread["values"] or {}).get("messages", [])[-1:]
+```
+
+`GET /threads` leaves both fields out because it isn't paginated. Use `threads.search` to page through threads with their values.
+
+Aegra stores this snapshot on the thread when a run ends with `success` or `interrupted`, and when you call `update_state`, so reading it costs no graph load. `values` is `null` until one of those happens. A run that errors or is cancelled leaves the previous snapshot in place, so use `get_state` when you need the exact checkpoint.
+
 ## Getting thread state
 
 The state contains the current values of all state fields, information about what nodes will execute next, and any pending interrupts.

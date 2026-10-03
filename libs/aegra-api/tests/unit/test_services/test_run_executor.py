@@ -83,13 +83,28 @@ class TestExecuteRunSuccess:
 
 
 class TestBuildRunConfig:
-    def test_injects_job_graph_id_into_configurable(self) -> None:
+    def test_injects_job_graph_id_into_configurable(self: "TestBuildRunConfig") -> None:
         job = _make_job()
 
         with patch("aegra_api.services.langgraph_service.get_tracing_callbacks", return_value=[]):
             config = _build_run_config(job)
 
         assert config["configurable"]["graph_id"] == "graph-1"
+
+    def test_preserves_client_graph_id_over_job_graph_id(self: "TestBuildRunConfig") -> None:
+        job = _make_job()
+        job = job.model_copy(
+            update={
+                "execution": job.execution.model_copy(
+                    update={"config": {"configurable": {"graph_id": "client-graph"}}}
+                )
+            }
+        )
+
+        with patch("aegra_api.services.langgraph_service.get_tracing_callbacks", return_value=[]):
+            config = _build_run_config(job)
+
+        assert config["configurable"]["graph_id"] == "client-graph"
 
 
 class TestExecuteRunCancelledError:

@@ -749,10 +749,7 @@ def create_run_config(
         cfg["configurable"].update({k: v for k, v in safe.items() if v is not None})
 
     if graph_id is not None:
-        # Server-authoritative: a run is already bound to a specific graph_id,
-        # so a client-supplied override would let a run impersonate another
-        # graph while still reusing the same thread/checkpointer context.
-        cfg["configurable"]["graph_id"] = graph_id
+        cfg["configurable"].setdefault("graph_id", graph_id)
 
     # Finally inject user context via existing helper
     return inject_user_context(user, cfg)

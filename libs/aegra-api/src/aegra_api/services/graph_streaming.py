@@ -459,9 +459,9 @@ def _process_stream_event(
     # Special handling for interrupt events when updates mode not explicitly requested
     elif mode == "updates" and only_interrupt_updates:
         # Check if this update contains interrupt data
-        has_interrupt_data = (
-            isinstance(chunk, dict) and "__interrupt__" in chunk and len(chunk.get("__interrupt__", [])) > 0
-        )
+        # Treat presence of __interrupt__ as an interrupt signal, even if empty
+        # (static breakpoints emit empty tuples/lists)
+        has_interrupt_data = isinstance(chunk, dict) and "__interrupt__" in chunk
 
         if has_interrupt_data:
             # Remap interrupt updates to values events for backward compatibility

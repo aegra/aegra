@@ -26,6 +26,7 @@ from sqlalchemy import func, or_, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from aegra_api.config import get_default_graph_id
 from aegra_api.core.auth_deps import get_current_user
 from aegra_api.core.auth_filters import build_metadata_filter
 from aegra_api.core.orm import Assistant as AssistantORM
@@ -159,14 +160,23 @@ class AssistantService(Authenticated):
 
     async def create_assistant(self, request: AssistantCreate) -> Assistant:
         """Create a new assistant"""
+        available_graphs = self.langgraph_service.list_graphs()
+
+        # Resolve the default before dispatch so auth handlers see the graph the
+        # create will actually use, not the omitted field.
+        graph_id = request.graph_id if request.graph_id is not None else get_default_graph_id()
+        if graph_id is None:
+            raise HTTPException(
+                422,
+                "graph_id is required: this deployment has no default graph. "
+                "Pass graph_id, or set 'default_graph_id' in aegra.json. "
+                f"Available: {list(available_graphs.keys())}",
+            )
+        request.graph_id = graph_id
+
         value = request.model_dump()
         await self._dispatch("create", value)
         request.metadata = _injected_metadata(request.metadata, value)
-
-        available_graphs = self.langgraph_service.list_graphs()
-
-        # Use graph_id as the main identifier
-        graph_id = request.graph_id
 
         if graph_id not in available_graphs:
             raise HTTPException(

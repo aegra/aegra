@@ -6,6 +6,7 @@ from unittest.mock import MagicMock
 
 import pytest
 import structlog
+from asgi_correlation_id import correlation_id
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import SimpleSpanProcessor
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import (
@@ -304,6 +305,70 @@ class TestMakeRunTraceContext:
         assert bound["run_id"] == "run-1"
         assert bound["thread_id"] == "thread-1"
         assert bound["graph_id"] == "my_graph"
+
+    def test_correlation_id_set_in_returned_context(self) -> None:
+        """Non-empty correlation_id_value sets the asgi_correlation_id context var."""
+        ctx = make_run_trace_context(
+            "run-1",
+            "thread-1",
+            "my_graph",
+            "user-1",
+            correlation_id_value="req-abc-123",
+        )
+
+        assert ctx.run(correlation_id.get) == "req-abc-123"
+
+    def test_correlation_id_adds_original_request_id_to_metadata(self) -> None:
+        """Non-empty correlation_id_value adds original_request_id to OTEL metadata."""
+        ctx = make_run_trace_context(
+            "run-1",
+            "thread-1",
+            "my_graph",
+            "user-1",
+            correlation_id_value="req-abc-123",
+        )
+
+        attrs = ctx.run(_trace_attrs.get)
+        assert attrs["langfuse.trace.metadata.original_request_id"] == "req-abc-123"
+
+    def test_correlation_id_adds_original_request_id_to_structlog(self) -> None:
+        """Non-empty correlation_id_value binds original_request_id in structlog."""
+        ctx = make_run_trace_context(
+            "run-1",
+            "thread-1",
+            "my_graph",
+            "user-1",
+            correlation_id_value="req-abc-123",
+        )
+
+        bound = ctx.run(structlog.contextvars.get_contextvars)
+        assert bound["original_request_id"] == "req-abc-123"
+
+    def test_empty_correlation_id_omits_original_request_id(self) -> None:
+        """Empty correlation_id_value does not set correlation_id or original_request_id."""
+        ctx = make_run_trace_context(
+            "run-1",
+            "thread-1",
+            "my_graph",
+            "user-1",
+            correlation_id_value="",
+        )
+
+        attrs = ctx.run(_trace_attrs.get)
+        metadata_keys = [k for k in attrs if k.startswith("langfuse.trace.metadata.")]
+        assert not any("original_request_id" in k for k in metadata_keys)
+        bound = ctx.run(structlog.contextvars.get_contextvars)
+        assert "original_request_id" not in bound
+
+    def test_none_correlation_id_omits_original_request_id(self) -> None:
+        """None correlation_id_value (default) does not set original_request_id."""
+        ctx = make_run_trace_context("run-1", "thread-1", "my_graph", "user-1")
+
+        attrs = ctx.run(_trace_attrs.get)
+        metadata_keys = [k for k in attrs if k.startswith("langfuse.trace.metadata.")]
+        assert not any("original_request_id" in k for k in metadata_keys)
+        bound = ctx.run(structlog.contextvars.get_contextvars)
+        assert "original_request_id" not in bound
 
 
 class TestMergeRunMetadata:

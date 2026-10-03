@@ -1,16 +1,19 @@
 """Unit tests for worker_executor service."""
 
 import asyncio
+import contextvars
 from collections.abc import Iterator
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+import structlog
 from redis import ConnectionError as RedisConnectionError
 from redis import TimeoutError as RedisTimeoutError
 
 from aegra_api.core.active_runs import active_runs, explicit_run_cancellations
 from aegra_api.models.auth import User
 from aegra_api.models.run_job import RunBehavior, RunExecution, RunIdentity, RunJob
+from aegra_api.observability.span_enrichment import make_run_trace_context as real_make_run_trace_context
 from aegra_api.services.run_executor import _shutdown_cancellations, _timeout_cancellations
 from aegra_api.services.worker_executor import (
     WorkerExecutor,
@@ -21,7 +24,6 @@ from aegra_api.services.worker_executor import (
     _LoadedRun,
     _release_lease,
     _requeue_drained_runs,
-    _restore_trace_context,
 )
 
 MODULE = "aegra_api.services.worker_executor"
@@ -340,110 +342,110 @@ class TestIsRunTerminal:
 
 
 # ------------------------------------------------------------------
-# _restore_trace_context
+# Trace context propagation in _execute_with_lease
 # ------------------------------------------------------------------
 
 
-class TestRestoreTraceContext:
-    def test_sets_structlog_context_vars(self) -> None:
-        job = _make_run_job()
-        trace = {"correlation_id": "req-abc"}
+class TestExecuteWithLeaseTraceContext:
+    """Verify _execute_with_lease builds and passes an explicit trace context."""
 
-        with patch(f"{MODULE}.set_trace_context") as mock_set_trace:
-            _restore_trace_context("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee", job, trace)
-
-        mock_set_trace.assert_called_once()
-        call_kwargs = mock_set_trace.call_args.kwargs
-        assert call_kwargs["user_id"] == "test-user"
-        assert call_kwargs["session_id"] == "11111111-2222-3333-4444-555555555555"
-        assert call_kwargs["trace_name"] == "test-graph"
-
-    def test_clears_previous_context_before_setting_new(self) -> None:
-        job = _make_run_job()
-        trace = {"correlation_id": "req-abc"}
-        call_order: list[str] = []
+    @pytest.mark.asyncio
+    async def test_calls_make_run_trace_context_with_correct_args(self) -> None:
+        """make_run_trace_context is called with job identity, user, metadata, and correlation_id."""
+        run_id = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+        executor = WorkerExecutor()
+        mock_loaded = MagicMock(spec=_LoadedRun)
+        mock_loaded.job = _make_run_job()
+        mock_loaded.trace = {"correlation_id": "req-abc"}
+        real_ctx = contextvars.copy_context()
 
         with (
-            patch(f"{MODULE}.structlog.contextvars.clear_contextvars", side_effect=lambda: call_order.append("clear")),
-            patch(f"{MODULE}.set_trace_context", side_effect=lambda **kw: call_order.append("set_trace")),
-            patch(
-                f"{MODULE}.structlog.contextvars.bind_contextvars", side_effect=lambda **kw: call_order.append("bind")
-            ),
-            patch(f"{MODULE}.correlation_id"),
+            patch(f"{MODULE}._acquire_and_load", new_callable=AsyncMock, return_value=mock_loaded),
+            patch(f"{MODULE}.make_run_trace_context", return_value=real_ctx) as mock_make_ctx,
+            patch(f"{MODULE}.execute_run", new_callable=AsyncMock),
+            patch(f"{MODULE}._heartbeat_loop", new_callable=AsyncMock),
+            patch(f"{MODULE}._release_lease", new_callable=AsyncMock),
         ):
-            _restore_trace_context("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee", job, trace)
+            await executor._execute_with_lease(run_id, "worker-0")
 
-        assert call_order == ["clear", "set_trace", "bind"]
-
-    def test_user_metadata_merged_with_system_keys(self) -> None:
-        """job.run_metadata is merged into the trace context metadata."""
-        job = RunJob(
-            identity=RunIdentity(
-                run_id="aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
-                thread_id="11111111-2222-3333-4444-555555555555",
-                graph_id="test-graph",
-            ),
-            user=User(identity="test-user"),
-            run_metadata={"tenant": "acme", "feature_flag": True},
+        mock_make_ctx.assert_called_once_with(
+            run_id,
+            mock_loaded.job.identity.thread_id,
+            mock_loaded.job.identity.graph_id,
+            mock_loaded.job.user.identity,
+            extra_metadata=mock_loaded.job.run_metadata,
+            correlation_id_value="req-abc",
         )
-        trace = {"correlation_id": "req-abc"}
 
-        with patch(f"{MODULE}.set_trace_context") as mock_set_trace:
-            _restore_trace_context("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee", job, trace)
+    @pytest.mark.asyncio
+    async def test_missing_correlation_id_passes_empty_string(self) -> None:
+        """When trace has no correlation_id, empty string is passed."""
+        run_id = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+        executor = WorkerExecutor()
+        mock_loaded = MagicMock(spec=_LoadedRun)
+        mock_loaded.job = _make_run_job()
+        mock_loaded.trace = {}
+        real_ctx = contextvars.copy_context()
 
-        metadata = mock_set_trace.call_args.kwargs["metadata"]
-        assert metadata["tenant"] == "acme"
-        assert metadata["feature_flag"] is True
-        # System keys still present
-        assert metadata["run_id"] == "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
-        assert metadata["thread_id"] == "11111111-2222-3333-4444-555555555555"
-        assert metadata["graph_id"] == "test-graph"
-        assert metadata["original_request_id"] == "req-abc"
+        with (
+            patch(f"{MODULE}._acquire_and_load", new_callable=AsyncMock, return_value=mock_loaded),
+            patch(f"{MODULE}.make_run_trace_context", return_value=real_ctx) as mock_make_ctx,
+            patch(f"{MODULE}.execute_run", new_callable=AsyncMock),
+            patch(f"{MODULE}._heartbeat_loop", new_callable=AsyncMock),
+            patch(f"{MODULE}._release_lease", new_callable=AsyncMock),
+        ):
+            await executor._execute_with_lease(run_id, "worker-0")
 
-    def test_user_metadata_cannot_override_system_keys(self) -> None:
-        """Reserved system keys win on collision; user spoof is dropped."""
-        job = RunJob(
-            identity=RunIdentity(
-                run_id="aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
-                thread_id="11111111-2222-3333-4444-555555555555",
-                graph_id="test-graph",
-            ),
-            user=User(identity="test-user"),
-            run_metadata={"run_id": "spoofed", "tenant": "acme"},
+        assert mock_make_ctx.call_args.kwargs["correlation_id_value"] == ""
+
+    @pytest.mark.asyncio
+    async def test_skipped_when_lease_not_acquired(self) -> None:
+        """No trace context or task created when lease acquisition fails."""
+        run_id = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+        executor = WorkerExecutor()
+
+        with (
+            patch(f"{MODULE}._acquire_and_load", new_callable=AsyncMock, return_value=None),
+            patch(f"{MODULE}.make_run_trace_context") as mock_make_ctx,
+        ):
+            await executor._execute_with_lease(run_id, "worker-0")
+
+        mock_make_ctx.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_execute_run_task_receives_trace_context(self) -> None:
+        """The trace context returned by make_run_trace_context is passed
+        to the asyncio task that runs execute_run."""
+        run_id = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+        executor = WorkerExecutor()
+        mock_loaded = MagicMock(spec=_LoadedRun)
+        mock_loaded.job = _make_run_job()
+        mock_loaded.trace = {"correlation_id": "req-abc"}
+
+        real_ctx = real_make_run_trace_context(
+            run_id,
+            mock_loaded.job.identity.thread_id,
+            mock_loaded.job.identity.graph_id,
+            mock_loaded.job.user.identity,
+            correlation_id_value="req-abc",
         )
-        trace = {"correlation_id": "req-abc"}
 
-        with patch(f"{MODULE}.set_trace_context") as mock_set_trace:
-            _restore_trace_context("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee", job, trace)
+        context_seen: dict[str, str] = {}
 
-        metadata = mock_set_trace.call_args.kwargs["metadata"]
-        assert metadata["run_id"] == "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
-        assert metadata["tenant"] == "acme"
+        async def capture_context(job: object) -> None:
+            context_seen.update(structlog.contextvars.get_contextvars())
 
-    def test_empty_run_metadata_with_correlation_id_keeps_four_system_keys(self) -> None:
-        """When a correlation-id is present, ``original_request_id`` is
-        included in the metadata alongside the three runtime keys."""
-        job = _make_run_job()  # run_metadata defaults to {}
-        trace = {"correlation_id": "req-abc"}
+        with (
+            patch(f"{MODULE}._acquire_and_load", new_callable=AsyncMock, return_value=mock_loaded),
+            patch(f"{MODULE}.make_run_trace_context", return_value=real_ctx),
+            patch(f"{MODULE}.execute_run", side_effect=capture_context),
+            patch(f"{MODULE}._heartbeat_loop", new_callable=AsyncMock),
+            patch(f"{MODULE}._release_lease", new_callable=AsyncMock),
+        ):
+            await executor._execute_with_lease(run_id, "worker-0")
 
-        with patch(f"{MODULE}.set_trace_context") as mock_set_trace:
-            _restore_trace_context("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee", job, trace)
-
-        metadata = mock_set_trace.call_args.kwargs["metadata"]
-        assert set(metadata.keys()) == {"run_id", "thread_id", "graph_id", "original_request_id"}
-
-    def test_missing_correlation_id_omits_original_request_id(self) -> None:
-        """Requests without an upstream correlation-id header should not produce
-        a ``langfuse.trace.metadata.original_request_id=""`` empty attribute."""
-        job = _make_run_job()
-        trace: dict[str, str] = {}  # no correlation_id
-
-        with patch(f"{MODULE}.set_trace_context") as mock_set_trace:
-            _restore_trace_context("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee", job, trace)
-
-        metadata = mock_set_trace.call_args.kwargs["metadata"]
-        assert "original_request_id" not in metadata
-        assert set(metadata.keys()) == {"run_id", "thread_id", "graph_id"}
+        assert context_seen["run_id"] == run_id
+        assert context_seen["original_request_id"] == "req-abc"
 
 
 # ------------------------------------------------------------------
@@ -827,7 +829,7 @@ class TestExecuteWithLease:
 
         with (
             patch(f"{MODULE}._acquire_and_load", new_callable=AsyncMock, return_value=mock_loaded),
-            patch(f"{MODULE}._restore_trace_context"),
+            patch(f"{MODULE}.make_run_trace_context", return_value=contextvars.copy_context()),
             patch(f"{MODULE}.execute_run", side_effect=long_running_job),
             patch(f"{MODULE}._heartbeat_loop", new_callable=AsyncMock),
             patch(f"{MODULE}._release_lease", new_callable=AsyncMock),

@@ -331,6 +331,27 @@ class TestStreamLegacyInterruptDetection:
         assert result.has_interrupt is True
         assert result.data == {"state": "after_a"}
 
+    @pytest.mark.asyncio
+    async def test_static_breakpoint_values_event_with_only_interrupt_preserves_output(self) -> None:
+        """Values event containing only __interrupt__ must not overwrite existing output."""
+        result = _GraphResult()
+        result.data = {"state": "existing"}
+
+        async def gen(**_kwargs: Any) -> Any:
+            yield "values", {"__interrupt__": ()}
+
+        with (
+            patch.object(run_executor_module, "stream_graph_events", gen),
+            patch.object(run_executor_module, "broker_manager") as bm,
+            patch.object(run_executor_module, "streaming_service") as ss,
+        ):
+            bm.allocate_event_id = AsyncMock(return_value="run-1_event_1")
+            ss.put_to_broker = AsyncMock()
+            await _stream_legacy(_make_job(), MagicMock(), {"msg": "x"}, {}, ["values"], result)
+
+        assert result.has_interrupt is True
+        assert result.data == {"state": "existing"}
+
 
 class TestSignalEndEvent:
     @pytest.mark.asyncio
@@ -623,3 +644,43 @@ class TestStaticBreakpointWithRealGraph:
 
         assert result.has_interrupt is True
         assert result.data is not None
+
+    @pytest.mark.asyncio
+    async def test_static_breakpoint_values_event_with_only_interrupt_no_existing_output(self) -> None:
+        """Values event containing only __interrupt__ with no existing output preserves state."""
+        result = _GraphResult()  # no existing data
+
+        async def gen(**_kwargs: Any) -> Any:
+            yield "values", {"__interrupt__": ()}
+
+        with (
+            patch.object(run_executor_module, "stream_graph_events", gen),
+            patch.object(run_executor_module, "broker_manager") as bm,
+            patch.object(run_executor_module, "streaming_service") as ss,
+        ):
+            bm.allocate_event_id = AsyncMock(return_value="run-1_event_1")
+            ss.put_to_broker = AsyncMock()
+            await _stream_legacy(_make_job(), MagicMock(), {"msg": "x"}, {}, ["values"], result)
+
+        assert result.has_interrupt is True
+        assert result.data == {}
+
+    @pytest.mark.asyncio
+    async def test_values_event_with_interrupt_and_data_updates_output(self) -> None:
+        """Values event with __interrupt__ and other data should update output."""
+        result = _GraphResult()
+
+        async def gen(**_kwargs: Any) -> Any:
+            yield "values", {"state": "updated", "__interrupt__": ()}
+
+        with (
+            patch.object(run_executor_module, "stream_graph_events", gen),
+            patch.object(run_executor_module, "broker_manager") as bm,
+            patch.object(run_executor_module, "streaming_service") as ss,
+        ):
+            bm.allocate_event_id = AsyncMock(return_value="run-1_event_1")
+            ss.put_to_broker = AsyncMock()
+            await _stream_legacy(_make_job(), MagicMock(), {"msg": "x"}, {}, ["values"], result)
+
+        assert result.has_interrupt is True
+        assert result.data == {"state": "updated", "__interrupt__": ()}

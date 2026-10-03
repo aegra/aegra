@@ -228,7 +228,6 @@ async def _stream_legacy(
                 keys = set(event_data.keys()) - {"__interrupt__"}
                 if keys:
                     result.data = event_data
-                # If only __interrupt__, don't overwrite existing data
             else:
                 result.data = event_data
 

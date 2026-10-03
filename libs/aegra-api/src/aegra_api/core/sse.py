@@ -3,7 +3,7 @@
 import contextlib
 import json
 import re
-from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Mapping, MutableMapping
+from collections.abc import AsyncGenerator, Awaitable, Callable, Mapping, MutableMapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
@@ -21,6 +21,7 @@ _serializer = GeneralSerializer()
 # Platform, and avoids per-tick datetime formatting that sse-starlette's
 # default ping does.
 _HEARTBEAT_EVENT = ServerSentEvent(comment="heartbeat")
+_HEARTBEAT_BYTES = _HEARTBEAT_EVENT.encode()
 
 
 def heartbeat_factory() -> ServerSentEvent:
@@ -88,8 +89,28 @@ async def sse_to_bytes(inner: AsyncGenerator[str, None]) -> AsyncGenerator[bytes
             yield chunk.encode("utf-8")
 
 
+async def _open_with_keepalive(body: AsyncGenerator[bytes, None]) -> AsyncGenerator[bytes, None]:
+    """Emit one keepalive ahead of ``body`` so the first byte leaves when the stream opens.
+
+    ASGI servers hold the response head until a body chunk arrives, so a stream
+    with nothing to say yet writes nothing for a whole ping interval. A client
+    that treats the first byte as "subscribed" (the LangGraph SDK does, while
+    rotating its shared ``/stream/events`` subscription) waits that long on
+    every open, which on a thread's first run is long enough to miss the run.
+    The payload is the ping's own comment, so this is a keepalive at t=0 rather
+    than a new frame: SSE parsers ignore it and the wire format is unchanged.
+
+    ``aclosing`` keeps ``body``'s cleanup deterministic when sse-starlette
+    aborts the stream mid-flight, matching ``sse_to_bytes``.
+    """
+    yield _HEARTBEAT_BYTES
+    async with contextlib.aclosing(body) as managed:
+        async for chunk in managed:
+            yield chunk
+
+
 def make_sse_response(
-    body: AsyncIterator[bytes],
+    body: AsyncGenerator[bytes, None],
     *,
     headers: Mapping[str, str],
     close_handler: Callable[[MutableMapping[str, Any]], Awaitable[None]] | None = None,
@@ -98,11 +119,12 @@ def make_sse_response(
     """Construct an ``EventSourceResponse`` with our shared SSE defaults.
 
     Centralizes ping interval + heartbeat factory so every SSE endpoint
-    emits identical wire-format keepalives. ``settings`` is read at call
-    time so live overrides (e.g. tests, env reloads) take effect.
+    emits identical wire-format keepalives, and opens each stream with one
+    (see ``_open_with_keepalive``). ``settings`` is read at call time so live
+    overrides (e.g. tests, env reloads) take effect.
     """
     return EventSourceResponse(
-        body,
+        _open_with_keepalive(body),
         status_code=status_code,
         ping=settings.app.sse_ping_interval_secs,
         ping_message_factory=heartbeat_factory,

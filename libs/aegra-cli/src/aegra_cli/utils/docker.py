@@ -4,6 +4,7 @@ This module provides helpers to detect Docker installation, check if Docker is r
 and manage PostgreSQL containers for local development.
 """
 
+import os
 import platform
 import shutil
 import subprocess
@@ -14,16 +15,97 @@ from rich.console import Console
 console = Console()
 
 
+def get_compose_command() -> list[str]:
+    """Detect the available compose command.
+
+    Checks in order: docker compose (v2 plugin), podman-compose, docker-compose (v1).
+    Returns the command as a list suitable for subprocess calls.
+
+    Raises:
+        FileNotFoundError: If no compose tool is found.
+    """
+    try:
+        result = subprocess.run(
+            ["docker", "compose", "version"],
+            capture_output=True,
+            timeout=10,
+        )
+        if result.returncode == 0:
+            daemon = subprocess.run(
+                ["docker", "info"],
+                capture_output=True,
+                timeout=10,
+            )
+            if daemon.returncode == 0:
+                return ["docker", "compose"]
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        pass
+
+    if shutil.which("podman-compose"):
+        try:
+            podman_info = subprocess.run(
+                ["podman", "info"],
+                capture_output=True,
+                timeout=10,
+            )
+            if podman_info.returncode == 0:
+                return ["podman-compose"]
+        except (subprocess.TimeoutExpired, FileNotFoundError):
+            pass
+
+    if shutil.which("docker-compose"):
+        return ["docker-compose"]
+
+    raise FileNotFoundError(
+        "No container compose tool found. Install one of: "
+        "Docker Desktop, podman-compose, or docker-compose."
+    )
+
+
+def get_container_command() -> str:
+    """Detect the available container runtime command.
+
+    Returns 'docker' or 'podman', preferring docker if both are available.
+
+    Raises:
+        FileNotFoundError: If neither docker nor podman is found.
+    """
+    if shutil.which("docker"):
+        return "docker"
+    if shutil.which("podman"):
+        return "podman"
+    raise FileNotFoundError("No container runtime found. Install Docker or Podman.")
+
+
+def is_container_runtime_installed() -> bool:
+    """Check if a container runtime (Docker or Podman) is installed."""
+    return shutil.which("docker") is not None or shutil.which("podman") is not None
+
+
 def is_docker_installed() -> bool:
     """Check if Docker CLI is installed and available in PATH."""
     return shutil.which("docker") is not None
 
 
 def is_docker_running() -> bool:
-    """Check if Docker daemon is running.
+    """Check if a container runtime is available.
 
-    Returns True if we can communicate with Docker daemon.
+    For Docker, checks if the daemon is responding.
+    For Podman, checks if the runtime is ready via ``podman info``
+    (the VM must be running on macOS/Windows).
     """
+    if shutil.which("podman"):
+        try:
+            result = subprocess.run(
+                ["podman", "info"],
+                capture_output=True,
+                timeout=10,
+            )
+            if result.returncode == 0:
+                return True
+        except (subprocess.TimeoutExpired, FileNotFoundError):
+            pass
+
     if not is_docker_installed():
         return False
 
@@ -194,31 +276,62 @@ def is_postgres_container_running(compose_file: Path | None = None) -> bool:
     Returns:
         True if postgres service is running.
     """
-    cmd = ["docker", "compose"]
-
-    if compose_file:
-        cmd.extend(["-f", str(compose_file)])
-
-    cmd.extend(["ps", "--services", "--filter", "status=running"])
-
     try:
-        result = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=10,
-        )
-        if result.returncode == 0:
-            running_services = result.stdout.strip().split("\n")
-            return "postgres" in running_services
-    except (subprocess.TimeoutExpired, FileNotFoundError):
-        pass
+        compose_cmd = get_compose_command()
+    except FileNotFoundError:
+        return False
+
+    if compose_cmd == ["docker", "compose"]:
+        cmd = list(compose_cmd)
+        if compose_file:
+            cmd.extend(["-f", str(compose_file)])
+        cmd.extend(["ps", "--services", "--filter", "status=running"])
+        try:
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+            if result.returncode == 0:
+                return "postgres" in result.stdout.strip().split("\n")
+        except (subprocess.TimeoutExpired, FileNotFoundError):
+            pass
+    else:
+        runtime = compose_cmd[0].split("-")[0]
+        project = os.environ.get("COMPOSE_PROJECT_NAME") or (
+            compose_file.parent.name if compose_file else Path.cwd().name
+        ).lower()
+        cmd = [
+            runtime,
+            "ps",
+            "-q",
+            "--filter",
+            "label=com.docker.compose.service=postgres",
+            "--filter",
+            f"label=com.docker.compose.project={project}",
+            "--filter",
+            "status=running",
+        ]
+        try:
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+            if result.returncode == 0 and result.stdout.strip():
+                return True
+        except (subprocess.TimeoutExpired, FileNotFoundError):
+            pass
 
     return False
 
 
+def _supports_wait_flag(compose_cmd: list[str]) -> bool:
+    """Check if the compose command supports the --wait flag.
+
+    Docker Compose v2 (plugin) supports --wait. podman-compose and
+    docker-compose v1 do not.
+    """
+    return compose_cmd == ["docker", "compose"]
+
+
 def start_postgres_container(compose_file: Path | None = None) -> bool:
-    """Start the PostgreSQL container using docker compose.
+    """Start the PostgreSQL container using the detected compose tool.
+
+    Uses --wait for Docker Compose v2. For podman-compose and docker-compose v1,
+    starts the container and polls for readiness.
 
     Args:
         compose_file: Optional path to docker-compose.yml file.
@@ -226,30 +339,78 @@ def start_postgres_container(compose_file: Path | None = None) -> bool:
     Returns:
         True if postgres was started successfully.
     """
-    cmd = ["docker", "compose"]
+    try:
+        compose_cmd = get_compose_command()
+    except FileNotFoundError:
+        console.print("[red]No compose tool found[/red]")
+        return False
+
+    cmd = list(compose_cmd)
 
     if compose_file:
         cmd.extend(["-f", str(compose_file)])
 
-    cmd.extend(["up", "-d", "--wait", "postgres"])
+    if _supports_wait_flag(compose_cmd):
+        cmd.extend(["up", "-d", "--wait", "postgres"])
+    else:
+        cmd.extend(["up", "-d", "postgres"])
 
     console.print("[cyan]Starting PostgreSQL container...[/cyan]")
     console.print(f"[dim]Running: {' '.join(cmd)}[/dim]")
 
     try:
         result = subprocess.run(cmd, timeout=120)
-        if result.returncode == 0:
-            console.print("[green]PostgreSQL container started successfully![/green]")
-            return True
-        else:
+        if result.returncode != 0:
             console.print(
                 f"[red]Failed to start PostgreSQL container (exit code {result.returncode})[/red]"
             )
+            return False
     except subprocess.TimeoutExpired:
         console.print("[red]Timeout while starting PostgreSQL container[/red]")
+        return False
     except FileNotFoundError:
-        console.print("[red]Docker command not found[/red]")
+        console.print("[red]Compose command not found[/red]")
+        return False
 
+    if not _supports_wait_flag(compose_cmd):
+        return _wait_for_postgres_ready(compose_cmd, compose_file)
+
+    console.print("[green]PostgreSQL container started successfully![/green]")
+    return True
+
+
+def _wait_for_postgres_ready(
+    compose_cmd: list[str],
+    compose_file: Path | None = None,
+    timeout_seconds: int = 30,
+) -> bool:
+    """Poll PostgreSQL container until it accepts connections.
+
+    Uses pg_isready via compose exec for a true readiness check,
+    rather than just checking container status.
+    Used when the compose tool doesn't support --wait.
+    """
+    import time
+
+    check_cmd = list(compose_cmd)
+    if compose_file:
+        check_cmd.extend(["-f", str(compose_file)])
+    check_cmd.extend(["exec", "-T", "postgres", "pg_isready", "-U", "postgres"])
+
+    console.print("[dim]Waiting for PostgreSQL to be ready...[/dim]")
+    start_time = time.time()
+
+    while time.time() - start_time < timeout_seconds:
+        try:
+            result = subprocess.run(check_cmd, capture_output=True, timeout=10)
+            if result.returncode == 0:
+                console.print("[green]PostgreSQL container started successfully![/green]")
+                return True
+        except (subprocess.TimeoutExpired, FileNotFoundError):
+            pass
+        time.sleep(1)
+
+    console.print(f"[red]PostgreSQL did not become ready within {timeout_seconds}s[/red]")
     return False
 
 
@@ -291,18 +452,36 @@ def ensure_postgres_running(compose_file: Path | None = None) -> bool:
     Returns:
         True if PostgreSQL is running (either was already running or was started).
     """
-    # Step 1: Check if Docker is installed
-    if not is_docker_installed():
+    # Step 1: Check if a container runtime is installed
+    if not is_container_runtime_installed():
         console.print(
-            "\n[bold red]Docker is not installed![/bold red]\n\n"
-            "Aegra requires Docker to run PostgreSQL for state persistence.\n\n"
+            "\n[bold red]No container runtime found![/bold red]\n\n"
+            "Aegra requires Docker or Podman to run PostgreSQL for state persistence.\n\n"
             "[bold]Installation instructions:[/bold]\n"
-            "  • [cyan]https://docs.docker.com/get-docker/[/cyan]\n"
+            "  • Docker: [cyan]https://docs.docker.com/get-docker/[/cyan]\n"
+            "  • Podman: [cyan]https://podman.io/docs/installation[/cyan]\n"
         )
         return False
 
-    # Step 2: Check if Docker daemon is running
+    # Step 2: Check if container runtime is ready
     if not is_docker_running():
+        if shutil.which("podman") and not shutil.which("docker"):
+            system = platform.system().lower()
+            if system == "linux":
+                console.print(
+                    "\n[bold red]Podman is not working.[/bold red]\n\n"
+                    "Try running [cyan]podman info[/cyan] to diagnose the issue.\n\n"
+                    "[dim]Then run 'aegra dev' again.[/dim]"
+                )
+            else:
+                console.print(
+                    "\n[bold red]Podman is not ready.[/bold red]\n\n"
+                    "Start your Podman machine:\n"
+                    "  [cyan]podman machine start[/cyan]\n\n"
+                    "[dim]Then run 'aegra dev' again.[/dim]"
+                )
+            return False
+
         console.print("\n[yellow]Docker is not running.[/yellow]")
 
         # Try to start Docker automatically

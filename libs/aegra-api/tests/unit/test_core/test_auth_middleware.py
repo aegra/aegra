@@ -12,9 +12,21 @@ from starlette.responses import JSONResponse
 from aegra_api.core.auth_middleware import (
     LangGraphAuthBackend,
     LangGraphUser,
+    _authenticate_kwargs_for_handler,
+    _call_authenticate_handler,
     get_auth_backend,
     on_auth_error,
 )
+
+
+def _http_connection(headers: dict) -> Mock:
+    """Build a minimal ``HTTPConnection`` mock for auth middleware tests."""
+    mock_conn = Mock(spec=HTTPConnection)
+    mock_conn.headers = headers
+    mock_conn.scope = {"method": "GET", "path_params": {}}
+    mock_conn.url = Mock(path="/")
+    mock_conn.query_params = {}
+    return mock_conn
 
 
 class TestLangGraphUser:
@@ -297,11 +309,10 @@ class TestLangGraphAuthBackend:
         backend = LangGraphAuthBackend()
         backend.auth_instance = mock_auth_instance
 
-        mock_conn = Mock(spec=HTTPConnection)
-        mock_conn.headers = {
+        mock_conn = _http_connection({
             "authorization": b"Bearer token123",
             "content-type": b"application/json",
-        }
+        })
 
         credentials, user = await backend.authenticate(mock_conn)
 
@@ -322,8 +333,7 @@ class TestLangGraphAuthBackend:
         backend = LangGraphAuthBackend()
         backend.auth_instance = mock_auth_instance
 
-        mock_conn = Mock(spec=HTTPConnection)
-        mock_conn.headers = {"authorization": b"Bearer token123"}
+        mock_conn = _http_connection({"authorization": b"Bearer token123"})
 
         credentials, user = await backend.authenticate(mock_conn)
 
@@ -338,8 +348,7 @@ class TestLangGraphAuthBackend:
         backend = LangGraphAuthBackend()
         backend.auth_instance = mock_auth_instance
 
-        mock_conn = Mock(spec=HTTPConnection)
-        mock_conn.headers = {"authorization": b"Bearer token123"}
+        mock_conn = _http_connection({"authorization": b"Bearer token123"})
 
         with pytest.raises(AuthenticationError, match="Authentication system error"):
             await backend.authenticate(mock_conn)
@@ -353,8 +362,7 @@ class TestLangGraphAuthBackend:
         backend = LangGraphAuthBackend()
         backend.auth_instance = mock_auth_instance
 
-        mock_conn = Mock(spec=HTTPConnection)
-        mock_conn.headers = {"authorization": b"Bearer token123"}
+        mock_conn = _http_connection({"authorization": b"Bearer token123"})
 
         with pytest.raises(AuthenticationError, match="Authentication system error"):
             await backend.authenticate(mock_conn)
@@ -376,8 +384,7 @@ class TestLangGraphAuthBackend:
         with patch("aegra_api.core.auth_middleware.Auth") as mock_auth:
             mock_auth.exceptions.HTTPException = Exception
 
-            mock_conn = Mock(spec=HTTPConnection)
-            mock_conn.headers = {"authorization": b"Bearer token123"}
+            mock_conn = _http_connection({"authorization": b"Bearer token123"})
 
             with pytest.raises(AuthenticationError, match="Invalid token"):
                 await backend.authenticate(mock_conn)
@@ -385,28 +392,178 @@ class TestLangGraphAuthBackend:
     @pytest.mark.asyncio
     async def test_authenticate_headers_conversion(self):
         """Test header conversion for different types"""
+        captured: dict = {}
+
+        async def authenticate(headers: dict) -> dict:
+            """Record headers passed by the auth backend."""
+            captured["headers"] = headers
+            return {"identity": "user-123"}
+
         mock_auth_instance = Mock()
-        mock_auth_instance._authenticate_handler = AsyncMock(return_value={"identity": "user-123"})
+        mock_auth_instance._authenticate_handler = authenticate
 
         backend = LangGraphAuthBackend()
         backend.auth_instance = mock_auth_instance
 
-        mock_conn = Mock(spec=HTTPConnection)
-        mock_conn.headers = {
+        mock_conn = _http_connection({
             b"authorization": b"Bearer token123",  # bytes key and value
             "content-type": "application/json",  # str key and value
             b"user-agent": "test-agent",  # bytes key, str value
-        }
+        })
 
         await backend.authenticate(mock_conn)
 
-        # Verify headers were converted properly
         expected_headers = {
             "authorization": "Bearer token123",
             "content-type": "application/json",
             "user-agent": "test-agent",
         }
-        mock_auth_instance._authenticate_handler.assert_called_once_with(expected_headers)
+        assert captured["headers"] == expected_headers
+
+
+class TestAuthenticateHandlerInjection:
+    """LangGraph SDK inject-by-name support for @auth.authenticate handlers."""
+
+    def _mock_connection(
+        self,
+        *,
+        path: str = "/threads/t1/runs/wait",
+        method: str = "POST",
+        path_params: dict | None = None,
+        headers: dict | None = None,
+    ) -> Mock:
+        """Build an ``HTTPConnection`` mock with path/method scope fields."""
+        mock_conn = Mock(spec=HTTPConnection)
+        mock_conn.url = Mock()
+        mock_conn.url.path = path
+        mock_conn.scope = {
+            "method": method,
+            "path_params": path_params or {"thread_id": "t1"},
+        }
+        mock_conn.query_params = {}
+        mock_conn.headers = headers or {b"authorization": b"Bearer tok"}
+        mock_conn.receive = Mock()
+        mock_conn.send = Mock()
+        return mock_conn
+
+    def test_kwargs_headers_only_signature(self):
+        async def authenticate(headers: dict) -> dict:
+            """Headers-only handler stub."""
+            return {"identity": "x"}
+
+        conn = self._mock_connection()
+        kwargs = _authenticate_kwargs_for_handler(conn, authenticate)
+        assert set(kwargs.keys()) == {"headers"}
+        assert kwargs["headers"]["authorization"] == "Bearer tok"
+
+    def test_kwargs_path_method_included_when_declared(self):
+        async def authenticate(method: str, path: str, headers: dict) -> dict:
+            """Handler stub that declares path and method."""
+            return {"identity": "x"}
+
+        conn = self._mock_connection(path="/assistants/search", method="POST")
+        kwargs = _authenticate_kwargs_for_handler(conn, authenticate)
+        assert kwargs == {
+            "method": "POST",
+            "path": "/assistants/search",
+            "headers": {"authorization": "Bearer tok"},
+        }
+
+    def test_request_and_body_not_injected(self):
+        """``request`` / ``body`` are intentionally unsupported in middleware auth."""
+
+        async def authenticate(request, body: dict, headers: dict) -> dict:
+            """Handler stub declaring unsupported request/body params."""
+            return {"identity": "x"}
+
+        conn = self._mock_connection()
+        kwargs = _authenticate_kwargs_for_handler(conn, authenticate)
+        assert set(kwargs.keys()) == {"headers"}
+
+    def test_path_params_and_query_params_not_injected(self):
+        async def authenticate(
+            path_params: dict,
+            query_params: dict,
+            headers: dict,
+        ) -> dict:
+            """Handler stub declaring unsupported path/query params."""
+            return {"identity": "x"}
+
+        conn = self._mock_connection()
+        kwargs = _authenticate_kwargs_for_handler(conn, authenticate)
+        assert set(kwargs.keys()) == {"headers"}
+
+    @pytest.mark.parametrize("sig_exc", [ValueError, TypeError])
+    def test_signature_errors_fallback_to_headers_only(self, sig_exc):
+        """When signature inspection fails, kwargs fall back to headers only."""
+
+        async def authenticate(headers: dict) -> dict:
+            """Headers-only handler stub."""
+            return {"identity": "x"}
+
+        conn = self._mock_connection()
+        with patch("aegra_api.core.auth_middleware.inspect.signature", side_effect=sig_exc):
+            kwargs = _authenticate_kwargs_for_handler(conn, authenticate)
+        assert kwargs == {"headers": {"authorization": "Bearer tok"}}
+
+    @pytest.mark.asyncio
+    async def test_call_authenticate_handler_supports_sync_handler(self):
+        """Synchronous handlers should return through the non-awaitable branch."""
+
+        def authenticate(method: str, path: str, headers: dict) -> dict:
+            """Sync handler stub for non-awaitable path."""
+            return {
+                "identity": "sync-user",
+                "method": method,
+                "path": path,
+                "authorization": headers.get("authorization"),
+            }
+
+        conn = self._mock_connection(path="/runs/wait", method="POST")
+        result = await _call_authenticate_handler(authenticate, conn)
+        assert result == {
+            "identity": "sync-user",
+            "method": "POST",
+            "path": "/runs/wait",
+            "authorization": "Bearer tok",
+        }
+
+    @pytest.mark.asyncio
+    async def test_call_authenticate_handler_invokes_with_path(self):
+        captured: dict = {}
+
+        async def authenticate(method: str, path: str, headers: dict) -> dict:
+            """Capture path/method from injected kwargs."""
+            captured["method"] = method
+            captured["path"] = path
+            return {"identity": "user-1"}
+
+        conn = self._mock_connection(path="/runs/wait", method="POST")
+        result = await _call_authenticate_handler(authenticate, conn)
+        assert result["identity"] == "user-1"
+        assert captured["method"] == "POST"
+        assert captured["path"] == "/runs/wait"
+
+    @pytest.mark.asyncio
+    async def test_backend_passes_path_to_multi_arg_handler(self):
+        captured: dict = {}
+
+        async def authenticate(method: str, path: str, headers: dict) -> dict:
+            """Capture path from backend authenticate flow."""
+            captured["path"] = path
+            return {"identity": "user-1"}
+
+        mock_auth_instance = Mock()
+        mock_auth_instance._authenticate_handler = authenticate
+
+        backend = LangGraphAuthBackend()
+        backend.auth_instance = mock_auth_instance
+
+        conn = self._mock_connection(path="/threads/abc/runs/wait", method="POST")
+        credentials, user = await backend.authenticate(conn)
+        assert user.identity == "user-1"
+        assert captured["path"] == "/threads/abc/runs/wait"
+        assert isinstance(credentials, AuthCredentials)
 
 
 class TestGetAuthBackend:
@@ -505,11 +662,10 @@ class TestAuthMiddlewareIntegration:
         backend.auth_instance = mock_auth_instance
 
         # Mock connection
-        mock_conn = Mock(spec=HTTPConnection)
-        mock_conn.headers = {
+        mock_conn = _http_connection({
             "authorization": "Bearer valid-token",
             "content-type": "application/json",
-        }
+        })
 
         # Authenticate
         credentials, user = await backend.authenticate(mock_conn)
@@ -539,8 +695,7 @@ class TestAuthMiddlewareIntegration:
         backend = LangGraphAuthBackend()
         backend.auth_instance = mock_auth_instance
 
-        mock_conn = Mock(spec=HTTPConnection)
-        mock_conn.headers = {"authorization": "Bearer invalid-token"}
+        mock_conn = _http_connection({"authorization": "Bearer invalid-token"})
 
         # Should raise AuthenticationError
         with pytest.raises(AuthenticationError):

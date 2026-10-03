@@ -17,6 +17,7 @@ from aegra_cli.templates import slugify
 def rendered_project(
     cli_runner: CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> Iterator[str]:
+    """Exercise CLI rendering and remove generated modules to isolate each test."""
     # The rendered utils.py imports langchain, which is only in aegra-api's dev group
     pytest.importorskip("langchain")
     project_dir = tmp_path / "slash-model"
@@ -31,10 +32,12 @@ def rendered_project(
 
 @pytest.fixture
 def captured_model(monkeypatch: pytest.MonkeyPatch, rendered_project: str) -> dict[str, Any]:
+    """Inspect the parsing boundary without constructing a provider client."""
     utils = importlib.import_module(f"{rendered_project}.utils")
     captured: dict[str, Any] = {}
 
     def fake_init_chat_model(model: str, model_provider: str | None = None) -> object:
+        """Record both arguments so a truncated gateway route cannot pass unnoticed."""
         captured["model"] = model
         captured["provider"] = model_provider
         return object()
@@ -58,6 +61,7 @@ def test_load_chat_model_keeps_slashes_in_the_model_id(
     provider: str,
     model: str,
 ) -> None:
+    """Only the first slash separates the provider; subsequent slashes belong to the ID."""
     utils = importlib.import_module(f"{rendered_project}.utils")
 
     utils.load_chat_model(fully_specified_name)
@@ -71,6 +75,7 @@ def test_load_chat_model_keeps_slashes_in_the_model_id(
 def test_load_chat_model_rejects_a_missing_provider_or_model(
     captured_model: dict[str, Any], rendered_project: str, fully_specified_name: str
 ) -> None:
+    """Invalid names must fail before LangChain can infer missing components."""
     utils = importlib.import_module(f"{rendered_project}.utils")
 
     with pytest.raises(ValueError):

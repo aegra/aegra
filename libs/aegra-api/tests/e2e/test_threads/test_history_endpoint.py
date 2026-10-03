@@ -72,7 +72,8 @@ async def _count_stuck_thread_lookups(engine: AsyncEngine) -> int:
         result = await conn.execute(
             text(
                 "SELECT count(*) FROM pg_stat_activity WHERE datname = current_database() "
-                "AND pid <> pg_backend_pid() AND state = 'idle in transaction' AND query LIKE '%FROM thread%'"
+                "AND pid <> pg_backend_pid() AND state = 'idle in transaction' "
+                "AND query LIKE '%WHERE thread.thread_id = % AND thread.user_id = %'"
             )
         )
         return int(result.scalar_one())

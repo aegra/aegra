@@ -2,6 +2,7 @@
 
 from typing import Any
 
+from fastapi import HTTPException
 from pydantic import BaseModel, Field
 
 
@@ -11,6 +12,18 @@ class AgentProtocolError(BaseModel):
     error: str = Field(..., description="Error type")
     message: str = Field(..., description="Human-readable error message")
     details: dict[str, Any] | None = Field(None, description="Additional error details")
+
+
+class DetailedHTTPException(HTTPException):
+    """An ``HTTPException`` that fills in ``AgentProtocolError.details``.
+
+    ``HTTPException`` declares no such attribute, so raising this is what lets
+    ``agent_protocol_exception_handler`` find one.
+    """
+
+    def __init__(self, status_code: int, detail: str, details: dict[str, Any]) -> None:
+        super().__init__(status_code, detail=detail)
+        self.details = details
 
 
 # Reusable OpenAPI error response declarations for endpoint decorators

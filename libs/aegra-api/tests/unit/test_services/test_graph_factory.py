@@ -15,12 +15,15 @@ from langgraph_sdk.runtime import (
     _ExecutionRuntime,
     _ReadRuntime,
 )
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict, field_validator
+from structlog.testing import capture_logs
 
 from aegra_api.services.graph_factory import (
     _FACTORY_CONTEXT_TYPES,
     _FACTORY_KWARGS,
+    ContextValidationError,
     _classify_factory,
+    _context_errors,
     _extract_context_type,
     _is_runtime_annotation,
     build_server_runtime,
@@ -31,6 +34,7 @@ from aegra_api.services.graph_factory import (
     invoke_factory,
     is_factory,
     is_for_execution,
+    validate_context,
 )
 
 # ---------------------------------------------------------------------------
@@ -570,6 +574,14 @@ class _DataclassCtx:
     value: int
 
 
+class _StrictCtx(BaseModel):
+    """Pydantic model that forbids unexpected keys."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: str
+
+
 class TestCoerceContext:
     """Test context coercion from raw dict to T."""
 
@@ -613,23 +625,206 @@ class TestCoerceContext:
         assert result.name == "test"
         assert result.value == 42
 
-    def test_pydantic_validation_error_falls_back(self) -> None:
-        """Invalid data for Pydantic model → graceful fallback to raw dict."""
+    def test_pydantic_validation_error_raises(self) -> None:
+        """Invalid data for a Pydantic model raises rather than degrading to the raw dict."""
         _FACTORY_CONTEXT_TYPES["g"] = _PydanticCtx
-        ctx = {"wrong_field": "nope"}
 
-        result = coerce_context(ctx, "g")
+        with pytest.raises(ContextValidationError) as exc_info:
+            coerce_context({"wrong_field": "nope"}, "g")
 
-        assert result is ctx  # raw dict fallback
+        assert exc_info.value.graph_id == "g"
+        assert exc_info.value.context_type is _PydanticCtx
 
-    def test_dataclass_missing_field_falls_back(self) -> None:
-        """Missing fields for dataclass → graceful fallback to raw dict."""
+    def test_dataclass_missing_field_raises(self) -> None:
+        """Missing fields for a dataclass raise rather than degrading to the raw dict."""
         _FACTORY_CONTEXT_TYPES["g"] = _DataclassCtx
-        ctx = {"name": "test"}  # missing 'value'
 
-        result = coerce_context(ctx, "g")
+        with pytest.raises(ContextValidationError):
+            coerce_context({"name": "test"}, "g")  # missing 'value'
 
-        assert result is ctx  # raw dict fallback
+    def test_coercion_failure_logs_at_error(self) -> None:
+        """A context that was never validated at the edge must be loud, not a warning."""
+        _FACTORY_CONTEXT_TYPES["g"] = _PydanticCtx
+
+        with capture_logs() as logs, pytest.raises(ContextValidationError):
+            coerce_context({"wrong_field": "nope"}, "g")
+
+        entries = [entry for entry in logs if entry["event"] == "context_coercion_failed"]
+        assert len(entries) == 1
+        assert entries[0]["log_level"] == "error"
+        assert entries[0]["graph_id"] == "g"
+        assert entries[0]["context_type"] == "_PydanticCtx"
+
+
+# ---------------------------------------------------------------------------
+# validate_context
+# ---------------------------------------------------------------------------
+
+
+class TestValidateContext:
+    """Validation of a request context against the factory's declared type."""
+
+    def test_valid_pydantic_context_passes(self) -> None:
+        _FACTORY_CONTEXT_TYPES["g"] = _PydanticCtx
+        validate_context({"name": "test", "value": 42}, "g")
+
+    def test_valid_dataclass_context_passes(self) -> None:
+        _FACTORY_CONTEXT_TYPES["g"] = _DataclassCtx
+        validate_context({"name": "test", "value": 42}, "g")
+
+    def test_none_context_is_skipped(self) -> None:
+        _FACTORY_CONTEXT_TYPES["g"] = _PydanticCtx
+        validate_context(None, "g")
+
+    def test_graph_without_declared_type_accepts_anything(self) -> None:
+        """Plain ServerRuntime declares no shape, so nothing is rejected."""
+        _FACTORY_CONTEXT_TYPES["g"] = None
+        validate_context({"anything": "goes"}, "g")
+
+    def test_unregistered_graph_accepts_anything(self) -> None:
+        validate_context({"anything": "goes"}, "unregistered")
+
+    def test_a_server_side_failure_is_not_blamed_on_the_caller(self) -> None:
+        """A validator that breaks for its own reasons must stay a 500.
+
+        Converting it would tell the caller their context was invalid, and put
+        the operational failure's message in the response body.
+        """
+
+        class _BrokenValidator(BaseModel):
+            name: str
+
+            @field_validator("name")
+            @classmethod
+            def _explode(cls, _value: str) -> str:
+                raise RuntimeError("the credential service is down")
+
+        _FACTORY_CONTEXT_TYPES["g"] = _BrokenValidator
+
+        with pytest.raises(RuntimeError, match="credential service"):
+            validate_context({"name": "test"}, "g")
+
+    def test_wrong_type_names_the_offending_field(self) -> None:
+        _FACTORY_CONTEXT_TYPES["g"] = _PydanticCtx
+
+        with pytest.raises(ContextValidationError) as exc_info:
+            validate_context({"name": "test", "value": "abc"}, "g")
+
+        assert exc_info.value.errors == [
+            {
+                "loc": ["context", "value"],
+                "msg": "Input should be a valid integer, unable to parse string as an integer",
+                "type": "int_parsing",
+            }
+        ]
+
+    def test_missing_field_names_the_offending_field(self) -> None:
+        _FACTORY_CONTEXT_TYPES["g"] = _PydanticCtx
+
+        with pytest.raises(ContextValidationError) as exc_info:
+            validate_context({"name": "test"}, "g")
+
+        assert exc_info.value.errors == [{"loc": ["context", "value"], "msg": "Field required", "type": "missing"}]
+
+    def test_extra_forbid_rejects_unexpected_key(self) -> None:
+        """``extra="forbid"`` now rejects, where it used to drop the whole context."""
+        _FACTORY_CONTEXT_TYPES["g"] = _StrictCtx
+
+        with pytest.raises(ContextValidationError) as exc_info:
+            validate_context({"name": "test", "surprise": 1}, "g")
+
+        assert exc_info.value.errors == [
+            {"loc": ["context", "surprise"], "msg": "Extra inputs are not permitted", "type": "extra_forbidden"}
+        ]
+
+    def test_a_dataclass_missing_field_names_the_field(self) -> None:
+        _FACTORY_CONTEXT_TYPES["g"] = _DataclassCtx
+
+        with pytest.raises(ContextValidationError) as exc_info:
+            validate_context({"name": "test"}, "g")
+
+        assert [e["loc"] for e in exc_info.value.errors] == [["context", "value"]]
+        assert exc_info.value.errors[0]["type"] == "missing"
+
+    def test_a_dataclass_field_type_is_enforced(self) -> None:
+        """A dataclass does not check its own annotations; ``value: int`` must still mean int.
+
+        Plain construction accepts {"value": "abc"} and hands the graph a str.
+        """
+        _FACTORY_CONTEXT_TYPES["g"] = _DataclassCtx
+
+        with pytest.raises(ContextValidationError) as exc_info:
+            validate_context({"name": "test", "value": "abc"}, "g")
+
+        assert exc_info.value.errors == [
+            {
+                "loc": ["context", "value"],
+                "msg": "Input should be a valid integer, unable to parse string as an integer",
+                "type": "int_parsing",
+            }
+        ]
+
+    def test_a_dataclass_still_refuses_an_unexpected_field(self) -> None:
+        """TypeAdapter ignores extras, so __init__ stays the thing that refuses them."""
+        _FACTORY_CONTEXT_TYPES["g"] = _DataclassCtx
+
+        with pytest.raises(ContextValidationError) as exc_info:
+            validate_context({"name": "test", "value": 1, "surprise": 2}, "g")
+
+        assert [e["loc"] for e in exc_info.value.errors] == [["context"]]
+        assert "surprise" in exc_info.value.errors[0]["msg"]
+
+    def test_a_dataclass_pydantic_cannot_describe_falls_back_to_construction(self) -> None:
+        """No schema to build, so the field check is whatever __init__ does."""
+
+        class _Opaque:
+            def __init__(self, a: int) -> None:
+                self.a = a
+
+        @dataclasses.dataclass
+        class _OpaqueCtx:
+            field: _Opaque
+
+        _FACTORY_CONTEXT_TYPES["g"] = _OpaqueCtx
+
+        validate_context({"field": _Opaque(1)}, "g")
+
+        with pytest.raises(ContextValidationError):
+            validate_context({"nope": 1}, "g")
+
+    def test_errors_do_not_echo_submitted_values(self) -> None:
+        """The 422 body must not reflect the caller's own values back at them."""
+        _FACTORY_CONTEXT_TYPES["g"] = _PydanticCtx
+
+        with pytest.raises(ContextValidationError) as exc_info:
+            validate_context({"name": "test", "value": "s3cr3t-value"}, "g")
+
+        assert "s3cr3t-value" not in repr(exc_info.value.errors)
+
+    def test_a_declared_type_with_no_construction_path_accepts_anything(self) -> None:
+        """Neither a model nor a dataclass, so there is nothing to build.
+
+        Guessing at a constructor would reject contexts the graph would have
+        accepted, so the raw dict passes through as it did before.
+        """
+
+        class _Opaque:
+            pass
+
+        _FACTORY_CONTEXT_TYPES["g"] = _Opaque
+
+        validate_context({"anything": "at all"}, "g")
+
+    def test_an_errors_method_that_is_not_pydantics_is_never_called(self) -> None:
+        """Only a real ValidationError takes the Pydantic branch."""
+
+        class _HostileErrors(Exception):
+            def errors(self) -> list[dict[str, Any]]:
+                raise RuntimeError("not Pydantic's errors()")
+
+        entries = _context_errors(_HostileErrors("rejected"))
+
+        assert entries == [{"loc": ["context"], "msg": "rejected", "type": "value_error"}]
 
 
 # ---------------------------------------------------------------------------

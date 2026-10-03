@@ -29,12 +29,7 @@ def create_get_graph_mock(return_value=None, side_effect=None):
 
 
 def _make_session_maker(session: AsyncMock) -> MagicMock:
-    """Build a mock async_sessionmaker that always yields the given session.
-
-    get_thread_state_at_checkpoint manages its session manually via
-    _get_session_maker (not Depends(get_session)) so the pooled connection is
-    released before any LangGraph checkpoint read starts.
-    """
+    """Mock async_sessionmaker yielding *session*; handlers open their own via _get_session_maker."""
     ctx = MagicMock()
     ctx.__aenter__ = AsyncMock(return_value=session)
     ctx.__aexit__ = AsyncMock(return_value=False)

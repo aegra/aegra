@@ -54,11 +54,7 @@ thread_state_service = ThreadStateService()
 
 
 async def _get_thread_graph_id(thread_id: str, user: User) -> str | None:
-    """Look up a thread's graph_id via a short-lived session.
-
-    Releases the pooled connection before the caller starts any long-running
-    LangGraph checkpoint operation, so an aborted request can't leak it.
-    """
+    """Resolve graph_id via a short-lived session, so the caller's checkpoint ops hold no pool connection."""
     maker = _get_session_maker()
     async with maker() as session:
         stmt = select(ThreadORM).where(ThreadORM.thread_id == thread_id, ThreadORM.user_id == user.identity)
@@ -412,9 +408,6 @@ async def get_thread_state(
     Returns the latest checkpoint's values, pending next nodes, interrupt
     data, and metadata. If the thread has no associated graph yet (no runs
     executed), returns an empty state.
-
-    Sessions are managed manually (not via ``Depends``) so the pool
-    connection is released before the LangGraph checkpoint read starts.
     """
     try:
         graph_id = await _get_thread_graph_id(thread_id, user)
@@ -746,9 +739,6 @@ async def get_thread_history_post(
 
     Returns a list of past states ordered from newest to oldest. Use `limit`
     to control how many states are returned and `before` to paginate.
-
-    Sessions are managed manually (not via ``Depends``) so the pool
-    connection is released before ``aget_state_history`` starts iterating.
     """
     try:
         limit = request.limit or 10

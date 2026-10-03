@@ -1,13 +1,5 @@
-"""Regression tests for aegra/aegra#517.
-
-Aborting an in-flight thread history/state request could leave its
-SQLAlchemy session (and asyncpg connection) checked out, because the
-endpoint held the session open across the long-running, cancellable
-LangGraph checkpoint call. These endpoints now look up the thread's
-graph_id via a short-lived session that is closed *before* the LangGraph
-call starts, so a cancellation during that call can no longer leak the
-connection. Each test fails loudly if a future change reverses the order.
-"""
+"""Regression tests for #517: the thread-lookup session must close before the
+cancellable LangGraph checkpoint call starts, or an aborted request leaks it."""
 
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -18,6 +10,7 @@ import pytest
 from fastapi import HTTPException
 
 from aegra_api.api.threads import (
+    _get_thread_graph_id,
     get_thread_history_post,
     get_thread_state,
     get_thread_state_at_checkpoint,
@@ -162,3 +155,43 @@ class TestSessionReleasedBeforeCheckpointRead:
 
         assert result == []
         assert closed_marker == [True]
+
+
+class _CapturingSession(_TrackingSession):
+    def __init__(self, thread_row: Any, closed_marker: list[bool]) -> None:
+        super().__init__(thread_row, closed_marker)
+        self.statements: list[Any] = []
+
+    async def scalar(self, stmt: Any) -> Any:
+        self.statements.append(stmt)
+        return self._thread_row
+
+
+class TestThreadGraphIdLookup:
+    @pytest.mark.asyncio
+    async def test_scopes_lookup_to_thread_id_and_caller_identity(self) -> None:
+        thread_row = MagicMock()
+        thread_row.metadata_json = {"graph_id": "graph-123"}
+        session = _CapturingSession(thread_row, [])
+
+        with patch("aegra_api.api.threads._get_session_maker", return_value=MagicMock(return_value=session)):
+            graph_id = await _get_thread_graph_id("thread-123", User(identity="user-1", scopes=[]))
+
+        assert graph_id == "graph-123"
+        assert session.statements[0].compile().params == {"thread_id_1": "thread-123", "user_id_1": "user-1"}
+
+    @pytest.mark.asyncio
+    async def test_returns_404_for_unowned_thread_without_touching_langgraph(self) -> None:
+        closed_marker: list[bool] = []
+        mock_service = MagicMock()
+
+        with (
+            _patch_session_maker(None, closed_marker),
+            patch("aegra_api.services.langgraph_service.get_langgraph_service", return_value=mock_service),
+            pytest.raises(HTTPException) as exc_info,
+        ):
+            await get_thread_state("thread-123", user=User(identity="intruder", scopes=[]))
+
+        assert exc_info.value.status_code == 404
+        assert closed_marker == [True]
+        mock_service.get_graph.assert_not_called()

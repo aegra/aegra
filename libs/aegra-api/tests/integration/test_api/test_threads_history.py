@@ -1,4 +1,6 @@
 import json
+from collections.abc import AsyncIterator
+from typing import Any
 
 import pytest
 from fastapi.testclient import TestClient
@@ -52,7 +54,7 @@ def client(monkeypatch: pytest.MonkeyPatch) -> TestClient:
 
     # Provide a DummySession that returns a thread row for scalar()
     class Session(DummySessionBase):
-        async def scalar(self, _stmt):
+        async def scalar(self, _stmt: Any) -> DummyThread:
             return _thread_row()
 
     # Override the ORM get_session dependency (still used by POST /threads)
@@ -294,3 +296,39 @@ class TestBeforeParameterFormats:
 
         assert len(captured) == 1
         assert captured[0] is None
+
+
+def test_post_history_session_released_before_state_history_iterates(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Regression for #517: the thread-lookup session must close before aget_state_history runs."""
+    app = create_test_app(include_runs=False, include_threads=True)
+    session_closed: list[bool] = []
+
+    class Session(DummySessionBase):
+        async def scalar(self, _stmt: Any) -> DummyThread:
+            return _thread_row()
+
+        async def __aexit__(self, *_exc_info: object) -> bool:
+            session_closed.append(True)
+            return False
+
+    app.dependency_overrides[core_get_session] = override_get_session_dep(Session)
+    monkeypatch.setattr("aegra_api.api.threads._get_session_maker", lambda: Session)
+
+    class AssertingAgent(FakeAgent):
+        async def aget_state_history(self, config: dict[str, Any], **kwargs: Any) -> AsyncIterator[Any]:
+            if not session_closed:
+                raise AssertionError("thread-lookup session still open when aget_state_history started")
+            async for snapshot in super().aget_state_history(config, **kwargs):
+                yield snapshot
+
+    client = make_client(app)
+    thread_id = _ensure_thread(client)
+    session_closed.clear()
+    agent = AssertingAgent([make_snapshot({"messages": ["hello"]}, {"configurable": {"checkpoint_id": "cp_1"}})])
+
+    with patch_langgraph_service(agent=agent):
+        resp = client.post(f"/threads/{thread_id}/history", json={"limit": 10})
+
+    assert resp.status_code == 200, resp.text
+    assert session_closed, "session was never released"
+    assert len(resp.json()) == 1

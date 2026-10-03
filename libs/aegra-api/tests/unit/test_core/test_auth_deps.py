@@ -191,7 +191,7 @@ class TestGetCurrentUser:
 
         assert exc_info.value.status_code == 401
 
-    def test_get_current_user_preserves_auth_state(self):
+    def test_get_current_user_preserves_auth_state(self) -> None:
         """Test get_current_user preserves is_authenticated when auth is informational."""
         user_data = {
             "identity": "user-123",
@@ -207,7 +207,7 @@ class TestGetCurrentUser:
         assert user.identity == "user-123"
         assert user.is_authenticated is False
 
-    def test_noop_auth_server_still_serves_requests(self):
+    def test_noop_auth_server_still_serves_requests(self) -> None:
         """No-auth mode should still satisfy protected router dependencies."""
         app = FastAPI()
         router = APIRouter(dependencies=auth_dependency)
@@ -235,7 +235,7 @@ class TestGetCurrentUser:
         assert response.status_code == 200
         assert response.json() == {"identity": "anonymous", "is_authenticated": False}
 
-    def test_auth_handler_exception_still_returns_401(self):
+    def test_auth_handler_exception_still_returns_401(self) -> None:
         """Auth handler failures should still reject protected requests."""
         app = FastAPI()
         router = APIRouter(dependencies=auth_dependency)

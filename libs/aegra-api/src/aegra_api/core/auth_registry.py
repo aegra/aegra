@@ -89,6 +89,11 @@ ROUTE_AUTH_MAP: Final[dict[tuple[str, str], tuple[str, str]]] = {
     # --- protocol v2 event streaming ---------------------------------------
     ("POST", "/threads/{thread_id}/stream/events"): ("threads", "read"),
     ("POST", "/threads/{thread_id}/commands"): ("threads", "create_run"),
+    # --- A2A ----------------------------------------------------------------
+    ("GET", "/.well-known/agent-card.json"): ("assistants", "read"),
+    ("GET", "/a2a/{assistant_id}"): ("assistants", "read"),
+    ("GET", "/a2a/{assistant_id}/.well-known/agent-card.json"): ("assistants", "read"),
+    ("GET", "/a2a/{assistant_id}/.well-known/agent.json"): ("assistants", "read"),
 }
 
 # Routes that authorize themselves inside the handler body.
@@ -141,6 +146,10 @@ SELF_DISPATCHING: Final[frozenset[tuple[str, str]]] = frozenset(
         ("DELETE", "/store/items"),
         ("POST", "/store/items/search"),
         ("POST", "/store/namespaces"),
+        ("GET", "/.well-known/agent-card.json"),
+        ("GET", "/a2a/{assistant_id}"),
+        ("GET", "/a2a/{assistant_id}/.well-known/agent-card.json"),
+        ("GET", "/a2a/{assistant_id}/.well-known/agent.json"),
     }
 )
 

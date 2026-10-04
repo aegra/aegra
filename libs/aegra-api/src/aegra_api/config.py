@@ -32,6 +32,10 @@ class HttpConfig(TypedDict, total=False):
     """Apply Aegra authentication dependency to custom routes (uses FastAPI dependencies, not middleware)"""
     cors: CorsConfig | None
     """Custom CORS configuration"""
+    disable_a2a: bool
+    """Disable Agent2Agent protocol"""
+    a2a_default_assistant: str
+    """Assistant ID or Graph ID served at the host-root A2A agent card"""
 
 
 class StoreIndexConfig(TypedDict, total=False):

@@ -257,3 +257,46 @@ async def test_lifespan_fails_before_any_db_work_on_invalid_durability_default(
             mock_db_manager.initialize.assert_not_called()
     finally:
         run_preparation.get_default_durability.cache_clear()
+
+
+@pytest.mark.unit
+def test_create_app_mounts_a2a_routes_by_default() -> None:
+    """Test that A2A routes are mounted when aegra.json has no http block."""
+    import aegra_api.main as main_module
+
+    with patch("aegra_api.main.load_http_config", return_value=None):
+        app = main_module.create_app()
+
+    paths = app.openapi()["paths"]
+    assert "/a2a/{assistant_id}" in paths
+    assert "/a2a/{assistant_id}/.well-known/agent-card.json" in paths
+    assert "/a2a/{assistant_id}/.well-known/agent.json" in paths
+    assert "/.well-known/agent-card.json" in paths
+
+
+@pytest.mark.unit
+def test_create_app_mounts_a2a_routes_when_http_block_has_no_disable_key() -> None:
+    """Test that an http block without disable_a2a still mounts A2A routes."""
+    import aegra_api.main as main_module
+
+    with patch("aegra_api.main.load_http_config", return_value={"cors": None}):
+        app = main_module.create_app()
+
+    paths = app.openapi()["paths"]
+    assert "/a2a/{assistant_id}" in paths
+    assert "/.well-known/agent-card.json" in paths
+
+
+@pytest.mark.unit
+def test_create_app_skips_a2a_routes_when_disabled() -> None:
+    """Test that disable_a2a: true skips every A2A route."""
+    import aegra_api.main as main_module
+
+    with patch("aegra_api.main.load_http_config", return_value={"disable_a2a": True}):
+        app = main_module.create_app()
+
+    paths = app.openapi()["paths"]
+    assert "/a2a/{assistant_id}" not in paths
+    assert "/a2a/{assistant_id}/.well-known/agent-card.json" not in paths
+    assert "/a2a/{assistant_id}/.well-known/agent.json" not in paths
+    assert "/.well-known/agent-card.json" not in paths

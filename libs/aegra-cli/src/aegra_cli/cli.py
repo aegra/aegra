@@ -24,9 +24,22 @@ from aegra_cli.templates import (
     get_dockerfile,
     slugify,
 )
-from aegra_cli.utils.docker import ensure_postgres_running
+from aegra_cli.utils.docker import ensure_postgres_running, get_compose_command
 
 console = Console()
+
+
+def _resolve_compose_command() -> list[str]:
+    """Resolve the compose command or exit with an error."""
+    try:
+        return get_compose_command()
+    except FileNotFoundError:
+        console.print(
+            "[bold red]Error:[/bold red] No compose tool found.\n"
+            "Install Docker Desktop, podman-compose, or docker-compose."
+        )
+        sys.exit(1)
+
 
 # Default values for server options (single source of truth)
 _DEFAULT_DEV_HOST = "127.0.0.1"
@@ -637,9 +650,8 @@ def serve(ctx: click.Context, host: str, port: int, app: str, config_file: Path 
 )
 @click.argument("services", nargs=-1)
 def up(compose_file: Path | None, build: bool, services: tuple[str, ...]):
-    """Start services with Docker Compose.
+    """Start services with the detected compose tool.
 
-    Uses docker-compose.yml which contains both postgres and the API service.
     Auto-generates Docker files if they don't exist.
 
     Examples:
@@ -672,7 +684,9 @@ def up(compose_file: Path | None, build: bool, services: tuple[str, ...]):
         )
     )
 
-    cmd = ["docker", "compose", "-f", str(compose_file)]
+    compose_cmd = _resolve_compose_command()
+
+    cmd = [*compose_cmd, "-f", str(compose_file)]
 
     cmd.append("up")
     cmd.append("-d")
@@ -694,19 +708,18 @@ def up(compose_file: Path | None, build: bool, services: tuple[str, ...]):
         if result.returncode == 0:
             console.print("\n[bold green]Services started successfully![/bold green]")
             console.print()
-            console.print(
-                "[dim]View logs:    docker compose -f " + str(compose_file) + " logs -f[/dim]"
-            )
+            compose_str = " ".join(compose_cmd)
+            console.print(f"[dim]View logs:    {compose_str} -f {compose_file} logs -f[/dim]")
             console.print("[dim]Stop:         aegra down[/dim]")
         else:
             console.print(
-                f"\n[bold red]Error:[/bold red] Docker Compose exited with code {result.returncode}"
+                f"\n[bold red]Error:[/bold red] Compose exited with code {result.returncode}"
             )
         sys.exit(result.returncode)
     except FileNotFoundError:
         console.print(
-            "[bold red]Error:[/bold red] docker is not installed or not in PATH.\n"
-            "Please install Docker Desktop or Docker Engine."
+            "[bold red]Error:[/bold red] Compose tool not found in PATH.\n"
+            "Install Docker Desktop, podman-compose, or docker-compose."
         )
         sys.exit(1)
 
@@ -728,9 +741,7 @@ def up(compose_file: Path | None, build: bool, services: tuple[str, ...]):
     help="Remove named volumes declared in the compose file.",
 )
 def down(compose_file: Path | None, volumes: bool):
-    """Stop services with Docker Compose.
-
-    Runs 'docker compose down' to stop and remove containers.
+    """Stop services with the detected compose tool.
 
     Examples:
 
@@ -766,7 +777,9 @@ def down(compose_file: Path | None, volumes: bool):
 
     console.print(f"\n[cyan]Stopping:[/cyan] {target_compose}")
 
-    cmd = ["docker", "compose", "-f", str(target_compose), "down"]
+    compose_cmd = _resolve_compose_command()
+
+    cmd = [*compose_cmd, "-f", str(target_compose), "down"]
 
     if volumes:
         cmd.append("-v")
@@ -783,8 +796,8 @@ def down(compose_file: Path | None, volumes: bool):
             sys.exit(1)
     except FileNotFoundError:
         console.print(
-            "[bold red]Error:[/bold red] docker is not installed or not in PATH.\n"
-            "Please install Docker Desktop or Docker Engine."
+            "[bold red]Error:[/bold red] Compose tool not found in PATH.\n"
+            "Install Docker Desktop, podman-compose, or docker-compose."
         )
         sys.exit(1)
 

@@ -778,7 +778,7 @@
           "Threads"
         ],
         "summary": "List Threads",
-        "description": "List all threads owned by the authenticated user.\n\nReturns every thread without filtering. Use the search endpoint for\nfiltered queries.",
+        "description": "List all threads owned by the authenticated user.\n\nReturns every thread without filtering or state values. Use the search\nendpoint for filtered, paginated queries that include each thread's values.",
         "operationId": "list_threads_threads_get",
         "responses": {
           "200": {
@@ -5501,6 +5501,31 @@
             "format": "date-time",
             "title": "Updated At",
             "description": "Timestamp when the thread was last updated."
+          },
+          "values": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Values",
+            "description": "State values of the latest checkpoint, refreshed when a run finishes or the state is updated. Null until the thread's first run completes."
+          },
+          "interrupts": {
+            "additionalProperties": {
+              "items": {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              "type": "array"
+            },
+            "type": "object",
+            "title": "Interrupts",
+            "description": "Pending interrupts of the latest checkpoint, keyed by the task ID that raised them."
           }
         },
         "type": "object",
@@ -5511,7 +5536,7 @@
           "updated_at"
         ],
         "title": "Thread",
-        "description": "Thread entity model\n\nStatus values: idle, busy, interrupted, error"
+        "description": "Thread entity model, including the cached latest values and interrupts"
       },
       "ThreadCheckpoint": {
         "properties": {
@@ -5773,7 +5798,7 @@
         "properties": {
           "threads": {
             "items": {
-              "$ref": "#/components/schemas/Thread"
+              "$ref": "#/components/schemas/ThreadSummary"
             },
             "type": "array",
             "title": "Threads"
@@ -6124,6 +6149,53 @@
         ],
         "title": "ThreadStateUpdateResponse",
         "description": "Response model for thread state update"
+      },
+      "ThreadSummary": {
+        "properties": {
+          "thread_id": {
+            "type": "string",
+            "title": "Thread Id",
+            "description": "Unique identifier for the thread."
+          },
+          "status": {
+            "type": "string",
+            "title": "Status",
+            "description": "Current thread status: idle, busy, interrupted, or error.",
+            "default": "idle"
+          },
+          "metadata": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Metadata",
+            "description": "Arbitrary metadata attached to the thread."
+          },
+          "user_id": {
+            "type": "string",
+            "title": "User Id",
+            "description": "Identifier of the user who owns this thread."
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Created At",
+            "description": "Timestamp when the thread was created."
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Updated At",
+            "description": "Timestamp when the thread was last updated."
+          }
+        },
+        "type": "object",
+        "required": [
+          "thread_id",
+          "user_id",
+          "created_at",
+          "updated_at"
+        ],
+        "title": "ThreadSummary",
+        "description": "Thread entity without its state, for the unpaginated GET /threads listing\n\nStatus values: idle, busy, interrupted, error"
       },
       "ThreadTTLSpec": {
         "properties": {

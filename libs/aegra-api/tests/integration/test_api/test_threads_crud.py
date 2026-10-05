@@ -9,7 +9,7 @@ from uuid import uuid4
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
-from langgraph.types import StateSnapshot
+from langgraph.types import Interrupt, PregelTask, StateSnapshot
 from psycopg import Error as PsycopgError
 from sqlalchemy.dialects import postgresql
 
@@ -1327,3 +1327,228 @@ class TestUpdateThread:
         data = resp.json()
         # Data should not have changed
         assert data["metadata"]["initial"] is True
+
+
+def _interrupted_snapshot() -> StateSnapshot:
+    return StateSnapshot(
+        values={"messages": [{"type": "ai", "content": "Need approval"}]},
+        next=("review",),
+        config={"configurable": {"thread_id": "test-123", "checkpoint_id": "cp-2"}},
+        metadata={},
+        created_at="2026-01-01T00:00:00Z",
+        parent_config=None,
+        tasks=(
+            PregelTask(
+                id="task-1",
+                name="review",
+                path=("__pregel_pull", "review"),
+                interrupts=(Interrupt(value="approve?", id="int-1"),),
+            ),
+            PregelTask(id="task-2", name="other", path=("__pregel_pull", "other")),
+        ),
+        interrupts=(Interrupt(value="approve?", id="int-1"),),
+    )
+
+
+class TestThreadValuesAndInterrupts:
+    """Thread responses carry the cached latest values and interrupts (issue #648)."""
+
+    def test_get_thread_returns_cached_values_and_interrupts(self) -> None:
+        app = create_test_app(include_runs=False, include_threads=True)
+        thread = _thread_row("test-123", status="interrupted")
+        thread.values_json = {"messages": [{"type": "ai", "content": "done"}]}
+        thread.interrupts_json = {"task-1": [{"value": "approve?", "id": "int-1"}]}
+
+        class Session(DummySessionBase):
+            async def scalar(self, _stmt: Any) -> Any:
+                return thread
+
+        app.dependency_overrides[core_get_session] = override_get_session_dep(Session)
+        client = make_client(app)
+
+        resp = client.get("/threads/test-123")
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["values"] == {"messages": [{"type": "ai", "content": "done"}]}
+        assert data["interrupts"] == {"task-1": [{"value": "approve?", "id": "int-1"}]}
+
+    def test_get_thread_without_completed_run_returns_null_values_and_empty_interrupts(self) -> None:
+        app = create_test_app(include_runs=False, include_threads=True)
+        thread = _thread_row("test-123")
+        thread.values_json = None
+        thread.interrupts_json = {}
+
+        class Session(DummySessionBase):
+            async def scalar(self, _stmt: Any) -> Any:
+                return thread
+
+        app.dependency_overrides[core_get_session] = override_get_session_dep(Session)
+        client = make_client(app)
+
+        resp = client.get("/threads/test-123")
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["values"] is None
+        assert data["interrupts"] == {}
+
+    def test_search_threads_returns_cached_values(self) -> None:
+        app = create_test_app(include_runs=False, include_threads=True)
+        thread = _thread_row("thread-1")
+        thread.values_json = {"messages": [{"type": "ai", "content": "last"}]}
+        thread.interrupts_json = {}
+        override_session_dependency(app, ThreadSession, threads=[thread])
+        client = make_client(app)
+
+        resp = client.post("/threads/search", json={})
+
+        assert resp.status_code == 200
+        [data] = resp.json()
+        assert data["values"]["messages"][-1]["content"] == "last"
+        assert data["interrupts"] == {}
+
+    def test_patch_thread_keeps_cached_values_in_response(self) -> None:
+        app = create_test_app(include_runs=False, include_threads=True)
+        thread = _thread_row("test-123", metadata={"graph_id": "g"})
+        thread.values_json = {"messages": [{"type": "ai", "content": "done"}]}
+        thread.interrupts_json = {}
+
+        class Session(DummySessionBase):
+            async def scalar(self, _stmt: Any) -> Any:
+                return thread
+
+            async def execute(self, stmt: Any) -> None:
+                apply_thread_metadata_merge(stmt, thread)
+
+        app.dependency_overrides[core_get_session] = override_get_session_dep(Session)
+        client = make_client(app)
+
+        resp = client.patch("/threads/test-123", json={"metadata": {"label": "x"}})
+
+        assert resp.status_code == 200
+        assert resp.json()["metadata"]["label"] == "x"
+        assert resp.json()["values"] == {"messages": [{"type": "ai", "content": "done"}]}
+
+    def test_list_threads_omits_state_and_does_not_load_it(self) -> None:
+        """GET /threads is unpaginated, so it must not ship or even load each thread's cached state."""
+        app = create_test_app(include_runs=False, include_threads=True)
+        ran = _thread_row("thread-ran")
+        ran.values_json = {"messages": [{"type": "ai", "content": "hi"}]}
+        ran.interrupts_json = {"task-1": [{"value": "x", "id": "i"}]}
+        statements: list[Any] = []
+
+        class Session(ThreadSession):
+            async def scalars(self, stmt: Any = None) -> Any:
+                statements.append(stmt)
+                return await super().scalars(stmt)
+
+        override_session_dependency(app, Session, threads=[ran])
+        client = make_client(app)
+
+        resp = client.get("/threads")
+
+        assert resp.status_code == 200
+        [thread] = resp.json()["threads"]
+        assert thread["thread_id"] == "thread-ran"
+        assert "values" not in thread
+        assert "interrupts" not in thread
+        [stmt] = statements
+        selected = str(stmt.compile(dialect=postgresql.dialect()))
+        assert "values_json" not in selected
+        assert "interrupts_json" not in selected
+
+    def test_create_if_exists_do_nothing_returns_existing_thread_without_state(self) -> None:
+        """Only threads.create is authorized on this path, so cached state must not ride along."""
+        app = create_test_app(include_runs=False, include_threads=True)
+        existing = _thread_row("existing-thread-id", metadata={"original": True})
+        existing.values_json = {"messages": [{"type": "ai", "content": "secret"}]}
+        existing.interrupts_json = {"task-1": [{"value": "approve?", "id": "int-1"}]}
+        client = make_client(_conflicting_app(app, existing))
+
+        resp = client.post("/threads", json={"threadId": "existing-thread-id", "ifExists": "do_nothing"})
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["metadata"]["original"] is True
+        assert data["values"] is None
+        assert data["interrupts"] == {}
+
+    def test_create_thread_returns_null_values(self) -> None:
+        app = create_test_app(include_runs=False, include_threads=True)
+        override_session_dependency(app, BasicSession)
+        client = make_client(app)
+
+        resp = client.post("/threads", json={})
+
+        assert resp.status_code == 200
+        assert resp.json()["values"] is None
+        assert resp.json()["interrupts"] == {}
+
+    def test_update_state_refreshes_cached_values_from_latest_checkpoint(self) -> None:
+        app = create_test_app(include_runs=False, include_threads=True)
+        thread = _thread_row("test-123", metadata={"graph_id": "test-graph"})
+        executed: list[Any] = []
+        commits: list[bool] = []
+
+        class Session(DummySessionBase):
+            async def scalar(self, _stmt: Any) -> Any:
+                return thread
+
+            async def execute(self, stmt: Any) -> None:
+                executed.append(stmt)
+
+            async def commit(self) -> None:
+                commits.append(True)
+
+        app.dependency_overrides[core_get_session] = override_get_session_dep(Session)
+        client = make_client(app)
+
+        graph = MagicMock()
+        bound_agent = AsyncMock()
+        bound_agent.aupdate_state.return_value = {"configurable": {"checkpoint_id": "cp-2", "checkpoint_ns": ""}}
+        graph.with_config = Mock(return_value=bound_agent)
+        graph.aget_state = AsyncMock(return_value=_interrupted_snapshot())
+
+        with patch("aegra_api.services.langgraph_service.get_langgraph_service") as mock_get_service:
+            mock_get_service.return_value.get_graph = create_get_graph_mock(return_value=graph)
+            resp = client.post(
+                "/threads/test-123/state",
+                json={"values": {"foo": "bar"}, "checkpoint_id": "old-cp"},
+            )
+
+        assert resp.status_code == 200
+        # Latest state is read from the unbound graph so the request's checkpoint_id can't pin it.
+        read_config = graph.aget_state.await_args.args[0]
+        assert "checkpoint_id" not in read_config["configurable"]
+        assert read_config["configurable"]["thread_id"] == "test-123"
+        [stmt] = executed
+        compiled = stmt.compile(dialect=postgresql.dialect())
+        assert "thread.user_id" in str(compiled)
+        assert compiled.params["values_json"] == {"messages": [{"type": "ai", "content": "Need approval"}]}
+        assert compiled.params["interrupts_json"] == {"task-1": [{"value": "approve?", "id": "int-1"}]}
+        assert commits
+
+    def test_update_state_succeeds_when_value_refresh_fails(self) -> None:
+        app = create_test_app(include_runs=False, include_threads=True)
+        thread = _thread_row("test-123", metadata={"graph_id": "test-graph"})
+
+        class Session(DummySessionBase):
+            async def scalar(self, _stmt: Any) -> Any:
+                return thread
+
+        app.dependency_overrides[core_get_session] = override_get_session_dep(Session)
+        client = make_client(app)
+
+        graph = MagicMock()
+        bound_agent = AsyncMock()
+        bound_agent.aupdate_state.return_value = {"configurable": {"checkpoint_id": "cp-2", "checkpoint_ns": ""}}
+        graph.with_config = Mock(return_value=bound_agent)
+        graph.aget_state = AsyncMock(side_effect=RuntimeError("checkpointer down"))
+
+        with patch("aegra_api.services.langgraph_service.get_langgraph_service") as mock_get_service:
+            mock_get_service.return_value.get_graph = create_get_graph_mock(return_value=graph)
+            resp = client.post("/threads/test-123/state", json={"values": {"foo": "bar"}})
+
+        assert resp.status_code == 200
+        assert resp.json()["checkpoint"]["checkpoint_id"] == "cp-2"

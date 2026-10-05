@@ -1,5 +1,6 @@
 """Thread state conversion service"""
 
+from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
@@ -9,6 +10,15 @@ from aegra_api.core.serializers import LangGraphSerializer
 from aegra_api.models.threads import ThreadCheckpoint, ThreadState
 
 logger = structlog.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class ThreadValues:
+    """Latest-checkpoint projection cached on the thread row for Thread responses."""
+
+    values: dict[str, Any]
+    interrupts: dict[str, list[dict[str, Any]]]
+    checkpoint_id: str | None
 
 
 class ThreadStateService:
@@ -74,6 +84,20 @@ class ThreadStateService:
                 f"(thread_id={thread_id}, snapshot_type={type(snapshot).__name__})"
             )
             raise
+
+    def extract_thread_values(self, snapshot: Any) -> ThreadValues:
+        """Serialize a snapshot's values and per-task interrupts into JSON-safe form."""
+        values = self.serializer.serialize(getattr(snapshot, "values", None) or {})
+        interrupts: dict[str, list[dict[str, Any]]] = {}
+        for task in getattr(snapshot, "tasks", None) or ():
+            task_interrupts = getattr(task, "interrupts", None)
+            if task_interrupts:
+                interrupts[str(task.id)] = self.serializer.serialize(list(task_interrupts))
+        return ThreadValues(
+            values=values if isinstance(values, dict) else {},
+            interrupts=interrupts,
+            checkpoint_id=self._extract_checkpoint_id(getattr(snapshot, "config", None)),
+        )
 
     def convert_snapshots_to_thread_states(self, snapshots: list[Any], thread_id: str) -> list[ThreadState]:
         """Convert multiple snapshots to ThreadState objects"""

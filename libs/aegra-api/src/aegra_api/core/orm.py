@@ -147,6 +147,12 @@ class Thread(Base):
     user_id: Mapped[str] = mapped_column(Text, nullable=False)
     created_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), server_default=text("now()"))
     updated_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), server_default=text("now()"))
+    # Latest checkpoint values/interrupts, cached when a run finishes or state is updated
+    # so Thread reads and searches don't load the graph per row. NULL until then.
+    values_json: Mapped[dict | None] = mapped_column("values_json", JsonbSafe, nullable=True)
+    interrupts_json: Mapped[dict] = mapped_column("interrupts_json", JsonbSafe, server_default=text("'{}'::jsonb"))
+    # Checkpoint the cached values came from; writers only move it forward so a late run can't clobber newer state.
+    values_checkpoint_id: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     # Indexes for performance
     __table_args__ = (Index("idx_thread_user", "user_id"),)

@@ -387,8 +387,8 @@ class TestProcessStreamEvent:
         # Should return None (filtered out)
         assert results is None
 
-    def test_empty_interrupt_list_filtered(self):
-        """Test updates with empty interrupt list are filtered."""
+    def test_empty_interrupt_list_not_filtered(self) -> None:
+        """Test updates with empty interrupt list are forwarded (static breakpoints)."""
         chunk = {"__interrupt__": []}
 
         results = _process_stream_event(
@@ -403,7 +403,29 @@ class TestProcessStreamEvent:
             on_task_result=lambda _: None,
         )
 
-        assert results is None
+        assert results is not None
+        assert results[0][0] == "values"
+        assert results[0][1] == chunk
+
+    def test_empty_interrupt_tuple_not_filtered(self) -> None:
+        """Test updates with empty interrupt tuple are forwarded (static breakpoints)."""
+        chunk = {"__interrupt__": ()}
+
+        results = _process_stream_event(
+            mode="updates",
+            chunk=chunk,
+            namespace=None,
+            subgraphs=False,
+            stream_mode=["values"],
+            messages={},
+            only_interrupt_updates=True,
+            on_checkpoint=lambda _: None,
+            on_task_result=lambda _: None,
+        )
+
+        assert results is not None
+        assert results[0][0] == "values"
+        assert results[0][1] == chunk
 
     def test_updates_mode_explicitly_requested(self):
         """Test updates mode when explicitly requested."""
@@ -944,3 +966,23 @@ class TestProcessStreamEventMessagesTupleNormalization:
         converted_msg, _meta = results[0][1]
         serialized = converted_msg.model_dump()
         assert serialized["type"] == "AIMessageChunk"
+
+    def test_empty_interrupt_tuple_with_updates_explicitly_requested(self) -> None:
+        """Test empty interrupt tuple when updates mode explicitly requested."""
+        chunk = {"__interrupt__": ()}
+
+        results = _process_stream_event(
+            mode="updates",
+            chunk=chunk,
+            namespace=None,
+            subgraphs=False,
+            stream_mode=["updates"],  # Explicitly requested
+            messages={},
+            only_interrupt_updates=False,  # Not filtering
+            on_checkpoint=lambda _: None,
+            on_task_result=lambda _: None,
+        )
+
+        # When updates explicitly requested and not filtering, it goes to normal path
+        assert results is not None
+        assert results[0][0] == "updates"

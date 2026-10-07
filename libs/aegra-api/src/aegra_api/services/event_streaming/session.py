@@ -138,6 +138,7 @@ class ThreadEventSession:
         """
         broker = broker_manager.get_or_create_broker(run_id)
         seen: set[str] = set()
+        self._sent_interrupts = set()
         self._current_graph = graph_name
         self._open_namespaces = {}
 

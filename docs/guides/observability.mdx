@@ -169,7 +169,7 @@ In production mode (`REDIS_BROKER_ENABLED=true`), the [lease reaper](/guides/wor
 |--------|--------|---------|
 | `aegra_reaper_recovered_runs_total` | `outcome="crashed_retried"` | Runs whose worker lease expired; reset to pending and re-enqueued |
 | | `outcome="crashed_exhausted"` | Crashed runs that exceeded `BG_JOB_MAX_RETRIES`; marked permanently failed |
-| | `outcome="stuck_pending"` | Runs never claimed by a worker; re-enqueued without charging retry budget |
+| | `outcome="stuck_pending"` | Pending runs missing from the job queue; re-enqueued without charging retry budget. Runs still waiting in the queue are not counted |
 
 The counter increments only for confirmed operations: a successful Redis push for `crashed_retried`/`stuck_pending`, a successful DB update for `crashed_exhausted`. If Redis is down during recovery, workers still pick the runs up via the Postgres poll fallback, but those recoveries are not counted (the metric never overcounts, though it can undercount during a Redis outage).
 

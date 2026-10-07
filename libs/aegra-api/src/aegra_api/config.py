@@ -15,6 +15,7 @@ class CorsConfig(TypedDict, total=False):
     """CORS configuration options"""
 
     allow_origins: list[str]
+    allow_origin_regex: str
     allow_methods: list[str]
     allow_headers: list[str]
     allow_credentials: bool
@@ -86,6 +87,8 @@ class CheckpointerConfig(TypedDict, total=False):
 
     ttl: CheckpointerTTLConfig | None
     """Thread TTL / retention policy."""
+    durability: str
+    """Default checkpoint durability for runs that do not set one: 'sync', 'async' or 'exit'."""
 
 
 class AuthConfig(TypedDict, total=False):

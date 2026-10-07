@@ -190,6 +190,7 @@ Every instance runs a `LeaseReaper` background task that scans for runs with exp
 When a worker crashes (OOM, kill signal, network partition), its heartbeat stops and the lease expires.
 The reaper resets the run to `pending` and re-enqueues it.
 The new worker resumes from the last checkpoint.
+A run created with `durability="exit"` writes no checkpoints until it ends, so it starts over from the thread's state before the run (see [checkpoint durability](/guides/threads-and-state#checkpoint-durability)).
 Once retries are exhausted, the reaper marks the run `error`, clears ownership, and marks the thread `error` in the same transaction when no other run is active.
 
 The reaper also re-enqueues `pending` runs older than `STUCK_PENDING_THRESHOLD_SECONDS`, but only when they are missing from the job queue. A run still in the queue is waiting for a free worker and is left alone.

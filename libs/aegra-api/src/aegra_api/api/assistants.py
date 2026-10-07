@@ -199,8 +199,9 @@ async def get_assistant_schemas(
 ):
     """Get the JSON schemas for an assistant's graph.
 
-    Returns the input, output, state, and config schemas derived from the
-    underlying graph's type annotations.
+    Returns ``graph_id`` and the input, output, state, config and context
+    schemas derived from the graph's type annotations. A schema the server
+    could not derive is ``null``; the key is always present.
     """
     return await service.get_assistant_schemas(assistant_id)
 

@@ -25,11 +25,11 @@ Usage in aegra.json::
 
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from typing import Any, Literal, cast
+from typing import Annotated, Any, Literal, cast
 
 from langchain_core.messages import AIMessage, AnyMessage, SystemMessage
 from langchain_core.tools import BaseTool
-from langgraph.graph import StateGraph
+from langgraph.graph import StateGraph, add_messages
 from langgraph.prebuilt import ToolNode
 from langgraph.runtime import Runtime
 from langgraph_sdk.runtime import ServerRuntime
@@ -67,7 +67,7 @@ MCP_SERVERS: dict[str, dict[str, Any]] = {
 class State(TypedDict):
     """Minimal chat state."""
 
-    messages: list[AnyMessage]
+    messages: Annotated[list[AnyMessage], add_messages]
 
 
 # ---------------------------------------------------------------------------

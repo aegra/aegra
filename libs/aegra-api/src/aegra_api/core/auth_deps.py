@@ -72,7 +72,7 @@ async def require_auth(request: Request) -> User:
         User object with authentication context including any extra fields
 
     Raises:
-        HTTPException: If user is not authenticated
+        HTTPException: If no authentication context was attached to the request
     """
     cached = request.scope.get(_AUTH_RESULT_SCOPE_KEY)
     if cached is not None:
@@ -140,9 +140,6 @@ def get_current_user(request: Request) -> User:
         if not hasattr(request, "user") or request.user is None:
             raise HTTPException(status_code=401, detail="Authentication required")
         user = request.user
-
-    if hasattr(user, "is_authenticated") and not user.is_authenticated:
-        raise HTTPException(status_code=401, detail="Invalid authentication")
 
     # Convert to User model
     return _to_user_model(user)

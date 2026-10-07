@@ -667,6 +667,17 @@ class ThreadTTLSettings(EnvBase):
     LANGGRAPH_THREAD_TTL: str | None = None
 
 
+class CheckpointerSettings(EnvBase):
+    """Server-wide checkpoint durability default.
+
+    AEGRA_CHECKPOINT_DURABILITY is one of sync, async or exit. When set it wins
+    over the aegra.json checkpointer.durability key; a per-run durability field
+    wins over both. Validated in services.run_preparation at startup.
+    """
+
+    AEGRA_CHECKPOINT_DURABILITY: str | None = None
+
+
 class EventStreamingSettings(EnvBase):
     """Agent Protocol v2 event streaming (/threads/{id}/stream/events + /commands).
 
@@ -693,6 +704,7 @@ class Settings:
         self.worker = WorkerSettings()
         self.cron = CronSettings()
         self.thread_ttl = ThreadTTLSettings()
+        self.checkpointer = CheckpointerSettings()
         self.event_streaming = EventStreamingSettings()
 
 

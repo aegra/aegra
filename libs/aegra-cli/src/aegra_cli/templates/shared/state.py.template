@@ -7,7 +7,7 @@ from typing import Sequence
 
 from langchain_core.messages import AnyMessage
 from langgraph.graph import add_messages
-from langgraph.managed import IsLastStep
+from langgraph.managed import RemainingSteps
 from typing import Annotated
 
 
@@ -22,4 +22,4 @@ class InputState:
 class State(InputState):
     """Internal state — extends InputState with runtime-managed fields."""
 
-    is_last_step: IsLastStep = field(default=False)
+    remaining_steps: RemainingSteps = field(default=25)

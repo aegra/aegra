@@ -3,12 +3,18 @@
 import json
 import sys
 from pathlib import Path
+from typing import Any
 from unittest.mock import Mock, mock_open, patch
 
 import pytest
+from langchain_core.callbacks import BaseCallbackHandler
+from langgraph.checkpoint.memory import InMemorySaver
+from langgraph.graph import START, MessagesState, StateGraph
+from langgraph.pregel import Pregel
 
 # Import the settings singleton directly to patch it
 from aegra_api import config as config_module
+from aegra_api.core import database as dbmod
 from aegra_api.services.langgraph_service import (
     LangGraphService,
     create_run_config,
@@ -882,6 +888,47 @@ async def test_get_graph_context_manager_injects_checkpointer(monkeypatch):
 
     async with service.get_graph("g2") as graph:
         assert graph == "copied:cp2:store2"
+
+
+class _NoDeepcopyHandler(BaseCallbackHandler):
+    """Stands in for handlers like Langfuse's, whose clients deepcopy cannot rebuild."""
+
+    def __deepcopy__(self, memo: dict[int, Any]) -> "_NoDeepcopyHandler":
+        raise TypeError("handler cannot be deep-copied")
+
+
+def _compiled_graph() -> Pregel:
+    builder = StateGraph(MessagesState)
+    builder.add_node("noop", lambda state: {})
+    builder.add_edge(START, "noop")
+    return builder.compile()
+
+
+@pytest.mark.asyncio
+async def test_get_graph_keeps_persistence_when_config_has_non_copyable_callback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    handler = _NoDeepcopyHandler()
+    base = _compiled_graph().with_config(callbacks=[handler], metadata={"team": "a"})
+    service = LangGraphService()
+    service._graph_registry["cb"] = {"file_path": "f", "export_name": "g"}
+    service._base_graph_cache["cb"] = base
+    checkpointer = InMemorySaver()
+
+    class FakeDBManager:
+        def get_checkpointer(self) -> InMemorySaver:
+            return checkpointer
+
+        def get_store(self) -> None:
+            return None
+
+    monkeypatch.setattr(dbmod, "db_manager", FakeDBManager())
+
+    async with service.get_graph("cb") as graph:
+        assert graph.checkpointer is checkpointer
+        assert graph.config["callbacks"][0] is handler
+        assert graph.config["metadata"] == {"team": "a"}
+        assert graph.config["metadata"] is not base.config["metadata"]
 
 
 class TestSetupDependencies:

@@ -6,131 +6,62 @@ from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
 
-from aegra_api.api.crons import _authorize_cron_create, _trigger_first_run
-from aegra_api.models import Run, User
-from aegra_api.models.crons import CronCreate
+from aegra_api.api.crons import _authorize_cron_create, create_cron, create_cron_for_thread
+from aegra_api.models import User
+from aegra_api.models.crons import CronCreate, CronResponse
 
 
-def _make_cron(
-    *,
-    assistant_id: str = "agent",
-    thread_id: str | None = None,
-    on_run_completed: str | None = None,
-    payload: dict | None = None,
-) -> SimpleNamespace:
+def _make_cron_row(*, thread_id: str | None = None, enabled: bool = True) -> SimpleNamespace:
+    now = datetime.now(UTC)
     return SimpleNamespace(
         cron_id="cron-001",
-        assistant_id=assistant_id,
+        assistant_id="agent",
         thread_id=thread_id,
-        on_run_completed=on_run_completed,
-        payload=payload
-        if payload is not None
-        else {"input": {"messages": [{"role": "user", "content": "hi"}]}, "config": {"k": "v"}},
+        on_run_completed=None,
+        end_time=None,
+        schedule="*/5 * * * *",
+        created_at=now,
+        updated_at=now,
+        payload={"input": {"messages": [{"role": "user", "content": "hi"}]}},
+        user_id="test-user",
+        next_run_date=now,
+        metadata_dict={},
+        enabled=enabled,
     )
 
 
-class TestTriggerFirstRun:
-    """Test initial run triggering for cron creation."""
+class TestCreateCronReturnsCron:
+    """Create endpoints return the persisted Cron, matching LangSmith Deployments."""
 
     @pytest.fixture
-    def mock_user(self) -> User:
+    def user(self) -> User:
         return User(identity="test-user", scopes=[])
 
     @pytest.fixture
-    def mock_session(self) -> AsyncMock:
-        return AsyncMock()
-
-    @pytest.fixture
-    def mock_run(self, mock_user: User) -> Run:
-        return Run(
-            run_id="run-001",
-            thread_id="thread-001",
-            assistant_id="agent",
-            status="pending",
-            input={"messages": [{"role": "user", "content": "hi"}]},
-            user_id=mock_user.identity,
-            created_at=datetime.now(UTC),
-            updated_at=datetime.now(UTC),
-        )
+    def request_body(self) -> CronCreate:
+        return CronCreate(input={"q": 1}, assistant_id="agent", schedule="*/5 * * * *")
 
     @pytest.mark.asyncio
-    async def test_schedules_cleanup_for_stateless_cron(
-        self, mock_user: User, mock_session: AsyncMock, mock_run: Run
-    ) -> None:
-        cron = _make_cron(thread_id=None, on_run_completed=None)
+    async def test_stateless_create_returns_cron(self, user: User, request_body: CronCreate) -> None:
+        service = Mock(create_cron=AsyncMock(return_value=_make_cron_row()))
+        with patch("aegra_api.api.crons.handle_event", new_callable=AsyncMock):
+            result = await create_cron(request_body, user, service)
 
-        with (
-            patch("aegra_api.api.crons.uuid4", return_value="eph-thread-1"),
-            patch(
-                "aegra_api.api.crons._prepare_run",
-                new_callable=AsyncMock,
-                return_value=("run-001", mock_run, Mock()),
-            ) as mock_prepare,
-            patch("aegra_api.api.crons.schedule_background_cleanup") as mock_schedule,
-        ):
-            result = await _trigger_first_run(mock_session, cron, mock_user)
-
-        assert result is mock_run
-        mock_prepare.assert_awaited_once()
-        assert mock_prepare.await_args.args[1] == "eph-thread-1"
-        mock_schedule.assert_called_once_with("run-001", "eph-thread-1", mock_user.identity)
+        assert isinstance(result, CronResponse)
+        assert result.cron_id == "cron-001"
+        service.create_cron.assert_awaited_once_with(request_body, "test-user")
 
     @pytest.mark.asyncio
-    async def test_skips_cleanup_for_thread_bound_cron(
-        self, mock_user: User, mock_session: AsyncMock, mock_run: Run
-    ) -> None:
-        cron = _make_cron(thread_id="thread-bound-1")
+    async def test_thread_create_returns_cron(self, user: User, request_body: CronCreate) -> None:
+        service = Mock(create_cron=AsyncMock(return_value=_make_cron_row(thread_id="thread-001")))
+        session = AsyncMock()
+        session.scalar.return_value = SimpleNamespace(user_id="test-user")
+        with patch("aegra_api.api.crons.handle_event", new_callable=AsyncMock):
+            result = await create_cron_for_thread("thread-001", request_body, user, service, session)
 
-        with (
-            patch(
-                "aegra_api.api.crons._prepare_run",
-                new_callable=AsyncMock,
-                return_value=("run-001", mock_run, Mock()),
-            ),
-            patch("aegra_api.api.crons.schedule_background_cleanup") as mock_schedule,
-        ):
-            await _trigger_first_run(mock_session, cron, mock_user)
-
-        mock_schedule.assert_not_called()
-
-    @pytest.mark.asyncio
-    async def test_skips_cleanup_when_keep_requested(
-        self, mock_user: User, mock_session: AsyncMock, mock_run: Run
-    ) -> None:
-        cron = _make_cron(thread_id=None, on_run_completed="keep")
-
-        with (
-            patch("aegra_api.api.crons.uuid4", return_value="eph-thread-keep"),
-            patch(
-                "aegra_api.api.crons._prepare_run",
-                new_callable=AsyncMock,
-                return_value=("run-001", mock_run, Mock()),
-            ),
-            patch("aegra_api.api.crons.schedule_background_cleanup") as mock_schedule,
-        ):
-            await _trigger_first_run(mock_session, cron, mock_user)
-
-        mock_schedule.assert_not_called()
-
-    @pytest.mark.asyncio
-    async def test_deletes_ephemeral_thread_when_initial_run_setup_fails(
-        self, mock_user: User, mock_session: AsyncMock
-    ) -> None:
-        cron = _make_cron(thread_id=None, on_run_completed=None)
-
-        with (
-            patch("aegra_api.api.crons.uuid4", return_value="eph-thread-fail"),
-            patch(
-                "aegra_api.api.crons._prepare_run",
-                new_callable=AsyncMock,
-                side_effect=RuntimeError("boom"),
-            ),
-            patch("aegra_api.api.crons.delete_thread_by_id", new_callable=AsyncMock) as mock_delete,
-            pytest.raises(RuntimeError, match="boom"),
-        ):
-            await _trigger_first_run(mock_session, cron, mock_user)
-
-        mock_delete.assert_awaited_once_with("eph-thread-fail", mock_user.identity)
+        assert isinstance(result, CronResponse)
+        assert result.thread_id == "thread-001"
+        service.create_cron.assert_awaited_once_with(request_body, "test-user", thread_id="thread-001")
 
 
 class TestAuthorizeCronCreate:

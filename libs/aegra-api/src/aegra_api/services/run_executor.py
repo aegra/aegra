@@ -188,9 +188,22 @@ async def _stream_graph(job: RunJob) -> _GraphResult:
         with_auth_ctx(job.user, job.user.permissions),  # type: ignore[arg-type]
     ):
         if job.execution.event_streaming_v2:
-            await _stream_native_v2(job, graph, execution_input, run_config, result)
+            await _stream_native_v2(
+                job,
+                graph,
+                execution_input,
+                run_config,
+                result,
+            )
         else:
-            await _stream_legacy(job, graph, execution_input, run_config, stream_modes, result)
+            await _stream_legacy(
+                job,
+                graph,
+                execution_input,
+                run_config,
+                stream_modes,
+                result,
+            )
 
     return result
 
@@ -210,6 +223,8 @@ async def _stream_legacy(
         input_data=execution_input,
         config=run_config,
         stream_mode=stream_modes,
+        interrupt_before=_normalize_interrupt_value(job.behavior.interrupt_before),
+        interrupt_after=_normalize_interrupt_value(job.behavior.interrupt_after),
         context=job.execution.context,
         subgraphs=job.behavior.subgraphs,
         durability=job.execution.durability,
@@ -243,6 +258,8 @@ async def _stream_native_v2(
         graph=graph,
         input_data=execution_input,
         config=run_config,
+        interrupt_before=_normalize_interrupt_value(job.behavior.interrupt_before),
+        interrupt_after=_normalize_interrupt_value(job.behavior.interrupt_after),
         context=job.execution.context,
         durability=job.execution.durability,
     ):
@@ -268,13 +285,16 @@ def _build_run_config(job: RunJob) -> dict[str, Any]:
         additional_config=job.execution.config,
         checkpoint=job.execution.checkpoint,
     )
-    if job.behavior.interrupt_before is not None:
-        items = job.behavior.interrupt_before
-        config["interrupt_before"] = items if isinstance(items, list) else [items]
-    if job.behavior.interrupt_after is not None:
-        items = job.behavior.interrupt_after
-        config["interrupt_after"] = items if isinstance(items, list) else [items]
     return config
+
+
+def _normalize_interrupt_value(value: str | list[str] | None) -> str | list[str] | None:
+    """Normalize interrupt targets for LangGraph's sequence or wildcard API."""
+    if value == "*" or value == ["*"]:
+        return "*"
+    if isinstance(value, str):
+        return [value]
+    return value
 
 
 def _resolve_input(job: RunJob) -> Any:

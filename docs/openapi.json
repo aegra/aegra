@@ -2639,7 +2639,7 @@
           "Crons"
         ],
         "summary": "Create Cron",
-        "description": "Create a cron job that fires on a schedule (stateless).\n\nPersists the cron record, then triggers the first run immediately and\nreturns the ``Run`` object (matching LangGraph SDK ``create()`` contract).\nWhen the caller passes ``enabled=False`` the first run is suppressed and\nthe response is the persisted ``Cron`` instead.",
+        "description": "Create a cron job that fires on a schedule (stateless).\n\nReturns the persisted ``Cron``, matching LangSmith Deployments. No run\nstarts at creation; the first run fires at ``next_run_date``.",
         "operationId": "create_cron_runs_crons_post",
         "requestBody": {
           "content": {
@@ -2657,15 +2657,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "anyOf": [
-                    {
-                      "$ref": "#/components/schemas/Run"
-                    },
-                    {
-                      "$ref": "#/components/schemas/CronResponse"
-                    }
-                  ],
-                  "title": "Response Create Cron Runs Crons Post"
+                  "$ref": "#/components/schemas/CronResponse"
                 }
               }
             }
@@ -2689,7 +2681,7 @@
           "Crons"
         ],
         "summary": "Create Cron For Thread",
-        "description": "Create a cron job bound to an existing thread.\n\nThe thread is reused for every scheduled run. Triggers the first run\nimmediately and returns the ``Run`` object. When ``enabled=False`` is\npassed the first run is suppressed and the persisted cron is returned.",
+        "description": "Create a cron job bound to an existing thread.\n\nThe thread is reused for every scheduled run. Returns the persisted\n``Cron``; the first run fires at ``next_run_date``.",
         "operationId": "create_cron_for_thread_threads__thread_id__runs_crons_post",
         "parameters": [
           {
@@ -2718,15 +2710,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "anyOf": [
-                    {
-                      "$ref": "#/components/schemas/Run"
-                    },
-                    {
-                      "$ref": "#/components/schemas/CronResponse"
-                    }
-                  ],
-                  "title": "Response Create Cron For Thread Threads  Thread Id  Runs Crons Post"
+                  "$ref": "#/components/schemas/CronResponse"
                 }
               }
             }

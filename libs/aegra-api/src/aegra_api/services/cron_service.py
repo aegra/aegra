@@ -211,8 +211,7 @@ class CronService:
     ) -> CronORM:
         """Create a new cron job record.
 
-        Returns the ORM row so the caller (API layer) can also trigger
-        the first run and return the ``Run`` response.
+        No run starts here; the scheduler fires the first one at ``next_run_date``.
         """
         # Schedule: validate format AND seconds-feature gate.
         if _is_seconds_cron(request.schedule) and not settings.cron.CRON_ALLOW_SECONDS_SCHEDULE:
@@ -264,18 +263,7 @@ class CronService:
 
         payload = _build_payload(request)
         now = datetime.now(UTC)
-        # Advance past the immediate first occurrence since _trigger_first_run
-        # fires a run right away when ``enabled`` is not False. We skip to the
-        # second occurrence so the scheduler does not fire a duplicate run
-        # seconds after creation. When the caller suppresses the first run
-        # (enabled=False) the scheduler picks up the regular first occurrence.
-        first_occ = _compute_next_run(request.schedule, now=now, timezone=request.timezone)
-        will_fire_immediately = request.enabled is not False
-        next_run = (
-            _compute_next_run(request.schedule, now=first_occ, timezone=request.timezone)
-            if will_fire_immediately
-            else first_occ
-        )
+        next_run = _compute_next_run(request.schedule, now=now, timezone=request.timezone)
 
         cron_orm = CronORM(
             cron_id=str(uuid4()),

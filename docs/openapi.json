@@ -5837,6 +5837,21 @@
             "title": "Status",
             "description": "Thread status filter (idle, busy, interrupted, error)"
           },
+          "select": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Select",
+            "description": "Response projection fields. Currently unsupported; non-null values return 422."
+          },
           "limit": {
             "anyOf": [
               {

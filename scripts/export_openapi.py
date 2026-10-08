@@ -32,6 +32,28 @@ from aegra_api.main import OPENAPI_TAGS, app  # noqa: E402
 from aegra_api.settings import settings  # noqa: E402
 
 
+def _normalize_default_graph_id(schema: dict) -> None:
+    """Publish ``graph_id`` as required, whatever config the exporter ran under.
+
+    A deployment that resolves a default serves its own schema with ``graph_id``
+    optional, which is correct for that server. This file is the canonical
+    reference rather than any one deployment, so it states the contract every
+    server honours — an explicit ``graph_id`` is always accepted — and does not
+    change with the exporter's ``aegra.json``.
+    """
+    create = schema.get("components", {}).get("schemas", {}).get("AssistantCreate")
+    if create is None:
+        return
+
+    graph_id = create["properties"]["graph_id"]
+    graph_id.pop("default", None)
+    graph_id.pop("anyOf", None)
+    graph_id["type"] = "string"
+    required = create.setdefault("required", [])
+    if "graph_id" not in required:
+        required.append("graph_id")
+
+
 def main() -> None:
     """Export the OpenAPI spec to docs/openapi.json."""
     schema = app.openapi()
@@ -40,6 +62,8 @@ def main() -> None:
     schema["info"]["title"] = "Aegra"
     schema["info"]["version"] = settings.app.VERSION
     schema["info"]["description"] = "Production-ready Agent Protocol server"
+
+    _normalize_default_graph_id(schema)
 
     # Remove custom-route endpoints and untagged paths (root, custom routes)
     core_tags: set[str] = {t["name"] for t in OPENAPI_TAGS}

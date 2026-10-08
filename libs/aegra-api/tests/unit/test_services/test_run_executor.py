@@ -10,6 +10,7 @@ from aegra_api.models.run_job import RunExecution, RunIdentity, RunJob
 from aegra_api.models.runs import Durability
 from aegra_api.services import run_executor as run_executor_module
 from aegra_api.services.run_executor import (
+    _build_run_config,
     _GraphResult,
     _lease_loss_cancellations,
     _shutdown_cancellations,
@@ -79,6 +80,31 @@ class TestExecuteRunSuccess:
         assert mock_finalize.await_args.kwargs["status"] == "success"
 
         mock_signal_end.assert_awaited_once_with("run-1", "success")
+
+
+class TestBuildRunConfig:
+    def test_injects_job_graph_id_into_configurable(self: "TestBuildRunConfig") -> None:
+        job = _make_job()
+
+        with patch("aegra_api.services.langgraph_service.get_tracing_callbacks", return_value=[]):
+            config = _build_run_config(job)
+
+        assert config["configurable"]["graph_id"] == "graph-1"
+
+    def test_preserves_client_graph_id_over_job_graph_id(self: "TestBuildRunConfig") -> None:
+        job = _make_job()
+        job = job.model_copy(
+            update={
+                "execution": job.execution.model_copy(
+                    update={"config": {"configurable": {"graph_id": "client-graph"}}}
+                )
+            }
+        )
+
+        with patch("aegra_api.services.langgraph_service.get_tracing_callbacks", return_value=[]):
+            config = _build_run_config(job)
+
+        assert config["configurable"]["graph_id"] == "client-graph"
 
 
 class TestExecuteRunCancelledError:
@@ -408,7 +434,9 @@ class TestLeaseLossCancellation:
 
 class TestShutdownDrainCancellation:
     @pytest.mark.asyncio
-    async def test_shutdown_cancel_skips_finalize_and_signal(self) -> None:
+    async def test_shutdown_cancel_skips_finalize_and_signal(
+        self: "TestShutdownDrainCancellation",
+    ) -> None:
         """A drain cancel goes back to the queue: finalizing it as interrupted
         would make graceful shutdown lose runs a plain crash recovers (#474)."""
         mock_start = AsyncMock(return_value=True)
@@ -446,7 +474,9 @@ class TestShutdownDrainCancellation:
         mock_streaming.cleanup_run.assert_not_awaited()
 
     @pytest.mark.asyncio
-    async def test_shutdown_flag_is_cleared_after_cancel(self) -> None:
+    async def test_shutdown_flag_is_cleared_after_cancel(
+        self: "TestShutdownDrainCancellation",
+    ) -> None:
         """The provenance flag must not leak into a later run with the same id."""
         with (
             patch("aegra_api.services.run_executor.start_run", new_callable=AsyncMock, return_value=True),

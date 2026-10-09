@@ -54,6 +54,8 @@ def _make_request() -> MagicMock:
     request.config = {}
     request.context = None
     request.checkpoint = None
+    request.durability = None
+    request.checkpoint_during = None
     request.stream_mode = None
     request.interrupt_before = None
     request.interrupt_after = None

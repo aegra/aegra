@@ -813,7 +813,7 @@ class TestSearchThreads:
 class TestThreadGetState:
     """Test GET /threads/{thread_id}/state endpoint"""
 
-    def test_get_latest_state_thread_not_found(self):
+    def test_get_latest_state_thread_not_found(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Thread lookup should 404 when record is missing."""
         app = create_test_app(include_runs=False, include_threads=True)
 
@@ -822,13 +822,14 @@ class TestThreadGetState:
                 return None
 
         app.dependency_overrides[core_get_session] = override_get_session_dep(Session)
+        monkeypatch.setattr(threads_module, "_get_session_maker", lambda: Session)
         client = make_client(app)
 
         resp = client.get("/threads/missing/state")
         assert resp.status_code == 404
         assert "not found" in resp.json()["detail"].lower()
 
-    def test_get_latest_state_no_graph_id(self):
+    def test_get_latest_state_no_graph_id(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Threads without graph metadata should return empty state."""
         app = create_test_app(include_runs=False, include_threads=True)
 
@@ -839,6 +840,7 @@ class TestThreadGetState:
                 return thread
 
         app.dependency_overrides[core_get_session] = override_get_session_dep(Session)
+        monkeypatch.setattr(threads_module, "_get_session_maker", lambda: Session)
         client = make_client(app)
 
         resp = client.get("/threads/test-123/state")
@@ -848,7 +850,7 @@ class TestThreadGetState:
         assert "checkpoint" in state
         assert state["checkpoint"]["checkpoint_id"] is None
 
-    def test_get_latest_state_success(self):
+    def test_get_latest_state_success(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Test getting latest state successfully."""
         app = create_test_app(include_runs=False, include_threads=True)
         thread = _thread_row("test-123", metadata={"graph_id": "test-graph"})
@@ -858,6 +860,7 @@ class TestThreadGetState:
                 return thread
 
         app.dependency_overrides[core_get_session] = override_get_session_dep(Session)
+        monkeypatch.setattr(threads_module, "_get_session_maker", lambda: Session)
         client = make_client(app)
 
         # Mock langgraph service and agent
@@ -889,7 +892,7 @@ class TestThreadGetState:
 class TestThreadUpdateState:
     """Test POST /threads/{thread_id}/state endpoint"""
 
-    def test_update_state_as_get(self):
+    def test_update_state_as_get(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Test POST without values behaves like GET."""
         app = create_test_app(include_runs=False, include_threads=True)
         thread = _thread_row("test-123", metadata={"graph_id": "test-graph"})
@@ -899,6 +902,7 @@ class TestThreadUpdateState:
                 return thread
 
         app.dependency_overrides[core_get_session] = override_get_session_dep(Session)
+        monkeypatch.setattr(threads_module, "_get_session_maker", lambda: Session)
         client = make_client(app)
 
         mock_agent = AsyncMock()
@@ -925,7 +929,7 @@ class TestThreadUpdateState:
             state = resp.json()
             assert state["values"]["key"] == "val"
 
-    def test_update_state_success(self):
+    def test_update_state_success(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Test updating state successfully."""
         app = create_test_app(include_runs=False, include_threads=True)
         thread = _thread_row("test-123", metadata={"graph_id": "test-graph"})
@@ -935,6 +939,7 @@ class TestThreadUpdateState:
                 return thread
 
         app.dependency_overrides[core_get_session] = override_get_session_dep(Session)
+        monkeypatch.setattr(threads_module, "_get_session_maker", lambda: Session)
         client = make_client(app)
 
         mock_agent = AsyncMock()
@@ -961,7 +966,7 @@ class TestThreadUpdateState:
             call_args = mock_agent.aupdate_state.call_args
             assert call_args[0][1] == {"foo": "bar"}  # values
 
-    def test_update_state_no_graph(self):
+    def test_update_state_no_graph(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Test updating state when thread has no graph."""
         app = create_test_app(include_runs=False, include_threads=True)
         thread = _thread_row("test-123", metadata={})  # No graph_id
@@ -971,6 +976,7 @@ class TestThreadUpdateState:
                 return thread
 
         app.dependency_overrides[core_get_session] = override_get_session_dep(Session)
+        monkeypatch.setattr(threads_module, "_get_session_maker", lambda: Session)
         client = make_client(app)
 
         resp = client.post(
@@ -980,7 +986,7 @@ class TestThreadUpdateState:
         assert resp.status_code == 400
         assert "no associated graph" in resp.json()["detail"]
 
-    def test_update_state_copy_checkpoint_with_as_node(self):
+    def test_update_state_copy_checkpoint_with_as_node(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """values=None + as_node must create a copy checkpoint via aupdate_state.
 
         Regression test: LangGraph Studio posts {"values": null,
@@ -998,6 +1004,7 @@ class TestThreadUpdateState:
                 return thread
 
         app.dependency_overrides[core_get_session] = override_get_session_dep(Session)
+        monkeypatch.setattr(threads_module, "_get_session_maker", lambda: Session)
         client = make_client(app)
 
         mock_agent = AsyncMock()
@@ -1029,7 +1036,7 @@ class TestThreadUpdateState:
             assert cfg["configurable"]["checkpoint_id"] == "original-cp"
             assert mock_agent.aupdate_state.call_args[1]["as_node"] == "__copy__"
 
-    def test_update_state_body_checkpoint_id_routes_to_update_path(self):
+    def test_update_state_body_checkpoint_id_routes_to_update_path(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Body-only checkpoint_id must flow to aupdate_state, not the GET shim
         which reads query params and would silently drop the body field."""
         app = create_test_app(include_runs=False, include_threads=True)
@@ -1040,6 +1047,7 @@ class TestThreadUpdateState:
                 return thread
 
         app.dependency_overrides[core_get_session] = override_get_session_dep(Session)
+        monkeypatch.setattr(threads_module, "_get_session_maker", lambda: Session)
         client = make_client(app)
 
         mock_agent = AsyncMock()
@@ -1061,7 +1069,7 @@ class TestThreadUpdateState:
             assert values is None
             assert cfg["configurable"]["checkpoint_id"] == "body-cp"
 
-    def test_update_state_body_checkpoint_dict_routes_to_update_path(self):
+    def test_update_state_body_checkpoint_dict_routes_to_update_path(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Mirror of the checkpoint_id case for the `checkpoint` dict variant
         so neither half of the gate condition can regress silently."""
         app = create_test_app(include_runs=False, include_threads=True)
@@ -1072,6 +1080,7 @@ class TestThreadUpdateState:
                 return thread
 
         app.dependency_overrides[core_get_session] = override_get_session_dep(Session)
+        monkeypatch.setattr(threads_module, "_get_session_maker", lambda: Session)
         client = make_client(app)
 
         mock_agent = AsyncMock()
@@ -1101,7 +1110,7 @@ class TestThreadUpdateState:
 class TestThreadStateCheckpoint:
     """Test GET /threads/{thread_id}/state/{checkpoint_id} endpoint"""
 
-    def test_get_state_thread_not_found(self):
+    def test_get_state_thread_not_found(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Test getting state when thread doesn't exist"""
         app = create_test_app(include_runs=False, include_threads=True)
 
@@ -1110,12 +1119,13 @@ class TestThreadStateCheckpoint:
                 return None
 
         app.dependency_overrides[core_get_session] = override_get_session_dep(Session)
+        monkeypatch.setattr(threads_module, "_get_session_maker", lambda: Session)
         client = make_client(app)
 
         resp = client.get("/threads/nonexistent/state/checkpoint-1")
         assert resp.status_code == 404
 
-    def test_get_state_no_graph_id(self):
+    def test_get_state_no_graph_id(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Test getting state when thread has no associated graph"""
         app = create_test_app(include_runs=False, include_threads=True)
 
@@ -1126,13 +1136,14 @@ class TestThreadStateCheckpoint:
                 return thread
 
         app.dependency_overrides[core_get_session] = override_get_session_dep(Session)
+        monkeypatch.setattr(threads_module, "_get_session_maker", lambda: Session)
         client = make_client(app)
 
         resp = client.get("/threads/test-123/state/checkpoint-1")
         assert resp.status_code == 404
         assert "no associated graph" in resp.json()["detail"]
 
-    def test_get_state_with_subgraphs_param(self):
+    def test_get_state_with_subgraphs_param(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Test getting state with subgraphs query parameter"""
         app = create_test_app(include_runs=False, include_threads=True)
 
@@ -1143,13 +1154,14 @@ class TestThreadStateCheckpoint:
                 return thread
 
         app.dependency_overrides[core_get_session] = override_get_session_dep(Session)
+        monkeypatch.setattr(threads_module, "_get_session_maker", lambda: Session)
         client = make_client(app)
 
         # Should fail because no graph_id, but tests that param is accepted
         resp = client.get("/threads/test-123/state/checkpoint-1?subgraphs=true")
         assert resp.status_code == 404
 
-    def test_get_state_at_checkpoint_success(self):
+    def test_get_state_at_checkpoint_success(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Test getting state at specific checkpoint."""
         app = create_test_app(include_runs=False, include_threads=True)
         thread = _thread_row("test-123", metadata={"graph_id": "test-graph"})
@@ -1159,6 +1171,7 @@ class TestThreadStateCheckpoint:
                 return thread
 
         app.dependency_overrides[core_get_session] = override_get_session_dep(Session)
+        monkeypatch.setattr(threads_module, "_get_session_maker", lambda: Session)
         client = make_client(app)
 
         mock_agent = AsyncMock()
@@ -1189,7 +1202,7 @@ class TestThreadStateCheckpoint:
 class TestThreadStateCheckpointPost:
     """Test POST /threads/{thread_id}/state/checkpoint endpoint"""
 
-    def test_post_checkpoint_thread_not_found(self):
+    def test_post_checkpoint_thread_not_found(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Test POST checkpoint when thread doesn't exist"""
         app = create_test_app(include_runs=False, include_threads=True)
 
@@ -1198,6 +1211,7 @@ class TestThreadStateCheckpointPost:
                 return None
 
         app.dependency_overrides[core_get_session] = override_get_session_dep(Session)
+        monkeypatch.setattr(threads_module, "_get_session_maker", lambda: Session)
         client = make_client(app)
 
         resp = client.post(
@@ -1206,7 +1220,7 @@ class TestThreadStateCheckpointPost:
         )
         assert resp.status_code == 404
 
-    def test_post_checkpoint_no_graph_id(self):
+    def test_post_checkpoint_no_graph_id(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Test POST checkpoint when thread has no graph"""
         app = create_test_app(include_runs=False, include_threads=True)
 
@@ -1217,6 +1231,7 @@ class TestThreadStateCheckpointPost:
                 return thread
 
         app.dependency_overrides[core_get_session] = override_get_session_dep(Session)
+        monkeypatch.setattr(threads_module, "_get_session_maker", lambda: Session)
         client = make_client(app)
 
         resp = client.post(
@@ -1225,7 +1240,7 @@ class TestThreadStateCheckpointPost:
         )
         assert resp.status_code == 404
 
-    def test_post_checkpoint_success(self):
+    def test_post_checkpoint_success(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Test POST checkpoint success."""
         app = create_test_app(include_runs=False, include_threads=True)
         thread = _thread_row("test-123", metadata={"graph_id": "test-graph"})
@@ -1235,6 +1250,7 @@ class TestThreadStateCheckpointPost:
                 return thread
 
         app.dependency_overrides[core_get_session] = override_get_session_dep(Session)
+        monkeypatch.setattr(threads_module, "_get_session_maker", lambda: Session)
         client = make_client(app)
 
         mock_agent = AsyncMock()

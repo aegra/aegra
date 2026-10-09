@@ -61,8 +61,8 @@ class BaseBrokerManager(ABC):
         """Get or create a broker for a run"""
 
     @abstractmethod
-    def get_broker(self, run_id: str) -> BaseRunBroker | None:
-        """Get an existing broker or None"""
+    def get_broker(self, run_id: str, *, for_replay: bool = False) -> BaseRunBroker | None:
+        """Get an existing broker, or an uncached handle to remote replay data."""
 
     @abstractmethod
     def cleanup_broker(self, run_id: str) -> None:

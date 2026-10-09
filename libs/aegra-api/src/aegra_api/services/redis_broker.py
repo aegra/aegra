@@ -343,9 +343,12 @@ class RedisBrokerManager(BaseBrokerManager):
             logger.debug(f"Created Redis broker for run {run_id}")
         return self._brokers[run_id]
 
-    def get_broker(self, run_id: str) -> RedisRunBroker | None:
-        """Get an existing broker from the local cache, or None."""
-        return self._brokers.get(run_id)
+    def get_broker(self, run_id: str, *, for_replay: bool = False) -> RedisRunBroker | None:
+        """Read remote replay data without retaining a new local broker."""
+        broker = self._brokers.get(run_id)
+        if broker is None and for_replay:
+            return self._make_broker(run_id)
+        return broker
 
     def cleanup_broker(self, run_id: str) -> None:
         broker = self._brokers.pop(run_id, None)

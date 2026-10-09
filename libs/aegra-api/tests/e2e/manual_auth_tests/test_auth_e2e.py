@@ -86,6 +86,30 @@ class TestCoreRoutesAuth:
             {"url": url, "status": response.status_code},
         )
 
+    def test_disabled_account_returns_403(self) -> None:
+        """Handler HTTPException(403) must not be rewritten as 401."""
+        url = f"{get_server_url()}/assistants"
+        headers = get_auth_headers("mock-jwt-disabled-user-team123")
+
+        response = httpx.get(url, headers=headers, timeout=10.0)
+
+        assert response.status_code == 403, f"Expected 403, got {response.status_code}: {response.text}"
+        assert "account disabled" in response.text
+
+        elog("Disabled account", {"url": url, "status": response.status_code})
+
+    def test_rate_limited_identity_returns_429(self) -> None:
+        """Handler HTTPException(429) must not be rewritten as 401."""
+        url = f"{get_server_url()}/assistants"
+        headers = get_auth_headers("mock-jwt-ratelimited-user-team123")
+
+        response = httpx.get(url, headers=headers, timeout=10.0)
+
+        assert response.status_code == 429, f"Expected 429, got {response.status_code}: {response.text}"
+        assert "too many attempts" in response.text
+
+        elog("Rate limited identity", {"url": url, "status": response.status_code})
+
 
 @pytest.mark.e2e
 @pytest.mark.auth_only

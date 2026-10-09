@@ -18,7 +18,7 @@ Aegra supports flexible authentication through configurable auth handlers. You w
 
     @auth.authenticate
     async def authenticate(headers: dict) -> dict:
-        token = headers.get("Authorization", "").replace("Bearer ", "")
+        token = headers.get("authorization", "").removeprefix("Bearer ")
         if not token:
             raise Exception("Authentication required")
 
@@ -78,7 +78,7 @@ Your `authenticate` handler is the only gate. For each request it does one of tw
 
 | Your handler | What happens |
 |---|---|
-| Raises an exception | The request is rejected with `401` and never reaches your graphs |
+| Raises an exception | The request is rejected and never reaches your graphs; explicit HTTP exceptions preserve their status |
 | Returns a user | The request runs as that user |
 
 Aegra does not look at `is_authenticated` to decide. It is information for your own code: authorization handlers, graphs and custom routes. A user returned with `"is_authenticated": False` still gets in.
@@ -141,6 +141,39 @@ A guest can now list and read, but can't create threads, start runs or change an
 - All guests share the `guest` identity, so they see each other's threads and store items. To keep guests apart, give each one its own identity, for example from a session ID your frontend sends.
 - `@auth.on` is the fallback handler. A more specific handler such as `@auth.on.threads.create` runs instead of it, so repeat the guest check there.
 - A guest that can start runs spends your model budget. Allow that only on purpose.
+
+### Denying access
+
+Raise `Auth.exceptions.HTTPException` to deny authentication. Aegra forwards the handler's `status_code`, `detail`, and `headers` to the client. Status codes that the handler does not set default to 401.
+
+```python
+from langgraph_sdk import Auth
+
+auth = Auth()
+
+@auth.authenticate
+async def authenticate(headers: dict) -> dict:
+    token = headers.get("authorization", "").removeprefix("Bearer ")
+    if not token:
+        raise Auth.exceptions.HTTPException(status_code=401, detail="Authentication required")
+    if is_rate_limited(token):
+        raise Auth.exceptions.HTTPException(status_code=429, detail="Too many attempts")
+    if is_account_disabled(token):
+        raise Auth.exceptions.HTTPException(status_code=403, detail="Account disabled")
+    if idp_unreachable():
+        raise Auth.exceptions.HTTPException(status_code=503, detail="Identity provider unreachable")
+    if not is_valid_token(token):
+        raise Auth.exceptions.HTTPException(status_code=401, detail="Invalid token")
+    return user_data
+```
+
+| Status | Meaning |
+|---|---|
+| `401` | Not authenticated (missing or invalid credentials). Also the default when the handler raises a non-HTTP exception. |
+| `403` | The identity is known but access is refused (disabled account, forbidden). Authorization denials from `@auth.on` are also 403. |
+| Other | Passed through as raised (`429` rate limit, `503` identity provider down, …). |
+
+Any other exception still becomes `401` and does not leak the exception text. Do not raise a generic `Exception` if you need a status other than 401.
 
 ## Authorization handlers
 
@@ -418,7 +451,7 @@ Convenience shortcuts are also available directly on `config["configurable"]`:
 
     @auth.authenticate
     async def authenticate(headers: dict) -> dict:
-        token = headers.get("Authorization", "").replace("Bearer ", "")
+        token = headers.get("authorization", "").removeprefix("Bearer ")
         if not token:
             raise Exception("Missing Authorization header")
 
@@ -440,7 +473,7 @@ Convenience shortcuts are also available directly on `config["configurable"]`:
 
     @auth.authenticate
     async def authenticate(headers: dict) -> dict:
-        token = headers.get("Authorization", "").replace("Bearer ", "")
+        token = headers.get("authorization", "").removeprefix("Bearer ")
         if not token:
             raise Exception("Missing Authorization header")
 
@@ -469,7 +502,7 @@ Convenience shortcuts are also available directly on `config["configurable"]`:
 
     @auth.authenticate
     async def authenticate(headers: dict) -> dict:
-        token = headers.get("Authorization", "").replace("Bearer ", "")
+        token = headers.get("authorization", "").removeprefix("Bearer ")
         if not token:
             raise Exception("Missing Authorization header")
 

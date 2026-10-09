@@ -225,7 +225,8 @@ class LangGraphAuthBackend(AuthenticationBackend):
             Tuple of (credentials, user) if authenticated, None otherwise
 
         Raises:
-            AuthenticationError: If authentication fails
+            Auth.exceptions.HTTPException: Handler denied with an explicit status
+            AuthenticationError: Authentication failed without an HTTPException
         """
         # Handle noop auth when no auth instance is configured
         # Default to noop (anonymous) authentication when no auth file is found,
@@ -278,8 +279,9 @@ class LangGraphAuthBackend(AuthenticationBackend):
             return credentials, user
 
         except Auth.exceptions.HTTPException as e:
+            # Keep handler status codes; AuthenticationError can only become 401.
             logger.warning(f"Authentication failed: {e.detail}")
-            raise AuthenticationError(e.detail) from e
+            raise
 
         except Exception as e:
             logger.error(f"Unexpected error during authentication: {e}", exc_info=True)

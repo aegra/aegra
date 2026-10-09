@@ -14,16 +14,21 @@ import json
 import sys
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, TypeVar
+from typing import Any, NotRequired, TypedDict, TypeVar, cast
 from uuid import uuid5
 
 import structlog
 from langgraph.graph import StateGraph
 from langgraph.pregel import Pregel
 from langgraph_sdk.auth.types import BaseUser
+from sqlalchemy import func, select
 
 from aegra_api.constants import ASSISTANT_NAMESPACE_UUID
+from aegra_api.core.orm import Assistant as AssistantORM
+from aegra_api.core.orm import AssistantVersion as AssistantVersionORM
+from aegra_api.core.orm import get_session
 from aegra_api.models.auth import User
 from aegra_api.observability.base import (
     get_tracing_callbacks,
@@ -45,6 +50,21 @@ State = TypeVar("State")
 logger = structlog.get_logger(__name__)
 
 
+class GraphConfigEntry(TypedDict):
+    """Object form of a graph configuration entry."""
+
+    path: str
+    description: NotRequired[str | None]
+
+
+class GraphRegistryEntry(TypedDict):
+    """Normalized graph metadata used by graph consumers."""
+
+    file_path: str
+    export_name: str
+    description: NotRequired[str]
+
+
 def _module_name_for(graph_id: str) -> str:
     """Return a safe ``sys.modules`` key for a dynamically loaded graph.
 
@@ -54,6 +74,37 @@ def _module_name_for(graph_id: str) -> str:
     """
     safe_id = graph_id.replace(".", "_").replace("/", "_").replace("-", "_")
     return f"aegra_graphs.{safe_id}"
+
+
+def _parse_graph_config_entry(graph_id: str, graph_config: object) -> GraphRegistryEntry:
+    """Validate and normalize one graph configuration entry."""
+    description: str | None = None
+    if isinstance(graph_config, str):
+        graph_path = graph_config
+    elif isinstance(graph_config, dict):
+        graph_config_data = cast(dict[str, object], graph_config)
+        if "path" not in graph_config_data:
+            raise ValueError(f"Graph '{graph_id}' configuration is missing required 'path'")
+        graph_path = graph_config_data["path"]
+        if not isinstance(graph_path, str):
+            raise ValueError(f"Graph '{graph_id}' field 'path' must be a string")
+        raw_description = graph_config_data.get("description")
+        if raw_description is not None and not isinstance(raw_description, str):
+            raise ValueError(f"Graph '{graph_id}' field 'description' must be a string or null")
+        description = raw_description
+    else:
+        raise ValueError(f"Graph '{graph_id}' configuration must be a string or object")
+
+    if ":" not in graph_path:
+        raise ValueError(f"Invalid graph path format for '{graph_id}': {graph_path}")
+
+    file_path, export_name = graph_path.split(":", 1)
+    if not file_path or not export_name:
+        raise ValueError(f"Invalid graph path format for '{graph_id}': {graph_path}")
+    registry_entry = GraphRegistryEntry(file_path=file_path, export_name=export_name)
+    if description is not None:
+        registry_entry["description"] = description
+    return registry_entry
 
 
 class LangGraphService:
@@ -69,7 +120,7 @@ class LangGraphService:
         self.config_path = Path(config_path) if config_path else Path("aegra.json")
         self._explicit_config = config_path is not None
         self.config: dict[str, Any] | None = None
-        self._graph_registry: dict[str, Any] = {}
+        self._graph_registry: dict[str, GraphRegistryEntry] = {}
         # Cache for base graph definitions (without checkpointer/store).
         # For factory graphs, this holds the default-compiled graph (for schema extraction).
         self._base_graph_cache: dict[str, Pregel] = {}
@@ -127,7 +178,10 @@ class LangGraphService:
         """Load graph definitions from aegra.json"""
         if self.config is None:
             raise ValueError("Configuration not loaded")
-        graphs_config = self.config.get("graphs", {})
+        raw_graphs_config = self.config.get("graphs", {})
+        if not isinstance(raw_graphs_config, dict):
+            raise ValueError("Configuration field 'graphs' must be an object")
+        graphs_config = cast(dict[str, str | GraphConfigEntry], raw_graphs_config)
 
         # Detect graph_ids that collide after sanitisation (e.g. "a.b" and
         # "a_b" both map to aegra_graphs.a_b in sys.modules).
@@ -141,16 +195,8 @@ class LangGraphService:
                 )
             seen_modules[mod_name] = graph_id
 
-        for graph_id, graph_path in graphs_config.items():
-            # Parse path format: "./graphs/weather_agent.py:graph"
-            if ":" not in graph_path:
-                raise ValueError(f"Invalid graph path format: {graph_path}")
-
-            file_path, export_name = graph_path.split(":", 1)
-            self._graph_registry[graph_id] = {
-                "file_path": file_path,
-                "export_name": export_name,
-            }
+        for graph_id, graph_config in graphs_config.items():
+            self._graph_registry[graph_id] = _parse_graph_config_entry(graph_id, graph_config)
 
     async def _load_all_graph_modules(self) -> None:
         """Eagerly load all graph modules, classifying factories without calling them.
@@ -202,32 +248,53 @@ class LangGraphService:
                 logger.warning(f"Dependency path does not exist: {path_str}")
 
     async def _ensure_default_assistants(self) -> None:
-        """Create a default assistant per graph with deterministic UUID.
+        """Create default assistants and sync their configured descriptions.
 
         Uses uuid5 with a fixed namespace so that the same graph_id maps
         to the same assistant_id across restarts. Idempotent.
         """
-        from sqlalchemy import select
-
-        from aegra_api.core.orm import Assistant as AssistantORM
-        from aegra_api.core.orm import AssistantVersion as AssistantVersionORM
-        from aegra_api.core.orm import get_session
-
         # Fixed namespace used to derive assistant IDs from graph IDs
         NS = ASSISTANT_NAMESPACE_UUID
         session_gen = get_session()
         session = await anext(session_gen)
         try:
-            for graph_id in self._graph_registry:
+            for graph_id, graph_config in self._graph_registry.items():
                 assistant_id = str(uuid5(NS, graph_id))
-                existing = await session.scalar(select(AssistantORM).where(AssistantORM.assistant_id == assistant_id))
+                description = graph_config.get("description", f"Default assistant for graph '{graph_id}'")
+                existing = await session.scalar(
+                    select(AssistantORM).where(AssistantORM.assistant_id == assistant_id).with_for_update()
+                )
                 if existing:
+                    if existing.description != description:
+                        max_version = await session.scalar(
+                            select(func.max(AssistantVersionORM.version)).where(
+                                AssistantVersionORM.assistant_id == assistant_id
+                            )
+                        )
+                        new_version = max(existing.version, max_version or 0) + 1
+                        now = datetime.now(UTC)
+                        session.add(
+                            AssistantVersionORM(
+                                assistant_id=assistant_id,
+                                version=new_version,
+                                name=existing.name,
+                                description=description,
+                                graph_id=existing.graph_id,
+                                config=existing.config,
+                                context=existing.context,
+                                metadata_dict=existing.metadata_dict,
+                                created_at=now,
+                            )
+                        )
+                        existing.description = description
+                        existing.version = new_version
+                        existing.updated_at = now
                     continue
                 session.add(
                     AssistantORM(
                         assistant_id=assistant_id,
                         name=graph_id,
-                        description=f"Default assistant for graph '{graph_id}'",
+                        description=description,
                         graph_id=graph_id,
                         config={},
                         user_id="system",
@@ -239,7 +306,7 @@ class LangGraphService:
                         assistant_id=assistant_id,
                         version=1,
                         name=graph_id,
-                        description=f"Default assistant for graph '{graph_id}'",
+                        description=description,
                         graph_id=graph_id,
                         metadata_dict={"created_by": "system"},
                     )
@@ -479,7 +546,7 @@ class LangGraphService:
 
         return await self._get_base_graph(graph_id)
 
-    async def _load_graph_from_file(self, graph_id: str, graph_info: dict[str, str]) -> Pregel | StateGraph | None:
+    async def _load_graph_from_file(self, graph_id: str, graph_info: GraphRegistryEntry) -> Pregel | StateGraph | None:
         """Load graph from filesystem.
 
         Paths are resolved relative to the config file's directory.
@@ -554,7 +621,7 @@ class LangGraphService:
                 # base graph is needed later for schema extraction, _get_base_graph
                 # will call _call_factory_with_defaults lazily.
                 self._graph_factories[graph_id] = graph
-                return
+                return None
 
         return graph
 

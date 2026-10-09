@@ -1,7 +1,7 @@
 """E2E tests for cron job endpoints.
 
-Covers all six SDK operations consumed by ``CronClient``:
-    create (stateless), create_for_thread, update, delete, search, count.
+Covers the seven cron operations in the Agent Protocol:
+    create (stateless), create_for_thread, get, update, delete, search, count.
 
 Tests run against a live server (CRON_ENABLED is not required; the scheduler
 is only needed for scheduled firing; most tests verify the CRUD API while
@@ -40,6 +40,17 @@ async def _post_json(path: str, payload: dict[str, Any]) -> tuple[int, Any]:
     """POST JSON to the live server and return status + parsed body."""
     async with httpx.AsyncClient(base_url=settings.app.SERVER_URL, timeout=10.0) as client:
         response = await client.post(path, json=payload)
+        try:
+            body = response.json()
+        except ValueError:
+            body = {"text": response.text}
+        return response.status_code, body
+
+
+async def _get_json(path: str) -> tuple[int, Any]:
+    """GET JSON from the live server and return status + parsed body."""
+    async with httpx.AsyncClient(base_url=settings.app.SERVER_URL, timeout=10.0) as client:
+        response = await client.get(path)
         try:
             body = response.json()
         except ValueError:
@@ -187,6 +198,36 @@ async def test_cron_disabled_create_returns_cron_without_first_run() -> None:
 
     await client.crons.delete(created["cron_id"])
     elog("Cron deleted", {"cron_id": created["cron_id"]})
+
+
+@pytest.mark.e2e
+@pytest.mark.asyncio
+async def test_cron_get_by_id() -> None:
+    """Create a disabled cron and retrieve it by ID."""
+    client = get_e2e_client()
+    marker = f"cron-get-{uuid4()}"
+
+    assistant = await client.assistants.create(
+        graph_id="agent",
+        config={"tags": ["e2e-cron-get"]},
+        if_exists="do_nothing",
+    )
+    created = await _create_cron_via_http(
+        {
+            "assistant_id": assistant["assistant_id"],
+            "schedule": "0 23 * * *",
+            "enabled": False,
+            "input": {"messages": [{"role": "user", "content": marker}]},
+        }
+    )
+
+    status, fetched = await _get_json(f"/runs/crons/{created['cron_id']}")
+
+    assert status == 200, fetched
+    assert fetched["cron_id"] == created["cron_id"]
+    assert _extract_message_content(fetched) == marker
+
+    await client.crons.delete(created["cron_id"])
 
 
 @pytest.mark.e2e

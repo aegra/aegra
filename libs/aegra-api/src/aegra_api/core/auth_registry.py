@@ -73,6 +73,7 @@ ROUTE_AUTH_MAP: Final[dict[tuple[str, str], tuple[str, str]]] = {
     # --- crons --------------------------------------------------------------
     ("POST", "/runs/crons"): ("crons", "create"),
     ("POST", "/threads/{thread_id}/runs/crons"): ("crons", "create"),
+    ("GET", "/runs/crons/{cron_id}"): ("crons", "read"),
     ("PATCH", "/runs/crons/{cron_id}"): ("crons", "update"),
     ("DELETE", "/runs/crons/{cron_id}"): ("crons", "delete"),
     ("POST", "/runs/crons/search"): ("crons", "search"),
@@ -132,6 +133,7 @@ SELF_DISPATCHING: Final[frozenset[tuple[str, str]]] = frozenset(
         ("POST", "/runs/wait"),
         ("POST", "/runs/crons"),
         ("POST", "/threads/{thread_id}/runs/crons"),
+        ("GET", "/runs/crons/{cron_id}"),
         ("PATCH", "/runs/crons/{cron_id}"),
         ("DELETE", "/runs/crons/{cron_id}"),
         ("POST", "/runs/crons/search"),

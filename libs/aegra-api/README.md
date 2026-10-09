@@ -120,7 +120,7 @@ OTEL_TARGETS=LANGFUSE,PHOENIX
 | `/threads/{thread_id}/runs/{run_id}/cancel` | POST | Cancel a run |
 | `/runs/crons` | POST | Create a stateless cron job |
 | `/threads/{thread_id}/runs/crons` | POST | Create a thread-bound cron job |
-| `/runs/crons/{cron_id}` | PATCH/DELETE | Update or delete a cron job |
+| `/runs/crons/{cron_id}` | GET/PATCH/DELETE | Get, update, or delete a cron job |
 | `/runs/crons/search` | POST | Search cron jobs |
 | `/runs/crons/count` | POST | Count cron jobs |
 | `/store/items` | PUT | Save to vector store |

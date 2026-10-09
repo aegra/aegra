@@ -4,7 +4,7 @@ import asyncio
 import contextlib
 import json
 import warnings
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from typing import Any
 from uuid import uuid4
 
@@ -21,7 +21,6 @@ from aegra_api.core.auth_handlers import build_auth_context, handle_event
 from aegra_api.core.database import db_manager
 from aegra_api.core.orm import Run as RunORM
 from aegra_api.core.orm import Thread as ThreadORM
-from aegra_api.core.orm import ThreadTTL as ThreadTTLORM
 from aegra_api.core.orm import _get_session_maker, get_session
 from aegra_api.models import (
     Thread,
@@ -35,7 +34,6 @@ from aegra_api.models import (
     ThreadState,
     ThreadStateUpdate,
     ThreadStateUpdateResponse,
-    ThreadTTLSpec,
     ThreadUpdate,
     User,
 )
@@ -43,7 +41,7 @@ from aegra_api.models.errors import CONFLICT, NOT_FOUND, AgentProtocolError
 from aegra_api.models.search_limit import effective_search_limit
 from aegra_api.services.streaming_service import streaming_service
 from aegra_api.services.thread_state_service import ThreadStateService
-from aegra_api.services.thread_ttl import get_thread_ttl_config, prune_expired_threads_for_user
+from aegra_api.services.thread_ttl import prune_expired_threads_for_user, resolve_thread_ttl_row
 from aegra_api.utils.jsonb import jsonb_patch, jsonb_shallow_merge
 from aegra_api.utils.run_utils import strip_pinned_config_keys
 
@@ -171,38 +169,6 @@ def _serialize_thread(thread_orm: ThreadORM, default_metadata: dict[str, Any] | 
 # --- Endpoints ---
 
 
-def _resolve_ttl_row(thread_id: str, requested: ThreadTTLSpec | None) -> ThreadTTLORM | None:
-    """Build the thread_ttl row for a new thread, or None when TTL doesn't apply.
-
-    Server config supplies defaults; a request-level ttl overrides per field.
-    Without server config, an explicit request must carry default_ttl.
-    """
-    config = get_thread_ttl_config()
-    if config is None and requested is None:
-        return None
-
-    requested_ttl = requested.default_ttl if requested else None
-    requested_strategy = requested.strategy if requested else None
-
-    if config is not None:
-        ttl_minutes = requested_ttl if requested_ttl is not None else config.default_ttl
-        strategy = requested_strategy or config.strategy
-    else:
-        if requested_ttl is None:
-            raise HTTPException(422, "ttl.default_ttl is required when no server-side TTL default is configured")
-        ttl_minutes = requested_ttl
-        strategy = requested_strategy or "delete"
-
-    now = datetime.now(UTC)
-    return ThreadTTLORM(
-        thread_id=thread_id,
-        strategy=strategy,
-        ttl_minutes=ttl_minutes,
-        created_at=now,
-        expires_at=now + timedelta(minutes=ttl_minutes),
-    )
-
-
 @router.post("/threads", response_model=Thread, responses={**CONFLICT})
 async def create_thread(
     request: ThreadCreate,
@@ -234,7 +200,7 @@ async def create_thread(
 
     thread_id = request.thread_id or str(uuid4())
     # Resolve before the insert so an invalid ttl request 422s without DB work.
-    ttl_row = _resolve_ttl_row(thread_id, request.ttl)
+    ttl_row = resolve_thread_ttl_row(thread_id, request.ttl)
 
     metadata = request.metadata or {}
     # Always enforce owner from authenticated user

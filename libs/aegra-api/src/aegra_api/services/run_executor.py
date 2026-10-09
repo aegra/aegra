@@ -14,12 +14,13 @@ import structlog
 from aegra_api.core.active_runs import active_runs
 from aegra_api.core.auth_ctx import with_auth_ctx
 from aegra_api.core.redis_manager import redis_manager
+from aegra_api.models.auth import User
 from aegra_api.models.run_job import RunJob
 from aegra_api.services.broker import broker_manager
 from aegra_api.services.event_streaming.native_stream import stream_native_v3_events
 from aegra_api.services.graph_streaming import stream_graph_events
-from aegra_api.services.langgraph_service import create_run_config, get_langgraph_service
-from aegra_api.services.run_status import finalize_run, start_run
+from aegra_api.services.langgraph_service import create_run_config, create_thread_config, get_langgraph_service
+from aegra_api.services.run_status import dispatch_next_queued_run, finalize_run, get_run_status, start_run
 from aegra_api.services.streaming_service import streaming_service
 from aegra_api.settings import settings
 from aegra_api.utils.run_utils import map_command_to_langgraph
@@ -51,13 +52,17 @@ async def execute_run(job: RunJob) -> None:
 
     try:
         if not await start_run(run_id, user_id=user_id):
+            # Terminal before start (user cancel or multitask pre-emption): whoever did it owns
+            # the status and thread. Release the stream and let a parked replacement start.
             logger.info("Run became terminal before execution started", run_id=run_id)
+            await _best_effort_signal(streaming_service.signal_run_cancelled, run_id)
+            await dispatch_next_queued_run(thread_id)
             return
 
         final_output = await _stream_graph(job)
 
         if final_output.has_interrupt:
-            finalized = await finalize_run(
+            finalized = await _finalize(
                 run_id,
                 thread_id,
                 user_id=user_id,
@@ -66,7 +71,7 @@ async def execute_run(job: RunJob) -> None:
                 output=final_output.data,
             )
         else:
-            finalized = await finalize_run(
+            finalized = await _finalize(
                 run_id,
                 thread_id,
                 user_id=user_id,
@@ -79,13 +84,16 @@ async def execute_run(job: RunJob) -> None:
         if run_id in _lease_loss_cancellations:
             resumes_elsewhere = True
             logger.info("Lease-loss cancel, skipping finalize", run_id=run_id)
+            # The reaper owns this run now (re-enqueued or failed): a no-op while it is pending
+            # again, otherwise this promotes a parked replacement sooner than the next sweep.
+            await dispatch_next_queued_run(thread_id)
         elif run_id in _shutdown_cancellations:
             # Drain cancel: the run goes back to the queue, so finalizing here
             # would destroy work a plain crash (SIGKILL) recovers (#474).
             resumes_elsewhere = True
             logger.info("Shutdown drain cancel, skipping finalize for requeue", run_id=run_id)
         elif run_id in _timeout_cancellations:
-            finalized = await finalize_run(
+            finalized = await _finalize(
                 run_id,
                 thread_id,
                 user_id=user_id,
@@ -102,7 +110,7 @@ async def execute_run(job: RunJob) -> None:
                     "TimeoutError",
                 )
         else:
-            finalized = await finalize_run(
+            finalized = await _finalize(
                 run_id,
                 thread_id,
                 user_id=user_id,
@@ -116,7 +124,7 @@ async def execute_run(job: RunJob) -> None:
     except Exception as exc:
         logger.exception("Run failed", run_id=run_id)
         safe_message = f"{type(exc).__name__}: execution failed"
-        finalized = await finalize_run(
+        finalized = await _finalize(
             run_id,
             thread_id,
             user_id=user_id,
@@ -146,6 +154,24 @@ async def execute_run(job: RunJob) -> None:
 # ------------------------------------------------------------------
 
 
+_pending_finalizes: set[asyncio.Task[bool]] = set()
+
+
+async def _finalize(run_id: str, thread_id: str, *, user_id: str, **values: Any) -> bool:
+    """``finalize_run`` shielded from task cancellation: a stop request landing mid-finalize must
+    not abort the write, since once the task has exited nothing else terminalizes the row."""
+    pending = asyncio.ensure_future(finalize_run(run_id, thread_id, user_id=user_id, **values))
+    _pending_finalizes.add(pending)
+    pending.add_done_callback(_pending_finalizes.discard)
+    return await asyncio.shield(pending)
+
+
+async def await_pending_finalizes() -> None:
+    """Executor shutdown hook: a shielded finalize outlives its cancelled task, so wait for it here."""
+    if _pending_finalizes:
+        await asyncio.gather(*list(_pending_finalizes), return_exceptions=True)
+
+
 async def _best_effort_signal(fn: Any, *args: Any) -> None:
     """Call a signaling function, logging but not raising on failure.
 
@@ -155,7 +181,7 @@ async def _best_effort_signal(fn: Any, *args: Any) -> None:
     try:
         await fn(*args)
     except Exception:
-        logger.warning("Signal failed (best-effort, DB status already committed)", fn=fn.__name__)
+        logger.warning("Signal failed (best-effort, DB status already committed)", fn=getattr(fn, "__name__", repr(fn)))
 
 
 class _GraphResult:
@@ -187,6 +213,23 @@ async def _stream_graph(job: RunJob) -> _GraphResult:
         ) as graph,
         with_auth_ctx(job.user, job.user.permissions),  # type: ignore[arg-type]
     ):
+        # Fork from the checkpoint preceding the target run so its writes are reverted and the
+        # graph re-enters via __start__; no checkpoints are deleted.
+        if job.execution.rollback_target_run_id and not run_config.get("configurable", {}).get("checkpoint_id"):
+            base = await _rollback_fork_base(graph, job)
+            if base is not None:
+                run_config.setdefault("configurable", {})["checkpoint_id"] = base
+                logger.info(
+                    "Rollback fork from base checkpoint",
+                    run_id=job.identity.run_id,
+                    base_checkpoint_id=base,
+                )
+            else:
+                logger.info(
+                    "Rollback has no earlier checkpoint to fork from; continuing on the current state",
+                    run_id=job.identity.run_id,
+                )
+
         if job.execution.event_streaming_v2:
             await _stream_native_v2(job, graph, execution_input, run_config, result)
         else:
@@ -275,6 +318,36 @@ def _build_run_config(job: RunJob) -> dict[str, Any]:
         items = job.behavior.interrupt_after
         config["interrupt_after"] = items if isinstance(items, list) else [items]
     return config
+
+
+async def _rollback_fork_base(graph: Any, job: RunJob) -> str | None:
+    """Checkpoint this rollback run forks from, or None to run without reverting. Re-reads the
+    target's status so a run that raced to ``success`` past the gate is never reverted."""
+    target_run_id = job.execution.rollback_target_run_id
+    if target_run_id is None:
+        return None
+    if await get_run_status(target_run_id) == "success":
+        logger.info(
+            "Rollback skipped: target run completed successfully",
+            run_id=job.identity.run_id,
+            target_run_id=target_run_id,
+        )
+        return None
+    return await _resolve_rollback_base(graph, job.identity.thread_id, job.user, target_run_id)
+
+
+async def _resolve_rollback_base(graph: Any, thread_id: str, user: User, target_run_id: str) -> str | None:
+    """Fork base = ``parent_config`` of the target run's oldest checkpoint. Every checkpoint carries
+    its run_id in metadata, so the checkpointer filter yields exactly that run's rows, newest first."""
+    history_config = create_thread_config(thread_id, user)
+    history_config.setdefault("configurable", {})["checkpoint_ns"] = ""
+    oldest_target = None
+    async for checkpoint in graph.checkpointer.alist(history_config, filter={"run_id": target_run_id}):
+        oldest_target = checkpoint
+    if oldest_target is None:
+        return None
+    parent = oldest_target.parent_config or {}
+    return (parent.get("configurable") or {}).get("checkpoint_id")
 
 
 def _resolve_input(job: RunJob) -> Any:

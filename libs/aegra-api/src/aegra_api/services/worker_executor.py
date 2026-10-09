@@ -33,6 +33,7 @@ from aegra_api.services.run_executor import (
     _lease_loss_cancellations,
     _shutdown_cancellations,
     _timeout_cancellations,
+    await_pending_finalizes,
     execute_run,
 )
 from aegra_api.services.run_status import finalize_run
@@ -145,6 +146,7 @@ class WorkerExecutor(BaseExecutor):
 
     async def start(self) -> None:
         self._running = True
+        self._accepting = True
         count = settings.worker.WORKER_COUNT
         if count == 0:
             logger.warning(
@@ -166,6 +168,9 @@ class WorkerExecutor(BaseExecutor):
 
     async def stop(self) -> None:
         self._running = False
+        # No new queued-run promotions past this point; an in-flight one finishes its
+        # rpush first, so the job it promoted lands on a live instance, not in limbo.
+        await self._begin_shutdown()
         drain_timeout = settings.worker.WORKER_DRAIN_TIMEOUT
 
         # Wait for in-flight job tasks to finish
@@ -185,6 +190,8 @@ class WorkerExecutor(BaseExecutor):
                 for task in pending:
                     task.cancel()
                 await asyncio.gather(*pending, return_exceptions=True)
+        # A finalize that a drain cancel interrupted keeps running shielded; let it land.
+        await await_pending_finalizes()
 
         # Cancel worker loops before the requeue push: a loop still blocked in
         # BLPOP would steal the handed-off jobs back onto this dying instance.

@@ -18,6 +18,7 @@ from aegra_api.core.orm import Run as RunORM
 from aegra_api.core.orm import Thread as ThreadORM
 from aegra_api.core.orm import _get_session_maker
 from aegra_api.services.executor import executor
+from aegra_api.services.run_status import ACTIVE_RUN_STATES, QUEUED_RUN_STATE, drop_queued_runs
 from aegra_api.services.streaming_service import streaming_service
 
 logger = structlog.getLogger(__name__)
@@ -41,9 +42,27 @@ async def delete_thread_by_id(thread_id: str, user_id: str) -> None:
         active_runs_stmt = select(RunORM).where(
             RunORM.thread_id == thread_id,
             RunORM.user_id == user_id,
-            RunORM.status.in_(["pending", "running"]),
+            RunORM.status.in_((QUEUED_RUN_STATE, *ACTIVE_RUN_STATES)),
         )
         active_runs_list = (await session.scalars(active_runs_stmt)).all()
+
+        if any(run.status == QUEUED_RUN_STATE for run in active_runs_list):
+            # Same as the delete_thread route: drop parked runs before cancelling the
+            # active one, or its finalize promotes them onto the thread being deleted.
+            for dropped_id in await drop_queued_runs(session, thread_id, user_id=user_id):
+                try:
+                    await streaming_service.signal_run_cancelled(dropped_id)
+                except _CLEANUP_ERRORS:
+                    logger.exception("Failed to close a dropped run's stream", run_id=dropped_id)
+            active_runs_list = (
+                await session.scalars(
+                    select(RunORM).where(
+                        RunORM.thread_id == thread_id,
+                        RunORM.user_id == user_id,
+                        RunORM.status.in_(ACTIVE_RUN_STATES),
+                    )
+                )
+            ).all()
 
         for run in active_runs_list:
             run_id = run.run_id

@@ -1742,10 +1742,10 @@
                   "type": "null"
                 }
               ],
-              "description": "Filter by run status (e.g. pending, running, success, error, interrupted)",
+              "description": "Filter by run status (pending, running, success, error, timeout, interrupted). `pending` includes runs queued behind another run on the thread.",
               "title": "Status"
             },
-            "description": "Filter by run status (e.g. pending, running, success, error, interrupted)"
+            "description": "Filter by run status (pending, running, success, error, timeout, interrupted). `pending` includes runs queued behind another run on the thread."
           }
         ],
         "responses": {
@@ -1988,7 +1988,7 @@
           "Thread Runs"
         ],
         "summary": "Delete Run",
-        "description": "Delete a run record.\n\nIf the run is active (pending or running) and `force=0`, returns 409\nConflict. Set `force=1` to cancel the run first (best-effort) and then\ndelete it. Returns 204 No Content on success.",
+        "description": "Delete a run record.\n\nIf the run is active (pending, running or enqueued) and `force=0`, returns 409\nConflict. Set `force=1` to cancel the run first and then delete it; a worker-owned\nrun that has not stopped within ~10 seconds is left in place with 409 for a retry.\nReturns 204 No Content on success.",
         "operationId": "delete_run_threads__thread_id__runs__run_id__delete",
         "parameters": [
           {
@@ -4038,7 +4038,12 @@
             "anyOf": [
               {
                 "type": "string",
-                "maxLength": 256
+                "enum": [
+                  "reject",
+                  "rollback",
+                  "interrupt",
+                  "enqueue"
+                ]
               },
               {
                 "type": "null"
@@ -4486,7 +4491,12 @@
             "anyOf": [
               {
                 "type": "string",
-                "maxLength": 256
+                "enum": [
+                  "reject",
+                  "rollback",
+                  "interrupt",
+                  "enqueue"
+                ]
               },
               {
                 "type": "null"
@@ -4734,7 +4744,7 @@
           "status": {
             "type": "string",
             "title": "Status",
-            "description": "Current run status: pending, running, error, success, timeout, or interrupted.",
+            "description": "Current run status: pending (includes runs enqueued behind another run), running, error, success, timeout, or interrupted.",
             "default": "pending"
           },
           "input": {
@@ -4829,7 +4839,7 @@
           "updated_at"
         ],
         "title": "Run",
-        "description": "Run entity model\n\nStatus values: pending, running, error, success, timeout, interrupted"
+        "description": "Run entity model\n\nStatus values: pending, running, error, success, timeout, interrupted.\nA run parked behind another (internal 'queued') is reported as 'pending'."
       },
       "RunCreate": {
         "properties": {
@@ -4987,14 +4997,20 @@
           "multitask_strategy": {
             "anyOf": [
               {
-                "type": "string"
+                "type": "string",
+                "enum": [
+                  "reject",
+                  "rollback",
+                  "interrupt",
+                  "enqueue"
+                ]
               },
               {
                 "type": "null"
               }
             ],
             "title": "Multitask Strategy",
-            "description": "Strategy for handling concurrent runs on same thread: 'reject', 'interrupt', 'rollback', or 'enqueue'."
+            "description": "How to handle a new run when the thread already has an active run. 'enqueue' (default) queues it to run after; 'reject' returns 409; 'interrupt' cancels the active run then starts this one; 'rollback' cancels the active run (kept as interrupted) and forks this run from the checkpoint preceding it, reverting that run's writes. With no active run every strategy simply starts the run. None defaults to 'enqueue'."
           },
           "command": {
             "anyOf": [

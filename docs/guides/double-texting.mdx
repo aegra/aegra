@@ -1,0 +1,133 @@
+---
+title: "Double-texting (multitask)"
+description: "Control what happens when a new run is created on a thread that already has one in progress."
+---
+
+When a client creates a run on a thread that already has an active run — a user
+sending a follow-up before the agent has finished, or two API calls racing — the
+`multitask_strategy` field decides the outcome. The strategy names and request-time
+outcomes follow LangGraph Platform's
+[double-texting](https://docs.langchain.com/langsmith/double-texting) model; `rollback`
+reverts non-destructively via a checkpoint fork (nothing is deleted) rather than
+Platform's checkpoint deletion.
+
+## Strategies
+
+| Strategy | Behavior |
+|:--|:--|
+| `enqueue` *(default)* | Queue the new run and execute it after the active one finishes. |
+| `reject` | Refuse the new run with `409 Conflict` while a run is active. |
+| `interrupt` | Cancel the active run (kept as `interrupted`) and start the new run as soon as it has stopped. |
+| `rollback` | Cancel the active run and, once it has stopped, **fork** the new run from the checkpoint preceding it — reverting the cancelled run's writes. Nothing is deleted. |
+
+If `multitask_strategy` is omitted it defaults to `enqueue`, matching LangGraph
+Platform. An unknown value is rejected with `422` at request validation. `interrupt`
+and `rollback` only act on a run that is still in flight; on an idle thread every
+strategy simply starts the new run.
+
+## Usage
+
+```python
+from langgraph_sdk import get_client
+
+client = get_client(url="http://localhost:2026")
+
+# Queue behind any active run (default)
+await client.runs.create(thread_id, assistant_id, input={...})
+
+# Refuse if the thread is busy
+await client.runs.create(thread_id, assistant_id, input={...}, multitask_strategy="reject")
+```
+
+Over HTTP:
+
+```bash
+curl -X POST http://localhost:2026/threads/$THREAD/runs \
+  -H "Content-Type: application/json" \
+  -d '{"assistant_id": "...", "input": {...}, "multitask_strategy": "interrupt"}'
+```
+
+## Parked runs and the internal `queued` status
+
+A run parked by `enqueue` is stored internally with status `queued`. It holds no
+worker slot and does not execute until the run ahead of it finalizes, at which point
+the oldest `queued` run on the thread is promoted to `pending` and dispatched (FIFO).
+Over the API a parked run is reported as `pending` — the LangGraph SDK's run-status
+vocabulary has no `queued` value, and LangGraph Platform reports enqueued
+double-texts the same way, so typed clients (Studio, Agent Chat UI, the JS SDK)
+see only standard statuses. Poll or stream it like any other run; on the wire it
+transitions `pending → running → success` (or `error`/`interrupted`). A later
+`interrupt` or `rollback` run admitted while this one is still parked *drops* it
+(marks it `interrupted` and ends any stream attached to it) instead of running it
+afterward — those strategies abandon all in-flight work, including earlier
+double-texts.
+
+At most one run per thread ever executes — the per-thread admission check is
+serialized with a `SELECT ... FOR UPDATE` on the thread row, so two concurrent
+creates cannot both start. `interrupt` and `rollback` hold to that too: a pre-empted
+run that is still executing is told to stop at once but keeps its `running` status
+(and the thread) until its task has actually exited; only then does it become
+`interrupted`, and the new run — parked (reported `pending`) meanwhile — starts. So
+two graphs never write the same thread's checkpoints at the same time, and a third
+`interrupt`/`rollback`, a cancel or a recovery sweep arriving in that window parks
+or no-ops as well. A pre-empted run that had not started yet can no longer start, so
+it is marked `interrupted` right away and the new run begins immediately.
+
+## Behavior notes
+
+- **`rollback` mechanism.** The active run is cancelled, then the new run is
+  *forked* from the checkpoint that preceded the rolled-back run — so that run's
+  input and any partial/orphaned writes are abandoned along with the old branch
+  and the graph re-enters from `__start__` with no orphan left to repair. No
+  checkpoints are deleted; the old branch survives as harmless siblings, so
+  `GET /threads/{id}/history` shows both branches while `state` returns the new
+  clean head. The fork point is resolved by lineage — the parent of the rolled-back
+  run's oldest checkpoint, found through the checkpointer's `run_id` metadata filter,
+  so the length of the thread's history does not matter. Only an in-flight run is
+  ever reverted: on an *idle* thread `rollback` starts the new run on the current
+  state like `enqueue` would, even if the last run ended `interrupted` or `error`
+  (LangGraph Platform behaves the same). Caveat: if the rolled-back run was the
+  thread's *first* run there is no earlier checkpoint to fork from — the new run
+  still re-enters from `__start__`, where a `before_agent` repair middleware can fix
+  the orphan in place, but that first run's input message is not physically removed.
+  `rollback` only applies to a fresh dict-input run (not a `command`/resume or an
+  explicit client checkpoint).
+- **Human-in-the-loop pauses.** A thread paused on a LangGraph `interrupt()` has
+  status `interrupted` with a pending interrupt. By default
+  (`MULTITASK_PAUSED_THREAD_POLICY=admit`, LangGraph Platform's behaviour) a new run
+  carrying fresh input is admitted: the graph starts from `__start__` and the pending
+  interrupt is discarded. Message and resume serialize under the admission lock,
+  first one wins, and a run enqueued *before* the thread paused is promoted onto the
+  pause once the paused run has finalized. Approval flows where a stray message must
+  not bypass a pending review can set `MULTITASK_PAUSED_THREAD_POLICY=reject`: fresh
+  input (under *any* `multitask_strategy`) is then refused with `409 Conflict` until a
+  `command={"resume": ...}` run clears the pause, both at run creation AND at
+  queued-run promotion (`dispatch_next_for_thread`), so parked runs stay parked. Under
+  either policy a resume command **jumps ahead of any parked runs** (it is the only
+  run that can clear the pause without discarding it); once it finalizes, the parked
+  runs are promoted as normal next turns. While that resume is itself executing,
+  `interrupt` and `rollback` are refused with `409 Conflict` — pre-empting an in-flight
+  resume would land the new run on the pending-interrupt checkpoint.
+- **Cancelling a parked run.** `POST .../runs/{id}/cancel`, a cancelling `PATCH`,
+  `POST /runs/cancel` (the SDK's `cancel_many`; its `pending` selector includes
+  parked runs), force-delete and disconnect-cancel all handle a still-`queued` run by
+  dropping it in place: it becomes `interrupted` without touching the thread, and
+  anything parked behind it is promoted at once. A run that was promoted in the
+  meantime is cancelled like any other active run. Every path that frees a thread —
+  a run's own finalize, a cancel, a force-delete — dispatches that thread's next
+  queued run, so a cancelled head never strands the queue; it does so only once
+  nothing can still be executing the freed run (a live task's own exit is what
+  promotes the queue). A force-delete of a run owned by a worker waits, bounded, for
+  it to stop before the row is removed — and answers `409` instead if it has not
+  stopped within that window — and deleting a thread drops its parked runs
+  before cancelling the active one, so neither can start a successor on a thread
+  that is going away.
+- **Crash recovery.** Queued runs are durable in Postgres. In worker mode the
+  lease reaper re-dispatches a thread whose queue was stranded by a lost wakeup;
+  in dev mode (`LocalExecutor`) the same recovery runs on startup and via a periodic
+  ~30s sweep, so a stranded dev queue self-heals without a restart. A run finalizing
+  during shutdown does not dispatch the next queued run — it is picked up by the next
+  start or sweep instead.
+- **Both execution modes.** The strategy is enforced in the shared run-creation
+  path, so it behaves identically under `LocalExecutor` (dev) and the Redis worker
+  pool (production).

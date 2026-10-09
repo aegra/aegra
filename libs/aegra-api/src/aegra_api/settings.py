@@ -468,7 +468,8 @@ class MultitaskSettings(EnvBase):
     """Double-texting admission policy: MULTITASK_PAUSED_THREAD_POLICY decides whether fresh input on
     a thread paused at ``interrupt()`` is rejected (409) or admitted; see docs/guides/double-texting.mdx."""
 
-    MULTITASK_PAUSED_THREAD_POLICY: Literal["reject", "admit"] = "reject"
+    # Default matches LangGraph Platform: fresh input on a paused thread is admitted.
+    MULTITASK_PAUSED_THREAD_POLICY: Literal["reject", "admit"] = "admit"
 
 
 class Settings:

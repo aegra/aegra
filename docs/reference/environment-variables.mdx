@@ -176,7 +176,7 @@ Controls how a run carrying fresh input is admitted onto a thread paused at a hu
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `MULTITASK_PAUSED_THREAD_POLICY` | `reject` | `reject` answers `409 Conflict` until a `command={"resume": ...}` run clears the pause; `admit` starts the run from `__start__` and discards the pending interrupt, matching LangGraph Platform |
+| `MULTITASK_PAUSED_THREAD_POLICY` | `admit` | `admit` starts the run from `__start__` and discards the pending interrupt, matching LangGraph Platform; `reject` answers `409 Conflict` until a `command={"resume": ...}` run clears the pause |
 
 ## Thread TTL
 

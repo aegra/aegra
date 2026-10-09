@@ -3,15 +3,19 @@
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from sqlalchemy.dialects import postgresql
 
 from aegra_api.services.run_status import (
     _safe_serialize,
+    drop_queued_runs,
     finalize_run,
     interrupt_unowned_run,
+    queued_threads_stmt,
     set_thread_status,
     set_thread_status_if_no_active_runs,
     start_run,
 )
+from aegra_api.settings import settings
 
 
 @pytest.fixture(autouse=True)
@@ -309,3 +313,55 @@ class TestSafeSerialize:
 
         assert result["error"] == "Output serialization failed"
         assert "original_type" in result
+
+
+class TestQueuedThreadsStmt:
+    """The recovery sweeps' thread scan honours the paused-thread policy."""
+
+    @staticmethod
+    def _sql() -> str:
+        return str(queued_threads_stmt().compile(dialect=postgresql.dialect(), compile_kwargs={"literal_binds": True}))
+
+    def test_reject_policy_skips_paused_threads(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # Promotion onto a paused thread is refused under reject, so retrying it every sweep
+        # would only log a warning for as long as the pause lasts.
+        monkeypatch.setattr(settings.multitask, "MULTITASK_PAUSED_THREAD_POLICY", "reject")
+        sql = self._sql()
+        assert "JOIN thread" in sql
+        assert "thread.status != 'interrupted'" in sql
+
+    def test_admit_policy_scans_every_queued_thread(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(settings.multitask, "MULTITASK_PAUSED_THREAD_POLICY", "admit")
+        sql = self._sql()
+        assert "runs.status = 'queued'" in sql
+        assert "JOIN" not in sql
+
+
+class TestDropQueuedRuns:
+    @pytest.mark.asyncio
+    async def test_flips_parked_rows_and_returns_their_ids(self) -> None:
+        session = AsyncMock()
+        result = MagicMock()
+        result.all.return_value = [("q1",), ("q2",)]
+        session.execute = AsyncMock(return_value=result)
+
+        dropped = await drop_queued_runs(session, "thread-1", user_id="user-1")
+
+        assert dropped == ["q1", "q2"]
+        sql = str(
+            session.execute.await_args.args[0].compile(
+                dialect=postgresql.dialect(), compile_kwargs={"literal_binds": True}
+            )
+        )
+        assert "runs.status = 'queued'" in sql and "'interrupted'" in sql and "runs.user_id = 'user-1'" in sql
+        session.commit.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_nothing_parked_commits_nothing(self) -> None:
+        session = AsyncMock()
+        result = MagicMock()
+        result.all.return_value = []
+        session.execute = AsyncMock(return_value=result)
+
+        assert await drop_queued_runs(session, "thread-1", user_id="user-1") == []
+        session.commit.assert_not_awaited()

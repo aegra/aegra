@@ -9,6 +9,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from aegra_api.services import run_preparation as run_preparation_mod
+from aegra_api.settings import settings
 from tests.fixtures.clients import create_test_app, make_client
 from tests.fixtures.session_fixtures import BasicSession, override_session_dependency
 
@@ -78,7 +79,8 @@ class TestResumeValidationAtHttpBoundary:
         assert resp.status_code == 422
         assert "Invalid command" in resp.json()["detail"]
 
-    def test_fresh_input_on_paused_thread_returns_409(self) -> None:
+    def test_fresh_input_on_paused_thread_returns_409_under_reject(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(settings.multitask, "MULTITASK_PAUSED_THREAD_POLICY", "reject")
         app = create_test_app(include_runs=True, include_threads=False)
         override_session_dependency(app, _InterruptedThreadSession)
         client = make_client(app)
@@ -90,19 +92,6 @@ class TestResumeValidationAtHttpBoundary:
 
         assert resp.status_code == 409
         assert "resume" in resp.json()["detail"]
-
-    def test_null_resume_on_paused_thread_returns_409(self) -> None:
-        # map_command drops a None resume — running it would crash the pause to 'error'.
-        app = create_test_app(include_runs=True, include_threads=False)
-        override_session_dependency(app, _InterruptedThreadSession)
-        client = make_client(app)
-
-        resp = client.post(
-            "/threads/test-thread-123/runs",
-            json={"assistant_id": "asst-123", "command": {"resume": None}},
-        )
-
-        assert resp.status_code == 409
 
     def test_resume_on_idle_thread_returns_400(self, monkeypatch: pytest.MonkeyPatch) -> None:
         # Collapse the settle poll (no DB in integration tests) — idle stays idle.

@@ -271,6 +271,26 @@ class TestFireCron:
             mock_session.commit.assert_awaited_once()
 
     @pytest.mark.asyncio
+    async def test_skipped_occurrence_rolls_back_pre_gate_writes(self) -> None:
+        # _prepare_run updates the thread before the admission gate refuses the run; the
+        # advance commit must not carry those writes along.
+        scheduler = CronScheduler()
+        cron = _make_cron_orm(payload={"input": {"msg": "hi"}}, end_time=None)
+        cron.end_time = None
+        mock_session = AsyncMock()
+
+        with patch(
+            "aegra_api.services.cron_scheduler._prepare_run",
+            new_callable=AsyncMock,
+            side_effect=HTTPException(status_code=409, detail="busy"),
+        ):
+            await scheduler._fire_cron(mock_session, cron)
+
+        mock_session.rollback.assert_awaited_once()
+        mock_session.execute.assert_awaited_once()  # the occurrence is still advanced, not retried
+        mock_session.commit.assert_awaited_once()
+
+    @pytest.mark.asyncio
     async def test_schedules_cleanup_for_stateless_cron_by_default(self) -> None:
         scheduler = CronScheduler()
         cron = _make_cron_orm(thread_id=None, end_time=None)

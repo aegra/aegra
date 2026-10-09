@@ -16,13 +16,17 @@ from aegra_api.core.orm import Run as RunORM
 from aegra_api.core.orm import Thread as ThreadORM
 from aegra_api.core.orm import _get_session_maker
 from aegra_api.models.run_job import RunJob
+from aegra_api.services.run_status import ACTIVE_RUN_STATES, QUEUED_RUN_STATE
 from aegra_api.settings import settings
 
 logger = structlog.getLogger(__name__)
 
-_OCCUPYING_RUN_STATUSES = ("running", "pending")
-# Sentinel: a promotion attempt failed a corrupt row and the caller should try the next one.
-_RETRY = object()
+
+class _Retry:
+    """Sentinel: a promotion attempt failed a corrupt row and the caller should try the next one."""
+
+
+_RETRY = _Retry()
 
 
 class BaseExecutor(ABC):
@@ -85,13 +89,13 @@ class BaseExecutor(ABC):
             job = await self._promote_oldest_queued(maker, thread_id)
             if job is None:
                 return
-            if job is _RETRY:
+            if isinstance(job, _Retry):
                 continue  # a corrupt row was failed; the thread is still free, try the next one
             logger.info("Dispatched queued run", run_id=job.identity.run_id, thread_id=thread_id)
             await self.submit(job)
             return
 
-    async def _promote_oldest_queued(self, maker: Any, thread_id: str) -> RunJob | object | None:
+    async def _promote_oldest_queued(self, maker: Any, thread_id: str) -> RunJob | _Retry | None:
         """One promotion attempt: the promoted RunJob, ``_RETRY`` after failing a corrupt row, else None."""
         async with maker() as session:
             thread = await session.scalar(select(ThreadORM).where(ThreadORM.thread_id == thread_id).with_for_update())
@@ -104,7 +108,7 @@ class BaseExecutor(ABC):
                 return None
             occupying = await session.scalar(
                 select(RunORM.run_id)
-                .where(RunORM.thread_id == thread_id, RunORM.status.in_(_OCCUPYING_RUN_STATUSES))
+                .where(RunORM.thread_id == thread_id, RunORM.status.in_(ACTIVE_RUN_STATES))
                 .limit(1)
             )
             if occupying is not None:
@@ -119,7 +123,7 @@ class BaseExecutor(ABC):
 
             run_orm = await session.scalar(
                 select(RunORM)
-                .where(RunORM.thread_id == thread_id, RunORM.status == "queued")
+                .where(RunORM.thread_id == thread_id, RunORM.status == QUEUED_RUN_STATE)
                 .order_by(RunORM.created_at.asc())
                 .limit(1)
                 .with_for_update(skip_locked=True)

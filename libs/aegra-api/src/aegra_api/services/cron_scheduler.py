@@ -215,6 +215,9 @@ class CronScheduler:
             if should_delete_thread:
                 schedule_background_cleanup(_run_id, thread_id, cron.user_id)
         except HTTPException as exc:
+            # Drop the thread writes _prepare_run made before the gate refused the run; the
+            # claim/advance commit below must not carry them along.
+            await session.rollback()
             if exc.status_code == 409:
                 # Busy thread under `reject`, or a HITL pause: that is this occurrence's answer.
                 # Re-firing every tick until the thread frees would be `enqueue` in disguise.
@@ -235,6 +238,7 @@ class CronScheduler:
             if should_delete_thread:
                 await CronScheduler._cleanup_failed_stateless_thread(thread_id, cron)
         except Exception:
+            await session.rollback()
             logger.exception("Cron run creation failed unexpectedly", cron_id=cron.cron_id)
             if should_delete_thread:
                 await CronScheduler._cleanup_failed_stateless_thread(thread_id, cron)

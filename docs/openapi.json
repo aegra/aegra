@@ -1742,10 +1742,10 @@
                   "type": "null"
                 }
               ],
-              "description": "Filter by run status (e.g. pending, running, success, error, interrupted)",
+              "description": "Filter by run status (pending, running, success, error, timeout, interrupted). `pending` includes runs queued behind another run on the thread.",
               "title": "Status"
             },
-            "description": "Filter by run status (e.g. pending, running, success, error, interrupted)"
+            "description": "Filter by run status (pending, running, success, error, timeout, interrupted). `pending` includes runs queued behind another run on the thread."
           }
         ],
         "responses": {
@@ -1988,7 +1988,7 @@
           "Thread Runs"
         ],
         "summary": "Delete Run",
-        "description": "Delete a run record.\n\nIf the run is active (pending, running, or enqueued behind another run)\nand `force=0`, returns 409 Conflict. Set `force=1` to cancel the run first\nand then delete it; a run owned by a worker that has not stopped within\n~10 seconds of the cancel is left in place with 409 so the client can retry.\nReturns 204 No Content on success.",
+        "description": "Delete a run record.\n\nIf the run is active (pending, running or enqueued) and `force=0`, returns 409\nConflict. Set `force=1` to cancel the run first and then delete it; a worker-owned\nrun that has not stopped within ~10 seconds is left in place with 409 for a retry.\nReturns 204 No Content on success.",
         "operationId": "delete_run_threads__thread_id__runs__run_id__delete",
         "parameters": [
           {
@@ -4762,7 +4762,7 @@
           "updated_at"
         ],
         "title": "Run",
-        "description": "Run entity model\n\nStatus values: pending, running, error, success, timeout, interrupted.\nA run parked behind another run (double-texting enqueue) is internally\n'queued' and reported as 'pending', matching the LangGraph SDK vocabulary."
+        "description": "Run entity model\n\nStatus values: pending, running, error, success, timeout, interrupted.\nA run parked behind another (internal 'queued') is reported as 'pending'."
       },
       "RunCreate": {
         "properties": {
@@ -4904,7 +4904,7 @@
               }
             ],
             "title": "Multitask Strategy",
-            "description": "How to handle a new run when the thread already has an active run. 'enqueue' (default) queues it to run after; 'reject' returns 409; 'interrupt' cancels the active run then starts this one; 'rollback' cancels the active run (kept as interrupted) \u2014 or, with no active run, reverts the last run only if it was left interrupted/errored (repairing a broken thread; a completed run is untouched) \u2014 then forks this run from the checkpoint preceding it, reverting that run's writes. None defaults to 'enqueue'."
+            "description": "How to handle a new run when the thread already has an active run. 'enqueue' (default) queues it to run after; 'reject' returns 409; 'interrupt' cancels the active run then starts this one; 'rollback' cancels the active run (kept as interrupted) and forks this run from the checkpoint preceding it, reverting that run's writes. With no active run every strategy simply starts the run. None defaults to 'enqueue'."
           },
           "command": {
             "anyOf": [

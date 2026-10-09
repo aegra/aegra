@@ -555,37 +555,50 @@ class TestDeleteThread:
         executed: list[str] = []
 
         class Session(DummySessionBase):
-            async def scalar(self, _stmt):
+            async def scalar(self, _stmt: Any) -> Any:
                 return thread
 
-            async def execute(self, _stmt):
-                executed.append(str(_stmt.compile(compile_kwargs={"literal_binds": True})))
+            async def execute(self, _stmt: Any) -> Any:
+                compiled = str(_stmt.compile(compile_kwargs={"literal_binds": True}))
+                executed.append(compiled)
 
-            async def scalars(self, _stmt):
+                class Result:
+                    def all(self) -> list[tuple[str]]:
+                        return [("q1",)] if compiled.startswith("UPDATE runs") else []
+
+                return Result()
+
+            async def scalars(self, _stmt: Any) -> Any:
                 # Only surface the queued run if the cleanup query's status filter
                 # actually includes 'queued' — so dropping it from threads.py reds this test.
                 compiled = str(_stmt.compile(compile_kwargs={"literal_binds": True}))
                 rows = [queued_run] if "queued" in compiled else []
 
                 class Result:
-                    def all(self):
+                    def all(self) -> list[Any]:
                         return rows
 
                 return Result()
 
-            async def delete(self, obj):
+            async def delete(self, obj: Any) -> None:
                 pass
 
-            async def commit(self):
+            async def commit(self) -> None:
                 pass
 
-        with patch("aegra_api.api.threads.streaming_service.cancel_run", new_callable=AsyncMock) as mock_cancel:
+        with (
+            patch("aegra_api.api.threads.streaming_service.cancel_run", new_callable=AsyncMock) as mock_cancel,
+            patch(
+                "aegra_api.api.threads.streaming_service.signal_run_cancelled", new_callable=AsyncMock
+            ) as mock_signal,
+        ):
             app.dependency_overrides[core_get_session] = override_get_session_dep(Session)
             client = make_client(app)
             resp = client.delete("/threads/test-123")
 
         assert resp.status_code == 200
         mock_cancel.assert_not_awaited()  # nothing executes a parked run; the broker has no task for it
+        mock_signal.assert_awaited_once_with("q1")  # but a client may be streaming it: close that stream
         drop = next(s for s in executed if s.startswith("UPDATE runs"))
         assert "'interrupted'" in drop and "runs.status = 'queued'" in drop  # guarded drop, before deletion
 

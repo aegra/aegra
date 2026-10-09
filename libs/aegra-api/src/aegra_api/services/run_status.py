@@ -11,13 +11,15 @@ from datetime import UTC, datetime
 from typing import Any, cast
 
 import structlog
-from sqlalchemy import CursorResult, exists, or_, select, update
+from sqlalchemy import CursorResult, Select, exists, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from aegra_api.core.active_runs import active_runs
 from aegra_api.core.orm import Run as RunORM
 from aegra_api.core.orm import Thread as ThreadORM
 from aegra_api.core.orm import _get_session_maker
 from aegra_api.core.serializers import GeneralSerializer
+from aegra_api.settings import settings
 from aegra_api.utils.status_compat import validate_run_status, validate_thread_status
 
 logger = structlog.getLogger(__name__)
@@ -27,6 +29,25 @@ ACTIVE_RUN_STATES = ("pending", "running")
 # Internal double-texting park state: the run waits behind an active run and has no
 # task or worker. Reported as ``pending`` over the API (Run.validate_status).
 QUEUED_RUN_STATE = "queued"
+
+
+def queued_threads_stmt() -> Select[tuple[str]]:
+    """Threads holding a parked run that a recovery sweep may promote; under the ``reject`` policy a
+    thread paused on a human-in-the-loop interrupt is left out, since promotion is refused there anyway."""
+    stmt = select(RunORM.thread_id).where(RunORM.status == QUEUED_RUN_STATE).distinct()
+    if settings.multitask.MULTITASK_PAUSED_THREAD_POLICY == "reject":
+        stmt = stmt.join(ThreadORM, ThreadORM.thread_id == RunORM.thread_id).where(ThreadORM.status != "interrupted")
+    return stmt
+
+
+def has_live_executor(run: RunORM, *, now: datetime | None = None) -> bool:
+    """Whether a task may still be executing ``run``: a local task in this process, or a worker
+    claim whose lease has not expired (the ownership predicate ``interrupt_unowned_run`` uses)."""
+    if active_runs.get(run.run_id) is not None:
+        return True
+    if run.claimed_by is None:
+        return False
+    return run.lease_expires_at is None or run.lease_expires_at >= (now or datetime.now(UTC))
 
 
 async def start_run(run_id: str, *, user_id: str) -> bool:
@@ -207,6 +228,26 @@ async def cancel_queued_run_by_id(run_id: str, thread_id: str, *, user_id: str) 
     maker = _get_session_maker()
     async with maker() as session:
         return await cancel_queued_run(session, run_id, thread_id, user_id=user_id)
+
+
+async def drop_queued_runs(session: AsyncSession, thread_id: str, *, user_id: str) -> list[str]:
+    """Interrupt every parked run on a thread in place (guarded, committed) and return their ids so
+    the caller can close their streams; the thread row is left alone."""
+    result = await session.execute(
+        update(RunORM)
+        .where(
+            RunORM.thread_id == thread_id,
+            RunORM.user_id == user_id,
+            RunORM.status == QUEUED_RUN_STATE,
+        )
+        .values(status="interrupted", updated_at=datetime.now(UTC))
+        .returning(RunORM.run_id)
+    )
+    dropped = [row[0] for row in result.all()]
+    if dropped:
+        await session.commit()
+        logger.info("Dropped queued runs", thread_id=thread_id, run_ids=dropped)
+    return dropped
 
 
 async def finalize_run(

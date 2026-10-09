@@ -20,20 +20,18 @@ from aegra_api.core.orm import _get_session_maker
 from aegra_api.models.run_job import RunJob
 from aegra_api.observability.span_enrichment import make_run_trace_context
 from aegra_api.services.base_executor import BaseExecutor
+from aegra_api.services.run_status import ACTIVE_RUN_STATES, QUEUED_RUN_STATE, get_run_status, queued_threads_stmt
 
 logger = structlog.getLogger(__name__)
 
-_TERMINAL_STATUSES = frozenset({"success", "error", "interrupted"})
 _STRANDED_SWEEP_INTERVAL_SECONDS = 30
 _QUEUED_POLL_INTERVAL_SECONDS = 0.5
 
 
 async def _is_run_terminal(run_id: str) -> bool:
     """True if the run reached a terminal state (or no longer exists)."""
-    maker = _get_session_maker()
-    async with maker() as session:
-        status = await session.scalar(select(RunORM.status).where(RunORM.run_id == run_id))
-    return status is None or status in _TERMINAL_STATUSES
+    status = await get_run_status(run_id)
+    return status is None or status not in (*ACTIVE_RUN_STATES, QUEUED_RUN_STATE)
 
 
 class LocalExecutor(BaseExecutor):
@@ -109,12 +107,7 @@ class LocalExecutor(BaseExecutor):
         """Re-dispatch every thread holding a queued run (a no-op when one is occupying)."""
         maker = _get_session_maker()
         async with maker() as session:
-            threads = {
-                row[0]
-                for row in (
-                    await session.execute(select(RunORM.thread_id).where(RunORM.status == "queued").distinct())
-                ).all()
-            }
+            threads = {row[0] for row in (await session.execute(queued_threads_stmt())).all()}
         for thread_id in threads:
             # Per-thread isolation: one bad row must not abort recovery for the rest.
             try:
@@ -126,15 +119,22 @@ class LocalExecutor(BaseExecutor):
         """Fail runs orphaned by the previous process (a fresh process has no live tasks) and
         dispatch the next queued run on each affected thread."""
         maker = _get_session_maker()
-        async with maker() as session:
-            threads = {
-                row[0]
-                for row in (
-                    await session.execute(
-                        select(RunORM.thread_id).where(RunORM.status.in_(("queued", "running", "pending"))).distinct()
-                    )
-                ).all()
-            }
+        try:
+            async with maker() as session:
+                threads = {
+                    row[0]
+                    for row in (
+                        await session.execute(
+                            select(RunORM.thread_id)
+                            .where(RunORM.status.in_((*ACTIVE_RUN_STATES, QUEUED_RUN_STATE)))
+                            .distinct()
+                        )
+                    ).all()
+                }
+        except SQLAlchemyError:
+            # Recovery is best effort: the periodic sweep retries, and startup must not depend on it.
+            logger.exception("Could not scan for runs orphaned by the previous process")
+            return
         if not threads:
             return
 
@@ -182,4 +182,8 @@ class LocalExecutor(BaseExecutor):
         if tasks_to_cancel:
             logger.info("Draining cancelled tasks", count=len(tasks_to_cancel))
             await asyncio.gather(*tasks_to_cancel, return_exceptions=True)
+        # Deferred import: run_executor imports services that reference the executor singleton.
+        from aegra_api.services.run_executor import await_pending_finalizes
+
+        await await_pending_finalizes()
         logger.info("Local executor stopped")

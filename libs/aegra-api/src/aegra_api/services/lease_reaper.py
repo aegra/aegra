@@ -18,7 +18,8 @@ from aegra_api.core.orm import Run as RunORM
 from aegra_api.core.orm import _get_session_maker
 from aegra_api.core.redis_manager import redis_manager
 from aegra_api.observability.metrics import REAPER_RECOVERED_RUNS
-from aegra_api.services.run_status import ACTIVE_RUN_STATES, QUEUED_RUN_STATE, set_thread_status_if_no_active_runs
+from aegra_api.services.executor import executor
+from aegra_api.services.run_status import ACTIVE_RUN_STATES, queued_threads_stmt, set_thread_status_if_no_active_runs
 from aegra_api.settings import settings
 
 logger = structlog.getLogger(__name__)
@@ -102,12 +103,7 @@ class LeaseReaper:
         """Threads with a queued run but no running/pending run holding them."""
         maker = _get_session_maker()
         async with maker() as session:
-            queued = {
-                row[0]
-                for row in (
-                    await session.execute(select(RunORM.thread_id).where(RunORM.status == QUEUED_RUN_STATE).distinct())
-                ).all()
-            }
+            queued = {row[0] for row in (await session.execute(queued_threads_stmt())).all()}
             if not queued:
                 return []
             active = {
@@ -122,10 +118,6 @@ class LeaseReaper:
 
     @staticmethod
     async def _dispatch_stranded_queued(thread_ids: list[str]) -> None:
-        # Deferred import: executor -> run_executor -> run_status, none of which
-        # may import lease_reaper at module load.
-        from aegra_api.services.executor import executor
-
         for thread_id in thread_ids:
             try:
                 await executor.dispatch_next_for_thread(thread_id)
@@ -242,6 +234,13 @@ class LeaseReaper:
                         max_retries=max_retries,
                     )
 
+            await session.commit()
+
+        if not exhausted_threads_by_user:
+            return retryable, exhausted
+        # Thread rows only after the run-row locks above are released: the gate and finalize
+        # lock thread-then-run, so holding both here in the reverse order could deadlock.
+        async with maker() as session:
             for user_id, thread_ids in exhausted_threads_by_user.items():
                 await set_thread_status_if_no_active_runs(
                     session,

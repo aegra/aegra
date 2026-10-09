@@ -63,9 +63,8 @@ class RunCreate(BaseModel):
         description="How to handle a new run when the thread already has an active run. "
         "'enqueue' (default) queues it to run after; 'reject' returns 409; "
         "'interrupt' cancels the active run then starts this one; 'rollback' cancels the active "
-        "run (kept as interrupted) — or, with no active run, reverts the last run only if it was "
-        "left interrupted/errored (repairing a broken thread; a completed run is untouched) — then "
-        "forks this run from the checkpoint preceding it, reverting that run's writes. None defaults "
+        "run (kept as interrupted) and forks this run from the checkpoint preceding it, reverting "
+        "that run's writes. With no active run every strategy simply starts the run. None defaults "
         "to 'enqueue'.",
     )
 

@@ -78,7 +78,9 @@ class TestFindRecoverable:
 
 class TestRecoverCrashedRuns:
     @pytest.mark.asyncio
-    async def test_classifies_and_transitions_under_one_transaction(self) -> None:
+    async def test_classifies_runs_then_updates_threads_in_a_second_transaction(self) -> None:
+        # Run rows are locked and transitioned first; the exhausted threads are touched only
+        # after that commit released the run locks (gate/finalize lock thread-then-run).
         session = AsyncMock()
         locked = MagicMock()
         locked.fetchall.return_value = [
@@ -110,7 +112,8 @@ class TestRecoverCrashedRuns:
             compiled = call.args[0].compile()
             assert "runs.user_id" in str(compiled)
         mock_set_thread.assert_awaited_once_with(session, {"thread-2"}, "error", user_id="user-2")
-        session.commit.assert_awaited_once()
+        assert session.commit.await_count == 2
+        assert maker.call_count == 2  # a fresh transaction for the thread rows
 
     @pytest.mark.asyncio
     async def test_returns_empty_when_rows_are_no_longer_expired(self) -> None:
@@ -548,7 +551,7 @@ class TestStrandedQueued:
 
     @pytest.mark.asyncio
     async def test_dispatch_calls_executor_per_thread(self) -> None:
-        with patch("aegra_api.services.executor.executor") as ex:
+        with patch("aegra_api.services.lease_reaper.executor") as ex:
             ex.dispatch_next_for_thread = AsyncMock()
             await LeaseReaper._dispatch_stranded_queued(["t1", "t2"])
 
@@ -556,7 +559,7 @@ class TestStrandedQueued:
 
     @pytest.mark.asyncio
     async def test_one_thread_failure_does_not_abort_batch(self) -> None:
-        with patch("aegra_api.services.executor.executor") as ex:
+        with patch("aegra_api.services.lease_reaper.executor") as ex:
             # Infra errors and a corrupt-row KeyError alike: the remaining threads still get their turn.
             ex.dispatch_next_for_thread = AsyncMock(side_effect=[RedisError("boom"), KeyError("graph_id"), None])
             await LeaseReaper._dispatch_stranded_queued(["t1", "t2", "t3"])

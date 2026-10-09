@@ -392,6 +392,33 @@ class TestCancelConcurrentDelete:
 
         assert resp.status_code == 404  # not a 500 from refreshing a vanished row
 
+    def test_cancel_queued_run_deleted_meanwhile_is_404(self) -> None:
+        # The parked-run drop misses (a force-delete removed the row): the re-read must report
+        # it gone instead of refreshing a vanished identity.
+        app = create_test_app(include_runs=True, include_threads=False)
+        run = _run_row(status="queued")
+        reads = {"n": 0}
+
+        class Session(DummySessionBase):
+            async def scalar(self, _stmt: Any) -> Any:
+                reads["n"] += 1
+                return run if reads["n"] == 1 else None
+
+            async def commit(self) -> None:
+                pass
+
+        with (
+            patch("aegra_api.api.runs.streaming_service") as mock_streaming,
+            patch("aegra_api.api.runs.cancel_queued_run", new_callable=AsyncMock, return_value=False),
+            patch("aegra_api.api.runs.interrupt_unowned_run", new_callable=AsyncMock) as reconcile,
+        ):
+            mock_streaming.cancel_run = AsyncMock()
+            override_session_dependency(app, Session)
+            resp = make_client(app).post("/threads/test-thread-123/runs/test-run-123/cancel")
+
+        assert resp.status_code == 404
+        reconcile.assert_not_awaited()  # nothing left to reconcile
+
     def test_delete_run_force_tolerates_a_concurrent_delete(self) -> None:
         """The row vanished while we cancelled it: no wait, no 409, still 204."""
         app = create_test_app(include_runs=True, include_threads=False)
@@ -455,18 +482,19 @@ class TestCancelDispatchDecision:
         mock_dispatch.assert_awaited_once_with("test-thread-123")
 
     def test_local_task_defers_dispatch_to_its_exit(self, mock_dispatch: AsyncMock) -> None:
-        # Dev mode: claimed_by is always NULL, but the task is right here and still running —
-        # its finalize (losing the ownership CAS) is what promotes the queue, not this request.
+        # Dev mode: the task is right here and still running. The row is left to it (its exit
+        # writes interrupted and promotes the queue); this request only asks it to stop.
         client = self._client_with(_run_row(status="running"))
         with (
             patch("aegra_api.api.runs.streaming_service") as mock_streaming,
-            patch("aegra_api.api.runs.interrupt_unowned_run", new_callable=AsyncMock, return_value=True),
+            patch("aegra_api.api.runs.interrupt_unowned_run", new_callable=AsyncMock) as reconcile,
             patch("aegra_api.api.runs.active_runs", {"test-run-123": MagicMock()}),
         ):
             mock_streaming.cancel_run = AsyncMock()
             mock_streaming.signal_run_cancelled = AsyncMock()
             assert client.post("/threads/test-thread-123/runs/test-run-123/cancel").status_code == 200
-        mock_streaming.cancel_run.assert_awaited_once_with("test-run-123", emit_end_event=False)
+        mock_streaming.cancel_run.assert_awaited_once_with("test-run-123")
+        reconcile.assert_not_awaited()
         mock_dispatch.assert_not_awaited()
 
     def test_claimed_run_defers_dispatch_to_the_worker(self, mock_dispatch: AsyncMock) -> None:
@@ -659,14 +687,14 @@ class TestDeleteRun:
 
         assert resp.status_code == 204
 
-    def test_delete_run_queued_not_allowed(self):
+    def test_delete_run_queued_not_allowed(self) -> None:
         """A queued run is active; deleting without force returns 409."""
         app = create_test_app(include_runs=True, include_threads=False)
 
         run = _run_row(status="queued")
 
         class Session(DummySessionBase):
-            async def scalar(self, _stmt):
+            async def scalar(self, _stmt: Any) -> Any:
                 return run
 
         override_session_dependency(app, Session)
@@ -677,7 +705,7 @@ class TestDeleteRun:
         assert resp.status_code == 409
         assert "active" in resp.json()["detail"].lower()
 
-    def test_delete_run_force_queued_drops_it_without_broker_cancel(self):
+    def test_delete_run_force_queued_drops_it_without_broker_cancel(self) -> None:
         """Force-deleting a queued run drops it in place (no task to cancel) and promotes the queue."""
         app = create_test_app(include_runs=True, include_threads=False)
 
@@ -685,13 +713,13 @@ class TestDeleteRun:
         executed: list[str] = []
 
         class Session(DummySessionBase):
-            async def scalar(self, _stmt):
+            async def scalar(self, _stmt: Any) -> Any:
                 return run
 
-            async def execute(self, _stmt):
+            async def execute(self, _stmt: Any) -> None:
                 executed.append(str(_stmt))
 
-            async def commit(self):
+            async def commit(self) -> None:
                 pass
 
         with (
@@ -716,29 +744,29 @@ class TestDeleteRun:
         # Whatever was parked behind the deleted run may start now.
         mock_dispatch.assert_awaited_with("test-thread-123")
 
-    def test_delete_run_force_queued_run_promoted_meanwhile_is_cancelled_not_deleted(self):
+    def test_delete_run_force_queued_run_promoted_meanwhile_is_cancelled_not_deleted(self) -> None:
         """A run read as queued but promoted before the drop is cancelled like an active run and,
         while executing, neither deleted underneath the live task nor overtaken by the queue."""
         app = create_test_app(include_runs=True, include_threads=False)
 
         run = _run_row(status="queued")
         executed: list[str] = []
+        reads = {"n": 0}
 
         class Session(DummySessionBase):
-            async def scalar(self, _stmt):
+            async def scalar(self, _stmt: Any) -> Any:
+                reads["n"] += 1
+                if reads["n"] >= 2:
+                    run.status = "running"  # the concurrent dispatcher promoted it meanwhile
                 return run
 
             def expire_all(self) -> None:
                 pass
 
-            async def refresh(self, obj):
-                # The concurrent dispatcher promoted it; a live task is now attached.
-                obj.status = "running"
-
-            async def execute(self, _stmt):
+            async def execute(self, _stmt: Any) -> None:
                 executed.append(str(_stmt))
 
-            async def commit(self):
+            async def commit(self) -> None:
                 pass
 
         with (
@@ -763,7 +791,7 @@ class TestDeleteRun:
         assert not any("DELETE FROM runs" in stmt for stmt in executed)
         mock_dispatch.assert_not_awaited()
 
-    def test_delete_run_force_waits_for_a_worker_owned_run_to_stop(self):
+    def test_delete_run_force_waits_for_a_worker_owned_run_to_stop(self) -> None:
         """A worker-owned run stops asynchronously: the row is removed and the queue promoted only
         after its terminal write lands, not while it may still be writing checkpoints."""
         app = create_test_app(include_runs=True, include_threads=False)
@@ -774,7 +802,7 @@ class TestDeleteRun:
         reads = {"n": 0}
 
         class Session(DummySessionBase):
-            async def scalar(self, _stmt):
+            async def scalar(self, _stmt: Any) -> Any:
                 reads["n"] += 1
                 if reads["n"] >= 3:
                     run.status = "interrupted"  # the worker's finalize landed on the 2nd poll
@@ -783,10 +811,10 @@ class TestDeleteRun:
             def expire_all(self) -> None:
                 pass
 
-            async def execute(self, _stmt):
+            async def execute(self, _stmt: Any) -> None:
                 executed.append(str(_stmt))
 
-            async def commit(self):
+            async def commit(self) -> None:
                 pass
 
         with (
@@ -926,6 +954,40 @@ class TestRunStatuses:
         assert resp.status_code == 200
         data = resp.json()
         assert isinstance(data, list)
+
+    def test_list_runs_queued_filter_is_rejected(self) -> None:
+        # `queued` is internal; parked runs are reported (and filtered) as `pending`.
+        app = create_test_app(include_runs=True, include_threads=False)
+        override_session_dependency(app, BasicSession)
+        client = make_client(app)
+
+        resp = client.get("/threads/test-thread-123/runs?status=queued")
+
+        assert resp.status_code == 422
+        assert "pending" in resp.json()["detail"]
+
+    def test_list_runs_pending_filter_includes_queued(self) -> None:
+        app = create_test_app(include_runs=True, include_threads=False)
+        compiled: list[str] = []
+
+        class Session(DummySessionBase):
+            async def scalars(self, _stmt: Any) -> Any:
+                compiled.append(str(_stmt.compile(compile_kwargs={"literal_binds": True})))
+
+                class Result:
+                    def all(self) -> list[Any]:
+                        return []
+
+                return Result()
+
+        override_session_dependency(app, Session)
+        client = make_client(app)
+
+        assert client.get("/threads/test-thread-123/runs?status=pending").status_code == 200
+        assert client.get("/threads/test-thread-123/runs?status=running").status_code == 200
+
+        assert "'pending'" in compiled[0] and "'queued'" in compiled[0]  # pending covers parked runs
+        assert "'queued'" not in compiled[1]  # other statuses filter exactly
 
 
 class TestWaitForRun:

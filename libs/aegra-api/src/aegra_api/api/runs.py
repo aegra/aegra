@@ -10,7 +10,7 @@ import structlog
 from fastapi import APIRouter, Depends, Header, HTTPException, Query
 from fastapi.responses import StreamingResponse
 from redis import RedisError
-from sqlalchemy import delete, select
+from sqlalchemy import ColumnElement, delete, select
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sse_starlette import EventSourceResponse
@@ -67,6 +67,25 @@ async def _reread_run(session: AsyncSession, run_id: str, thread_id: str, user_i
     )
 
 
+async def _reload_run(session: AsyncSession, run_orm: RunORM) -> RunORM | None:
+    """Re-read one row in place, None when it was deleted meanwhile. No ``expire_all``: a bulk
+    cancel is still iterating this row's siblings, and ``refresh()`` would 500 on a vanished row."""
+    return await session.scalar(
+        select(RunORM).where(RunORM.run_id == run_orm.run_id).execution_options(populate_existing=True)
+    )
+
+
+def _run_status_filter(status: str | None) -> list[ColumnElement[bool]]:
+    """``pending`` covers the internal ``queued`` state it is reported as; ``queued`` itself is not public."""
+    if status is None:
+        return []
+    if status == QUEUED_RUN_STATE:
+        raise HTTPException(status_code=422, detail="Unknown run status 'queued'; parked runs are listed as 'pending'")
+    if status == "pending":
+        return [RunORM.status.in_(("pending", QUEUED_RUN_STATE))]
+    return [RunORM.status == status]
+
+
 async def _wait_for_run_to_settle(session: AsyncSession, run_id: str) -> bool:
     """Poll until the run is terminal or its row is gone. False when the window expired."""
     for _ in range(_SETTLE_ATTEMPTS):
@@ -98,9 +117,19 @@ async def _request_run_interruption(
                 logger.exception("Failed to signal queued run cancellation", run_id=run_orm.run_id)
             return
         # Promoted meanwhile: fall through and cancel it like any active run.
-        await session.refresh(run_orm)
-        if run_orm.status in TERMINAL_STATES:
+        promoted = await _reload_run(session, run_orm)
+        if promoted is None or promoted.status in TERMINAL_STATES:
             return
+        run_orm = promoted
+
+    if active_runs.get(run_orm.run_id) is not None:
+        # Dev mode: the task in this process owns the row and writes ``interrupted`` when it has
+        # stopped, which keeps the thread occupied until then. Only ask it to stop here.
+        if action == "interrupt":
+            await streaming_service.interrupt_run(run_orm.run_id)
+        else:
+            await streaming_service.cancel_run(run_orm.run_id)
+        return
 
     claimed_by = run_orm.claimed_by
     reconciled = await interrupt_unowned_run(
@@ -123,14 +152,14 @@ async def _request_run_interruption(
             # Database reconciliation has already committed. A broker outage
             # must not turn the successful interruption into an API error.
             logger.exception("Failed to signal reconciled run interruption", run_id=run_orm.run_id)
-        # Promote only when no local task or worker can still be executing this run; otherwise
-        # its exit (a finalize losing the CAS) dispatches, and promoting here would run two graphs.
-        if active_runs.get(run_orm.run_id) is None and claimed_by is None:
+        # A run never claimed by a worker has no task left anywhere. A claimed one whose lease
+        # merely expired may still be executing; its exit is what promotes the queue.
+        if claimed_by is None:
             await dispatch_next_queued_run(run_orm.thread_id)
         return
 
-    await session.refresh(run_orm)
-    if run_orm.status in TERMINAL_STATES:
+    current = await _reload_run(session, run_orm)
+    if current is None or current.status in TERMINAL_STATES:
         return
 
     if action == "interrupt":
@@ -303,7 +332,9 @@ async def list_runs(
     limit: int = Query(10, ge=1, description="Maximum number of runs to return"),
     offset: int = Query(0, ge=0, description="Number of runs to skip for pagination"),
     status: str | None = Query(
-        None, description="Filter by run status (e.g. pending, running, success, error, interrupted)"
+        None,
+        description="Filter by run status (pending, running, success, error, timeout, interrupted). "
+        "`pending` includes runs queued behind another run on the thread.",
     ),
     user: User = Depends(get_current_user),
     session: AsyncSession = Depends(get_session),
@@ -318,7 +349,7 @@ async def list_runs(
         .where(
             RunORM.thread_id == thread_id,
             RunORM.user_id == user.identity,
-            *([RunORM.status == status] if status else []),
+            *_run_status_filter(status),
         )
         .limit(limit)
         .offset(offset)

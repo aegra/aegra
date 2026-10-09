@@ -174,15 +174,6 @@ def _marker_body(assistant_id: str, marker: str, strategy: str | None = None) ->
     return body
 
 
-def _fail_marker_body(assistant_id: str, marker: str, strategy: str | None = None) -> dict[str, Any]:
-    """stress_test config that raises, leaving the run in a non-success (error) terminal state."""
-    content = json.dumps({"delay": 0.1, "steps": 1, "fail": True, "_m": marker})
-    body: dict[str, Any] = {"assistant_id": assistant_id, "input": {"messages": [{"role": "user", "content": content}]}}
-    if strategy is not None:
-        body["multitask_strategy"] = strategy
-    return body
-
-
 def _interrupt_marker_body(
     assistant_id: str, marker: str, strategy: str | None = None, delay: float = 0.1
 ) -> dict[str, Any]:
@@ -196,8 +187,8 @@ def _interrupt_marker_body(
 
 @pytest.mark.e2e
 @pytest.mark.asyncio
-async def test_rollback_idle_keeps_completed_run_e2e() -> None:
-    """On an idle thread, rollback must NOT silently revert a cleanly completed run."""
+async def test_rollback_idle_runs_fresh_and_reverts_nothing_e2e() -> None:
+    """On an idle thread rollback only adds a turn: like LangGraph Platform it reverts in-flight runs only."""
     async with httpx.AsyncClient(base_url=_base_url(), timeout=60) as client:
         aid, tid = await _setup(client)
 
@@ -208,7 +199,6 @@ async def test_rollback_idle_keeps_completed_run_e2e() -> None:
         a.raise_for_status()
         assert await _wait_terminal(client, tid, a.json()["run_id"]) == "success"
 
-        # Idle thread, last run succeeded: rollback just adds a turn, reverts nothing.
         b = await client.post(f"/threads/{tid}/runs", json=_marker_body(aid, "NEW", "rollback"))
         b.raise_for_status()
         assert await _wait_terminal(client, tid, b.json()["run_id"]) == "success"
@@ -217,33 +207,6 @@ async def test_rollback_idle_keeps_completed_run_e2e() -> None:
         assert "PRIOR" in raw  # prior state preserved
         assert "NEW" in raw  # new run ran
         assert "DONE" in raw  # the completed run is NOT reverted (no undo-last-turn footgun)
-
-
-@pytest.mark.e2e
-@pytest.mark.asyncio
-async def test_rollback_repairs_failed_last_run_e2e() -> None:
-    """On an idle thread, rollback reverts a last run left in a non-success state (broken-thread repair)."""
-    async with httpx.AsyncClient(base_url=_base_url(), timeout=60) as client:
-        aid, tid = await _setup(client)
-
-        p = await client.post(f"/threads/{tid}/runs", json=_marker_body(aid, "PRIOR"))
-        p.raise_for_status()
-        assert await _wait_terminal(client, tid, p.json()["run_id"]) == "success"
-
-        # A run that errors leaves the thread's last run in a non-success terminal state.
-        broken = await client.post(f"/threads/{tid}/runs", json=_fail_marker_body(aid, "BROKEN"))
-        broken.raise_for_status()
-        assert await _wait_terminal(client, tid, broken.json()["run_id"]) == "error"
-
-        # Idle now; rollback targets the errored run and forks from before it.
-        b = await client.post(f"/threads/{tid}/runs", json=_marker_body(aid, "NEW", "rollback"))
-        b.raise_for_status()
-        assert await _wait_terminal(client, tid, b.json()["run_id"]) == "success"
-
-        raw = str((await client.get(f"/threads/{tid}/state")).json().get("values", {}).get("messages", []))
-        assert "PRIOR" in raw  # prior state preserved
-        assert "NEW" in raw  # new run ran
-        assert "BROKEN" not in raw  # the errored run's writes were reverted
 
 
 def _slow_marker_body(assistant_id: str, marker: str, strategy: str | None = None) -> dict[str, Any]:
@@ -280,38 +243,8 @@ async def test_rollback_reverts_active_run_e2e() -> None:
 
 @pytest.mark.e2e
 @pytest.mark.asyncio
-async def test_two_sequential_rollbacks_do_not_resurrect_e2e() -> None:
-    """A second rollback must anchor by lineage: GEN2 reverts errored GEN1, and GEN3 must fork
-    from PRIOR (GEN2's lineage parent), not from GEN1's abandoned sibling."""
-    async with httpx.AsyncClient(base_url=_base_url(), timeout=60) as client:
-        aid, tid = await _setup(client)
-        p = await client.post(f"/threads/{tid}/runs", json=_marker_body(aid, "PRIOR"))
-        p.raise_for_status()
-        assert await _wait_terminal(client, tid, p.json()["run_id"]) == "success"
-
-        gen1 = await client.post(f"/threads/{tid}/runs", json=_fail_marker_body(aid, "GEN1"))
-        gen1.raise_for_status()
-        assert await _wait_terminal(client, tid, gen1.json()["run_id"]) == "error"
-
-        gen2 = await client.post(f"/threads/{tid}/runs", json=_fail_marker_body(aid, "GEN2", "rollback"))
-        gen2.raise_for_status()
-        assert await _wait_terminal(client, tid, gen2.json()["run_id"]) == "error"
-
-        gen3 = await client.post(f"/threads/{tid}/runs", json=_marker_body(aid, "GEN3", "rollback"))
-        gen3.raise_for_status()
-        assert await _wait_terminal(client, tid, gen3.json()["run_id"]) == "success"
-
-        raw = str((await client.get(f"/threads/{tid}/state")).json().get("values", {}).get("messages", []))
-        assert "PRIOR" in raw  # original state survives both rollbacks
-        assert "GEN3" in raw  # the latest run ran
-        assert "GEN1" not in raw  # first-rolled-back run not resurrected by the second rollback
-        assert "GEN2" not in raw  # second-rolled-back run reverted
-
-
-@pytest.mark.e2e
-@pytest.mark.asyncio
-async def test_fresh_run_on_hitl_pause_rejected_e2e() -> None:
-    """A fresh run on a HITL-paused thread is rejected (409); the pause stays pending and resumable."""
+async def test_fresh_run_on_hitl_pause_admitted_by_default_e2e() -> None:
+    """Default policy (admit, as LangGraph Platform): fresh input on a paused thread runs and clears the pause."""
     async with httpx.AsyncClient(base_url=_base_url(), timeout=60) as client:
         aid, tid = await _setup(client)
 
@@ -321,23 +254,20 @@ async def test_fresh_run_on_hitl_pause_rejected_e2e() -> None:
         assert await _wait_terminal(client, tid, paused.json()["run_id"]) == "interrupted"
         assert (await client.get(f"/threads/{tid}/state")).json().get("interrupts")  # pending interrupt present
 
-        # A fresh rollback run must be REFUSED, not silently consume the pause.
+        # Fresh input is admitted: the graph restarts from __start__ and the pending interrupt is dropped.
         b = await client.post(f"/threads/{tid}/runs", json=_marker_body(aid, "NEW", "rollback"))
-        assert b.status_code == 409
+        b.raise_for_status()
+        assert await _wait_terminal(client, tid, b.json()["run_id"]) == "success"
 
-        # The pause is intact and still resumable via a command.
-        assert (await client.get(f"/threads/{tid}/state")).json().get("interrupts")  # still pending, not consumed
-        resume = await client.post(f"/threads/{tid}/runs", json={"assistant_id": aid, "command": {"resume": "ok"}})
-        resume.raise_for_status()
-        assert await _wait_terminal(client, tid, resume.json()["run_id"]) == "success"
-        raw = str((await client.get(f"/threads/{tid}/state")).json().get("values", {}).get("messages", []))
-        assert "PAUSED" in raw  # the original paused turn ran to completion after resume
+        state = (await client.get(f"/threads/{tid}/state")).json()
+        assert not state.get("interrupts")  # the pause was consumed, not preserved
+        assert "NEW" in str(state.get("values", {}).get("messages", []))
 
 
 @pytest.mark.e2e
 @pytest.mark.asyncio
-async def test_queued_run_not_promoted_onto_hitl_pause_e2e() -> None:
-    """A run enqueued BEFORE a thread pauses on interrupt() must not be auto-promoted onto the pause."""
+async def test_queued_run_promoted_onto_hitl_pause_by_default_e2e() -> None:
+    """Default policy: a run enqueued before the thread paused is promoted onto the pause once it frees."""
     async with httpx.AsyncClient(base_url=_base_url(), timeout=60) as client:
         aid, tid = await _setup(client)
 
@@ -351,22 +281,11 @@ async def test_queued_run_not_promoted_onto_hitl_pause_e2e() -> None:
         assert b.json()["status"] == "pending"  # internal 'queued'
 
         assert await _wait_terminal(client, tid, a.json()["run_id"]) == "interrupted"
-        await asyncio.sleep(1.5)  # let finalize-dispatch + the stranded sweep run
-
-        # B must NOT have been promoted onto the pause; the pending interrupt is intact
-        # (still parked: wire status stays 'pending' and no output has been produced).
-        parked = (await client.get(f"/threads/{tid}/runs/{rid_b}")).json()
-        assert parked["status"] == "pending"
-        assert parked["output"] is None
-        assert (await client.get(f"/threads/{tid}/state")).json().get("interrupts")  # pause preserved
-
-        # After resuming, the pause clears and the parked run finally executes (not lost).
-        resume = await client.post(f"/threads/{tid}/runs", json={"assistant_id": aid, "command": {"resume": "ok"}})
-        resume.raise_for_status()
-        assert await _wait_terminal(client, tid, resume.json()["run_id"]) == "success"
+        # A's finalize promotes B onto the paused thread; B's fresh input discards the pause.
         assert await _wait_terminal(client, tid, rid_b) == "success"
-        raw = str((await client.get(f"/threads/{tid}/state")).json().get("values", {}).get("messages", []))
-        assert "QUEUED-B" in raw  # parked run ran after the pause resolved — parked, not consumed or lost
+        state = (await client.get(f"/threads/{tid}/state")).json()
+        assert not state.get("interrupts")
+        assert "QUEUED-B" in str(state.get("values", {}).get("messages", []))
 
 
 @pytest.mark.e2e

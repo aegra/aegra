@@ -12,6 +12,7 @@ from uuid import uuid4
 import structlog
 from asgi_correlation_id import correlation_id
 from fastapi import HTTPException
+from redis import RedisError
 from sqlalchemy import ColumnElement, case, func, literal_column, or_, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -25,7 +26,7 @@ from aegra_api.models.enums import MULTITASK_DEFAULT
 from aegra_api.models.run_job import RunBehavior, RunExecution, RunIdentity, RunJob
 from aegra_api.services.executor import executor
 from aegra_api.services.langgraph_service import get_langgraph_service
-from aegra_api.services.run_status import set_thread_status
+from aegra_api.services.run_status import ACTIVE_RUN_STATES, QUEUED_RUN_STATE, has_live_executor, set_thread_status
 from aegra_api.services.streaming_service import streaming_service
 from aegra_api.settings import settings
 from aegra_api.utils.assistants import resolve_assistant_id
@@ -86,13 +87,6 @@ async def _validate_resume_command(
                     break
         if status != "interrupted":
             raise HTTPException(400, "Cannot resume: thread is not in interrupted state")
-        if command is not None and command.get("resume") is None:
-            # map_command drops a None resume; the run would crash the pause to 'error'.
-            raise HTTPException(
-                409,
-                "Thread is paused on a human-in-the-loop interrupt; resume it with "
-                "a non-null command={'resume': ...} payload",
-            )
         return
     if (
         thread is not None
@@ -273,11 +267,7 @@ def _is_resume_run(run: RunORM) -> bool:
 
 
 # A run holds (or is queued for) its thread while in one of these states.
-_ACTIVE_RUN_STATUSES = ("running", "pending", "queued")
-# Only an actually-dispatched run has a task/worker to cancel.
-_CANCELLABLE_RUN_STATUSES = ("running", "pending")
-# Terminal states a rollback may target when no run is currently active.
-_TERMINAL_RUN_STATUSES = ("interrupted", "error", "success")
+_ACTIVE_RUN_STATUSES = (*ACTIVE_RUN_STATES, QUEUED_RUN_STATE)
 
 
 async def _apply_multitask_strategy(
@@ -305,25 +295,10 @@ async def _apply_multitask_strategy(
     if is_resume:
         # A resume skips merely-queued runs (it alone can clear a HITL pause) but serializes
         # behind running/pending ones, which under the lock also rejects a second concurrent resume.
-        if any(run.status in _CANCELLABLE_RUN_STATUSES for run in active):
+        if any(run.status in ACTIVE_RUN_STATES for run in active):
             raise HTTPException(status_code=409, detail=f"Thread '{thread_id}' already has an active run")
         return True, [], None
     if not active:
-        # Idle thread: rollback repairs a broken last turn (an interrupted/errored run can
-        # leave an orphaned tool call) but never silently reverts a cleanly completed one.
-        if strategy == "rollback":
-            last = await session.scalar(
-                select(RunORM)
-                .where(
-                    RunORM.thread_id == thread_id,
-                    RunORM.user_id == user.identity,
-                    RunORM.status.in_(_TERMINAL_RUN_STATUSES),
-                )
-                .order_by(RunORM.created_at.desc())
-                .limit(1)
-            )
-            target = last.run_id if last is not None and last.status != "success" else None
-            return True, [], target
         return True, [], None
 
     if strategy == "reject":
@@ -333,16 +308,19 @@ async def _apply_multitask_strategy(
 
     # interrupt / rollback: abandon the active run and everything queued behind it. The new run
     # starts now unless a pre-empted run is still executing, then as soon as it exits.
+    # cancel_ids lists every pre-empted run: the caller stops its task (if any) and closes
+    # its stream after commit.
     cancel_ids: list[str] = []
     rollback_target: str | None = None
     wait_for_running = False
+    now = datetime.now(UTC)
     for run in active:
-        if run.status == "queued":
+        cancel_ids.append(run.run_id)
+        if run.status == QUEUED_RUN_STATE:
             # Parked behind the active run with no task/broker to cancel: drop it from
             # the queue so it does not execute after the new run (stale double-text).
             run.status = "interrupted"
-            continue
-        if run.status not in _CANCELLABLE_RUN_STATUSES:
+            run.updated_at = now
             continue
         if _is_resume_run(run):
             # Cancelling an in-flight resume and running fresh input would land the new
@@ -352,21 +330,20 @@ async def _apply_multitask_strategy(
                 detail="Thread has a resume in flight for a pending interrupt; "
                 "wait for it to settle instead of pre-empting it",
             )
-        if run.status == "running":
-            # Executing: its task must be cancelled, and the new run waits for it to exit so
-            # two graphs never write the same thread's checkpoints at once.
-            cancel_ids.append(run.run_id)
-            wait_for_running = True
-        # (pending: no graph is running yet, and the row lock taken above means its start
-        # CAS fails once this commits — nothing to cancel, nothing to wait for.)
-        run.status = "interrupted"
-        # Release the lease with the pre-emption so a prod worker whose pub/sub cancel
-        # is lost detects lease loss on its next heartbeat and self-cancels the job.
-        run.claimed_by = None
-        run.lease_expires_at = None
         # The rollback target is the run that actually executed, never a queued one.
         if strategy == "rollback" and rollback_target is None:
             rollback_target = run.run_id
+        if run.status == "running" and has_live_executor(run, now=now):
+            # Its task keeps the row ``running`` until it has exited (its own finalize writes
+            # ``interrupted``), so nothing can promote onto the thread while it still writes.
+            wait_for_running = True
+            continue
+        # Never started (its start CAS fails once this commits) or its executor is gone:
+        # nothing can still write for it, so it is interrupted here and nobody waits for it.
+        run.status = "interrupted"
+        run.claimed_by = None
+        run.lease_expires_at = None
+        run.updated_at = now
     return not wait_for_running, cancel_ids, rollback_target
 
 
@@ -428,20 +405,22 @@ async def _prepare_run(
     if assistant.graph_id not in available_graphs:
         raise HTTPException(404, f"Graph '{assistant.graph_id}' not found for assistant")
 
-    # Mark thread as busy and update metadata
     await update_thread_metadata(
         session, thread_id, assistant.assistant_id, assistant.graph_id, user_id=user.identity, input_data=request.input
     )
-    await set_thread_status(session, thread_id, "busy")
 
     # Resolve double-texting: run now, queue behind the active run, reject, or
     # interrupt/rollback the active run. None defaults to enqueue.
     strategy = request.multitask_strategy or MULTITASK_DEFAULT
-    is_resume = bool(request.command and request.command.get("resume") is not None)
+    is_resume = request.command is not None and "resume" in request.command
     should_run, cancel_ids, rollback_target = await _apply_multitask_strategy(
         session, thread_id, strategy, user, is_resume=is_resume
     )
     run_status = initial_status if should_run else "queued"
+    if should_run:
+        # A parked run leaves the thread status alone: it is busy with the run ahead of it, or
+        # paused on an interrupt that a queued run must not look like it has cleared.
+        await set_thread_status(session, thread_id, "busy")
 
     # rollback only makes sense for a fresh dict-input run (not a resume/command
     # or an explicit client checkpoint, which target state themselves).
@@ -511,10 +490,15 @@ async def _prepare_run(
 
     run = Run.model_validate(run_orm)
 
-    # Cancel after commit: the cancelled runs' finalize takes the thread lock too, loses the
-    # ownership CAS (the gate wrote 'interrupted') and dispatches the run parked just below.
+    # Cancel after commit: a live run's finalize takes the thread lock too, writes ``interrupted``
+    # and dispatches the run parked just below. A run that never gets a task has nobody else to
+    # end its stream, so every pre-empted run's stream is closed here.
     for cancelled_id in cancel_ids:
         await streaming_service.cancel_run(cancelled_id)
+        try:
+            await streaming_service.signal_run_cancelled(cancelled_id)
+        except (RedisError, OSError):
+            logger.exception("Failed to close a pre-empted run's stream", run_id=cancelled_id)
 
     if should_run:
         await executor.submit(job)

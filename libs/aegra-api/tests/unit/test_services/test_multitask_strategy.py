@@ -4,8 +4,8 @@ Covers the admission gate, queued-run dispatch and the run_status guards the gat
 """
 
 import asyncio
-from collections.abc import AsyncIterator, Callable
-from datetime import datetime
+from collections.abc import AsyncIterator
+from datetime import UTC, datetime, timedelta
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -31,21 +31,23 @@ from aegra_api.settings import settings
 _USER = User(identity="test-user")
 
 
-def _fake_run(run_id: str = "run-1", status: str = "running") -> MagicMock:
+def _fake_run(run_id: str = "run-1", status: str = "running", *, live: bool = False) -> MagicMock:
+    """A run row as dev mode stores it (never claimed); ``live`` models a worker holding a valid lease."""
     run = MagicMock()
     run.run_id = run_id
     run.status = status
+    run.claimed_by = "worker-1" if live else None
+    run.lease_expires_at = datetime.now(UTC) + timedelta(minutes=5) if live else None
     return run
 
 
-def _session_with_active(active: list[MagicMock], *, terminal_run: MagicMock | None = None) -> AsyncMock:
-    """Mock session whose active-run query returns ``active``; ``terminal_run`` is the row the
-    idle-thread rollback lookup returns (None means no terminal run exists)."""
+def _session_with_active(active: list[MagicMock]) -> AsyncMock:
+    """Mock session whose active-run query returns ``active``."""
     session = AsyncMock()
     result = MagicMock()
     result.all.return_value = active
     session.scalars = AsyncMock(return_value=result)
-    session.scalar = AsyncMock(return_value=terminal_run)
+    session.scalar = AsyncMock(return_value=None)
     session.execute = AsyncMock()
     session.delete = AsyncMock()
     return session
@@ -93,21 +95,36 @@ class TestApplyMultitaskStrategy:
         session.delete.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_interrupt_marks_active_and_returns_cancel_id(self) -> None:
-        active = _fake_run(status="running")
+    async def test_interrupt_of_live_run_parks_behind_it(self) -> None:
+        active = _fake_run(status="running", live=True)
         session = _session_with_active([active])
 
         should_run, cancel_ids, target = await _apply_multitask_strategy(session, "thread-1", "interrupt", _USER)
 
         assert should_run is False  # parked until the executing run's task has exited
         assert cancel_ids == ["run-1"]  # caller cancels post-commit to avoid deadlock
-        assert active.status == "interrupted"
+        assert active.status == "running"  # its own finalize writes interrupted once it has stopped
+        assert active.claimed_by == "worker-1"  # the lease stays with the worker still executing it
         assert target is None  # interrupt does not revert checkpoints
         session.delete.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_rollback_marks_active_and_returns_target_without_delete(self) -> None:
+    async def test_interrupt_of_running_run_without_executor_starts_immediately(self) -> None:
+        # Dev mode with no task in this process: nothing can still write for the run, so it
+        # is interrupted here and the new run need not wait.
         active = _fake_run(status="running")
+        session = _session_with_active([active])
+
+        should_run, cancel_ids, target = await _apply_multitask_strategy(session, "thread-1", "interrupt", _USER)
+
+        assert should_run is True
+        assert cancel_ids == ["run-1"]  # still signalled, to close any attached stream
+        assert active.status == "interrupted"
+        assert target is None
+
+    @pytest.mark.asyncio
+    async def test_rollback_marks_target_and_parks_without_delete(self) -> None:
+        active = _fake_run(status="running", live=True)
         session = _session_with_active([active])
 
         should_run, cancel_ids, target = await _apply_multitask_strategy(session, "thread-1", "rollback", _USER)
@@ -115,74 +132,57 @@ class TestApplyMultitaskStrategy:
         assert should_run is False  # parked: the fork waits for the target's task to stop writing
         assert cancel_ids == ["run-1"]
         assert target == "run-1"  # worker forks the new run from before this run
-        assert active.status == "interrupted"
+        assert active.status == "running"
         session.delete.assert_not_called()  # rollback reverts via fork, never deletes
 
     @pytest.mark.asyncio
-    async def test_rollback_no_active_reverts_broken_terminal_run(self) -> None:
-        # #191: the dirtying run was already interrupted to a terminal state — repair it.
-        session = _session_with_active([], terminal_run=_fake_run("old-interrupted", "interrupted"))
+    async def test_rollback_on_idle_thread_runs_fresh_without_target(self) -> None:
+        # Like LangGraph Platform, rollback only reverts an in-flight run: an idle thread's last
+        # turn is left alone even when it ended interrupted or errored.
+        session = _session_with_active([])
 
         should_run, cancel_ids, target = await _apply_multitask_strategy(session, "thread-1", "rollback", _USER)
 
         assert should_run is True
         assert cancel_ids == []
-        assert target == "old-interrupted"
-
-    @pytest.mark.asyncio
-    async def test_rollback_no_active_ignores_successful_last_run(self) -> None:
-        # A cleanly completed last turn must NOT be silently reverted (no undo-last-turn footgun).
-        session = _session_with_active([], terminal_run=_fake_run("done", "success"))
-
-        should_run, cancel_ids, target = await _apply_multitask_strategy(session, "thread-1", "rollback", _USER)
-
-        assert should_run is True
         assert target is None
-
-    @pytest.mark.asyncio
-    async def test_rollback_no_prior_run_has_no_target(self) -> None:
-        session = _session_with_active([], terminal_run=None)
-
-        should_run, cancel_ids, target = await _apply_multitask_strategy(session, "thread-1", "rollback", _USER)
-
-        assert should_run is True
-        assert target is None
+        session.scalar.assert_not_called()  # no lookup of prior terminal runs
 
     @pytest.mark.asyncio
     async def test_queued_run_is_dropped_on_interrupt(self) -> None:
-        # interrupt/rollback abandons in-flight work: a parked 'queued' double-text is
-        # dropped from the queue (marked interrupted) but has no task, so no cancel id.
+        # interrupt/rollback abandons in-flight work: a parked 'queued' double-text is dropped
+        # from the queue (marked interrupted); it has no task, but its stream still gets closed.
         queued = _fake_run(run_id="queued-1", status="queued")
         session = _session_with_active([queued])
 
         should_run, cancel_ids, target = await _apply_multitask_strategy(session, "thread-1", "interrupt", _USER)
 
         assert should_run is True
-        assert cancel_ids == []
+        assert cancel_ids == ["queued-1"]
         assert queued.status == "interrupted"
 
     @pytest.mark.asyncio
     async def test_interrupt_drops_queued_behind_active(self) -> None:
-        running = _fake_run(run_id="r1", status="running")
+        running = _fake_run(run_id="r1", status="running", live=True)
         queued = _fake_run(run_id="q1", status="queued")
         session = _session_with_active([running, queued])
 
         should_run, cancel_ids, target = await _apply_multitask_strategy(session, "thread-1", "interrupt", _USER)
 
         assert should_run is False  # r1 is executing: wait for it
-        assert cancel_ids == ["r1"]  # only the running run holds a task to cancel
-        assert running.status == "interrupted"
+        assert cancel_ids == ["r1", "q1"]  # r1's task is stopped; q1 only has a stream to close
+        assert running.status == "running"  # still occupies the thread until its task exits
         assert queued.status == "interrupted"  # the stale double-text is dropped, not run later
 
     @pytest.mark.asyncio
     async def test_rollback_targets_running_not_queued(self) -> None:
-        running = _fake_run(run_id="r1", status="running")
+        running = _fake_run(run_id="r1", status="running", live=True)
         queued = _fake_run(run_id="q1", status="queued")
         session = _session_with_active([running, queued])
 
         _should_run, cancel_ids, target = await _apply_multitask_strategy(session, "thread-1", "rollback", _USER)
 
-        assert cancel_ids == ["r1"]
+        assert cancel_ids == ["r1", "q1"]
         assert target == "r1"  # revert the run that executed, never a queued one
         assert queued.status == "interrupted"
 
@@ -196,21 +196,21 @@ class TestApplyMultitaskStrategy:
         should_run, cancel_ids, target = await _apply_multitask_strategy(session, "thread-1", "interrupt", _USER)
 
         assert should_run is True
-        assert cancel_ids == []
+        assert cancel_ids == ["p1"]  # nothing to stop, but a client streaming it must be released
         assert target is None
         assert pending.status == "interrupted"
         assert pending.claimed_by is None
 
     @pytest.mark.asyncio
     async def test_rollback_waits_when_any_preempted_run_is_executing(self) -> None:
-        running = _fake_run(run_id="r1", status="running")
+        running = _fake_run(run_id="r1", status="running", live=True)
         pending = _fake_run(run_id="p1", status="pending")
         session = _session_with_active([running, pending])
 
         should_run, cancel_ids, target = await _apply_multitask_strategy(session, "thread-1", "rollback", _USER)
 
         assert should_run is False
-        assert cancel_ids == ["r1"]  # the pending one needs no cancel, its start CAS fails
+        assert cancel_ids == ["r1", "p1"]  # p1 cannot start (its start CAS fails); its stream is closed
         assert target == "r1"
         assert pending.status == "interrupted"
 
@@ -421,9 +421,10 @@ class TestDispatchNextForThread:
         assert ex.submitted == []
 
     @pytest.mark.asyncio
-    async def test_noop_when_thread_interrupted(self) -> None:
+    async def test_noop_when_thread_interrupted_under_reject(self, monkeypatch: pytest.MonkeyPatch) -> None:
         # side_effect is padded with the occupying + queued lookups so that removing the HITL
         # guard fails on `submitted == []`, not on StopAsyncIteration.
+        monkeypatch.setattr(settings.multitask, "MULTITASK_PAUSED_THREAD_POLICY", "reject")
         ex = _RecordingExecutor()
         queued = _fake_run(run_id="queued-1", status="queued")
         session = AsyncMock()
@@ -534,10 +535,10 @@ class TestDispatchNextForThread:
 
 class TestDispatchPausedThreadPolicy:
     @pytest.mark.asyncio
-    async def test_admit_policy_promotes_onto_paused_thread(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        # Under MULTITASK_PAUSED_THREAD_POLICY=admit fresh input is admitted onto a HITL pause at
-        # creation, so promotion must not hold parked runs back either.
-        monkeypatch.setattr(settings.multitask, "MULTITASK_PAUSED_THREAD_POLICY", "admit")
+    async def test_default_admit_policy_promotes_onto_paused_thread(self) -> None:
+        # Under the default MULTITASK_PAUSED_THREAD_POLICY=admit fresh input is admitted onto a
+        # HITL pause at creation, so promotion must not hold parked runs back either.
+        assert settings.multitask.MULTITASK_PAUSED_THREAD_POLICY == "admit"
         ex = _RecordingExecutor()
         queued = _fake_run(run_id="queued-1", status="queued")
         session = AsyncMock()
@@ -594,7 +595,7 @@ class TestShutdownBarrier:
 
 
 class _FakeSnap:
-    """Minimal LangGraph StateSnapshot stand-in for rollback-base resolution."""
+    """Minimal CheckpointTuple stand-in for rollback-base resolution."""
 
     def __init__(self, run_id: str | None, checkpoint_id: str, parent_checkpoint_id: str | None = None) -> None:
         self.metadata = {"run_id": run_id} if run_id is not None else {}
@@ -604,16 +605,17 @@ class _FakeSnap:
         )
 
 
-def _history(*snaps: _FakeSnap) -> Callable[..., AsyncIterator[_FakeSnap]]:
-    # Mirror aget_state_history's keyword-only ``limit`` and its SQL LIMIT semantics
-    # so the scan-cap / fail-loud path can be exercised deterministically.
-    async def _gen(config: object, *, limit: int | None = None) -> AsyncIterator[_FakeSnap]:
-        for i, s in enumerate(snaps):
-            if limit is not None and i >= limit:
-                return
-            yield s
+def _history(*snaps: _FakeSnap) -> MagicMock:
+    """A graph whose checkpointer lists ``snaps`` (newest first) honouring the metadata ``filter``."""
 
-    return _gen
+    async def _alist(config: object, *, filter: dict[str, Any] | None = None) -> AsyncIterator[_FakeSnap]:
+        for s in snaps:
+            if filter is None or all(s.metadata.get(k) == v for k, v in filter.items()):
+                yield s
+
+    graph = MagicMock()
+    graph.checkpointer.alist = _alist
+    return graph
 
 
 class TestResolveRollbackBase:
@@ -626,10 +628,21 @@ class TestResolveRollbackBase:
 
     @pytest.mark.asyncio
     async def test_returns_parent_of_oldest_target_checkpoint(self) -> None:
-        graph = MagicMock()
         # target wrote cp-3 (parent cp-2) and cp-2 (input, parent cp-1=base); cp-1 is a prior run.
-        graph.aget_state_history = _history(
+        graph = _history(
             _FakeSnap("target", "cp-3", parent_checkpoint_id="cp-2"),
+            _FakeSnap("target", "cp-2", parent_checkpoint_id="cp-1"),
+            _FakeSnap("prev", "cp-1", parent_checkpoint_id="cp-0"),
+        )
+        assert await self._resolve(graph, "target") == "cp-1"
+
+    @pytest.mark.asyncio
+    async def test_filters_by_target_run_id_without_a_window(self) -> None:
+        # A long thread: the target's rows sit behind thousands of newer checkpoints. The
+        # checkpointer filter finds them directly, so no scan cap can make the rollback fail.
+        newer = [_FakeSnap("later", f"cp-n{i}", parent_checkpoint_id=f"cp-n{i - 1}") for i in range(2000, 0, -1)]
+        graph = _history(
+            *newer,
             _FakeSnap("target", "cp-2", parent_checkpoint_id="cp-1"),
             _FakeSnap("prev", "cp-1", parent_checkpoint_id="cp-0"),
         )
@@ -639,8 +652,7 @@ class TestResolveRollbackBase:
     async def test_second_rollback_anchors_to_lineage_not_sibling(self) -> None:
         # P -> A(rolled back) -> B(forked from cp-P): history DESC interleaves the abandoned A
         # branch, and a second rollback targeting B must fork from cp-P (B's parent), not cp-A.
-        graph = MagicMock()
-        graph.aget_state_history = _history(
+        graph = _history(
             _FakeSnap("B", "cp-B", parent_checkpoint_id="cp-P"),
             _FakeSnap("A", "cp-A", parent_checkpoint_id="cp-P"),
             _FakeSnap("P", "cp-P", parent_checkpoint_id=None),
@@ -651,8 +663,7 @@ class TestResolveRollbackBase:
     async def test_retry_skips_own_partial_checkpoints(self) -> None:
         # Retry of crashed run B (target still A): B's own newer partial must be skipped;
         # base is A's oldest checkpoint's parent (cp-P), never B's partial.
-        graph = MagicMock()
-        graph.aget_state_history = _history(
+        graph = _history(
             _FakeSnap("B", "cp-Bpart", parent_checkpoint_id="cp-P"),  # newer, current run's own partial
             _FakeSnap("A", "cp-A2", parent_checkpoint_id="cp-A1"),
             _FakeSnap("A", "cp-A1", parent_checkpoint_id="cp-P"),
@@ -663,8 +674,7 @@ class TestResolveRollbackBase:
     @pytest.mark.asyncio
     async def test_first_run_target_has_no_parent(self) -> None:
         # Target was the thread's first run: its oldest checkpoint has no parent -> None.
-        graph = MagicMock()
-        graph.aget_state_history = _history(
+        graph = _history(
             _FakeSnap("target", "cp-1", parent_checkpoint_id="cp-0"),
             _FakeSnap("target", "cp-0", parent_checkpoint_id=None),
         )
@@ -672,73 +682,24 @@ class TestResolveRollbackBase:
 
     @pytest.mark.asyncio
     async def test_returns_none_when_target_has_no_checkpoints(self) -> None:
-        graph = MagicMock()
-        graph.aget_state_history = _history(_FakeSnap("other", "cp-1", parent_checkpoint_id=None))
+        graph = _history(_FakeSnap("other", "cp-1", parent_checkpoint_id=None))
         assert await self._resolve(graph, "target") is None
 
     @pytest.mark.asyncio
     async def test_returns_none_on_empty_history(self) -> None:
-        graph = MagicMock()
-        graph.aget_state_history = _history()
-        assert await self._resolve(graph, "target") is None
+        assert await self._resolve(_history(), "target") is None
 
     @pytest.mark.asyncio
     async def test_ignores_straggler_from_cancelled_target(self) -> None:
         # The cancelled target writes a late 'straggler' checkpoint after the new run forked;
         # the base must still be the target's original oldest parent (cp-P), not the straggler's.
-        graph = MagicMock()
-        graph.aget_state_history = _history(
+        graph = _history(
             _FakeSnap("A", "cp-straggler", parent_checkpoint_id="cp-Bnew"),  # newest: A's late write
             _FakeSnap("B", "cp-Bnew", parent_checkpoint_id="cp-P"),  # the new run's own checkpoint
             _FakeSnap("A", "cp-A1", parent_checkpoint_id="cp-P"),  # A's original (oldest) checkpoint
             _FakeSnap("P", "cp-P", parent_checkpoint_id=None),
         )
         assert await self._resolve(graph, "A") == "cp-P"
-
-    @pytest.mark.asyncio
-    async def test_raises_when_target_block_exceeds_scan_cap(self) -> None:
-        # Pathological: the target run has more checkpoints than the scan cap and the
-        # window never exits its block. Fail loud rather than fork a mid-turn checkpoint.
-        graph = MagicMock()
-        graph.aget_state_history = _history(
-            _FakeSnap("target", "cp-3", parent_checkpoint_id="cp-2"),
-            _FakeSnap("target", "cp-2", parent_checkpoint_id="cp-1"),
-            _FakeSnap("target", "cp-1", parent_checkpoint_id="cp-0"),
-        )
-        with (
-            patch("aegra_api.services.run_executor._ROLLBACK_HISTORY_LIMIT", 3),
-            pytest.raises(RuntimeError, match="exceeds 3 checkpoints"),
-        ):
-            await self._resolve(graph, "target")
-
-    @pytest.mark.asyncio
-    async def test_raises_when_cap_ends_on_non_target_row(self) -> None:
-        # A full window whose oldest in-window target row still has a parent may be mid-run
-        # (older target rows lie beyond it), so resolution must fail loud instead of forking.
-        graph = MagicMock()
-        graph.aget_state_history = _history(
-            _FakeSnap("target", "cp-9", parent_checkpoint_id="cp-8"),
-            _FakeSnap("sibling", "cp-8", parent_checkpoint_id="cp-7"),
-            _FakeSnap("sibling", "cp-7", parent_checkpoint_id="cp-6"),
-            _FakeSnap("target", "cp-6", parent_checkpoint_id="cp-5"),  # older target beyond the cap
-        )
-        with (
-            patch("aegra_api.services.run_executor._ROLLBACK_HISTORY_LIMIT", 3),
-            pytest.raises(RuntimeError, match="exceeds 3 checkpoints"),
-        ):
-            await self._resolve(graph, "target")
-
-    @pytest.mark.asyncio
-    async def test_first_run_at_scan_cap_returns_none_not_raise(self) -> None:
-        # Target is the thread's first run and fills the scan cap; its oldest checkpoint has no
-        # parent, so it is provably the root — return None (fork fresh), not a fail-loud error.
-        graph = MagicMock()
-        graph.aget_state_history = _history(
-            _FakeSnap("target", "cp-1", parent_checkpoint_id="cp-0"),
-            _FakeSnap("target", "cp-0", parent_checkpoint_id=None),  # root, no parent
-        )
-        with patch("aegra_api.services.run_executor._ROLLBACK_HISTORY_LIMIT", 2):
-            assert await self._resolve(graph, "target") is None
 
 
 class TestRollbackForkBase:
@@ -756,15 +717,13 @@ class TestRollbackForkBase:
     @pytest.mark.asyncio
     async def test_skips_revert_when_target_succeeded(self) -> None:
         # A non-empty history would resolve to cp-0; base is None only because we skipped.
-        graph = MagicMock()
-        graph.aget_state_history = _history(_FakeSnap("target", "cp-1", parent_checkpoint_id="cp-0"))
+        graph = _history(_FakeSnap("target", "cp-1", parent_checkpoint_id="cp-0"))
         with patch("aegra_api.services.run_executor.get_run_status", new=AsyncMock(return_value="success")):
             assert await _rollback_fork_base(graph, self._job()) is None
 
     @pytest.mark.asyncio
     async def test_resolves_base_when_target_not_success(self) -> None:
-        graph = MagicMock()
-        graph.aget_state_history = _history(
+        graph = _history(
             _FakeSnap("target", "cp-1", parent_checkpoint_id="cp-0"),
             _FakeSnap("target", "cp-0", parent_checkpoint_id="cp-prev"),
         )
@@ -796,9 +755,18 @@ class TestValidateResumeCommand:
     """Admission-time guard tying a run's input mode to the thread's interrupt state."""
 
     @pytest.mark.asyncio
-    async def test_fresh_input_on_paused_thread_rejected_409(self) -> None:
-        # A plain fresh-input run on a HITL-paused thread would silently consume the
-        # pending interrupt — it must be rejected so the pause stays resumable.
+    async def test_fresh_input_on_paused_thread_admitted_by_default(self) -> None:
+        # LangGraph Platform admits fresh input on a paused thread (the graph restarts from
+        # __start__ and the pending interrupt is discarded); so does the default policy.
+        session = _session_with_thread("interrupted")
+        await _validate_resume_command(session, "thread-1", None, _USER)  # no raise
+
+    @pytest.mark.asyncio
+    async def test_fresh_input_on_paused_thread_rejected_409_under_reject(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Opt-in for approval flows: a stray message must not consume the pending interrupt.
+        monkeypatch.setattr(settings.multitask, "MULTITASK_PAUSED_THREAD_POLICY", "reject")
         session = _session_with_thread("interrupted")
 
         with pytest.raises(HTTPException) as exc:
@@ -839,19 +807,20 @@ class TestValidateResumeCommand:
         session.scalar.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_null_resume_command_on_paused_thread_rejected(self) -> None:
-        # command={'resume': None} must NOT slip past as a state op and error out on a paused
-        # thread (flipping it to 'error'); it is gated like fresh input -> 409, pause intact.
+    async def test_null_resume_command_on_paused_thread_passes_validation(self) -> None:
+        # ``None`` is a valid resume value at the API boundary, as on main; the thread must
+        # still be paused for it, like any other resume.
         session = _session_with_thread("interrupted")
-        with pytest.raises(HTTPException) as exc:
-            await _validate_resume_command(session, "thread-1", {"resume": None}, _USER)
-        assert exc.value.status_code == 409
+        await _validate_resume_command(session, "thread-1", {"resume": None}, _USER)  # no raise
 
-    @pytest.mark.parametrize("command", [{"update": {}}, {"goto": []}, {"resume": None, "update": {}}])
+    @pytest.mark.parametrize("command", [{"update": {}}, {"goto": []}])
     @pytest.mark.asyncio
-    async def test_empty_container_command_on_paused_thread_rejected(self, command: dict[str, object]) -> None:
+    async def test_empty_container_command_on_paused_thread_rejected_under_reject(
+        self, command: dict[str, object], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         # Empty update/goto produce no LangGraph writes and would crash a paused thread to
         # 'error'; truthiness classification routes them to the 409 gate, keeping the pause.
+        monkeypatch.setattr(settings.multitask, "MULTITASK_PAUSED_THREAD_POLICY", "reject")
         session = _session_with_thread("interrupted")
         with pytest.raises(HTTPException) as exc:
             await _validate_resume_command(session, "thread-1", command, _USER)
@@ -1025,22 +994,46 @@ class TestInterruptUnownedRunDispatch:
         dispatched.assert_not_awaited()
 
 
-class TestGatePreemptionLeaseClearing:
+class TestGatePreemptionOccupancy:
+    """A pre-empted run keeps the thread occupied exactly as long as something may execute it."""
+
     @pytest.mark.asyncio
-    async def test_interrupt_clears_lease_of_preempted_run(self) -> None:
-        active = _fake_run(run_id="run-1", status="running")
+    async def test_live_worker_run_keeps_row_and_lease(self) -> None:
+        active = _fake_run(run_id="run-1", status="running", live=True)
         active.execution_params = {"execution": {"command": None}}
         session = _session_with_active([active])
 
         should_run, cancel_ids, _ = await _apply_multitask_strategy(session, "thread-1", "interrupt", _USER)
 
         assert should_run is False  # parked until run-1's task exits
+        assert cancel_ids == ["run-1"]  # the stop request goes through the broker
+        assert active.status == "running"
+        assert active.claimed_by == "worker-1"
+
+    @pytest.mark.asyncio
+    async def test_expired_lease_run_is_interrupted_in_place(self) -> None:
+        active = _fake_run(run_id="run-1", status="running", live=True)
+        active.lease_expires_at = datetime.now(UTC) - timedelta(minutes=1)
+        session = _session_with_active([active])
+
+        should_run, cancel_ids, _ = await _apply_multitask_strategy(session, "thread-1", "interrupt", _USER)
+
+        assert should_run is True  # no live owner: the same predicate interrupt_unowned_run uses
         assert cancel_ids == ["run-1"]
         assert active.status == "interrupted"
-        # Lease released with the pre-emption: a worker whose pub/sub cancel is lost
-        # detects lease loss on its next heartbeat and self-cancels the job.
         assert active.claimed_by is None
         assert active.lease_expires_at is None
+
+    @pytest.mark.asyncio
+    async def test_local_task_counts_as_live(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        active = _fake_run(run_id="run-1", status="running")
+        monkeypatch.setitem(active_runs, "run-1", MagicMock())
+        session = _session_with_active([active])
+
+        should_run, _cancel_ids, _ = await _apply_multitask_strategy(session, "thread-1", "interrupt", _USER)
+
+        assert should_run is False
+        assert active.status == "running"
 
 
 class TestGateResumeInFlightProtection:
@@ -1073,7 +1066,7 @@ class TestGateResumeInFlightProtection:
 
     @pytest.mark.asyncio
     async def test_preempting_a_plain_run_is_still_allowed(self) -> None:
-        plain = _fake_run(run_id="run-1", status="running")
+        plain = _fake_run(run_id="run-1", status="running", live=True)
         plain.execution_params = {"execution": {"command": None}}
         session = _session_with_active([plain])
 

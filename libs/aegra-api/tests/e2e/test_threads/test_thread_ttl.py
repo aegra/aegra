@@ -1,4 +1,5 @@
-"""E2E tests for thread TTL: per-thread opt-in and POST /threads/prune.
+"""E2E tests for thread TTL: per-thread opt-in, POST /threads/prune, and the
+server default on threads that runs create.
 
 Deterministic via /threads/prune instead of waiting on the background sweep
 (its loop is unit-tested; the minimum useful interval is minutes). Uses the
@@ -7,10 +8,13 @@ hermetic stress_test graph — no LLM key required.
 
 import asyncio
 import json
+from uuid import uuid4
 
 import httpx
 import pytest
 from langgraph_sdk.client import LangGraphClient
+from sqlalchemy import text
+from sqlalchemy.ext.asyncio import create_async_engine
 
 from aegra_api.settings import settings
 from tests.e2e._utils import elog, get_e2e_client
@@ -97,3 +101,44 @@ async def test_prune_keep_latest_preserves_latest_state() -> None:
     assert counts["checkpoints"] > 1
 
     await client.threads.delete(thread_id)
+
+
+async def _ttl_row(thread_id: str) -> tuple[str, float] | None:
+    """Read a thread's (strategy, ttl_minutes) straight from thread_ttl; the API does not expose it."""
+    engine = create_async_engine(settings.db.database_url)
+    try:
+        async with engine.connect() as conn:
+            result = await conn.execute(
+                text("SELECT strategy, ttl_minutes FROM thread_ttl WHERE thread_id = :tid"), {"tid": thread_id}
+            )
+            row = result.first()
+        return None if row is None else (row.strategy, row.ttl_minutes)
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.e2e
+@pytest.mark.asyncio
+async def test_run_created_threads_get_server_default_ttl() -> None:
+    """Threads that runs create expire under the server default, like threads from POST /threads."""
+    client = get_e2e_client()
+    assistant = await client.assistants.create(graph_id="stress_test", if_exists="do_nothing")
+    assistant_id = assistant["assistant_id"]
+
+    control = await client.threads.create()
+    server_default = await _ttl_row(control["thread_id"])
+    await client.threads.delete(control["thread_id"])
+    if server_default is None:
+        pytest.skip("server under test has no thread TTL default (checkpointer.ttl / AEGRA_THREAD_TTL)")
+
+    kept = await client.runs.create(None, assistant_id, input=_RUN_INPUT, on_completion="keep")
+    await client.runs.join(kept["thread_id"], kept["run_id"])
+    new_thread_id = str(uuid4())
+    await _run_to_completion(client, new_thread_id, assistant_id)
+
+    rows = {thread_id: await _ttl_row(thread_id) for thread_id in (kept["thread_id"], new_thread_id)}
+    elog("thread_ttl rows of run-created threads", {"server_default": server_default, **rows})
+    assert rows == dict.fromkeys(rows, server_default)
+
+    for thread_id in rows:
+        await client.threads.delete(thread_id)

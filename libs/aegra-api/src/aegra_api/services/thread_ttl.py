@@ -1,4 +1,4 @@
-"""Thread TTL: config resolution and expiry sweep (issue #288 phase 2).
+"""Thread TTL: config resolution, new-thread rows, and expiry sweep (issue #288 phase 2).
 
 Threads opt into a TTL via a ``thread_ttl`` row (server default on creation or
 per-thread override). A background sweep claims expired rows with
@@ -20,6 +20,7 @@ from functools import cache
 from typing import Literal
 
 import structlog
+from fastapi import HTTPException
 from psycopg import Error as PsycopgError
 from pydantic import BaseModel, Field
 from sqlalchemy import ColumnElement, Select, delete, select, update
@@ -31,7 +32,7 @@ from aegra_api.core.orm import Run as RunORM
 from aegra_api.core.orm import Thread as ThreadORM
 from aegra_api.core.orm import ThreadTTL as ThreadTTLORM
 from aegra_api.core.orm import _get_session_maker
-from aegra_api.models.threads import MAX_TTL_MINUTES
+from aegra_api.models.threads import MAX_TTL_MINUTES, ThreadTTLSpec
 from aegra_api.observability.metrics import THREAD_TTL_SWEPT
 from aegra_api.settings import settings
 
@@ -144,6 +145,38 @@ def get_thread_ttl_config() -> ThreadTTLConfig | None:
         return ThreadTTLConfig.model_validate(ttl_config)
 
     return None
+
+
+def resolve_thread_ttl_row(thread_id: str, requested: ThreadTTLSpec | None = None) -> ThreadTTLORM | None:
+    """Build the thread_ttl row for a new thread, or None when TTL doesn't apply.
+
+    Server config supplies defaults; a request-level ttl overrides per field.
+    Without server config, an explicit request must carry default_ttl.
+    """
+    config = get_thread_ttl_config()
+    if config is None and requested is None:
+        return None
+
+    requested_ttl = requested.default_ttl if requested else None
+    requested_strategy = requested.strategy if requested else None
+
+    if config is not None:
+        ttl_minutes = requested_ttl if requested_ttl is not None else config.default_ttl
+        strategy = requested_strategy or config.strategy
+    else:
+        if requested_ttl is None:
+            raise HTTPException(422, "ttl.default_ttl is required when no server-side TTL default is configured")
+        ttl_minutes = requested_ttl
+        strategy = requested_strategy or "delete"
+
+    now = datetime.now(UTC)
+    return ThreadTTLORM(
+        thread_id=thread_id,
+        strategy=strategy,
+        ttl_minutes=ttl_minutes,
+        created_at=now,
+        expires_at=now + timedelta(minutes=ttl_minutes),
+    )
 
 
 async def _prune_checkpoint_history(thread_id: str) -> None:

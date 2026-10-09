@@ -10,6 +10,7 @@ from sqlalchemy import Insert
 from aegra_api.api import threads as threads_module
 from aegra_api.core.orm import ThreadTTL as ThreadTTLORM
 from aegra_api.core.orm import get_session as core_get_session
+from aegra_api.services import thread_ttl as thread_ttl_module
 from aegra_api.services.thread_ttl import ThreadTTLConfig
 from tests.fixtures.clients import create_test_app, make_client
 from tests.fixtures.database import DummyScalarResult, DummySessionBase, override_get_session_dep
@@ -38,7 +39,7 @@ def _make_client(session: DummySessionBase) -> TestClient:
 
 @pytest.fixture
 def ttl_config_off(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(threads_module, "get_thread_ttl_config", lambda: None)
+    monkeypatch.setattr(thread_ttl_module, "get_thread_ttl_config", lambda: None)
 
 
 class TestCreateThreadTTL:
@@ -84,7 +85,7 @@ class TestCreateThreadTTL:
 
     def test_create_gets_default_row_when_server_config_enabled(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(
-            threads_module,
+            thread_ttl_module,
             "get_thread_ttl_config",
             lambda: ThreadTTLConfig(default_ttl=100, strategy="delete"),
         )
@@ -101,7 +102,7 @@ class TestCreateThreadTTL:
 
     def test_request_ttl_overrides_server_default_per_field(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(
-            threads_module,
+            thread_ttl_module,
             "get_thread_ttl_config",
             lambda: ThreadTTLConfig(default_ttl=100, strategy="delete"),
         )

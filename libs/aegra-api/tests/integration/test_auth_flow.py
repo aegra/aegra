@@ -5,19 +5,25 @@ These tests validate:
 2. Mock JWT auth handler behavior
 3. User model with custom fields
 4. Noop auth fallback
+5. Custom auth module is loaded once and reused across requests
 """
 
+from __future__ import annotations
+
 import json
+from importlib.machinery import ModuleSpec
 from pathlib import Path
-from unittest.mock import Mock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
-from fastapi import Request
+from fastapi import Depends, FastAPI, Request
+from fastapi.testclient import TestClient
 from starlette.authentication import AuthCredentials, AuthenticationError
 from starlette.requests import HTTPConnection
 
+from aegra_api.core import auth_middleware as auth_middleware_module
 from aegra_api.core.auth_deps import require_auth
-from aegra_api.core.auth_middleware import LangGraphAuthBackend, LangGraphUser
+from aegra_api.core.auth_middleware import LangGraphAuthBackend, LangGraphUser, get_auth_backend
 from aegra_api.models.auth import User
 
 
@@ -291,7 +297,10 @@ class TestUserModelCustomFields:
         mock_request.scope = {}
         mock_request.user = None
 
-        with patch("aegra_api.core.auth_deps.get_auth_backend", return_value=backend):
+        with patch(
+            "aegra_api.core.auth_deps.get_auth_backend_async",
+            AsyncMock(return_value=backend),
+        ):
             # Set scope with authenticated user
             mock_request.scope["user"] = langgraph_user
             mock_request.scope["auth"] = credentials
@@ -331,7 +340,10 @@ class TestUserModelCustomFields:
         mock_request.scope = {}
         mock_request.user = None
 
-        with patch("aegra_api.core.auth_deps.get_auth_backend", return_value=backend):
+        with patch(
+            "aegra_api.core.auth_deps.get_auth_backend_async",
+            AsyncMock(return_value=backend),
+        ):
             user = await require_auth(mock_request)
 
             # Verify user is authenticated and custom fields are present
@@ -348,3 +360,101 @@ class TestUserModelCustomFields:
             # Verify request scope was set
             assert mock_request.scope["user"] is not None
             assert mock_request.scope["auth"] is not None
+
+
+_CACHED_AUTH_SOURCE = """\
+from langgraph_sdk import Auth
+
+auth = Auth()
+
+
+@auth.authenticate
+async def authenticate(headers: dict) -> dict:
+    return {
+        "identity": "cached-user",
+        "display_name": "Cached User",
+        "is_authenticated": True,
+        "permissions": ["read"],
+        "team_id": "team-cache",
+    }
+"""
+
+
+def _count_auth_file_specs(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """Record each importlib spec created for a custom auth file."""
+    real_spec_from_file_location = auth_middleware_module.importlib.util.spec_from_file_location
+    locations: list[str] = []
+
+    def counting_spec(
+        name: str,
+        location: str | None = None,
+        *args: object,
+        **kwargs: object,
+    ) -> ModuleSpec | None:
+        if location is not None:
+            locations.append(location)
+        return real_spec_from_file_location(name, location, *args, **kwargs)
+
+    monkeypatch.setattr(
+        auth_middleware_module.importlib.util,
+        "spec_from_file_location",
+        counting_spec,
+    )
+    return locations
+
+
+class TestAuthModuleCachedAcrossRequests:
+    """Auth handler behavior must stay identical while the module loads once."""
+
+    @pytest.fixture
+    def cached_auth_project(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+        """Project root with aegra.json pointing at a custom auth module."""
+        auth_file = tmp_path / "cached_auth.py"
+        auth_file.write_text(_CACHED_AUTH_SOURCE)
+        (tmp_path / "aegra.json").write_text(
+            json.dumps(
+                {
+                    "graphs": {"test": "./test.py:graph"},
+                    "auth": {"path": "./cached_auth.py:auth"},
+                }
+            )
+        )
+        monkeypatch.chdir(tmp_path)
+        return auth_file
+
+    @pytest.mark.asyncio
+    async def test_require_auth_loads_module_once_and_returns_same_user(
+        self, cached_auth_project: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Several require_auth calls import the auth file once and keep handler results."""
+        locations = _count_auth_file_specs(monkeypatch)
+        users: list[User] = []
+        for _ in range(4):
+            mock_request = Mock(spec=Request)
+            mock_request.headers = {"authorization": "Bearer unused"}
+            mock_request.scope = {}
+            mock_request.user = None
+            users.append(await require_auth(mock_request))
+
+        assert [user.identity for user in users] == ["cached-user"] * 4
+        assert all(user.display_name == "Cached User" for user in users)
+        assert all(user.team_id == "team-cache" for user in users)
+        assert all(user.is_authenticated is True for user in users)
+        assert locations == [str(cached_auth_project.resolve())]
+        assert get_auth_backend() is get_auth_backend()
+
+    def test_http_requests_reuse_cached_auth(self, cached_auth_project: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """HTTP-level requests must not re-import the auth module."""
+        locations = _count_auth_file_specs(monkeypatch)
+
+        app = FastAPI()
+
+        @app.get("/whoami")
+        async def whoami_ok(user: User = Depends(require_auth)) -> dict[str, str]:
+            return {"identity": user.identity, "team_id": str(user.team_id)}
+
+        client = TestClient(app)
+        bodies = [client.get("/whoami").json() for _ in range(3)]
+
+        assert bodies == [{"identity": "cached-user", "team_id": "team-cache"}] * 3
+        assert locations == [str(cached_auth_project.resolve())]

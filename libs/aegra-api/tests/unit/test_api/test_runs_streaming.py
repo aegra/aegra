@@ -270,6 +270,7 @@ class TestRunsStreamingEndpoints:
             patch("aegra_api.api.runs.streaming_service.stream_run_execution", return_value=_single_event_stream()),
             patch("aegra_api.api.runs.broker_manager.request_cancel", new_callable=AsyncMock) as mock_cancel,
             patch("aegra_api.api.runs.cancel_queued_run_by_id", new_callable=AsyncMock, return_value=True) as mock_drop,
+            patch("aegra_api.api.runs.streaming_service.signal_run_cancelled", new_callable=AsyncMock) as mock_signal,
             patch("aegra_api.api.runs._get_session_maker", return_value=_make_session_maker(mock_session)),
         ):
             mock_session.scalar.return_value = None
@@ -283,6 +284,7 @@ class TestRunsStreamingEndpoints:
 
         mock_drop.assert_awaited_once_with(run_id, thread_id, user_id=mock_user.identity)
         mock_cancel.assert_not_awaited()  # nothing executes a queued run
+        mock_signal.assert_awaited_once_with(run_id)  # ... so this is what ends any other client's stream
 
     @pytest.mark.asyncio
     async def test_disconnect_cancels_a_promoted_run_through_the_broker(

@@ -143,7 +143,7 @@ class LocalExecutor(BaseExecutor):
             try:
                 async with maker() as session:
                     result = cast(
-                        "CursorResult[Any]",
+                        CursorResult[Any],
                         await session.execute(
                             update(RunORM)
                             .where(RunORM.thread_id == thread_id, RunORM.status.in_(("running", "pending")))

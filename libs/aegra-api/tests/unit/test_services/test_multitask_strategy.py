@@ -994,6 +994,41 @@ class TestInterruptUnownedRunDispatch:
         dispatched.assert_not_awaited()
 
 
+class TestGatePausedThreadUnderLock:
+    """The pre-lock pause check in _validate_resume_command can race the active run pausing;
+    under the admission lock the policy must hold again."""
+
+    @staticmethod
+    def _paused_session() -> AsyncMock:
+        session = _session_with_active([])
+        session.scalar = AsyncMock(return_value="interrupted")
+        return session
+
+    @pytest.mark.asyncio
+    async def test_fresh_input_rejected_under_reject(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(settings.multitask, "MULTITASK_PAUSED_THREAD_POLICY", "reject")
+        with pytest.raises(HTTPException) as exc:
+            await _apply_multitask_strategy(self._paused_session(), "thread-1", "enqueue", _USER)
+        assert exc.value.status_code == 409
+
+    @pytest.mark.parametrize("kwargs", [{"is_resume": True}, {"may_run_on_pause": True}])
+    @pytest.mark.asyncio
+    async def test_resume_and_state_ops_still_admitted_under_reject(
+        self, kwargs: dict[str, bool], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(settings.multitask, "MULTITASK_PAUSED_THREAD_POLICY", "reject")
+        should_run, _, _ = await _apply_multitask_strategy(
+            self._paused_session(), "thread-1", "enqueue", _USER, **kwargs
+        )
+        assert should_run is True
+
+    @pytest.mark.asyncio
+    async def test_fresh_input_admitted_by_default(self) -> None:
+        assert settings.multitask.MULTITASK_PAUSED_THREAD_POLICY == "admit"
+        should_run, _, _ = await _apply_multitask_strategy(self._paused_session(), "thread-1", "enqueue", _USER)
+        assert should_run is True
+
+
 class TestGatePreemptionOccupancy:
     """A pre-empted run keeps the thread occupied exactly as long as something may execute it."""
 

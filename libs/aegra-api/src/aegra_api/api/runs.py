@@ -71,7 +71,13 @@ async def _reload_run(session: AsyncSession, run_orm: RunORM) -> RunORM | None:
     """Re-read one row in place, None when it was deleted meanwhile. No ``expire_all``: a bulk
     cancel is still iterating this row's siblings, and ``refresh()`` would 500 on a vanished row."""
     return await session.scalar(
-        select(RunORM).where(RunORM.run_id == run_orm.run_id).execution_options(populate_existing=True)
+        select(RunORM)
+        .where(
+            RunORM.run_id == run_orm.run_id,
+            RunORM.thread_id == run_orm.thread_id,
+            RunORM.user_id == run_orm.user_id,
+        )
+        .execution_options(populate_existing=True)
     )
 
 
@@ -86,12 +92,11 @@ def _run_status_filter(status: str | None) -> list[ColumnElement[bool]]:
     return [RunORM.status == status]
 
 
-async def _wait_for_run_to_settle(session: AsyncSession, run_id: str) -> bool:
+async def _wait_for_run_to_settle(session: AsyncSession, run_id: str, thread_id: str, user_id: str) -> bool:
     """Poll until the run is terminal or its row is gone. False when the window expired."""
     for _ in range(_SETTLE_ATTEMPTS):
         await asyncio.sleep(_SETTLE_INTERVAL_SECONDS)
-        session.expire_all()  # sync method, clears cache
-        fresh = await session.scalar(select(RunORM).where(RunORM.run_id == run_id))
+        fresh = await _reread_run(session, run_id, thread_id, user_id)
         if fresh is None or fresh.status in TERMINAL_STATES:
             return True
     return False
@@ -265,6 +270,13 @@ async def create_and_stream_run(
             dropped = False
             logger.exception("Failed to drop queued run on client disconnect", run_id=run_id)
         if dropped:
+            # Nothing will ever execute the run, so nobody else ends the stream another
+            # client may still hold on it.
+            try:
+                with anyio.CancelScope(shield=True):
+                    await streaming_service.signal_run_cancelled(run_id)
+            except (RedisError, OSError):
+                logger.exception("Failed to close a dropped run's stream on client disconnect", run_id=run_id)
             return
         try:
             await broker_manager.request_cancel(run_id, "cancel")
@@ -625,7 +637,7 @@ async def cancel_run_endpoint(
 
     # Optionally wait for the run to settle (bounded, ~10s)
     if wait:
-        await _wait_for_run_to_settle(session, run_id)
+        await _wait_for_run_to_settle(session, run_id, thread_id, user.identity)
 
     fresh = await _reread_run(session, run_id, thread_id, user.identity)
     if fresh is None:
@@ -738,7 +750,7 @@ async def delete_run(
         if (
             fresh is not None
             and fresh.status in ACTIVE_RUN_STATES
-            and not await _wait_for_run_to_settle(session, run_id)
+            and not await _wait_for_run_to_settle(session, run_id, thread_id, user.identity)
         ):
             # Still executing on a worker after the bounded wait: never delete a row a live worker
             # owns or promote behind it while it may still write checkpoints. The client retries.

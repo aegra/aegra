@@ -263,6 +263,14 @@ def _resolve_checkpoint(request: RunCreate) -> dict[str, Any] | None:
     return {"checkpoint_id": str(request.checkpoint_id), **(request.checkpoint or {})}
 
 
+def _command_may_run_on_pause(command: dict[str, Any] | None) -> bool:
+    """A resume, or a deliberate update/goto (same truthiness as ``_validate_resume_command``),
+    may run on a paused thread; plain input may not under the ``reject`` policy."""
+    if command is None:
+        return False
+    return "resume" in command or bool(command.get("update") or command.get("goto"))
+
+
 def _is_resume_run(run: RunORM) -> bool:
     """Whether a run row was created to resume a HITL interrupt (command bears a resume key)."""
     params = run.execution_params or {}
@@ -275,7 +283,13 @@ _ACTIVE_RUN_STATUSES = (*ACTIVE_RUN_STATES, QUEUED_RUN_STATE)
 
 
 async def _apply_multitask_strategy(
-    session: AsyncSession, thread_id: str, strategy: str, user: User, *, is_resume: bool = False
+    session: AsyncSession,
+    thread_id: str,
+    strategy: str,
+    user: User,
+    *,
+    is_resume: bool = False,
+    may_run_on_pause: bool = False,
 ) -> tuple[bool, list[str], str | None]:
     """Resolve a new run against the thread's in-flight runs under thread-then-run ``FOR UPDATE``
     locks (matching finalize_run); returns ``(should_run, cancel_ids, rollback_target_run_id)``."""
@@ -284,6 +298,18 @@ async def _apply_multitask_strategy(
         .where(ThreadORM.thread_id == thread_id, ThreadORM.user_id == user.identity)
         .with_for_update()
     )
+    if not (is_resume or may_run_on_pause) and settings.multitask.MULTITASK_PAUSED_THREAD_POLICY == "reject":
+        # The pre-lock check in _validate_resume_command can race the active run pausing;
+        # under the lock the pause is final, so the policy must hold here too.
+        thread_status = await session.scalar(
+            select(ThreadORM.status).where(ThreadORM.thread_id == thread_id, ThreadORM.user_id == user.identity)
+        )
+        if thread_status == "interrupted":
+            raise HTTPException(
+                409,
+                "Thread is paused on a human-in-the-loop interrupt; resume it with "
+                "command={'resume': ...} instead of starting a new run",
+            )
     active = (
         await session.scalars(
             select(RunORM)
@@ -451,7 +477,12 @@ async def _prepare_run(
     strategy = request.multitask_strategy or MULTITASK_DEFAULT
     is_resume = request.command is not None and "resume" in request.command
     should_run, cancel_ids, rollback_target = await _apply_multitask_strategy(
-        session, thread_id, strategy, user, is_resume=is_resume
+        session,
+        thread_id,
+        strategy,
+        user,
+        is_resume=is_resume,
+        may_run_on_pause=_command_may_run_on_pause(request.command),
     )
     run_status = initial_status if should_run else "queued"
     if should_run:

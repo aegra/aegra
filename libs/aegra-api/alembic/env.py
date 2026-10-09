@@ -1,6 +1,7 @@
 """Alembic environment configuration for Aegra database migrations."""
 
 import asyncio
+import logging
 import threading
 from logging.config import fileConfig
 
@@ -9,9 +10,12 @@ from sqlalchemy.engine import Connection
 from sqlalchemy.ext.asyncio import async_engine_from_config
 
 # Import your SQLAlchemy models here
+from aegra_api.core.migrations import migration_advisory_lock
 from aegra_api.core.orm import Base
 from aegra_api.settings import settings
 from alembic import context
+
+logger = logging.getLogger(__name__)
 
 # This is the Alembic Config object, which provides
 # access to the values within the .ini file in use.
@@ -78,7 +82,7 @@ def run_migrations_offline() -> None:
 
 
 def do_run_migrations(connection: Connection) -> None:
-    """Run migrations with the given connection."""
+    """Apply revisions; the session lock is held by ``run_migrations_online``."""
     context.configure(connection=connection, target_metadata=target_metadata)
 
     with context.begin_transaction():
@@ -99,15 +103,26 @@ async def run_async_migrations() -> None:
         poolclass=pool.NullPool,
     )
 
-    async with connectable.connect() as connection:
-        await connection.run_sync(do_run_migrations)
-
-    await connectable.dispose()
+    migration_failed = False
+    try:
+        async with connectable.connect() as connection:
+            await connection.run_sync(do_run_migrations)
+    except BaseException:
+        migration_failed = True
+        raise
+    finally:
+        try:
+            await connectable.dispose()
+        except BaseException:
+            if not migration_failed:
+                raise
+            logger.warning("failed to dispose migration engine after upgrade error")
 
 
 def run_migrations_online() -> None:
-    """Run migrations in 'online' mode."""
-    asyncio.run(run_async_migrations())
+    """Run migrations in 'online' mode under a session advisory lock."""
+    with migration_advisory_lock():
+        asyncio.run(run_async_migrations())
 
 
 if context.is_offline_mode():

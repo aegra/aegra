@@ -99,9 +99,8 @@ class AppSettings(EnvBase):
     # Default 1000 matches LangGraph Platform threads.search (Agent Server OpenAPI max).
     MAX_SEARCH_LIMIT: int = Field(default=1000, ge=1)
 
-    # Run alembic upgrade head on startup. Default True (dev / single-pod).
-    # Set False for multi-pod K8s to avoid advisory-lock probe timeouts;
-    # run migrations out-of-band via `aegra db upgrade`.
+    # Default True. Set False in multi-pod so replicas skip Aegra's session advisory
+    # lock (alembic/env.py; not an Alembic built-in) and run `aegra db upgrade` out-of-band.
     RUN_MIGRATIONS_ON_STARTUP: bool = True
 
     # Logging

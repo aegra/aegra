@@ -17,6 +17,7 @@ cp .env.example .env
 | `VERSION` | `0.10.8` | Application version |
 | `DEBUG` | `false` | Enable debug mode |
 | `AEGRA_CONFIG` | `aegra.json` | Path to the configuration file |
+| `RUN_MIGRATIONS_ON_STARTUP` | `true` | Run Alembic on FastAPI startup (lock-free skip when already at head). Set `false` for multi-pod so replicas don't block on the session advisory lock; run `aegra db upgrade` out-of-band. |
 | `MAX_SEARCH_LIMIT` | `1000` | Max `limit` for `POST /threads/search` and `POST /store/items/search`. Omitted or null `limit` uses `min(20, MAX_SEARCH_LIMIT)`. Default cap matches LangGraph Platform threads.search (`1..1000`). |
 
 ## Database

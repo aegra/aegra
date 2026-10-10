@@ -48,6 +48,12 @@ def validate_history_length(value: Any) -> None:
         )
 
 
+def is_canceled_run(status: str, output: Any) -> bool:
+    """A cancel and a human-input pause both end ``interrupted``; only the pause saves an interrupt payload."""
+    has_interrupt = isinstance(output, dict) and bool(output.get("__interrupt__"))
+    return status == "interrupted" and not has_interrupt
+
+
 def format_task_id(context_id: str, run_id: str) -> str:
     return f"{context_id}:{run_id}"
 

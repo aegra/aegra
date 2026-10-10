@@ -71,6 +71,12 @@ def parse_send_params(params: Any) -> SendParams:
                 JsonRpcErrorCode.INVALID_PARAMS,
                 f"Unsupported 'acceptedOutputModes': only {', '.join(SUPPORTED_OUTPUT_MODES)} are available",
             )
+        # The reply is always a text part, so a client that lists modes must be able to take text.
+        if output_modes and "text/plain" not in output_modes:
+            raise JsonRpcError(
+                JsonRpcErrorCode.INVALID_PARAMS,
+                "Unsupported 'acceptedOutputModes': replies are sent as text/plain, so it must be accepted",
+            )
 
     # Resume is not implemented, and running a plain turn in its place would drop the client's answer.
     if message.get("command") is not None:

@@ -165,6 +165,7 @@ def test_non_blocking_send_is_rejected_in_either_polarity(configuration: dict[st
         pytest.param({"acceptedOutputModes": ["image/png"]}, "acceptedOutputModes", id="mode-not-offered"),
         pytest.param({"acceptedOutputModes": ["text/plain", "image/png"]}, "acceptedOutputModes", id="one-bad-mode"),
         pytest.param({"acceptedOutputModes": "text/plain"}, "acceptedOutputModes", id="modes-not-a-list"),
+        pytest.param({"acceptedOutputModes": ["application/json"]}, "replies are sent as text/plain", id="json-only"),
     ],
 )
 def test_configuration_the_card_does_not_advertise_is_rejected(configuration: dict[str, Any], fragment: str) -> None:

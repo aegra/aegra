@@ -13,11 +13,13 @@ import structlog
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from fastapi.responses import JSONResponse
 from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from aegra_api import __version__
 from aegra_api.api.runs import _apply_create_run_auth, _request_run_interruption
 from aegra_api.config import HttpConfig, load_http_config
 from aegra_api.core.auth_deps import auth_dependency, get_current_user
+from aegra_api.core.auth_filters import build_metadata_filter
 from aegra_api.core.auth_handlers import build_auth_context, handle_event
 from aegra_api.core.orm import Run as RunORM
 from aegra_api.core.orm import Thread as ThreadORM
@@ -40,6 +42,7 @@ from aegra_api.services.a2a.task import (
     build_status_task,
     build_task,
     format_task_id,
+    is_canceled_run,
     parse_optional_id,
     parse_task_id,
     validate_history_length,
@@ -187,8 +190,8 @@ async def _handle_send(rpc_request: JsonRpcRequest, assistant_id: str, user: Use
     output = run_result_body(run, run_id, timed_out=timed_out)
 
     task_id = send_params.task_id or format_task_id(thread_id, run_id)
-    # CancelTask leaves the run interrupted with no interrupt payload; that is not a completed answer.
-    if run is not None and run.status == "interrupted" and not output.get("__interrupt__"):
+    # A run canceled while this send was waiting has no answer to report as completed.
+    if run is not None and is_canceled_run(run.status, output):
         task = build_status_task(
             task_id=task_id,
             context_id=thread_id,
@@ -203,6 +206,19 @@ async def _handle_send(rpc_request: JsonRpcRequest, assistant_id: str, user: Use
     return task if rpc_request.dialect == "legacy" else {"task": task}
 
 
+async def _load_task_run(
+    session: AsyncSession, *, run_id: str, context_id: str, user: User, filters: dict[str, Any] | None
+) -> RunORM | None:
+    """The caller's run, or None when it is missing, foreign, or on a thread the auth handler's filter excludes."""
+    stmt = select(RunORM).where(
+        RunORM.run_id == run_id, RunORM.thread_id == context_id, RunORM.user_id == user.identity
+    )
+    auth_filter = build_metadata_filter(ThreadORM.metadata_json, filters)
+    if auth_filter is not None:
+        stmt = stmt.join(ThreadORM, ThreadORM.thread_id == RunORM.thread_id).where(auth_filter)
+    return await session.scalar(stmt)
+
+
 async def _handle_get_task(rpc_request: JsonRpcRequest, user: User) -> dict[str, Any]:
     params = rpc_request.params if isinstance(rpc_request.params, dict) else {}
     task_id = params.get("id")
@@ -211,15 +227,13 @@ async def _handle_get_task(rpc_request: JsonRpcRequest, user: User) -> dict[str,
     context_id, run_id = parse_task_id(task_id, parse_optional_id(params.get("contextId"), "contextId"))
     validate_history_length(params.get("historyLength"))
 
-    await handle_event(build_auth_context(user, "threads", "read"), {"run_id": run_id, "thread_id": context_id})
+    filters = await handle_event(
+        build_auth_context(user, "threads", "read"), {"run_id": run_id, "thread_id": context_id}
+    )
 
     maker = _get_session_maker()
     async with maker() as session:
-        run = await session.scalar(
-            select(RunORM).where(
-                RunORM.run_id == run_id, RunORM.thread_id == context_id, RunORM.user_id == user.identity
-            )
-        )
+        run = await _load_task_run(session, run_id=run_id, context_id=context_id, user=user, filters=filters)
         if run is None:
             raise JsonRpcError(JsonRpcErrorCode.TASK_NOT_FOUND, f"Task '{run_id}' not found in thread '{context_id}'")
         thread_status = await session.scalar(
@@ -227,8 +241,10 @@ async def _handle_get_task(rpc_request: JsonRpcRequest, user: User) -> dict[str,
         )
 
     state: TaskState = RUN_STATUS_TO_TASK_STATE.get(run.status, "SUBMITTED")
+    if is_canceled_run(run.status, run.output):
+        state = "CANCELED"
     # A finished run whose thread is now waiting on input reports as input-required, as the platform does.
-    if run.status == "success" and thread_status == "interrupted":
+    elif run.status == "success" and thread_status == "interrupted":
         state = "INPUT_REQUIRED"
 
     message_text: str | None = None
@@ -249,15 +265,13 @@ async def _handle_cancel_task(rpc_request: JsonRpcRequest, user: User) -> dict[s
         raise JsonRpcError(JsonRpcErrorCode.INVALID_PARAMS, "Missing required parameter: id (task_id)")
     context_id, run_id = parse_task_id(task_id, parse_optional_id(params.get("contextId"), "contextId"))
 
-    await handle_event(build_auth_context(user, "threads", "update"), {"run_id": run_id, "thread_id": context_id})
+    filters = await handle_event(
+        build_auth_context(user, "threads", "update"), {"run_id": run_id, "thread_id": context_id}
+    )
 
     maker = _get_session_maker()
     async with maker() as session:
-        run = await session.scalar(
-            select(RunORM).where(
-                RunORM.run_id == run_id, RunORM.thread_id == context_id, RunORM.user_id == user.identity
-            )
-        )
+        run = await _load_task_run(session, run_id=run_id, context_id=context_id, user=user, filters=filters)
         if run is None:
             raise JsonRpcError(JsonRpcErrorCode.TASK_NOT_FOUND, f"Task not found: {task_id}")
 
@@ -267,7 +281,9 @@ async def _handle_cancel_task(rpc_request: JsonRpcRequest, user: User) -> dict[s
             for _ in range(20):
                 await asyncio.sleep(0.5)
                 session.expire_all()
-                status = await session.scalar(select(RunORM.status).where(RunORM.run_id == run_id))
+                status = await session.scalar(
+                    select(RunORM.status).where(RunORM.run_id == run_id, RunORM.user_id == user.identity)
+                )
                 if status in TERMINAL_STATES:
                     break
             message_text = "Task was canceled"

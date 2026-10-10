@@ -8,7 +8,6 @@ import json
 import math
 from dataclasses import dataclass
 from enum import IntEnum
-from json import JSONDecodeError
 from typing import Any, Final, Literal
 
 Dialect = Literal["modern", "legacy"]
@@ -76,7 +75,7 @@ def _is_valid_request_id(value: Any) -> bool:
 def parse_json_rpc_request(raw_body: bytes) -> JsonRpcRequest | dict[str, Any] | None:
     try:
         body = json.loads(raw_body)
-    except (JSONDecodeError, UnicodeDecodeError, RecursionError):
+    except (json.JSONDecodeError, UnicodeDecodeError, RecursionError):
         return build_error_response(JsonRpcErrorCode.PARSE_ERROR, "Invalid JSON payload", None)
 
     if not isinstance(body, dict):

@@ -100,7 +100,7 @@ See the [A2A guide](/guides/a2a) for usage.
 | Agent cards | Supported | Per assistant at `/a2a/{assistant_id}` and both well-known paths. Host-root card via `http.a2a_default_assistant`. |
 | Protocol 1.0 and 0.3 clients | Supported | One endpoint answers each request in the dialect of its method name. The card declares 1.0. |
 | `SendMessage` / `message/send` | Supported | Text and data parts. Blocks until the run finishes. |
-| `GetTask` / `tasks/get` | Supported | Reports the run's status as a task state. |
+| `GetTask` / `tasks/get` | Supported | Reports the run's status as a task state. A canceled task reads as canceled, not as awaiting input. |
 | `CancelTask` / `tasks/cancel` | Supported | Interrupts a live run; acknowledges an already finished one. |
 | File parts | Coming soon | A message containing a file part is rejected with `-32005` and a message saying file parts are not supported yet. |
 | Resuming an interrupted task | Coming soon | An interrupted run is reported as input-required, but cannot yet be answered over A2A: a message to a thread that is awaiting input, or one carrying `command`, returns `-32602`. Resume it through the runs API. |
@@ -112,7 +112,7 @@ See the [A2A guide](/guides/a2a) for usage.
 
 Where Aegra differs from LangGraph Platform:
 
-- A request the endpoint cannot honour is rejected, not silently ignored: non-blocking send, a push notification config, `acceptedOutputModes` other than `text/plain` and `application/json`, a `historyLength` other than `0`, and `command` all return `-32602`.
+- A request the endpoint cannot honour is rejected, not silently ignored: non-blocking send, a push notification config, `acceptedOutputModes` that name another mode or leave out `text/plain` (replies are always text), a `historyLength` other than `0`, and `command` all return `-32602`.
 - `metadata` (on the request, the message and each part), `extensions` and `referenceTaskIds` are accepted and have no effect. `metadata` is free-form by design in the protocol, and the other two carry no meaning for Aegra yet.
 - `contextId` and `taskId` must be non-blank strings of at most 255 characters, the same bound as thread IDs elsewhere in the API.
 

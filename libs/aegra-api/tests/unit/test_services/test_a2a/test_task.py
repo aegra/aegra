@@ -15,6 +15,7 @@ from aegra_api.services.a2a.task import (
     data_part,
     format_task_id,
     interrupt_artifact,
+    is_canceled_run,
     parse_optional_id,
     parse_task_id,
     reply_text,
@@ -95,7 +96,8 @@ def test_reply_text_is_the_latest_agent_message_with_text(output: dict[str, Any]
 def test_response_artifact_has_the_exact_literals_clients_match_on() -> None:
     artifact = response_artifact(COMPLETED_OUTPUT, "agent", "modern")
 
-    assert UUID(artifact.pop("artifactId")).version == 4
+    artifact_id = artifact.pop("artifactId")
+    assert UUID(artifact_id).version == 4
     assert artifact == {
         "name": "Assistant Response",
         "description": "Response from assistant agent",
@@ -108,7 +110,8 @@ def test_interrupt_artifact_forwards_only_id_and_value_per_interrupt() -> None:
 
     artifact = interrupt_artifact(output, "legacy")
 
-    assert UUID(artifact.pop("artifactId")).version == 4
+    artifact_id = artifact.pop("artifactId")
+    assert UUID(artifact_id).version == 4
     assert artifact == {
         "name": "Interrupt",
         "description": "Agent requires input to continue",
@@ -157,7 +160,8 @@ def test_failed_run_has_a_status_message_and_neither_timestamp_nor_artifacts() -
     assert list(task["status"]) == ["state", "message"]
     assert task["status"]["state"] == "TASK_STATE_FAILED"
     message = task["status"]["message"]
-    assert UUID(message.pop("messageId")).version == 4
+    message_id = message.pop("messageId")
+    assert UUID(message_id).version == 4
     assert message == {
         "role": "ROLE_AGENT",
         "parts": [{"text": "Error executing assistant: TimeoutError"}],
@@ -241,7 +245,8 @@ def test_status_task_message_has_no_context_id_and_the_task_no_artifacts_or_time
     assert list(task) == ["id", "contextId", "status"]
     assert list(task["status"]) == ["state", "message"]
     message = task["status"]["message"]
-    assert UUID(message.pop("messageId")).version == 4
+    message_id = message.pop("messageId")
+    assert UUID(message_id).version == 4
     assert message == {
         "role": "ROLE_AGENT",
         "parts": [{"text": "Task completed successfully"}],
@@ -308,3 +313,21 @@ def test_history_length_that_cannot_be_honoured_is_invalid_params(value: Any, me
 
     assert exc_info.value.code == JsonRpcErrorCode.INVALID_PARAMS
     assert exc_info.value.message == message
+
+
+@pytest.mark.parametrize(
+    ("status", "output", "expected"),
+    [
+        pytest.param("interrupted", {}, True, id="interrupted-with-empty-output"),
+        pytest.param("interrupted", None, True, id="interrupted-with-no-output"),
+        pytest.param("interrupted", {"__interrupt__": []}, True, id="interrupted-with-empty-interrupt-list"),
+        pytest.param("interrupted", {"__interrupt__": [{"id": "i", "value": "?"}]}, False, id="paused-for-input"),
+        pytest.param("success", {}, False, id="success"),
+        pytest.param("error", {}, False, id="error"),
+        pytest.param("running", {}, False, id="running"),
+    ],
+)
+def test_a_run_is_canceled_only_when_interrupted_without_an_interrupt_payload(
+    status: str, output: Any, expected: bool
+) -> None:
+    assert is_canceled_run(status, output) is expected

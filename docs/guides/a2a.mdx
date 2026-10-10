@@ -116,7 +116,8 @@ task = await client.cancel_task(CancelTaskRequest(id=task.id))
 | `pending` | `TASK_STATE_SUBMITTED` |
 | `running` | `TASK_STATE_WORKING` |
 | `success` | `TASK_STATE_COMPLETED` |
-| `interrupted` | `TASK_STATE_INPUT_REQUIRED` |
+| `interrupted`, waiting on a human | `TASK_STATE_INPUT_REQUIRED` |
+| `interrupted`, after a cancel | `TASK_STATE_CANCELED` |
 | `error`, `timeout` | `TASK_STATE_FAILED` |
 
 `cancel_task` stops a run that is still going. Cancelling a task that has already finished is not an error: the response acknowledges the request and leaves the run as it was.

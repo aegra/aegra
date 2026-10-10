@@ -303,7 +303,7 @@ def test_send_with_a_command_is_rejected_without_creating_a_run(client: TestClie
     ],
 )
 def test_send_whose_run_was_cancelled_reports_canceled_not_completed(
-    client: TestClient, send_stubs: dict[str, Any], method: str, state: str, text_part: dict[str, str]
+    *, client: TestClient, send_stubs: dict[str, Any], method: str, state: str, text_part: dict[str, str]
 ) -> None:
     """CancelTask leaves the run interrupted with empty output; that must not read as a finished answer."""
     send_stubs["run"].status = "interrupted"
@@ -452,10 +452,10 @@ def _rpc(client: TestClient, method: str, params: Any) -> dict[str, Any]:
 def task_stubs(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
     """Replace the run lookup behind a task read: by default a ``success`` run on an idle thread."""
     session = MagicMock()
-    session.scalar = AsyncMock(side_effect=[MagicMock(status="success"), "idle"])
+    session.scalar = AsyncMock(side_effect=[MagicMock(status="success", output={}), "idle"])
     maker = MagicMock()
     maker.return_value.__aenter__.return_value = session
-    stubs: dict[str, Any] = {"session": session, "authorize": AsyncMock()}
+    stubs: dict[str, Any] = {"session": session, "authorize": AsyncMock(return_value=None)}
     monkeypatch.setattr(a2a_module, "_get_session_maker", lambda: maker)
     monkeypatch.setattr(a2a_module, "handle_event", stubs["authorize"])
     return stubs
@@ -467,7 +467,8 @@ def task_stubs(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
         pytest.param("pending", "busy", "TASK_STATE_SUBMITTED", None, id="pending"),
         pytest.param("running", "busy", "TASK_STATE_WORKING", None, id="running"),
         pytest.param("success", "idle", "TASK_STATE_COMPLETED", "Task completed successfully", id="success"),
-        pytest.param("interrupted", "interrupted", "TASK_STATE_INPUT_REQUIRED", None, id="interrupted"),
+        pytest.param("interrupted", "interrupted", "TASK_STATE_INPUT_REQUIRED", None, id="paused-for-input"),
+        pytest.param("interrupted", "idle", "TASK_STATE_CANCELED", None, id="canceled"),
         pytest.param("error", "idle", "TASK_STATE_FAILED", "Task failed with status: error", id="error"),
         pytest.param("timeout", "idle", "TASK_STATE_FAILED", "Task failed with status: timeout", id="timeout"),
         pytest.param("success", "interrupted", "TASK_STATE_INPUT_REQUIRED", None, id="success-on-interrupted-thread"),
@@ -475,6 +476,7 @@ def task_stubs(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
     ],
 )
 def test_get_task_reports_the_run_status_as_a_task_state(
+    *,
     client: TestClient,
     task_stubs: dict[str, Any],
     run_status: str,
@@ -482,7 +484,9 @@ def test_get_task_reports_the_run_status_as_a_task_state(
     state: str,
     message_text: str | None,
 ) -> None:
-    task_stubs["session"].scalar.side_effect = [MagicMock(status=run_status), thread_status]
+    """A cancel and a pause both leave the run interrupted; only the pause keeps an interrupt payload."""
+    output = {"__interrupt__": [{"id": "int-1", "value": "Approve?"}]} if thread_status == "interrupted" else {}
+    task_stubs["session"].scalar.side_effect = [MagicMock(status=run_status, output=output), thread_status]
 
     task = _rpc(client, "GetTask", {"id": "thread-1:run-1"})["result"]
 
@@ -563,6 +567,29 @@ def test_get_task_with_history_length_zero_is_served(client: TestClient, task_st
     assert "history" not in body["result"]
 
 
+def test_get_task_applies_the_auth_handlers_filter_to_the_thread(
+    client: TestClient, task_stubs: dict[str, Any]
+) -> None:
+    """A filter returned by ``@auth.on.threads.read`` must narrow the lookup, not only allow or deny it."""
+    task_stubs["authorize"].return_value = {"team": "sales"}
+    task_stubs["session"].scalar.side_effect = [None]
+
+    body = _rpc(client, "GetTask", {"id": "thread-1:run-1"})
+
+    assert body["error"]["code"] == -32001
+    query = str(task_stubs["session"].scalar.await_args_list[0].args[0])
+    assert "JOIN thread" in query
+    assert "metadata_json" in query
+
+
+def test_get_task_without_a_handler_filter_looks_up_the_run_alone(
+    client: TestClient, task_stubs: dict[str, Any]
+) -> None:
+    _rpc(client, "GetTask", {"id": "thread-1:run-1"})
+
+    assert "JOIN" not in str(task_stubs["session"].scalar.await_args_list[0].args[0])
+
+
 def test_get_task_with_no_resolvable_context_is_task_not_found(client: TestClient, task_stubs: dict[str, Any]) -> None:
     body = _rpc(client, "GetTask", {"id": "run-1"})
 
@@ -619,6 +646,20 @@ def test_cancel_stops_waiting_after_twenty_polls(client: TestClient, cancel_stub
 
     assert task["status"]["message"]["parts"] == [{"text": "Task was canceled"}]
     assert cancel_stubs["sleep"].await_count == 20
+
+
+def test_cancel_applies_the_auth_handlers_filter_and_scopes_every_query_to_the_caller(
+    client: TestClient, cancel_stubs: dict[str, Any]
+) -> None:
+    cancel_stubs["authorize"].return_value = {"team": "sales"}
+    cancel_stubs["session"].scalar.side_effect = [MagicMock(status="running"), "interrupted"]
+
+    _rpc(client, "CancelTask", {"id": "thread-1:run-1"})
+
+    lookup, poll = (str(call.args[0]) for call in cancel_stubs["session"].scalar.await_args_list)
+    assert "JOIN thread" in lookup
+    assert "metadata_json" in lookup
+    assert "user_id" in poll
 
 
 def test_legacy_cancel_is_tagged_and_lowercase(client: TestClient, cancel_stubs: dict[str, Any]) -> None:

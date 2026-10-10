@@ -231,6 +231,7 @@ _SPEC_TUPLES: dict[tuple[str, str], tuple[str, str]] = {
     # A2A
     ("GET", "/.well-known/agent-card.json"): ("assistants", "read"),
     ("GET", "/a2a/{assistant_id}"): ("assistants", "read"),
+    ("POST", "/a2a/{assistant_id}"): ("threads", "create_run"),
     ("GET", "/a2a/{assistant_id}/.well-known/agent-card.json"): ("assistants", "read"),
     ("GET", "/a2a/{assistant_id}/.well-known/agent.json"): ("assistants", "read"),
 }

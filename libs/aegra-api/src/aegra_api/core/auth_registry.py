@@ -92,6 +92,7 @@ ROUTE_AUTH_MAP: Final[dict[tuple[str, str], tuple[str, str]]] = {
     # --- A2A ----------------------------------------------------------------
     ("GET", "/.well-known/agent-card.json"): ("assistants", "read"),
     ("GET", "/a2a/{assistant_id}"): ("assistants", "read"),
+    ("POST", "/a2a/{assistant_id}"): ("threads", "create_run"),
     ("GET", "/a2a/{assistant_id}/.well-known/agent-card.json"): ("assistants", "read"),
     ("GET", "/a2a/{assistant_id}/.well-known/agent.json"): ("assistants", "read"),
 }
@@ -148,6 +149,7 @@ SELF_DISPATCHING: Final[frozenset[tuple[str, str]]] = frozenset(
         ("POST", "/store/namespaces"),
         ("GET", "/.well-known/agent-card.json"),
         ("GET", "/a2a/{assistant_id}"),
+        ("POST", "/a2a/{assistant_id}"),
         ("GET", "/a2a/{assistant_id}/.well-known/agent-card.json"),
         ("GET", "/a2a/{assistant_id}/.well-known/agent.json"),
     }

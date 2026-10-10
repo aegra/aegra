@@ -497,6 +497,17 @@ def test_get_task_reports_the_run_status_as_a_task_state(
     assert "timestamp" not in task["status"]
 
 
+def test_get_task_for_a_paused_run_without_an_interrupt_payload_is_still_input_required(
+    client: TestClient, task_stubs: dict[str, Any]
+) -> None:
+    """Runs started through the v2 commands endpoint save no ``__interrupt__``; the thread status marks the pause."""
+    task_stubs["session"].scalar.side_effect = [MagicMock(status="interrupted", output={}), "interrupted"]
+
+    task = _rpc(client, "GetTask", {"id": "thread-1:run-1"})["result"]
+
+    assert task["status"]["state"] == "TASK_STATE_INPUT_REQUIRED"
+
+
 def test_legacy_get_task_is_tagged_and_lowercase(client: TestClient, task_stubs: dict[str, Any]) -> None:
     task = _rpc(client, "tasks/get", {"id": "thread-1:run-1"})["result"]
 

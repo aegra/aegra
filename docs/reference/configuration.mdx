@@ -230,7 +230,7 @@ See [authentication guide](/guides/authentication) for details.
 
 ## `http`
 
-Configure custom routes and CORS.
+Configure custom routes, CORS and the A2A endpoint.
 
 ```json
 {
@@ -239,7 +239,9 @@ Configure custom routes and CORS.
     "enable_custom_route_auth": false,
     "cors": {
       "allow_origin_regex": "^https://[a-z0-9-]+\\.example\\.com$"
-    }
+    },
+    "disable_a2a": false,
+    "a2a_default_assistant": "agent"
   }
 }
 ```
@@ -251,12 +253,14 @@ Configure custom routes and CORS.
 | `cors.allow_origins` | `list[str]` | `["*"]` (`[]` if `allow_origin_regex` is set) | Allowed CORS origins |
 | `cors.allow_origin_regex` | `string` | `None` | Regular expression for additional allowed origins; when present without `allow_origins`, the origin-list default is `[]` |
 | `cors.allow_credentials` | `bool` | `false` with a regex or wildcard origins, `true` with concrete origins and no regex | Allow credentials in CORS requests |
+| `disable_a2a` | `bool` | `false` | Remove every [A2A](/guides/a2a) route: the JSON-RPC endpoint at `/a2a/{assistant_id}` and all agent card routes |
+| `a2a_default_assistant` | `string` | `None` | Assistant ID or graph ID whose agent card is served at the host root, `/.well-known/agent-card.json`. When unset, that route returns `404`; per-assistant cards are unaffected |
 
 When `allow_origin_regex` is non-null, it is passed to Starlette's `CORSMiddleware` and matched against the complete origin. If `allow_origins` is also provided, either the list or regex can authorize an origin. An explicit `allow_origins: ["*"]` remains a wildcard. An empty string still counts as configured; it does not match normal non-empty origins.
 
 Note: the `allow_credentials` default only recognizes an exact `["*"]` or `"*"`. A wildcard mixed with other concrete origins (e.g. `["*", "https://example.com"]`) currently still defaults `allow_credentials` to `true`, even though Starlette treats that list as allow-all — [tracked in #633](https://github.com/aegra/aegra/issues/633). Set `allow_credentials` explicitly if you use a mixed list.
 
-See [custom routes guide](/guides/custom-routes) for details.
+See [custom routes guide](/guides/custom-routes) and [A2A guide](/guides/a2a) for details.
 
 ## `store`
 

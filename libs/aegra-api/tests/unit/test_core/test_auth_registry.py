@@ -228,6 +228,12 @@ _SPEC_TUPLES: dict[tuple[str, str], tuple[str, str]] = {
     # v2 event streaming
     ("POST", "/threads/{thread_id}/stream/events"): ("threads", "read"),
     ("POST", "/threads/{thread_id}/commands"): ("threads", "create_run"),
+    # A2A
+    ("GET", "/.well-known/agent-card.json"): ("assistants", "read"),
+    ("GET", "/a2a/{assistant_id}"): ("assistants", "read"),
+    ("POST", "/a2a/{assistant_id}"): ("threads", "create_run"),
+    ("GET", "/a2a/{assistant_id}/.well-known/agent-card.json"): ("assistants", "read"),
+    ("GET", "/a2a/{assistant_id}/.well-known/agent.json"): ("assistants", "read"),
 }
 
 

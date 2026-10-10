@@ -1,0 +1,179 @@
+---
+title: "A2A protocol"
+description: "Let other agents talk to your assistants over the Agent2Agent (A2A) protocol."
+---
+
+Aegra serves every assistant as an [A2A](https://a2a-protocol.org) agent. Another agent, or any A2A client, can discover it through an agent card and send it messages over JSON-RPC, with no Aegra-specific code on the client side.
+
+A2A is on by default and needs no setup. Each assistant is reachable at `/a2a/{assistant_id}`, where `assistant_id` is an assistant ID or a graph ID from `aegra.json`.
+
+## How A2A maps onto Aegra
+
+A2A adds no storage of its own. It is a second way in to the same threads and runs.
+
+| A2A | Aegra |
+|:--|:--|
+| Context (`contextId`) | Thread (`thread_id`) |
+| Task | Run |
+| Task ID | `{thread_id}:{run_id}` |
+
+A conversation started over A2A shows up in `GET /threads/{thread_id}`, in Agent Chat UI and in LangGraph Studio. A thread created with the LangGraph SDK can be continued over A2A by sending its ID as `contextId`.
+
+## Agent card
+
+A client starts by fetching the agent card, which describes the agent and tells the client where to send requests.
+
+```bash
+curl http://localhost:2026/a2a/agent/.well-known/agent-card.json
+```
+
+The same card is served at `/a2a/{assistant_id}` and at the older `/a2a/{assistant_id}/.well-known/agent.json` path.
+
+Some clients only look for a card at the root of the host. To serve one there, name the assistant in `aegra.json`:
+
+```json
+{
+  "http": {
+    "a2a_default_assistant": "agent"
+  }
+}
+```
+
+`/.well-known/agent-card.json` then returns that assistant's card. Without this key the route returns `404`.
+
+## Send a message
+
+This example uses the official Python SDK (`pip install a2a-sdk`).
+
+```python
+import asyncio
+from uuid import uuid4
+
+import httpx
+from a2a.client import A2ACardResolver, ClientConfig, ClientFactory
+from a2a.types import Message, Part, Role, SendMessageRequest
+
+
+async def main() -> None:
+    async with httpx.AsyncClient(timeout=60) as http_client:
+        card = await A2ACardResolver(http_client, "http://localhost:2026/a2a/agent").get_agent_card()
+        client = ClientFactory(ClientConfig(httpx_client=http_client)).create(card)
+
+        request = SendMessageRequest(
+            message=Message(message_id=str(uuid4()), role=Role.ROLE_USER, parts=[Part(text="What is LangGraph?")])
+        )
+        async for response in client.send_message(request):
+            task = response.task
+            print(task.id)
+            print(task.artifacts[0].parts[0].text)
+
+
+asyncio.run(main())
+```
+
+The call waits for the run to finish and returns a task. The assistant's reply is in the artifact named `Assistant Response`.
+
+Text parts become messages in the graph's `messages` field. Data parts are merged into the graph input as top-level keys, so a client can set other state fields:
+
+```python
+from google.protobuf.struct_pb2 import Value
+
+Part(data=Value(struct_value={"city": "Paris"}))
+```
+
+<Note>
+  A graph must have a `messages` field in its input schema to receive text. Sending text to a graph without one returns a `-32602` error that lists the fields the graph does accept. Data-only messages are not subject to this check.
+</Note>
+
+### Continue a conversation
+
+Send the `context_id` from the previous task to keep talking in the same thread.
+
+```python
+Message(
+    message_id=str(uuid4()),
+    role=Role.ROLE_USER,
+    parts=[Part(text="Tell me more")],
+    context_id=task.context_id,
+)
+```
+
+Without a `context_id`, each message starts a new thread.
+
+## Check or cancel a task
+
+```python
+from a2a.types import CancelTaskRequest, GetTaskRequest
+
+task = await client.get_task(GetTaskRequest(id=task.id))
+task = await client.cancel_task(CancelTaskRequest(id=task.id))
+```
+
+`get_task` reports the state of the underlying run:
+
+| Run status | Task state |
+|:--|:--|
+| `pending` | `TASK_STATE_SUBMITTED` |
+| `running` | `TASK_STATE_WORKING` |
+| `success` | `TASK_STATE_COMPLETED` |
+| `interrupted` | `TASK_STATE_INPUT_REQUIRED` |
+| `error`, `timeout` | `TASK_STATE_FAILED` |
+
+`cancel_task` stops a run that is still going. A canceled run is stored as `interrupted`, so a later `get_task` on it reports `TASK_STATE_INPUT_REQUIRED`; rely on the `cancel_task` response for the canceled state. Cancelling a task that has already finished is not an error: the response acknowledges the request and leaves the run as it was.
+
+An unknown task ID returns error `-32001`, which the SDK raises as `TaskNotFoundError`.
+
+## Without an SDK
+
+The endpoint is plain JSON-RPC 2.0 over HTTP.
+
+```bash
+curl -X POST http://localhost:2026/a2a/agent \
+  -H "Content-Type: application/json" \
+  -d '{
+    "jsonrpc": "2.0",
+    "id": 1,
+    "method": "SendMessage",
+    "params": {
+      "message": {
+        "messageId": "msg-1",
+        "role": "ROLE_USER",
+        "parts": [{"text": "What is LangGraph?"}]
+      }
+    }
+  }'
+```
+
+Every JSON-RPC error is returned with HTTP `200` and an `error` object in the body, because A2A clients read the error code from the body.
+
+## Protocol versions
+
+The endpoint speaks both A2A dialects. Clients built for protocol 1.0 send method names such as `SendMessage`; clients built for 0.3 send `message/send`. Each request is answered in the dialect of its method name, so both kinds of client can use the same URL.
+
+The agent card declares protocol 1.0, which is what current SDKs select.
+
+## Authentication
+
+A2A routes use the same authentication as the rest of the API, including the agent card routes. With [authentication](/guides/authentication) enabled, a client must send its credentials on every request:
+
+```python
+httpx.AsyncClient(headers={"Authorization": "Bearer <token>"})
+```
+
+Threads and runs created over A2A belong to the authenticated user. Another user's task is reported as not found. `@auth.on` handlers run as they do for the equivalent thread and run operations.
+
+## Disable A2A
+
+```json
+{
+  "http": {
+    "disable_a2a": true
+  }
+}
+```
+
+This removes the JSON-RPC endpoint and every agent card route.
+
+## Current limits
+
+Streaming, file parts, task history and resuming an interrupted task over A2A are not available yet. A request that depends on one of them is rejected with an error, not silently run without it. See the [feature matrix](/feature-support#a2a-protocol) for the full list and for how Aegra differs from LangGraph Platform.

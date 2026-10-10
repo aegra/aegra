@@ -100,7 +100,7 @@ See the [A2A guide](/guides/a2a) for usage.
 | Agent cards | Supported | Per assistant at `/a2a/{assistant_id}` and both well-known paths. Host-root card via `http.a2a_default_assistant`. |
 | Protocol 1.0 and 0.3 clients | Supported | One endpoint answers each request in the dialect of its method name. The card declares 1.0. |
 | `SendMessage` / `message/send` | Supported | Text and data parts. Blocks until the run finishes. |
-| `GetTask` / `tasks/get` | Supported | Reports the run's status as a task state. A canceled task reads as canceled, not as awaiting input. |
+| `GetTask` / `tasks/get` | Supported | Reports the run's status as a task state. A canceled run is stored as interrupted, so it reads as input-required here; the `CancelTask` response, and a `SendMessage` that was waiting on the run, report it as canceled. |
 | `CancelTask` / `tasks/cancel` | Supported | Interrupts a live run; acknowledges an already finished one. |
 | File parts | Coming soon | A message containing a file part is rejected with `-32005` and a message saying file parts are not supported yet. |
 | Resuming an interrupted task | Coming soon | An interrupted run is reported as input-required, but cannot yet be answered over A2A: a message to a thread that is awaiting input, or one carrying `command`, returns `-32602`. Resume it through the runs API. |

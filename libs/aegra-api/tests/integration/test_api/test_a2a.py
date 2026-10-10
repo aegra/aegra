@@ -452,7 +452,7 @@ def _rpc(client: TestClient, method: str, params: Any) -> dict[str, Any]:
 def task_stubs(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
     """Replace the run lookup behind a task read: by default a ``success`` run on an idle thread."""
     session = MagicMock()
-    session.scalar = AsyncMock(side_effect=[MagicMock(status="success", output={}), "idle"])
+    session.scalar = AsyncMock(side_effect=[MagicMock(status="success"), "idle"])
     maker = MagicMock()
     maker.return_value.__aenter__.return_value = session
     stubs: dict[str, Any] = {"session": session, "authorize": AsyncMock(return_value=None)}
@@ -467,8 +467,8 @@ def task_stubs(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
         pytest.param("pending", "busy", "TASK_STATE_SUBMITTED", None, id="pending"),
         pytest.param("running", "busy", "TASK_STATE_WORKING", None, id="running"),
         pytest.param("success", "idle", "TASK_STATE_COMPLETED", "Task completed successfully", id="success"),
-        pytest.param("interrupted", "interrupted", "TASK_STATE_INPUT_REQUIRED", None, id="paused-for-input"),
-        pytest.param("interrupted", "idle", "TASK_STATE_CANCELED", None, id="canceled"),
+        pytest.param("interrupted", "interrupted", "TASK_STATE_INPUT_REQUIRED", None, id="interrupted"),
+        pytest.param("interrupted", "idle", "TASK_STATE_INPUT_REQUIRED", None, id="interrupted-by-a-cancel"),
         pytest.param("error", "idle", "TASK_STATE_FAILED", "Task failed with status: error", id="error"),
         pytest.param("timeout", "idle", "TASK_STATE_FAILED", "Task failed with status: timeout", id="timeout"),
         pytest.param("success", "interrupted", "TASK_STATE_INPUT_REQUIRED", None, id="success-on-interrupted-thread"),
@@ -484,9 +484,8 @@ def test_get_task_reports_the_run_status_as_a_task_state(
     state: str,
     message_text: str | None,
 ) -> None:
-    """A cancel and a pause both leave the run interrupted; only the pause keeps an interrupt payload."""
-    output = {"__interrupt__": [{"id": "int-1", "value": "Approve?"}]} if thread_status == "interrupted" else {}
-    task_stubs["session"].scalar.side_effect = [MagicMock(status=run_status, output=output), thread_status]
+    """The spec's status table, as written: a run stores a cancel and a pause the same way, as interrupted."""
+    task_stubs["session"].scalar.side_effect = [MagicMock(status=run_status), thread_status]
 
     task = _rpc(client, "GetTask", {"id": "thread-1:run-1"})["result"]
 
@@ -495,17 +494,6 @@ def test_get_task_reports_the_run_status_as_a_task_state(
     assert task["status"].get("message", {}).get("parts") == ([{"text": message_text}] if message_text else None)
     assert "artifacts" not in task
     assert "timestamp" not in task["status"]
-
-
-def test_get_task_for_a_paused_run_without_an_interrupt_payload_is_still_input_required(
-    client: TestClient, task_stubs: dict[str, Any]
-) -> None:
-    """Runs started through the v2 commands endpoint save no ``__interrupt__``; the thread status marks the pause."""
-    task_stubs["session"].scalar.side_effect = [MagicMock(status="interrupted", output={}), "interrupted"]
-
-    task = _rpc(client, "GetTask", {"id": "thread-1:run-1"})["result"]
-
-    assert task["status"]["state"] == "TASK_STATE_INPUT_REQUIRED"
 
 
 def test_legacy_get_task_is_tagged_and_lowercase(client: TestClient, task_stubs: dict[str, Any]) -> None:

@@ -241,12 +241,8 @@ async def _handle_get_task(rpc_request: JsonRpcRequest, user: User) -> dict[str,
         )
 
     state: TaskState = RUN_STATUS_TO_TASK_STATE.get(run.status, "SUBMITTED")
-    # Runs made through the v2 commands endpoint keep interrupts out of their output, so the payload
-    # alone cannot tell a pause from a cancel; a pause also leaves the thread interrupted.
-    if is_canceled_run(run.status, run.output) and thread_status != "interrupted":
-        state = "CANCELED"
     # A finished run whose thread is now waiting on input reports as input-required, as the platform does.
-    elif run.status == "success" and thread_status == "interrupted":
+    if run.status == "success" and thread_status == "interrupted":
         state = "INPUT_REQUIRED"
 
     message_text: str | None = None

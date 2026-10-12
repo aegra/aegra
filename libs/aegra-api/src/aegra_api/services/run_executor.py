@@ -267,6 +267,7 @@ def _build_run_config(job: RunJob) -> dict[str, Any]:
         job.user,
         additional_config=job.execution.config,
         checkpoint=job.execution.checkpoint,
+        trigger=job.trigger,
     )
     if job.behavior.interrupt_before is not None:
         items = job.behavior.interrupt_before

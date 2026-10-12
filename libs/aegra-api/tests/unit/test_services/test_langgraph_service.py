@@ -2,6 +2,7 @@
 
 import json
 import sys
+from datetime import UTC, datetime
 from pathlib import Path
 from unittest.mock import Mock, mock_open, patch
 
@@ -9,6 +10,7 @@ import pytest
 
 # Import the settings singleton directly to patch it
 from aegra_api import config as config_module
+from aegra_api.models.run_job import CronTrigger
 from aegra_api.services.langgraph_service import (
     LangGraphService,
     create_run_config,
@@ -745,6 +747,61 @@ class TestLangGraphServiceConfigs:
         assert f"run:{run_id}" in result["metadata"]["langfuse_tags"]
         assert f"thread:{thread_id}" in result["metadata"]["langfuse_tags"]
         assert f"user:{mock_user.identity}" in result["metadata"]["langfuse_tags"]
+
+    def test_create_run_config_pins_cron_keys_from_the_trigger(self) -> None:
+        """A fired run tells the graph which cron fired it and which occurrence it serves."""
+        mock_user = Mock()
+        mock_user.identity = "user-123"
+        mock_user.display_name = "Test User"
+        trigger = CronTrigger(
+            cron_id="cron-1", scheduled_time=datetime(2026, 1, 1, 9, 0, tzinfo=UTC), cron_metadata={"team": "ops"}
+        )
+
+        with patch(
+            "aegra_api.services.langgraph_service.get_tracing_callbacks",
+            return_value=[],
+        ):
+            result = create_run_config("run-789", "thread-456", mock_user, trigger=trigger)
+
+        assert result["configurable"]["cron_id"] == "cron-1"
+        assert result["configurable"]["cron_scheduled_time"] == "2026-01-01T09:00:00+00:00"
+
+    def test_create_run_config_drops_client_cron_keys_on_a_request_run(self) -> None:
+        """Without a trigger the cron keys are absent, whatever the client sent."""
+        mock_user = Mock()
+        mock_user.identity = "user-123"
+        mock_user.display_name = "Test User"
+        forged = {"configurable": {"cron_id": "not-mine", "cron_scheduled_time": "2026-01-01T09:00:00+00:00"}}
+
+        with patch(
+            "aegra_api.services.langgraph_service.get_tracing_callbacks",
+            return_value=[],
+        ):
+            result = create_run_config("run-789", "thread-456", mock_user, additional_config=forged)
+
+        assert "cron_id" not in result["configurable"]
+        assert "cron_scheduled_time" not in result["configurable"]
+
+    def test_create_run_config_client_cron_keys_cannot_override_the_trigger(self) -> None:
+        """A cron payload config or a checkpoint carrying cron keys loses to the server's values."""
+        mock_user = Mock()
+        mock_user.identity = "user-123"
+        mock_user.display_name = "Test User"
+        trigger = CronTrigger(cron_id="cron-1", scheduled_time=datetime(2026, 1, 1, 9, 0, tzinfo=UTC))
+        forged = {"configurable": {"cron_id": "not-mine"}}
+        checkpoint = {"cron_scheduled_time": "1999-01-01T00:00:00+00:00", "checkpoint_id": "cp-9"}
+
+        with patch(
+            "aegra_api.services.langgraph_service.get_tracing_callbacks",
+            return_value=[],
+        ):
+            result = create_run_config(
+                "run-789", "thread-456", mock_user, additional_config=forged, checkpoint=checkpoint, trigger=trigger
+            )
+
+        assert result["configurable"]["cron_id"] == "cron-1"
+        assert result["configurable"]["cron_scheduled_time"] == "2026-01-01T09:00:00+00:00"
+        assert result["configurable"]["checkpoint_id"] == "cp-9"
 
     def test_create_run_config_existing_callbacks(self):
         """Test creating run config with existing callbacks"""

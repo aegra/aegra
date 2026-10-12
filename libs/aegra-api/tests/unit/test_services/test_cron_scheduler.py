@@ -11,7 +11,9 @@ from unittest.mock import AsyncMock, Mock, patch
 import pytest
 from fastapi import HTTPException
 
+from aegra_api.models.run_job import CronTrigger, RunJob
 from aegra_api.services.cron_scheduler import CronScheduler, _build_run_create
+from aegra_api.services.run_executor import _build_run_config
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -30,6 +32,7 @@ def _make_cron_orm(
     on_run_completed: str | None = None,
     end_time: datetime | None = None,
     next_run_date: datetime | None = None,
+    metadata: dict[str, Any] | None = None,
 ) -> Mock:
     """Build a mock CronORM row for scheduler tests."""
     now = datetime.now(UTC)
@@ -44,6 +47,8 @@ def _make_cron_orm(
     cron.on_run_completed = on_run_completed
     cron.end_time = end_time
     cron.next_run_date = next_run_date or now
+    cron.metadata_dict = metadata or {}
+    cron.created_at = now
     return cron
 
 
@@ -606,3 +611,94 @@ class TestSchedulerLoop:
             await scheduler._loop()
 
         assert call_count == 2
+
+
+# ---------------------------------------------------------------------------
+# What a fired run tells the graph about its cron
+# ---------------------------------------------------------------------------
+
+
+async def _fire_through_prepare_run(cron: Mock) -> RunJob:
+    """Fire *cron* through the real ``_prepare_run`` and return the job it submitted."""
+    assistant = Mock()
+    assistant.assistant_id = cron.assistant_id
+    assistant.graph_id = "graph-1"
+    assistant.config = {}
+    assistant.context = {}
+    session = AsyncMock()
+    session.scalar = AsyncMock(return_value=assistant)
+    session.add = Mock()
+
+    with (
+        patch("aegra_api.services.run_preparation._validate_resume_command", new_callable=AsyncMock),
+        patch("aegra_api.services.run_preparation.get_langgraph_service") as mock_service,
+        patch("aegra_api.services.run_preparation.resolve_assistant_id", return_value=cron.assistant_id),
+        patch("aegra_api.services.run_preparation.update_thread_metadata", new_callable=AsyncMock),
+        patch("aegra_api.services.run_preparation.set_thread_status", new_callable=AsyncMock),
+        patch("aegra_api.services.run_preparation.executor.submit", new_callable=AsyncMock) as mock_submit,
+    ):
+        mock_service.return_value.list_graphs.return_value = ["graph-1"]
+        await CronScheduler._fire_cron(session, cron)
+
+    mock_submit.assert_awaited_once()
+    return mock_submit.await_args.args[0]
+
+
+class TestFireCronTrigger:
+    """_fire_cron names the claimed occurrence and the cron's metadata to _prepare_run."""
+
+    @pytest.mark.asyncio
+    async def test_passes_claimed_next_run_date_as_the_trigger(self) -> None:
+        due = datetime(2026, 1, 1, 9, 0, tzinfo=UTC)
+        cron = _make_cron_orm(cron_id="cron-7", thread_id="t-bound", next_run_date=due, metadata={"team": "ops"})
+        cron.end_time = None
+
+        with patch(
+            "aegra_api.services.cron_scheduler._prepare_run",
+            new_callable=AsyncMock,
+            return_value=("run-1", Mock(), None),
+        ) as mock_prepare:
+            await CronScheduler._fire_cron(AsyncMock(), cron)
+
+        assert mock_prepare.await_args.kwargs["trigger"] == CronTrigger(
+            cron_id="cron-7", scheduled_time=due, cron_metadata={"team": "ops"}
+        )
+
+
+class TestFiredRunProvenance:
+    """A fired run carries the cron that fired it and the occurrence it serves."""
+
+    _DUE = datetime(2026, 1, 1, 9, 0, tzinfo=UTC)
+
+    def _due_cron(self) -> Mock:
+        cron = _make_cron_orm(
+            cron_id="cron-9",
+            thread_id="t-bound",
+            next_run_date=self._DUE,
+            metadata={"team": "research"},
+        )
+        cron.end_time = None
+        return cron
+
+    @pytest.mark.asyncio
+    async def test_fired_run_metadata_carries_cron_id_and_scheduled_time(self) -> None:
+        job = await _fire_through_prepare_run(self._due_cron())
+
+        assert job.run_metadata["cron_id"] == "cron-9"
+        assert job.run_metadata["cron_scheduled_time"] == "2026-01-01T09:00:00+00:00"
+
+    @pytest.mark.asyncio
+    async def test_fired_run_metadata_carries_cron_metadata(self) -> None:
+        job = await _fire_through_prepare_run(self._due_cron())
+
+        assert job.run_metadata["team"] == "research"
+
+    @pytest.mark.asyncio
+    async def test_fired_run_config_pins_cron_id_and_scheduled_time(self) -> None:
+        job = await _fire_through_prepare_run(self._due_cron())
+
+        with patch("aegra_api.services.langgraph_service.get_tracing_callbacks", return_value=[]):
+            config = _build_run_config(job)
+
+        assert config["configurable"]["cron_id"] == "cron-9"
+        assert config["configurable"]["cron_scheduled_time"] == "2026-01-01T09:00:00+00:00"

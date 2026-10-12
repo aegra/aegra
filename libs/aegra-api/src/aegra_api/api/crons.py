@@ -31,7 +31,7 @@ from aegra_api.models.crons import (
     CronUpdate,
 )
 from aegra_api.models.errors import NOT_FOUND
-from aegra_api.services.cron_scheduler import _build_run_create
+from aegra_api.services.cron_scheduler import _build_run_create, _build_trigger
 from aegra_api.services.cron_service import (
     CronService,
     _cron_to_response,
@@ -266,6 +266,8 @@ async def _trigger_first_run(
     should_delete_thread = thread_id is None and should_delete_stateless_thread(cron)
 
     run_request = _build_run_create(cron)
+    # Not a schedule occurrence: the run fires at creation, so it carries that time.
+    trigger = _build_trigger(cron, cron.created_at)
 
     try:
         _run_id, run, _job = await _prepare_run(
@@ -274,6 +276,7 @@ async def _trigger_first_run(
             run_request,
             user,
             initial_status="pending",
+            trigger=trigger,
         )
     except Exception:
         if should_delete_thread:

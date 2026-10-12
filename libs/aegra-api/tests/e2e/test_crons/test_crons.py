@@ -10,6 +10,7 @@ real scheduler when fast cron settings are enabled.
 """
 
 import asyncio
+from datetime import datetime
 from typing import Any
 from uuid import uuid4
 
@@ -69,15 +70,19 @@ async def _search_crons_via_http(payload: dict[str, Any]) -> list[dict[str, Any]
     return body
 
 
+def _ticks(state: dict[str, Any]) -> list[dict[str, Any]]:
+    """Return the cron_example tick messages in a thread state payload."""
+    messages = state.get("values", {}).get("messages", [])
+    return [
+        message
+        for message in messages
+        if isinstance(message, dict) and str(message.get("content", "")).startswith("Tick #")
+    ]
+
+
 def _tick_count(state: dict[str, Any]) -> int:
     """Count cron_example tick messages in a thread state payload."""
-    messages = state.get("values", {}).get("messages", [])
-    count = 0
-    for message in messages:
-        content = message.get("content") if isinstance(message, dict) else getattr(message, "content", "")
-        if isinstance(content, str) and content.startswith("Tick #"):
-            count += 1
-    return count
+    return len(_ticks(state))
 
 
 async def _wait_for_tick_count(
@@ -483,6 +488,14 @@ async def test_cron_example_seconds_schedule_fires_on_live_scheduler() -> None:
         state = await _wait_for_tick_count(client=client, thread_id=thread_id, minimum=2, attempts=30)
         elog("cron_example state after scheduler fire", state)
         assert _tick_count(state) >= 2
+
+        # Every tick names the cron; the scheduler's tick also names the occurrence it served.
+        first_tick, scheduled_tick = _ticks(state)[:2]
+        assert first_tick["additional_kwargs"]["cron_id"] == cron_id
+        assert scheduled_tick["additional_kwargs"]["cron_id"] == cron_id
+        occurrence = datetime.fromisoformat(scheduled_tick["additional_kwargs"]["cron_scheduled_time"])
+        assert occurrence.tzinfo is not None
+        assert occurrence.second % 5 == 0
     finally:
         if cron_id is not None:
             await client.crons.delete(cron_id)

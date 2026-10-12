@@ -20,7 +20,7 @@ CRON_ALLOW_SECONDS_SCHEDULE=false  # default: false
 See the [environment variables reference](/reference/environment-variables#cron-scheduler) for all options.
 
 <Warning>
-**Delivery semantics: at-least-once.** When the scheduler claims a cron, the claim is held for `CRON_CLAIM_DURATION_SECONDS`. If a worker crashes between claiming and committing the run advance, another tick re-fires the cron once the claim expires. Make agent runs idempotent if duplicate firings are unacceptable.
+**Delivery semantics: at-least-once.** When the scheduler claims a cron, the claim is held for `CRON_CLAIM_DURATION_SECONDS`. If a worker crashes between claiming and committing the run advance, another tick re-fires the cron once the claim expires. Make agent runs idempotent if duplicate firings are unacceptable; both firings carry the same `cron_scheduled_time`, see [Reading the cron from a fired run](#reading-the-cron-from-a-fired-run).
 </Warning>
 
 <Note>
@@ -99,6 +99,31 @@ run = await client.crons.create_for_thread(
 )
 print(f"Cron ID: {run['cron_id']}")
 ```
+
+## Reading the cron from a fired run
+
+Every run a cron creates knows which cron fired it and which occurrence of the schedule it serves. The server sets two keys on the run's `config.configurable`:
+
+- `cron_id`: the cron that created the run.
+- `cron_scheduled_time`: the occurrence the firing serves, as an ISO 8601 timestamp in UTC. This is the cron's `next_run_date` at the moment the scheduler claimed it, so a duplicate firing of the same occurrence carries the same value.
+
+Both keys are server-pinned, like `thread_id` and `run_id`: a value sent in the cron's `config`, in a run request, or in a checkpoint is dropped, and runs created any other way carry neither key. That makes `(cron_id, cron_scheduled_time)` a safe idempotency key for scheduled work:
+
+```python
+from langchain_core.runnables import RunnableConfig
+
+
+def send_report(state: State, config: RunnableConfig) -> dict[str, Any]:
+    configurable = config["configurable"]
+    occurrence = f"{configurable['cron_id']}:{configurable['cron_scheduled_time']}"
+    if already_sent(occurrence):
+        return {}
+    ...
+```
+
+The same two keys, together with a copy of the cron's `metadata`, are set as the run's metadata, so the traces of scheduled runs carry the cron's tags (see [Observability](/guides/observability#run-metadata)). The cron's metadata cannot override the two server keys.
+
+The immediate first run that cron creation triggers is not a schedule occurrence; its `cron_scheduled_time` is the cron's `created_at`.
 
 ## Cron expression format
 
@@ -204,5 +229,4 @@ Deletion is permanent. When a cron is bound to a thread and that thread is delet
 ## Limitations
 
 - **Scheduled runs skip per-request auth handlers.** Creating a cron runs the full auth chain (`crons.create` → `assistants.read` → `threads.read`/`search`), but each *scheduled firing* executes as a background daemon under the cron owner's identity and does not re-dispatch `@auth.on(...)` handlers. Put per-run authorization logic in the graph itself if it must apply to scheduled runs.
-- **Cron metadata is not copied onto fired runs.** `metadata` set on a cron is stored on the cron record for search and filtering, but is not propagated to the runs the cron creates.
-- **Delivery is at-least-once.** Under a crash between firing and advancing the schedule, a run can fire more than once for a single occurrence. Make scheduled work idempotent.
+- **Delivery is at-least-once.** Under a crash between firing and advancing the schedule, a run can fire more than once for a single occurrence. Make scheduled work idempotent, keyed on `cron_id` and `cron_scheduled_time`.

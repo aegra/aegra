@@ -25,6 +25,7 @@ from langgraph_sdk.auth.types import BaseUser
 
 from aegra_api.constants import ASSISTANT_NAMESPACE_UUID
 from aegra_api.models.auth import User
+from aegra_api.models.run_job import CronTrigger
 from aegra_api.observability.base import (
     get_tracing_callbacks,
     get_tracing_metadata,
@@ -39,7 +40,7 @@ from aegra_api.services.graph_factory import (
     invoke_factory,
     is_factory,
 )
-from aegra_api.utils.run_utils import strip_pinned_config_keys
+from aegra_api.utils.run_utils import SERVER_PINNED_CONFIG_KEYS, strip_pinned_config_keys
 
 State = TypeVar("State")
 logger = structlog.get_logger(__name__)
@@ -705,12 +706,14 @@ def create_run_config(
     *,
     additional_config: dict[str, Any] | None = None,
     checkpoint: dict[str, Any] | None = None,
+    trigger: CronTrigger | None = None,
 ) -> dict[str, Any]:
     """Create LangGraph configuration for a specific run with full context.
 
-    Additive for client keys, except thread_id/run_id which are forced: a
-    body-supplied configurable.thread_id would redirect execution to another
-    user's thread (the checkpointer keys on thread_id alone).
+    Additive for client keys, except the server-pinned ones, which are forced:
+    a body-supplied configurable.thread_id would redirect execution to another
+    user's thread (the checkpointer keys on thread_id alone), and a forged
+    cron_id would let a request-created run pose as a scheduled one.
     """
     from copy import deepcopy
 
@@ -718,8 +721,12 @@ def create_run_config(
     cfg.setdefault("configurable", {})
 
     # Server-authoritative — overwrite, never honor a client override.
+    for key in SERVER_PINNED_CONFIG_KEYS:
+        cfg["configurable"].pop(key, None)
     cfg["configurable"]["thread_id"] = thread_id
     cfg["configurable"]["run_id"] = run_id
+    if trigger is not None:
+        cfg["configurable"].update(trigger.pinned_keys())
 
     # Ensure the root run ID is set to match so that astream_events recognizes it
     cfg.setdefault("run_id", run_id)

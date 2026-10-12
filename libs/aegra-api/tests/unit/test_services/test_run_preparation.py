@@ -1,6 +1,7 @@
 """Unit tests for run_preparation helpers."""
 
 from collections.abc import Iterator
+from datetime import UTC, datetime
 from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import AsyncMock, MagicMock
@@ -9,11 +10,13 @@ import pytest
 from fastapi import HTTPException
 
 from aegra_api.config import CheckpointerConfig
+from aegra_api.models.run_job import CronTrigger
 from aegra_api.models.runs import RunCreate
 from aegra_api.services import run_preparation as mod
 from aegra_api.services.run_preparation import (
     _resolve_checkpoint,
     _resolve_durability,
+    _resolve_run_metadata,
     _validate_resume_command,
     get_default_durability,
 )
@@ -128,6 +131,36 @@ def _fresh_default_durability() -> Iterator[None]:
     get_default_durability.cache_clear()
     yield
     get_default_durability.cache_clear()
+
+
+class TestResolveRunMetadata:
+    _TRIGGER = CronTrigger(
+        cron_id="cron-1", scheduled_time=datetime(2026, 1, 1, 9, 0, tzinfo=UTC), cron_metadata={"team": "ops"}
+    )
+
+    def test_request_run_keeps_its_own_metadata(self) -> None:
+        request = RunCreate(assistant_id="a", input={}, metadata={"env": "prod"})
+
+        assert _resolve_run_metadata(request, None) == {"env": "prod"}
+
+    def test_request_run_without_metadata_is_empty(self) -> None:
+        assert _resolve_run_metadata(RunCreate(assistant_id="a", input={}), None) == {}
+
+    def test_fired_run_carries_cron_metadata_and_the_trigger_keys(self) -> None:
+        request = RunCreate(assistant_id="a", input={})
+
+        assert _resolve_run_metadata(request, self._TRIGGER) == {
+            "team": "ops",
+            "cron_id": "cron-1",
+            "cron_scheduled_time": "2026-01-01T09:00:00+00:00",
+        }
+
+    def test_trigger_keys_win_over_cron_metadata_of_the_same_name(self) -> None:
+        trigger = CronTrigger(
+            cron_id="cron-1", scheduled_time=datetime(2026, 1, 1, 9, 0, tzinfo=UTC), cron_metadata={"cron_id": "x"}
+        )
+
+        assert _resolve_run_metadata(RunCreate(assistant_id="a", input={}), trigger)["cron_id"] == "cron-1"
 
 
 @pytest.mark.usefixtures("_fresh_default_durability")

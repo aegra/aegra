@@ -294,7 +294,7 @@ def lifespan_events(monkeypatch: pytest.MonkeyPatch) -> list[str]:
     graph_service.initialize = _recording(events, "graphs.initialize")
     monkeypatch.setattr(main_module, "get_langgraph_service", lambda: graph_service)
     monkeypatch.setattr(main_module, "setup_observability", lambda: None)
-    monkeypatch.setattr(main_module, "get_thread_ttl_config", lambda: MagicMock())
+    monkeypatch.setattr(main_module, "get_thread_ttl_config", MagicMock)
     # Patch the module's own settings reference: an earlier test in this file reloads aegra_api.settings.
     monkeypatch.setattr(main_module.settings.app, "RUN_MIGRATIONS_ON_STARTUP", False)
     monkeypatch.setattr(main_module.settings.redis, "REDIS_BROKER_ENABLED", True)
@@ -366,6 +366,40 @@ async def test_unwinds_started_components_when_executor_start_fails(
         "redis.initialize",
         "broker.start",
         "executor.start",
+        "broker.stop",
+        "redis.close",
+        "db.close",
+    ]
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_keeps_stopping_remaining_components_when_one_stop_fails(
+    monkeypatch: pytest.MonkeyPatch, lifespan_events: list[str]
+) -> None:
+    """A failing cleanup must not skip later cleanups, so the DB pools still close."""
+    failing_executor = MagicMock()
+    failing_executor.start = _recording(lifespan_events, "executor.start")
+    failing_executor.stop = _recording(lifespan_events, "executor.stop", error=RuntimeError("stop failed"))
+    monkeypatch.setattr(main_module, "executor", failing_executor)
+
+    with pytest.raises(RuntimeError, match="stop failed"):
+        async with main_module.lifespan(MagicMock()):
+            pass
+
+    assert lifespan_events == [
+        "db.initialize",
+        "graphs.initialize",
+        "redis.initialize",
+        "broker.start",
+        "executor.start",
+        "reaper.start",
+        "cron.start",
+        "ttl.start",
+        "ttl.stop",
+        "cron.stop",
+        "reaper.stop",
+        "executor.stop",
         "broker.stop",
         "redis.close",
         "db.close",

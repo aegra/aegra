@@ -253,4 +253,7 @@ The generated `docker-compose.yml` uses `/health` to monitor the API container. 
   <Accordion title="Pods restart-loop on rolling deploy (Kubernetes)">
     All replicas race for Alembic's advisory lock on boot. As fleet size grows, later pods queue past their probe deadline and the kubelet kills them. Set `RUN_MIGRATIONS_ON_STARTUP=false` and run `aegra db upgrade` once per release from a Helm pre-upgrade Job or init container.
   </Accordion>
+  <Accordion title="Server exits with 'Application startup failed'">
+    A startup step failed after the database connected, for example a graph in `aegra.json` that raises on import. Aegra closes the database connections and exits with a non-zero code instead of hanging. Check the traceback above the message in the logs, fix the error, and restart.
+  </Accordion>
 </AccordionGroup>

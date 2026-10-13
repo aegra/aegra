@@ -1,7 +1,7 @@
 """FastAPI application for Aegra (Agent Protocol Server)"""
 
 from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
+from contextlib import AsyncExitStack, asynccontextmanager
 from typing import Any
 
 import structlog
@@ -105,69 +105,64 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
         _log_connection_help(e)
         raise
 
-    # Observability
-    setup_observability()
+    # Each cleanup is registered once its step has started; they run in reverse start order
+    # on shutdown (ttl sweeper → cron → reaper → executor drains jobs → broker → Redis → DB).
+    async with AsyncExitStack() as stack:
+        stack.push_async_callback(db_manager.close)
 
-    # Initialize LangGraph service
-    langgraph_service = get_langgraph_service()
-    await langgraph_service.initialize()
+        # Observability
+        setup_observability()
 
-    # Initialize Redis broker (if enabled)
-    if settings.redis.REDIS_BROKER_ENABLED:
-        try:
-            await redis_manager.initialize()
-        except (ConnectionError, OSError) as e:
-            logger.error(
-                "Cannot connect to Redis. "
-                "Set REDIS_BROKER_ENABLED=false for single-instance mode without Redis, "
-                "or ensure Redis is running at REDIS_URL.",
-                redis_url=settings.redis.REDIS_URL,
-                error=str(e),
+        # Initialize LangGraph service
+        langgraph_service = get_langgraph_service()
+        await langgraph_service.initialize()
+
+        # Initialize Redis broker (if enabled)
+        if settings.redis.REDIS_BROKER_ENABLED:
+            try:
+                await redis_manager.initialize()
+            except (ConnectionError, OSError) as e:
+                logger.error(
+                    "Cannot connect to Redis. "
+                    "Set REDIS_BROKER_ENABLED=false for single-instance mode without Redis, "
+                    "or ensure Redis is running at REDIS_URL.",
+                    redis_url=settings.redis.REDIS_URL,
+                    error=str(e),
+                )
+                raise
+            stack.push_async_callback(redis_manager.close)
+        else:
+            logger.warning(
+                "Running without Redis broker. Background runs have no crash recovery "
+                "or horizontal scaling. Set REDIS_BROKER_ENABLED=true and configure "
+                "REDIS_URL for production use.",
             )
-            raise
-    else:
-        logger.warning(
-            "Running without Redis broker. Background runs have no crash recovery "
-            "or horizontal scaling. Set REDIS_BROKER_ENABLED=true and configure "
-            "REDIS_URL for production use.",
-        )
 
-    # Start broker manager (cleanup task for in-memory, cancel listener for Redis)
-    await broker_manager.start()
+        # Start broker manager (cleanup task for in-memory, cancel listener for Redis)
+        await broker_manager.start()
+        stack.push_async_callback(broker_manager.stop)
 
-    # Start executor (spawns worker coroutines when Redis is enabled)
-    await executor.start()
+        # Start executor (spawns worker coroutines when Redis is enabled)
+        await executor.start()
+        stack.push_async_callback(executor.stop)
 
-    # Start lease reaper (recovers crashed worker runs, Redis mode only)
-    if settings.redis.REDIS_BROKER_ENABLED:
-        await lease_reaper.start()
+        # Start lease reaper (recovers crashed worker runs, Redis mode only)
+        if settings.redis.REDIS_BROKER_ENABLED:
+            await lease_reaper.start()
+            stack.push_async_callback(lease_reaper.stop)
 
-    # Start cron scheduler (fires due cron jobs)
-    if settings.cron.CRON_ENABLED:
-        await cron_scheduler.start()
+        # Start cron scheduler (fires due cron jobs)
+        if settings.cron.CRON_ENABLED:
+            await cron_scheduler.start()
+            stack.push_async_callback(cron_scheduler.stop)
 
-    # Start thread TTL sweeper (deletes/compacts expired threads); resolving
-    # the config here also fails fast on an invalid retention policy.
-    if get_thread_ttl_config() is not None:
-        await thread_ttl_sweeper.start()
+        # Start thread TTL sweeper (deletes/compacts expired threads); resolving
+        # the config here also fails fast on an invalid retention policy.
+        if get_thread_ttl_config() is not None:
+            await thread_ttl_sweeper.start()
+            stack.push_async_callback(thread_ttl_sweeper.stop)
 
-    yield
-
-    # Shutdown order: ttl sweeper → cron → reaper → executor (drains jobs) → broker → Redis → DB
-    if get_thread_ttl_config() is not None:
-        await thread_ttl_sweeper.stop()
-    if settings.cron.CRON_ENABLED:
-        await cron_scheduler.stop()
-    if settings.redis.REDIS_BROKER_ENABLED:
-        await lease_reaper.stop()
-    await executor.stop()
-    await broker_manager.stop()
-
-    # Close Redis broker (if enabled)
-    if settings.redis.REDIS_BROKER_ENABLED:
-        await redis_manager.close()
-
-    await db_manager.close()
+        yield
 
 
 # Define core exception handlers

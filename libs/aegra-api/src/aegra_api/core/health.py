@@ -120,7 +120,7 @@ async def readiness_check(_request: Request) -> dict[str, str]:
         async with db_manager.engine.begin() as conn:
             await conn.execute(text("SELECT 1"))
     except Exception as e:
-        raise HTTPException(status_code=503, detail=f"Service not ready - database error: {str(e)}") from e
+        raise HTTPException(status_code=503, detail="Service not ready - database error") from e
 
     # Check that LangGraph components can be obtained (lazy init) and respond
     try:
@@ -134,7 +134,7 @@ async def readiness_check(_request: Request) -> dict[str, str]:
     except Exception as e:
         raise HTTPException(
             status_code=503,
-            detail=f"Service not ready - components unavailable: {str(e)}",
+            detail="Service not ready - components unavailable",
         ) from e
 
     return {"status": "ready"}

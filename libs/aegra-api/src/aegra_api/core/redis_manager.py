@@ -55,8 +55,13 @@ class RedisManager:
             decode_responses=True,
             health_check_interval=settings.redis.REDIS_HEALTH_CHECK_INTERVAL,
         )
-        # Set after from_url: a socket_timeout query param in REDIS_URL would override a kwarg.
-        self._blocking_pool.connection_kwargs["socket_timeout"] = settings.worker.BLOCKING_SOCKET_TIMEOUT_SECONDS
+        # Set after from_url: socket_timeout / retry_on_timeout query params in REDIS_URL override kwargs.
+        self._blocking_pool.connection_kwargs.update(
+            socket_timeout=settings.worker.BLOCKING_SOCKET_TIMEOUT_SECONDS,
+            retry=None,
+            retry_on_timeout=False,
+            retry_on_error=[],
+        )
         self._blocking_client = aioredis.Redis(connection_pool=self._blocking_pool)
 
         await self._client.ping()  # type: ignore[invalid-await]  # redis.asyncio stubs

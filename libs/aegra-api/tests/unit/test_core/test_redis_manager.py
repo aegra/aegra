@@ -1,6 +1,6 @@
 """Unit tests for RedisManager"""
 
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 import redis.asyncio as aioredis
@@ -22,7 +22,7 @@ class TestRedisManager:
         manager = RedisManager()
 
         mock_client = AsyncMock()
-        mock_pool = AsyncMock()
+        mock_pool = MagicMock()
 
         with (
             patch("aegra_api.core.redis_manager.aioredis.ConnectionPool") as mock_pool_cls,
@@ -58,9 +58,9 @@ class TestRedisManager:
         blocking_pool = mock_pool_cls.from_url.return_value
 
         assert "socket_timeout" not in shared_kwargs
-        assert blocking_pool.connection_kwargs.__setitem__.call_args.args == (
-            "socket_timeout",
-            settings.worker.BLOCKING_SOCKET_TIMEOUT_SECONDS,
+        assert (
+            blocking_pool.connection_kwargs.update.call_args.kwargs["socket_timeout"]
+            == settings.worker.BLOCKING_SOCKET_TIMEOUT_SECONDS
         )
         assert settings.worker.BLOCKING_SOCKET_TIMEOUT_SECONDS >= settings.worker.BLPOP_TIMEOUT_SECONDS + 5
         assert manager.get_blocking_client() is not manager.get_client()
@@ -102,10 +102,16 @@ class TestRedisManager:
         manager._pool = None
 
     @pytest.mark.asyncio
-    async def test_blocking_pool_ignores_socket_timeout_in_redis_url(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """redis-py lets URL query params override from_url kwargs; a REDIS_URL carrying
-        socket_timeout=5 must not reintroduce the BLPOP race on the blocking pool."""
-        monkeypatch.setattr(redis_manager_module.settings.redis, "REDIS_URL", "redis://localhost:1/0?socket_timeout=5")
+    async def test_blocking_pool_ignores_timeout_and_retry_params_in_redis_url(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """redis-py lets URL query params override from_url kwargs; socket_timeout=5 or
+        retry_on_timeout=true in REDIS_URL must not reintroduce the BLPOP race."""
+        monkeypatch.setattr(
+            redis_manager_module.settings.redis,
+            "REDIS_URL",
+            "redis://localhost:1/0?socket_timeout=5&retry_on_timeout=true",
+        )
         manager = RedisManager()
         real_from_url = aioredis.ConnectionPool.from_url
         pools: list[aioredis.ConnectionPool] = []
@@ -126,6 +132,7 @@ class TestRedisManager:
         assert blocking_conn.socket_timeout == settings.worker.BLOCKING_SOCKET_TIMEOUT_SECONDS
         # a silent BLPOP retry would discard the reply of a job the first attempt popped
         assert blocking_conn.retry.get_retries() == 0
+        assert blocking_conn.retry_on_error == []
 
         manager._client = None
         manager._pool = None

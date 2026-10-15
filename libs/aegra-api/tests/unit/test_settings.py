@@ -636,6 +636,14 @@ class TestWorkerSettingsLeaseValidation:
         with pytest.raises(ValueError, match="BLOCKING_SOCKET_TIMEOUT_SECONDS.*must exceed"):
             WorkerSettings(_env_file=None)
 
+    @pytest.mark.parametrize("value", ["0", "-1"])
+    def test_rejects_non_positive_blpop_timeout(self, monkeypatch: pytest.MonkeyPatch, value: str) -> None:
+        """BLPOP with timeout 0 blocks forever, so no finite read timeout can outlast it."""
+        self._clear_worker_env(monkeypatch)
+        monkeypatch.setenv("BLPOP_TIMEOUT_SECONDS", value)
+        with pytest.raises(ValueError, match="BLPOP_TIMEOUT_SECONDS"):
+            WorkerSettings(_env_file=None)
+
     def test_default_blocking_socket_timeout_outlasts_blpop(self, monkeypatch: pytest.MonkeyPatch) -> None:
         self._clear_worker_env(monkeypatch)
         ws = WorkerSettings(_env_file=None)

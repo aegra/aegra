@@ -54,10 +54,15 @@ class TestRedisManager:
             patch("aegra_api.core.redis_manager.aioredis.Redis", side_effect=lambda **_: AsyncMock()),
         ):
             await manager.initialize()
-            shared_kwargs, blocking_kwargs = (c.kwargs for c in mock_pool_cls.from_url.call_args_list)
+            shared_kwargs = mock_pool_cls.from_url.call_args_list[0].kwargs
+        blocking_pool = mock_pool_cls.from_url.return_value
 
         assert "socket_timeout" not in shared_kwargs
-        assert blocking_kwargs["socket_timeout"] >= settings.worker.BLPOP_TIMEOUT_SECONDS + 5
+        assert blocking_pool.connection_kwargs.__setitem__.call_args.args == (
+            "socket_timeout",
+            settings.worker.BLOCKING_SOCKET_TIMEOUT_SECONDS,
+        )
+        assert settings.worker.BLOCKING_SOCKET_TIMEOUT_SECONDS >= settings.worker.BLPOP_TIMEOUT_SECONDS + 5
         assert manager.get_blocking_client() is not manager.get_client()
 
         manager._client = None
@@ -95,6 +100,34 @@ class TestRedisManager:
 
         manager._client = None
         manager._pool = None
+
+    @pytest.mark.asyncio
+    async def test_blocking_pool_ignores_socket_timeout_in_redis_url(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """redis-py lets URL query params override from_url kwargs; a REDIS_URL carrying
+        socket_timeout=5 must not reintroduce the BLPOP race on the blocking pool."""
+        monkeypatch.setattr(redis_manager_module.settings.redis, "REDIS_URL", "redis://localhost:1/0?socket_timeout=5")
+        manager = RedisManager()
+        real_from_url = aioredis.ConnectionPool.from_url
+        pools: list[aioredis.ConnectionPool] = []
+
+        def capture_from_url(url: str, **kwargs: object) -> aioredis.ConnectionPool:
+            pools.append(real_from_url(url, **kwargs))
+            return pools[-1]
+
+        with (
+            patch("aegra_api.core.redis_manager.aioredis.ConnectionPool.from_url", side_effect=capture_from_url),
+            patch("aegra_api.core.redis_manager.aioredis.Redis", side_effect=lambda **_: AsyncMock()),
+        ):
+            await manager.initialize()
+
+        shared_pool, blocking_pool = pools
+        assert shared_pool.make_connection().socket_timeout == 5
+        assert blocking_pool.make_connection().socket_timeout == settings.worker.BLOCKING_SOCKET_TIMEOUT_SECONDS
+
+        manager._client = None
+        manager._pool = None
+        manager._blocking_client = None
+        manager._blocking_pool = None
 
     @pytest.mark.asyncio
     async def test_real_pool_connections_carry_retry(self, monkeypatch: pytest.MonkeyPatch) -> None:

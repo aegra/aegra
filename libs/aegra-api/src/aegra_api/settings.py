@@ -365,7 +365,7 @@ class WorkerSettings(EnvBase):
     WORKER_QUEUE_KEY: str = "aegra:jobs"
     # The read timeout must outlast the block: a client that gives up first drops the reply
     # of a job Redis already popped, stranding the run until the reaper.
-    BLPOP_TIMEOUT_SECONDS: int = 5
+    BLPOP_TIMEOUT_SECONDS: int = Field(default=5, gt=0)  # 0 makes Redis block forever
     BLOCKING_SOCKET_TIMEOUT_SECONDS: float = 15.0
     WORKER_DRAIN_TIMEOUT: float = 30.0
     BG_JOB_TIMEOUT_SECS: int = 3600

@@ -89,7 +89,7 @@ class TestRedisManager:
         ):
             await manager.initialize()
 
-            kwargs = mock_pool_cls.from_url.call_args.kwargs
+            kwargs = mock_pool_cls.from_url.call_args_list[0].kwargs
             assert kwargs["health_check_interval"] == 45
             retry = kwargs["retry"]
             assert isinstance(retry, Retry)
@@ -122,7 +122,10 @@ class TestRedisManager:
 
         shared_pool, blocking_pool = pools
         assert shared_pool.make_connection().socket_timeout == 5
-        assert blocking_pool.make_connection().socket_timeout == settings.worker.BLOCKING_SOCKET_TIMEOUT_SECONDS
+        blocking_conn = blocking_pool.make_connection()
+        assert blocking_conn.socket_timeout == settings.worker.BLOCKING_SOCKET_TIMEOUT_SECONDS
+        # a silent BLPOP retry would discard the reply of a job the first attempt popped
+        assert blocking_conn.retry.get_retries() == 0
 
         manager._client = None
         manager._pool = None
@@ -141,8 +144,9 @@ class TestRedisManager:
         captured: dict[str, aioredis.ConnectionPool] = {}
 
         def capture_from_url(url: str, **kwargs: object) -> aioredis.ConnectionPool:
-            captured["pool"] = real_from_url("redis://localhost:1/0", **kwargs)
-            return captured["pool"]
+            pool = real_from_url("redis://localhost:1/0", **kwargs)
+            captured.setdefault("pool", pool)
+            return pool
 
         with (
             patch(

@@ -47,18 +47,13 @@ class RedisManager:
         )
         self._client = aioredis.Redis(connection_pool=self._pool)
 
-        # BLPOP needs a read timeout longer than its block; the shared pool keeps
-        # redis-py's short default so dead connections are still detected fast.
+        # BLPOP needs a read timeout longer than its block. No retry: a reissued BLPOP would hide
+        # a reply lost with the old connection, so errors surface and _dequeue polls Postgres.
         self._blocking_pool = aioredis.ConnectionPool.from_url(
             settings.redis.REDIS_URL,
             max_connections=settings.worker.WORKER_COUNT + 2,
             decode_responses=True,
             health_check_interval=settings.redis.REDIS_HEALTH_CHECK_INTERVAL,
-            retry=Retry(
-                ExponentialBackoff(cap=1.0, base=0.05),
-                settings.redis.REDIS_RETRY_ATTEMPTS,
-            ),
-            retry_on_error=[RedisConnectionError, RedisTimeoutError],
         )
         # Set after from_url: a socket_timeout query param in REDIS_URL would override a kwarg.
         self._blocking_pool.connection_kwargs["socket_timeout"] = settings.worker.BLOCKING_SOCKET_TIMEOUT_SECONDS

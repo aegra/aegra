@@ -321,10 +321,12 @@ class WorkerExecutor(BaseExecutor):
     # ------------------------------------------------------------------
 
     async def _dequeue(self) -> str | None:
-        """BLPOP with 5s timeout. Falls back to Postgres polling if Redis is down."""
+        """BLPOP on the blocking client. Falls back to Postgres polling if Redis is down."""
         try:
-            client = redis_manager.get_client()
-            result = await client.blpop(settings.worker.WORKER_QUEUE_KEY, timeout=5)  # type: ignore[arg-type]
+            client = redis_manager.get_blocking_client()
+            result = await client.blpop(  # type: ignore[arg-type]
+                settings.worker.WORKER_QUEUE_KEY, timeout=settings.worker.BLPOP_TIMEOUT_SECONDS
+            )
             if result is None:
                 return None
             return result[1]

@@ -146,6 +146,8 @@ In dev mode (`REDIS_BROKER_ENABLED=false`), runs execute as in-process asyncio t
 | `HEARTBEAT_INTERVAL_SECONDS` | `10` | How often workers extend their lease |
 | `REAPER_INTERVAL_SECONDS` | `15` | How often the reaper scans for expired leases |
 | `POSTGRES_POLL_INTERVAL_SECONDS` | `5` | Fallback poll interval when Redis is unavailable |
+| `BLPOP_TIMEOUT_SECONDS` | `5` | Server-side block time of each job-queue `BLPOP` |
+| `BLOCKING_SOCKET_TIMEOUT_SECONDS` | `15.0` | Read timeout of the dedicated Redis connections that issue `BLPOP`. Must exceed `BLPOP_TIMEOUT_SECONDS` by at least 5s, or a job popped at the end of the block can be lost |
 | `WORKER_DRAIN_TIMEOUT` | `30.0` | Graceful shutdown wait time (seconds) |
 
 Total capacity per instance = `WORKER_COUNT` x `N_JOBS_PER_WORKER` (default: 30 concurrent runs).

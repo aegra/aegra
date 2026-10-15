@@ -10,6 +10,7 @@ from redis.exceptions import ConnectionError as RedisConnectionError
 
 from aegra_api.core import redis_manager as redis_manager_module
 from aegra_api.core.redis_manager import RedisManager
+from aegra_api.settings import settings
 
 
 class TestRedisManager:
@@ -31,13 +32,38 @@ class TestRedisManager:
 
             await manager.initialize()
 
-            mock_pool_cls.from_url.assert_called_once()
-            mock_redis_cls.assert_called_once_with(connection_pool=mock_pool)
+            # shared pool + dedicated pool for blocking commands
+            assert mock_pool_cls.from_url.call_count == 2
+            assert mock_redis_cls.call_count == 2
+            mock_redis_cls.assert_called_with(connection_pool=mock_pool)
             mock_client.ping.assert_awaited_once()
 
         # Clean up
         manager._client = None
         manager._pool = None
+        manager._blocking_client = None
+        manager._blocking_pool = None
+
+    @pytest.mark.asyncio
+    async def test_blocking_pool_read_timeout_outlasts_blpop(self) -> None:
+        """A BLPOP whose client read timeout fires at the end of the server-side block
+        drops a job Redis already popped. The blocking pool must wait clearly longer."""
+        manager = RedisManager()
+        with (
+            patch("aegra_api.core.redis_manager.aioredis.ConnectionPool") as mock_pool_cls,
+            patch("aegra_api.core.redis_manager.aioredis.Redis", side_effect=lambda **_: AsyncMock()),
+        ):
+            await manager.initialize()
+            shared_kwargs, blocking_kwargs = (c.kwargs for c in mock_pool_cls.from_url.call_args_list)
+
+        assert "socket_timeout" not in shared_kwargs
+        assert blocking_kwargs["socket_timeout"] >= settings.worker.BLPOP_TIMEOUT_SECONDS + 5
+        assert manager.get_blocking_client() is not manager.get_client()
+
+        manager._client = None
+        manager._pool = None
+        manager._blocking_client = None
+        manager._blocking_pool = None
 
     @pytest.mark.asyncio
     async def test_initialize_configures_retry_and_health_checks(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -130,6 +156,25 @@ class TestRedisManager:
         mock_pool.disconnect.assert_awaited_once()
         assert manager._client is None
         assert manager._pool is None
+
+    @pytest.mark.asyncio
+    async def test_close_cleans_up_blocking_pool(self) -> None:
+        manager = RedisManager()
+        mock_client = AsyncMock()
+        mock_pool = AsyncMock()
+        manager._blocking_client = mock_client
+        manager._blocking_pool = mock_pool
+
+        await manager.close()
+
+        mock_client.aclose.assert_awaited_once()
+        mock_pool.disconnect.assert_awaited_once()
+        assert manager._blocking_client is None
+        assert manager._blocking_pool is None
+
+    def test_get_blocking_client_raises_when_not_initialized(self) -> None:
+        with pytest.raises(RuntimeError, match="Redis not initialized"):
+            RedisManager().get_blocking_client()
 
     @pytest.mark.asyncio
     async def test_close_when_not_initialized(self) -> None:

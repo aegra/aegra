@@ -596,6 +596,8 @@ class TestWorkerSettingsLeaseValidation:
             "BG_JOB_TIMEOUT_SECS",
             "BG_JOB_MAX_RETRIES",
             "POSTGRES_POLL_INTERVAL_SECONDS",
+            "BLPOP_TIMEOUT_SECONDS",
+            "BLOCKING_SOCKET_TIMEOUT_SECONDS",
         ):
             monkeypatch.delenv(var, raising=False)
 
@@ -625,6 +627,19 @@ class TestWorkerSettingsLeaseValidation:
         monkeypatch.setenv("HEARTBEAT_INTERVAL_SECONDS", "10")
         ws = WorkerSettings(_env_file=None)
         assert ws.LEASE_DURATION_SECONDS == 21
+
+    def test_rejects_blocking_socket_timeout_not_outlasting_blpop(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Read timeout == BLPOP block is the race that loses popped jobs."""
+        self._clear_worker_env(monkeypatch)
+        monkeypatch.setenv("BLPOP_TIMEOUT_SECONDS", "5")
+        monkeypatch.setenv("BLOCKING_SOCKET_TIMEOUT_SECONDS", "5")
+        with pytest.raises(ValueError, match="BLOCKING_SOCKET_TIMEOUT_SECONDS.*must exceed"):
+            WorkerSettings(_env_file=None)
+
+    def test_default_blocking_socket_timeout_outlasts_blpop(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        self._clear_worker_env(monkeypatch)
+        ws = WorkerSettings(_env_file=None)
+        assert ws.BLOCKING_SOCKET_TIMEOUT_SECONDS >= ws.BLPOP_TIMEOUT_SECONDS + 5
 
 
 class TestCronSettingsValidation:

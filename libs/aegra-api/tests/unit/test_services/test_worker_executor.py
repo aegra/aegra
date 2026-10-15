@@ -23,6 +23,7 @@ from aegra_api.services.worker_executor import (
     _requeue_drained_runs,
     _restore_trace_context,
 )
+from aegra_api.settings import settings
 
 MODULE = "aegra_api.services.worker_executor"
 
@@ -859,18 +860,20 @@ class TestDequeue:
         blpop = AsyncMock(return_value=("aegra:worker:queue", "run-123"))
         executor = self._make_executor_with_blpop(blpop)
 
-        with patch(f"{MODULE}.redis_manager.get_client", return_value=self._client):
+        with patch(f"{MODULE}.redis_manager.get_blocking_client", return_value=self._client):
             result = await executor._dequeue()
 
         assert result == "run-123"
         executor._poll_postgres.assert_not_awaited()
+        blpop.assert_awaited_once()
+        assert blpop.await_args.kwargs["timeout"] == settings.worker.BLPOP_TIMEOUT_SECONDS
 
     @pytest.mark.asyncio
     async def test_returns_none_when_blpop_returns_none(self) -> None:
         blpop = AsyncMock(return_value=None)
         executor = self._make_executor_with_blpop(blpop)
 
-        with patch(f"{MODULE}.redis_manager.get_client", return_value=self._client):
+        with patch(f"{MODULE}.redis_manager.get_blocking_client", return_value=self._client):
             result = await executor._dequeue()
 
         assert result is None
@@ -885,7 +888,7 @@ class TestDequeue:
         executor = self._make_executor_with_blpop(blpop)
 
         with (
-            patch(f"{MODULE}.redis_manager.get_client", return_value=self._client),
+            patch(f"{MODULE}.redis_manager.get_blocking_client", return_value=self._client),
             patch(f"{MODULE}.logger.warning") as mock_warning,
         ):
             result = await executor._dequeue()
@@ -902,7 +905,7 @@ class TestDequeue:
         executor = self._make_executor_with_blpop(blpop)
 
         with (
-            patch(f"{MODULE}.redis_manager.get_client", return_value=self._client),
+            patch(f"{MODULE}.redis_manager.get_blocking_client", return_value=self._client),
             patch(f"{MODULE}.asyncio.sleep", new_callable=AsyncMock),
             patch(f"{MODULE}.logger.warning") as mock_warning,
         ):

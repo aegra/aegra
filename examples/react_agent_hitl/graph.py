@@ -101,7 +101,7 @@ def _update_tool_calls(original_calls: list, edited_args: dict) -> list:
     return updated_calls
 
 
-async def human_approval(state: State) -> Command:
+async def human_approval(state: State) -> Command[Literal["tools", "call_model", "__end__"]]:
     """Request human approval before executing tools."""
     # TODO: Fix Mark as Resolved functionality
     # ISSUE: Command(goto=END) creates infinite loop due to LangGraph bug

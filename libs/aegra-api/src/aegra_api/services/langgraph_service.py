@@ -20,6 +20,7 @@ from typing import Any, NotRequired, TypedDict, TypeVar, cast
 from uuid import uuid5
 
 import structlog
+from langchain_core.callbacks import BaseCallbackManager
 from langchain_core.runnables import RunnableConfig
 from langgraph.graph import StateGraph
 from langgraph.pregel import Pregel
@@ -82,7 +83,10 @@ def _copy_graph_config(config: RunnableConfig | None) -> RunnableConfig | None:
     if not config:
         return config
     callbacks = config.get("callbacks")
-    handlers = callbacks if isinstance(callbacks, list) else [] if callbacks is None else [callbacks]
+    if isinstance(callbacks, BaseCallbackManager):
+        handlers = [*callbacks.handlers, *callbacks.inheritable_handlers]
+    else:
+        handlers = callbacks if isinstance(callbacks, list) else [] if callbacks is None else [callbacks]
     # Handlers like Langfuse's hold clients deepcopy cannot rebuild; pre-seeding the memo reuses them as-is.
     return copy.deepcopy(config, memo={id(handler): handler for handler in handlers})
 

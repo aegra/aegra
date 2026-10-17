@@ -7,7 +7,7 @@ from typing import Any
 from unittest.mock import Mock, mock_open, patch
 
 import pytest
-from langchain_core.callbacks import BaseCallbackHandler
+from langchain_core.callbacks import BaseCallbackHandler, CallbackManager
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.graph import START, MessagesState, StateGraph
 from langgraph.pregel import Pregel
@@ -17,6 +17,7 @@ from aegra_api import config as config_module
 from aegra_api.core import database as dbmod
 from aegra_api.services.langgraph_service import (
     LangGraphService,
+    _copy_graph_config,
     create_run_config,
     create_thread_config,
     inject_user_context,
@@ -1011,6 +1012,23 @@ async def test_get_graph_keeps_persistence_when_config_has_non_copyable_callback
         assert graph.config["callbacks"][0] is handler
         assert graph.config["metadata"] == {"team": "a"}
         assert graph.config["metadata"] is not base.config["metadata"]
+
+
+def test_copy_graph_config_copies_callback_manager_but_shares_its_handlers() -> None:
+    handler = _NoDeepcopyHandler()
+    inheritable = _NoDeepcopyHandler()
+    manager = CallbackManager(handlers=[handler], inheritable_handlers=[inheritable], tags=["a"])
+
+    copied = _copy_graph_config({"callbacks": manager})
+
+    assert copied is not None
+    copied_manager = copied["callbacks"]
+    assert isinstance(copied_manager, CallbackManager)
+    assert copied_manager is not manager
+    assert copied_manager.handlers[0] is handler
+    assert copied_manager.inheritable_handlers[0] is inheritable
+    copied_manager.add_tags(["b"])
+    assert manager.tags == ["a"]
 
 
 class TestSetupDependencies:

@@ -158,6 +158,15 @@ containers:
 
 PostgreSQL should be a managed service (CloudSQL, RDS, etc.) or a StatefulSet with persistent volumes. Redis should be a managed service (ElastiCache, Memorystore, etc.) or a separate Deployment.
 
+If Redis is run by a Sentinel-based operator, point `REDIS_URL` at the sentinels rather than at a data node, so the client follows a failover instead of pinning to whichever node it dialled first:
+
+```yaml
+- name: REDIS_URL
+  value: redis+sentinel://redis-sentinel:26379/mymaster/0
+```
+
+Use `rediss+sentinel://` to wrap both the discovery and the master connection in TLS. See [Sentinel](/reference/environment-variables#sentinel) for the full URL format, including the certificate-hostname caveat that catches most first attempts.
+
 Set `terminationGracePeriodSeconds` a few seconds above `WORKER_DRAIN_TIMEOUT` (default 30). On SIGTERM the pod waits that long for in-flight runs to finish, then hands the rest back to the queue for other pods to resume from the last checkpoint. A pod killed mid-hand-off still recovers: before the database reset, the lease reaper reclaims the runs after lease expiry; after the reset but before the queue push, the stuck-pending scan re-enqueues them after `STUCK_PENDING_THRESHOLD_SECONDS`. See the [worker architecture guide](/guides/worker-architecture#graceful-shutdown).
 
 ## Database configuration

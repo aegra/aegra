@@ -265,7 +265,7 @@ class LangGraphService:
                     select(AssistantORM).where(AssistantORM.assistant_id == assistant_id).with_for_update()
                 )
                 if existing:
-                    if existing.description != description:
+                    if existing.user_id == "system" and existing.description != description:
                         max_version = await session.scalar(
                             select(func.max(AssistantVersionORM.version)).where(
                                 AssistantVersionORM.assistant_id == assistant_id

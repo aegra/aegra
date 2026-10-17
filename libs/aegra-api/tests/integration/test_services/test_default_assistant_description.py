@@ -57,3 +57,52 @@ async def test_http_reads_description_after_startup_sync(
     )
     assert response.json()["user_id"] == "system"
     assert response.json()["version"] == 2
+
+
+async def test_http_preserves_user_assistant_when_new_graph_has_same_default_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    assistant_id = str(uuid5(ASSISTANT_NAMESPACE_UUID, "new-graph"))
+    updated_at = datetime(2026, 1, 1, tzinfo=UTC)
+    existing = Assistant(
+        assistant_id=assistant_id,
+        graph_id="agent",
+        name="User assistant",
+        description="User description",
+        config={"configurable": {"custom": True}},
+        context={},
+        metadata_dict={"created_by": "system"},
+        user_id="test-user",
+        version=3,
+        created_at=updated_at,
+        updated_at=updated_at,
+    )
+    session = MagicMock(spec=AsyncSession)
+    session.scalar.side_effect = [existing, existing]
+
+    async def session_dependency() -> AsyncIterator[AsyncSession]:
+        yield session
+
+    monkeypatch.setattr(langgraph_service, "get_session", session_dependency)
+    service = LangGraphService()
+    service.config = {"graphs": {"new-graph": {"path": "./agent.py:graph", "description": "Configured description"}}}
+    service._load_graph_registry()
+    app = create_test_app(include_runs=False, include_threads=False)
+    app.include_router(router)
+    app.dependency_overrides[get_session] = session_dependency
+    app.dependency_overrides[get_langgraph_service] = lambda: service
+
+    await service._ensure_default_assistants()
+    with make_client(app) as client:
+        response = client.get(f"/assistants/{assistant_id}")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["assistant_id"] == assistant_id
+    assert body["user_id"] == "test-user"
+    assert body["graph_id"] == "agent"
+    assert body["name"] == "User assistant"
+    assert body["description"] == "User description"
+    assert body["version"] == 3
+    assert existing.updated_at == updated_at
+    session.add.assert_not_called()

@@ -1,4 +1,5 @@
 from collections.abc import AsyncIterator
+from datetime import UTC, datetime
 from unittest.mock import MagicMock
 from uuid import uuid5
 
@@ -109,7 +110,7 @@ async def test_sync_allocates_version_when_history_is_missing(session: MagicMock
     service = LangGraphService()
     service.config = {"graphs": {"agent": {"path": "./agent.py:graph", "description": "New"}}}
     service._load_graph_registry()
-    existing = Assistant(assistant_id="agent", graph_id="agent", description="Old", version=3)
+    existing = Assistant(assistant_id="agent", graph_id="agent", description="Old", version=3, user_id="system")
     session.scalar.side_effect = [existing, None]
 
     await service._ensure_default_assistants()
@@ -122,13 +123,53 @@ async def test_unchanged_description_does_not_rewrite_version(session: MagicMock
     service = LangGraphService()
     service.config = {"graphs": {"agent": {"path": "./agent.py:graph", "description": "Same"}}}
     service._load_graph_registry()
-    session.scalar.return_value = Assistant(description="Same", version=1)
+    session.scalar.return_value = Assistant(description="Same", version=1, user_id="system")
 
     await service._ensure_default_assistants()
 
     session.add.assert_not_called()
     session.execute.assert_not_awaited()
     session.commit.assert_awaited_once()
+
+
+@pytest.mark.parametrize("user_id", ["test-user", "SYSTEM", "", None])
+async def test_preserves_non_system_assistant_with_default_uuid(session: MagicMock, user_id: str | None) -> None:
+    assistant_id = str(uuid5(ASSISTANT_NAMESPACE_UUID, "agent"))
+    updated_at = datetime(2026, 1, 1, tzinfo=UTC)
+    existing = Assistant(
+        assistant_id=assistant_id,
+        graph_id="user-graph",
+        name="User assistant",
+        description="User description",
+        version=3,
+        config={"configurable": {"temperature": 0.5}},
+        context={"custom": True},
+        metadata_dict={"created_by": "system"},
+        user_id=user_id,
+        updated_at=updated_at,
+    )
+    service = LangGraphService()
+    service.config = {"graphs": {"agent": {"path": "./agent.py:graph", "description": "Configured description"}}}
+    service._load_graph_registry()
+    session.scalar.side_effect = [existing, 3]
+
+    await service._ensure_default_assistants()
+
+    assert existing.assistant_id == assistant_id
+    assert existing.user_id == user_id
+    assert existing.graph_id == "user-graph"
+    assert existing.name == "User assistant"
+    assert existing.description == "User description"
+    assert existing.version == 3
+    assert existing.updated_at == updated_at
+    assert existing.config == {"configurable": {"temperature": 0.5}}
+    assert existing.context == {"custom": True}
+    assert existing.metadata_dict == {"created_by": "system"}
+    session.scalar.assert_awaited_once()
+    session.add.assert_not_called()
+    session.execute.assert_not_awaited()
+    session.commit.assert_awaited_once()
+    session.close.assert_awaited_once()
 
 
 async def test_closes_session_when_commit_fails(session: MagicMock) -> None:

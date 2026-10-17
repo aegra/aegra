@@ -105,7 +105,7 @@ Each value can be a string import path or an object with a required `path` and o
 | `path` | `string` | Required in object form; import path in format `./path/to/file.py:variable` |
 | `description` | `string \| null` | Optional. Used as the description of the graph's default assistant. |
 
-The default assistant's description is synchronized on startup when this value changes. If omitted or `null`, it falls back to `Default assistant for graph '<graph_id>'`. An empty string is preserved as an explicit description.
+The default assistant's description is synchronized on startup when this value changes. Only system-owned assistants are synchronized; a user-created assistant with the same ID is left unchanged. If omitted or `null`, it falls back to `Default assistant for graph '<graph_id>'`. An empty string is preserved as an explicit description.
 
 The variable can be:
 

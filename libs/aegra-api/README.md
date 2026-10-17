@@ -84,7 +84,7 @@ Define your agent graphs in `aegra.json`:
 ```
 
 Graph entries accept either the legacy string import path or an object with a required `path` and optional `description`.
-The description is used for the graph's default assistant and synchronized on startup when it changes. An omitted or `null` description uses `Default assistant for graph '<graph_id>'`; an empty string is preserved.
+The description is used for the graph's default assistant and synchronized on startup when it changes. Only system-owned assistants are synchronized; a user-created assistant with the same ID is left unchanged. An omitted or `null` description uses `Default assistant for graph '<graph_id>'`; an empty string is preserved.
 
 ### Environment Variables
 

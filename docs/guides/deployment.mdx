@@ -233,6 +233,8 @@ Aegra provides health check endpoints for load balancers, Docker, and Kubernetes
 | `GET /live` | Liveness check |
 | `GET /info` | Server info |
 
+Failed `/ready` checks return HTTP 503 with generic messages that do not expose internal database or component exception details. For database or component-acquisition failures, consult the server warning logs for diagnostic details, including exception tracebacks.
+
 The generated `docker-compose.yml` uses `/health` to monitor the API container. If the server hangs or becomes unresponsive, Docker marks it unhealthy after 3 consecutive failures (every 30 seconds). Combined with `restart: unless-stopped`, unhealthy containers are automatically restarted.
 
 ## Troubleshooting

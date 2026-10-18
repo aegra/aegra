@@ -41,8 +41,10 @@ def ready_client() -> TestClient:
 
 @pytest.mark.parametrize("failure", ["connect", "query", "checkpointer", "store"])
 def test_ready_redacts_backend_exception_details(
-    ready_backend: MagicMock, ready_client: TestClient, failure: str
+    ready_backend: MagicMock, ready_client: TestClient, failure: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    warning = MagicMock()
+    monkeypatch.setattr(health.logger, "warning", warning)
     marker = "connection failed to db-internal.example.invalid:5432; database=synthetic_test_db"
     error = RuntimeError(marker)
     context = ready_backend.engine.begin.return_value
@@ -67,6 +69,8 @@ def test_ready_redacts_backend_exception_details(
     assert marker not in response.text
     assert "db-internal.example.invalid" not in response.text
     assert "synthetic_test_db" not in response.text
+    log_category = "database" if failure in {"connect", "query"} else "components"
+    warning.assert_called_once_with(f"readiness check failed: {log_category}", exc_info=True)
 
 
 def test_ready_preserves_missing_engine_response(ready_backend: MagicMock, ready_client: TestClient) -> None:

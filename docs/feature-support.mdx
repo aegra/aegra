@@ -89,7 +89,32 @@ description: "What Aegra supports today, what's coming soon, and what's not yet 
 | Custom routes | Supported | Add FastAPI endpoints alongside the Agent Protocol API. |
 | Shared dependencies | Supported | Load Python modules available to all graphs. |
 | MCP server support | Coming soon | Expose agents as Model Context Protocol servers. |
-| A2A protocol | Coming soon | Agent-to-agent communication protocol support. |
+| A2A protocol | Supported | Assistants are reachable as Agent2Agent agents. Partial: see [A2A protocol](#a2a-protocol) below. |
+
+### A2A protocol
+
+See the [A2A guide](/guides/a2a) for usage.
+
+| Feature | Status | Notes |
+|:--|:--|:--|
+| Agent cards | Supported | Per assistant at `/a2a/{assistant_id}` and both well-known paths. Host-root card via `http.a2a_default_assistant`. |
+| Protocol 1.0 and 0.3 clients | Supported | One endpoint answers each request in the dialect of its method name. The card declares 1.0. |
+| `SendMessage` / `message/send` | Supported | Text and data parts. Blocks until the run finishes. |
+| `GetTask` / `tasks/get` | Supported | Reports the run's status as a task state. A canceled run is stored as interrupted, so it reads as input-required here; the `CancelTask` response, and a `SendMessage` that was waiting on the run, report it as canceled. |
+| `CancelTask` / `tasks/cancel` | Supported | Interrupts a live run; acknowledges an already finished one. |
+| File parts | Coming soon | A message containing a file part is rejected with `-32005` and a message saying file parts are not supported yet. |
+| Resuming an interrupted task | Coming soon | An interrupted run is reported as input-required, but cannot yet be answered over A2A: a message to a thread that is awaiting input, or one carrying `command`, returns `-32602`. Resume it through the runs API. |
+| Streaming | Coming soon | `SendStreamingMessage` / `message/stream` return `-32601`; the card declares `streaming: false`, so SDKs fall back to `SendMessage`. |
+| Task history | Coming soon | Task responses carry no `history`. A `historyLength` other than `0` returns `-32602`. |
+| `ListTasks`, `GetExtendedAgentCard` | Coming soon | Return `-32601`. |
+| Non-blocking send | Not yet planned | `blocking: false` and `returnImmediately: true` return `-32602`. |
+| Push notifications | Not yet planned | A `pushNotificationConfig` or `taskPushNotificationConfig` returns `-32602`. |
+
+Where Aegra differs from LangGraph Platform:
+
+- A request the endpoint cannot honour is rejected, not silently ignored: non-blocking send, a push notification config, `acceptedOutputModes` that name another mode or leave out `text/plain` (replies are always text), a `historyLength` other than `0`, and `command` all return `-32602`.
+- `metadata` (on the request, the message and each part), `extensions` and `referenceTaskIds` are accepted and have no effect. `metadata` is free-form by design in the protocol, and the other two carry no meaning for Aegra yet.
+- `contextId` and `taskId` must be non-blank strings of at most 255 characters, the same bound as thread IDs elsewhere in the API.
 
 ### Observability
 

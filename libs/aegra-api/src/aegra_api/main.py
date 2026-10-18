@@ -14,6 +14,7 @@ from fastapi.routing import APIRoute
 from starlette.requests import HTTPConnection
 
 from aegra_api import __version__
+from aegra_api.api.a2a import router as a2a_router
 from aegra_api.api.assistants import router as assistants_router
 from aegra_api.api.crons import router as crons_router
 from aegra_api.api.event_streaming import router as event_streaming_router
@@ -55,6 +56,7 @@ OPENAPI_TAGS: list[dict[str, Any]] = [
     {"name": "Crons", "description": "Scheduled recurring runs on a cron schedule."},
     {"name": "Store", "description": "Persistent key-value and semantic storage available from any thread."},
     {"name": "Event Streaming", "description": "Agent Protocol v2 thread event streaming and commands."},
+    {"name": "A2A", "description": "Agent2Agent (A2A) protocol JSON-RPC endpoint and agent cards."},
     {"name": "Health", "description": "Server health checks and service information."},
 ]
 
@@ -349,7 +351,7 @@ def _add_common_middleware(app: FastAPI, cors_config: CorsConfig | None) -> None
     app.add_middleware(ContentTypeFixMiddleware)
 
 
-def _include_core_routers(app: FastAPI) -> None:
+def _include_core_routers(app: FastAPI, http_config: HttpConfig | None) -> None:
     """Include all core API routers with auth dependency.
 
     Routers are included in consistent order:
@@ -360,9 +362,12 @@ def _include_core_routers(app: FastAPI) -> None:
     5. Stateless Runs (with auth)
     6. Crons (with auth)
     7. Store (with auth)
+    8. Event Streaming (with auth)
+    9. A2A (with auth), unless ``http.disable_a2a`` is set
 
     Args:
         app: FastAPI application instance
+        http_config: The ``http`` section of aegra.json, if any
     """
     app.include_router(health_router)
     app.include_router(assistants_router)
@@ -372,6 +377,9 @@ def _include_core_routers(app: FastAPI) -> None:
     app.include_router(crons_router)
     app.include_router(store_router)
     app.include_router(event_streaming_router)
+
+    if not (http_config or {}).get("disable_a2a", False):
+        app.include_router(a2a_router)
 
     # Attach @auth.on dispatch from the route registry. Routes must opt out
     # explicitly; forgetting the in-body call no longer disables authorization.
@@ -409,7 +417,7 @@ def create_app() -> FastAPI:
             _apply_auth_to_custom_routes(application, CUSTOM_ROUTE_AUTH)
         if not application.openapi_tags:
             application.openapi_tags = OPENAPI_TAGS
-        _include_core_routers(application)
+        _include_core_routers(application, http_config)
 
         # Add root endpoint if not already defined
         if not any(route.path == "/" for route in application.routes if hasattr(route, "path")):
@@ -431,7 +439,7 @@ def create_app() -> FastAPI:
         )
 
         _add_common_middleware(application, cors_config)
-        _include_core_routers(application)
+        _include_core_routers(application, http_config)
 
         for exc_type, handler in exception_handlers.items():
             application.exception_handler(exc_type)(handler)

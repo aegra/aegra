@@ -8,7 +8,7 @@ import asyncio
 from collections.abc import Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from functools import cache
 from typing import Any
 from uuid import uuid4
@@ -24,6 +24,7 @@ from aegra_api.config import load_checkpointer_config
 from aegra_api.core.orm import Assistant as AssistantORM
 from aegra_api.core.orm import Run as RunORM
 from aegra_api.core.orm import Thread as ThreadORM
+from aegra_api.core.orm import ThreadTTL as ThreadTTLORM
 from aegra_api.core.orm import _get_session_maker
 from aegra_api.models import Run, RunCreate, User
 from aegra_api.models.run_job import RunBehavior, RunExecution, RunIdentity, RunJob
@@ -37,6 +38,8 @@ from aegra_api.utils.jsonb import jsonb_patch, jsonb_shallow_merge
 from aegra_api.utils.run_utils import _merge_jsonb
 
 logger = structlog.getLogger(__name__)
+
+_STATELESS_THREAD_TTL_MINUTES = 60
 
 _EPHEMERAL_RUN = ContextVar("aegra_ephemeral_run", default=False)
 
@@ -191,32 +194,42 @@ async def update_thread_metadata(
             status="idle",
             metadata_json=metadata,
             user_id=user_id,
-            is_ephemeral=is_ephemeral,
         )
         session.add(thread_orm)
+        if is_ephemeral:
+            created_at = datetime.now(UTC)
+            session.add(
+                ThreadTTLORM(
+                    thread_id=thread_id,
+                    strategy="delete",
+                    ttl_minutes=_STATELESS_THREAD_TTL_MINUTES,
+                    created_at=created_at,
+                    expires_at=created_at + timedelta(minutes=_STATELESS_THREAD_TTL_MINUTES),
+                )
+            )
         return
+
+    patches: list[ColumnElement[Any]] = [
+        jsonb_patch({"assistant_id": str(assistant_id), "graph_id": graph_id}, "metadata_patch")
+    ]
+    if thread_name:
+        # Only name a thread that has no name yet. The condition is evaluated at
+        # write time against the row the UPDATE locks, not against the read above.
+        patches.append(
+            case(
+                (
+                    func.coalesce(ThreadORM.metadata_json["thread_name"].astext, "") == "",
+                    jsonb_patch({"thread_name": thread_name}, "thread_name_patch"),
+                ),
+                else_=literal_column("'{}'::jsonb"),
+            )
+        )
 
     await session.execute(
         update(ThreadORM)
         .where(ThreadORM.thread_id == thread_id)
         .values(
-            metadata_json=jsonb_shallow_merge(
-                ThreadORM.metadata_json,
-                jsonb_patch({"assistant_id": str(assistant_id), "graph_id": graph_id}, "metadata_patch"),
-                *(
-                    [
-                        case(
-                            (
-                                func.coalesce(ThreadORM.metadata_json["thread_name"].astext, "") == "",
-                                jsonb_patch({"thread_name": thread_name}, "thread_name_patch"),
-                            ),
-                            else_=literal_column("'{}'::jsonb"),
-                        )
-                    ]
-                    if thread_name
-                    else []
-                ),
-            ),
+            metadata_json=jsonb_shallow_merge(ThreadORM.metadata_json, *patches),
             updated_at=datetime.now(UTC),
         )
         .execution_options(synchronize_session=False)

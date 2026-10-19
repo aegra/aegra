@@ -1,6 +1,7 @@
 """Unit tests for run_preparation helpers."""
 
 from collections.abc import Iterator
+from datetime import timedelta
 from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import AsyncMock, MagicMock
@@ -87,8 +88,8 @@ class TestValidateResumeCommand:
         session.scalar.assert_not_awaited()
 
 
-async def test_update_thread_metadata_persists_ephemeral_marker() -> None:
-    """Stateless preparation marks newly auto-created threads in the same transaction."""
+async def test_update_thread_metadata_adds_ttl_for_new_stateless_thread() -> None:
+    """Stateless threads receive a one-hour fallback TTL in the creation transaction."""
     session = AsyncMock()
     session.scalar.return_value = None
     session.add = MagicMock()
@@ -102,16 +103,19 @@ async def test_update_thread_metadata_persists_ephemeral_marker() -> None:
         is_ephemeral=True,
     )
 
-    created_thread = session.add.call_args.args[0]
+    created_thread, ttl_row = [call.args[0] for call in session.add.call_args_list]
     assert created_thread.thread_id == "thread-1"
     assert created_thread.user_id == "user-1"
-    assert created_thread.is_ephemeral is True
+    assert ttl_row.thread_id == "thread-1"
+    assert ttl_row.strategy == "delete"
+    assert ttl_row.ttl_minutes == 60
+    assert ttl_row.expires_at - ttl_row.created_at == timedelta(minutes=60)
 
 
-async def test_update_thread_metadata_does_not_mark_existing_thread_ephemeral() -> None:
-    """Existing persistent threads must not become sweeper candidates."""
+async def test_update_thread_metadata_does_not_add_ttl_to_existing_thread() -> None:
+    """Existing persistent threads do not become stateless cleanup candidates."""
     session = AsyncMock()
-    session.scalar.return_value = SimpleNamespace(metadata_json={}, is_ephemeral=False)
+    session.scalar.return_value = SimpleNamespace(metadata_json={})
 
     await mod.update_thread_metadata(
         session,
@@ -122,8 +126,8 @@ async def test_update_thread_metadata_does_not_mark_existing_thread_ephemeral() 
         is_ephemeral=True,
     )
 
-    update_values = session.execute.call_args.args[0]._values
-    assert "is_ephemeral" not in update_values
+    session.add.assert_not_called()
+    session.execute.assert_awaited_once()
 
 
 _CHECKPOINT_ID = "1ef4f797-8335-6428-8001-8a1503f9b875"

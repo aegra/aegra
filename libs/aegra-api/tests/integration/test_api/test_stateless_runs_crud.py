@@ -239,9 +239,10 @@ class TestStatelessWaitForRun:
 
         assert resp.status_code == 200
         assert resp.json() == {"result": "done"}
-        ephemeral_threads = [obj for obj in added_objects if hasattr(obj, "is_ephemeral")]
-        assert len(ephemeral_threads) == 1
-        assert ephemeral_threads[0].is_ephemeral is True
+        ttl_rows = [obj for obj in added_objects if hasattr(obj, "ttl_minutes")]
+        assert len(ttl_rows) == 1
+        assert ttl_rows[0].strategy == "delete"
+        assert ttl_rows[0].ttl_minutes == 60
 
 
 # ---------------------------------------------------------------------------

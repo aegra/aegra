@@ -451,17 +451,6 @@ class ThreadTTLSettings(EnvBase):
     LANGGRAPH_THREAD_TTL: str | None = None
 
 
-class EphemeralThreadSettings(EnvBase):
-    """Retention policy for orphaned stateless-run threads.
-
-    The sweeper starts with the application and only reclaims explicitly
-    marked, stale threads without pending or running runs.
-    """
-
-    EPHEMERAL_THREAD_RETENTION_SECONDS: int = Field(default=86400, gt=0)
-    EPHEMERAL_THREAD_SWEEP_INTERVAL_SECONDS: int = Field(default=300, gt=0)
-    EPHEMERAL_THREAD_SWEEP_LIMIT: int = Field(default=100, gt=0)
-
 class CheckpointerSettings(EnvBase):
     """Server-wide checkpoint durability default.
 
@@ -499,7 +488,6 @@ class Settings:
         self.worker = WorkerSettings()
         self.cron = CronSettings()
         self.thread_ttl = ThreadTTLSettings()
-        self.ephemeral_thread = EphemeralThreadSettings()
         self.checkpointer = CheckpointerSettings()
         self.event_streaming = EventStreamingSettings()
 

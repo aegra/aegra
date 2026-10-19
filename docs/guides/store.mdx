@@ -95,6 +95,8 @@ All store operations are automatically scoped to the authenticated user's namesp
 
 This ensures users can never access each other's data, even if they craft a request with another user's namespace.
 
+LangGraph does not allow periods in namespace labels, so the user id (and any [configurable scope](#configurable-scoping) value) is encoded before it becomes a label: `%` becomes `%25` and `.` becomes `%2E`. An identity like `alice.smith@example.com` is stored under `["users", "alice%2Esmith@example%2Ecom", ...]`. Ids without periods or percent signs are unchanged. You can qualify a namespace with either the raw or the encoded id; both resolve to your own scope.
+
 ### Configurable scoping
 
 Beyond the default per-user scope, you can define **configurable scopes**: a map of **namespace prefix → list of User attributes** under `store.scopes` in `aegra.json`. A namespace starting with a configured prefix is isolated under `[prefix, *<user attribute values>]`, where the values come from the authenticated user populated by [your auth handler](/guides/authentication).
@@ -218,5 +220,7 @@ def my_node(state, *, store: BaseStore):
 
     return {"preferences": prefs}
 ```
+
+If user ids can contain periods (for example email addresses), build the namespace with `namespace_label` from `aegra_api.api.store` — `("users", namespace_label(user_id), "history")` — so it is a valid label and matches what the `/store` API reads and writes.
 
 Add the node to your graph as usual — LangGraph injects the `store` parameter automatically when the graph is compiled with a store backend (which Aegra provides).

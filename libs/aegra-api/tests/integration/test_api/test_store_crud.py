@@ -1002,3 +1002,33 @@ class TestStoreIntegration:
         )
         assert search_resp.status_code == 200
         assert len(search_resp.json()["items"]) == 3
+
+
+class TestEmailIdentityNamespaces:
+    """An identity containing periods (e.g. an email) must not break store writes."""
+
+    def test_put_then_get_with_email_identity(self, client) -> None:
+        """PUT succeeds against a real store that validates labels, and GET reads it back."""
+        from langgraph.store.memory import InMemoryStore
+
+        import aegra_api.core.database as db_module
+        from aegra_api.core.auth_deps import get_current_user, require_auth
+        from aegra_api.models.auth import User
+
+        store = InMemoryStore()
+        db_module.db_manager.get_store = lambda: store
+        user = User(identity="alice.smith@example.com")
+        client.app.dependency_overrides[require_auth] = lambda: user
+        client.app.dependency_overrides[get_current_user] = lambda: user
+
+        resp = client.put(
+            "/store/items",
+            json={"namespace": ["design", "templates"], "key": "t1", "value": {"name": "hero"}},
+        )
+        assert resp.status_code == 204
+
+        resp = client.get("/store/items", params={"key": "t1", "namespace": ["design", "templates"]})
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["value"] == {"name": "hero"}
+        assert body["namespace"] == ["users", "alice%2Esmith@example%2Ecom", "design", "templates"]

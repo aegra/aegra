@@ -250,11 +250,32 @@ def _normalize_namespace(value: str | list[str] | None) -> list[str]:
     return [part for item in value if isinstance(item, str) for part in item.split(".") if part]
 
 
+def namespace_label(value: str) -> str:
+    """Encode a scope value (identity, org id, ...) as a valid store namespace label.
+
+    LangGraph rejects namespace labels containing periods, so identities such
+    as email addresses must be encoded before they become a label. ``%`` is
+    escaped first so the encoding stays injective: distinct values can never
+    collapse onto the same label. Values without ``.`` or ``%`` are unchanged.
+    Graphs that write user data directly should build their namespace with
+    this helper so it lines up with the ``/store`` API.
+    """
+    return value.replace("%", "%25").replace(".", "%2E")
+
+
 def _scope(prefix: str, scope_ids: list[str], namespace: list[str]) -> list[str]:
-    """Bury a namespace under [prefix, *scope_ids] unless it already starts with exactly that."""
-    head = [prefix, *scope_ids]
+    """Bury a namespace under [prefix, *scope_ids] unless it already starts with exactly that.
+
+    Scope ids are encoded with ``namespace_label``. A namespace qualified with
+    the caller's raw (unencoded) ids is also the caller's own, and is rewritten
+    onto the encoded head.
+    """
+    raw_head = [prefix, *scope_ids]
+    head = [prefix, *(namespace_label(scope_id) for scope_id in scope_ids)]
     if namespace[: len(head)] == head:
         return namespace
+    if namespace[: len(raw_head)] == raw_head:
+        return [*head, *namespace[len(raw_head) :]]
     return [*head, *namespace]
 
 

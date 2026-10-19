@@ -10,7 +10,7 @@ from aegra_api.core.orm import Run as RunORM
 from tests.fixtures.clients import create_test_app, make_client
 from tests.fixtures.database import DummyScalarResult, DummySessionBase
 from tests.fixtures.session_fixtures import BasicSession, override_session_dependency
-from tests.fixtures.test_helpers import DummyRun, DummyThread
+from tests.fixtures.test_helpers import DummyRun, DummyThread, make_run
 
 
 def _thread_row(thread_id="test-thread-123", status="idle", metadata=None, user_id="test-user"):
@@ -117,6 +117,29 @@ def _make_session_maker(session_instance: DummySessionBase) -> MagicMock:
 
 class TestCreateRun:
     """Test POST /threads/{thread_id}/runs"""
+
+    def test_create_run_passes_after_seconds_to_run_preparation(self: "TestCreateRun") -> None:
+        app = create_test_app(include_runs=True, include_threads=False)
+        override_session_dependency(app, BasicSession)
+        client = make_client(app)
+        run = make_run(status="pending")
+
+        with patch("aegra_api.api.runs._prepare_run", new_callable=AsyncMock) as prepare_run:
+            prepare_run.return_value = (run.run_id, run, MagicMock())
+
+            response = client.post(
+                "/threads/test-thread-123/runs",
+                json={
+                    "assistant_id": "test-assistant-123",
+                    "input": {"message": "hello"},
+                    "after_seconds": 30,
+                },
+            )
+
+        assert response.status_code == 200, response.text
+        assert response.json()["run_id"] == run.run_id
+        request = prepare_run.await_args.args[2]
+        assert request.after_seconds == 30
 
     def test_create_run_validation_error_no_input_or_command(self):
         """Test that run creation requires either input or command"""

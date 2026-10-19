@@ -303,6 +303,11 @@ async def stateless_create_run(
         raise
 
     if should_delete:
-        schedule_background_cleanup(result.run_id, thread_id, user.identity)
+        schedule_background_cleanup(
+            result.run_id,
+            thread_id,
+            user.identity,
+            timeout=3600.0 + request.after_seconds,
+        )
 
     return result

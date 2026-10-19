@@ -35,9 +35,7 @@ class LocalExecutor(BaseExecutor):
 
         async def _run_after_delay() -> None:
             try:
-                if job.after_seconds:
-                    await asyncio.sleep(job.after_seconds)
-                await execute_run(job)
+                await execute_run(job, delay_seconds=job.after_seconds)
             finally:
                 current = asyncio.current_task()
                 if active_runs.get(job.identity.run_id) is current:

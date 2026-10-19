@@ -43,9 +43,10 @@ class TestLocalExecutor:
             assert "run-1" in active_runs
             task = active_runs.pop("run-1")
             task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
 
     @pytest.mark.asyncio
-    async def test_submit_delays_execution_without_blocking_submission(self) -> None:
+    async def test_submit_passes_delay_to_run_execution(self: "TestLocalExecutor") -> None:
         executor = LocalExecutor()
         mock_execute = AsyncMock()
 
@@ -54,12 +55,13 @@ class TestLocalExecutor:
             patch("aegra_api.services.local_executor.make_run_trace_context", return_value=None),
         ):
             await executor.submit(_make_job("delayed-run").model_copy(update={"after_seconds": 1}))
-            await asyncio.sleep(0.05)
-
-            mock_execute.assert_not_awaited()
             task = active_runs["delayed-run"]
-            task.cancel()
-            await asyncio.gather(task, return_exceptions=True)
+            await task
+
+            mock_execute.assert_awaited_once_with(
+                _make_job("delayed-run").model_copy(update={"after_seconds": 1}),
+                delay_seconds=1,
+            )
             assert "delayed-run" not in active_runs
 
     @pytest.mark.asyncio

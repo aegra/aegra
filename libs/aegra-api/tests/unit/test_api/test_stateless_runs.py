@@ -463,6 +463,26 @@ class TestCleanupAfterBackgroundRun:
         mock_delete.assert_called_once_with(thread_id, user_id)
 
     @pytest.mark.asyncio
+    async def test_uses_configured_timeout_for_delayed_cleanup(self) -> None:
+        run_id = str(uuid4())
+        thread_id = str(uuid4())
+        user_id = "test-user"
+
+        with (
+            patch(
+                "aegra_api.services.run_cleanup.executor.wait_for_completion",
+                new_callable=AsyncMock,
+            ) as mock_wait,
+            patch(
+                "aegra_api.services.run_cleanup.delete_thread_by_id",
+                new_callable=AsyncMock,
+            ),
+        ):
+            await _cleanup_after_background_run(run_id, thread_id, user_id, timeout=3630.0)
+
+        mock_wait.assert_awaited_once_with(run_id, timeout=3630.0)
+
+    @pytest.mark.asyncio
     async def test_deletes_thread_when_no_task_in_active_runs(self) -> None:
         """Cleanup proceeds directly to thread deletion when run_id is not in active_runs."""
         run_id = str(uuid4())
@@ -1036,7 +1056,7 @@ class TestStatelessCreateRun:
     async def test_delegates_and_schedules_cleanup(self, mock_user: User, mock_session: AsyncMock) -> None:
         """Delegates to create_run and schedules background cleanup."""
         run_id = str(uuid4())
-        request = RunCreate(assistant_id="agent", input={"msg": "hi"})
+        request = RunCreate(assistant_id="agent", input={"msg": "hi"}, after_seconds=30)
 
         mock_run = Run(
             run_id=run_id,
@@ -1056,13 +1076,13 @@ class TestStatelessCreateRun:
                 new_callable=AsyncMock,
                 return_value=mock_run,
             ) as mock_create,
-            patch("aegra_api.api.stateless_runs.asyncio.create_task") as mock_create_task,
+            patch("aegra_api.api.stateless_runs.schedule_background_cleanup") as mock_schedule,
         ):
             result = await stateless_create_run(request, mock_user, mock_session)
 
         assert result.run_id == run_id
         mock_create.assert_called_once_with("eph-thread-6", request, mock_user, mock_session)
-        mock_create_task.assert_called_once()
+        mock_schedule.assert_called_once_with(run_id, "eph-thread-6", mock_user.identity, timeout=3630.0)
 
     @pytest.mark.asyncio
     async def test_no_cleanup_when_keep(self, mock_user: User, mock_session: AsyncMock) -> None:

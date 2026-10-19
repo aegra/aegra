@@ -37,7 +37,7 @@ _TIMEOUT_ERROR = "Job exceeded maximum execution time"
 _TIMEOUT_SAFE_MESSAGE = "TimeoutError: execution failed"
 
 
-async def execute_run(job: RunJob) -> None:
+async def execute_run(job: RunJob, *, delay_seconds: int = 0) -> None:
     """Execute a graph run, stream events to the broker, and update DB.
 
     Handles the full lifecycle: status transitions, event streaming,
@@ -50,6 +50,9 @@ async def execute_run(job: RunJob) -> None:
     finalized = False
 
     try:
+        if delay_seconds:
+            await asyncio.sleep(delay_seconds)
+
         if not await start_run(run_id, user_id=user_id):
             logger.info("Run became terminal before execution started", run_id=run_id)
             return

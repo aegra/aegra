@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock, MagicMock, Mock, patch
 import pytest
 from fastapi.testclient import TestClient
 
+from aegra_api.api import crons as crons_module
 from aegra_api.core.orm import Run as RunORM
 from aegra_api.core.orm import get_session
 from aegra_api.services import webhook_policy
@@ -181,9 +182,6 @@ class TestCronWebhook:
     @pytest.fixture
     def cron_client(self) -> Iterator[tuple[TestClient, AsyncMock]]:
         app = create_test_app(include_runs=False, include_threads=False)
-
-        from aegra_api.api import crons as crons_module
-
         app.include_router(crons_module.router)
         session = AsyncMock()
         owned_thread = Mock()

@@ -3,7 +3,7 @@ title: "Configuration"
 description: "Complete reference for the aegra.json configuration file."
 ---
 
-Aegra uses a JSON configuration file (`aegra.json`) to define graphs, authentication, HTTP settings, the semantic store, and checkpointer settings (thread TTL and the default checkpoint durability).
+Aegra uses a JSON configuration file (`aegra.json`) to define graphs, authentication, HTTP settings, the semantic store, checkpointer settings (thread TTL and the default checkpoint durability), and run-completion webhooks.
 
 ## Config file resolution
 
@@ -260,6 +260,7 @@ Configure custom routes and CORS.
 | `cors.allow_origins` | `list[str]` | `["*"]` (`[]` if `allow_origin_regex` is set) | Allowed CORS origins |
 | `cors.allow_origin_regex` | `string` | `None` | Regular expression for additional allowed origins; when present without `allow_origins`, the origin-list default is `[]` |
 | `cors.allow_credentials` | `bool` | `false` with a regex or wildcard origins, `true` with concrete origins and no regex | Allow credentials in CORS requests |
+| `disable_webhooks` | `bool` | `false` | Stop all run-completion webhook calls. Requests that set `webhook` get a `422`. See [webhooks](/guides/webhooks#disable-webhooks) |
 
 When `allow_origin_regex` is non-null, it is passed to Starlette's `CORSMiddleware` and matched against the complete origin. If `allow_origins` is also provided, either the list or regex can authorize an origin. An explicit `allow_origins: ["*"]` remains a wildcard. An empty string still counts as configured; it does not match normal non-empty origins.
 
@@ -355,6 +356,44 @@ Resolution order for each run:
 4. LangGraph's default.
 
 An invalid value stops the server at startup. LangGraph Platform has no server-wide durability setting, so this key is specific to Aegra. See [checkpoint durability](/guides/threads-and-state#checkpoint-durability) for what each mode trades off.
+
+## `webhooks`
+
+Configure the POST Aegra sends when a run with `webhook` set finishes. The keys match LangGraph's `webhooks` block.
+
+```json
+{
+  "webhooks": {
+    "env_prefix": "LG_WEBHOOK_",
+    "headers": {
+      "Authorization": "Bearer ${{ env.LG_WEBHOOK_TOKEN }}"
+    },
+    "url": {
+      "allowed_domains": ["hooks.example.com", "*.internal.example.com"],
+      "require_https": true,
+      "allowed_ports": [443],
+      "max_url_length": 2048,
+      "disable_loopback": true,
+      "disable_private_ips": false
+    },
+    "allowed_fields": ["run_id", "thread_id", "status", "values", "error"]
+  }
+}
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `env_prefix` | `string` | `"LG_WEBHOOK_"` | Environment variables referenced from `headers` must start with this prefix |
+| `headers` | `dict[str, str]` | `{}` | Headers sent with every webhook call. Values can contain `${{ env.NAME }}` |
+| `url.require_https` | `bool` | `true` (`false` without a `url` block) | Reject `http://` webhook URLs |
+| `url.allowed_domains` | `list[str]` | `[]` (any host) | Exact hosts or `*.example.com` subdomain wildcards. Exact entries skip the address checks |
+| `url.allowed_ports` | `list[int]` | `[]` (any port) | Allowed ports; a URL without one uses 443 or 80 |
+| `url.max_url_length` | `integer` | `2048` (`4096` without a `url` block) | Longest accepted webhook URL |
+| `url.disable_loopback` | `bool` | `true` | Block `localhost`, `host.docker.internal`, and loopback addresses |
+| `url.disable_private_ips` | `bool` | `false` | Block private (RFC 1918, `100.64.0.0/10`, `fc00::/7`) addresses |
+| `allowed_fields` | `list[str]` | all fields | Top-level payload keys to send |
+
+The policy applies when a run or cron is created (a violation returns `422`) and again before every call. A header that references an unset variable, an unknown key, or an invalid value stops the server at startup. See [webhooks](/guides/webhooks) for the payload, retries, and the addresses that are always blocked.
 
 ## Common configurations
 

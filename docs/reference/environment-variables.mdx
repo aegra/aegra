@@ -202,6 +202,17 @@ AEGRA_CHECKPOINT_DURABILITY=exit
 
 An invalid value stops the server at startup. See [checkpoint durability](/guides/threads-and-state#checkpoint-durability) for the trade-offs.
 
+## Webhook headers
+
+Webhooks have no environment variables of their own; they are configured in the [`webhooks`](/reference/configuration#webhooks) block of `aegra.json`. Header values there can read secrets from the environment, but only variables whose names start with `webhooks.env_prefix` (default `LG_WEBHOOK_`):
+
+```bash
+# Referenced from aegra.json as "Authorization": "Bearer ${{ env.LG_WEBHOOK_TOKEN }}"
+LG_WEBHOOK_TOKEN=change-me
+```
+
+A referenced variable that is not set stops the server at startup. See [webhooks](/guides/webhooks#secure-the-receiver).
+
 ## Prometheus metrics
 
 | Variable | Default | Description |

@@ -4996,6 +4996,18 @@
             "title": "Multitask Strategy",
             "description": "Strategy for handling concurrent runs on same thread: 'reject', 'interrupt', 'rollback', or 'enqueue'."
           },
+          "webhook": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Webhook",
+            "description": "Absolute http(s) URL that receives a POST with the run, its final values and any error once the run reaches a terminal status. Must pass the server's webhooks.url policy; a URL the server will not call returns 422."
+          },
           "command": {
             "anyOf": [
               {

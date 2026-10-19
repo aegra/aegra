@@ -158,3 +158,25 @@ class TestRunCreateMetadataValidation:
         """Boundary: exactly 512 chars is allowed."""
         run_create = RunCreate(**self._payload(metadata={"k": "v" * 512}))
         assert len(run_create.metadata["k"]) == 512
+
+
+class TestRunCreateWebhook:
+    """``webhook`` is a declared field; the URL policy runs when the run is prepared."""
+
+    def test_accepts_a_webhook_url(self) -> None:
+        run_create = RunCreate(assistant_id="agent", input={"x": 1}, webhook="https://hooks.example.com/runs?t=1")
+
+        assert run_create.webhook == "https://hooks.example.com/runs?t=1"
+
+    def test_defaults_to_no_webhook(self) -> None:
+        assert RunCreate(assistant_id="agent", input={"x": 1}).webhook is None
+
+    def test_rejects_non_string_webhook(self) -> None:
+        with pytest.raises(ValidationError, match="webhook"):
+            RunCreate(assistant_id="agent", input={"x": 1}, webhook={"url": "https://hooks.example.com"})
+
+    def test_the_sdk_webhook_key_is_not_dropped(self) -> None:
+        """The SDK sends ``webhook`` in the body; it must survive into the dumped request."""
+        body = {"assistant_id": "agent", "input": {"x": 1}, "webhook": "https://hooks.example.com/runs"}
+
+        assert RunCreate.model_validate(body).model_dump()["webhook"] == "https://hooks.example.com/runs"

@@ -62,6 +62,8 @@ def _make_run_orm(
     orm = MagicMock()
     orm.run_id = run_id
     orm.thread_id = thread_id
+    orm.assistant_id = "assistant-1"
+    orm.created_at = None
     orm.status = status
     orm.execution_params = execution_params or {
         "graph_id": "test-graph",

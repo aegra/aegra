@@ -28,6 +28,7 @@ from aegra_api.services.run_preparation import _prepare_run
 from aegra_api.services.run_status import interrupt_unowned_run
 from aegra_api.services.run_waiters import TERMINAL_STATES, encode_output, heartbeat_wait_body, run_result_body
 from aegra_api.services.streaming_service import streaming_service
+from aegra_api.services.webhook_delivery import RunOutcome, job_for_webhook, notify_run_finished
 from aegra_api.settings import settings
 from aegra_api.utils.status_compat import validate_run_status
 
@@ -59,6 +60,16 @@ async def _request_run_interruption(
     )
 
     if reconciled:
+        # This call made the run terminal, so it reports it; the executor's later finalize is a no-op.
+        job = job_for_webhook(
+            run_orm.execution_params,
+            run_id=run_orm.run_id,
+            thread_id=run_orm.thread_id,
+            assistant_id=run_orm.assistant_id,
+            created_at=run_orm.created_at,
+        )
+        if job is not None:
+            notify_run_finished(job, RunOutcome(status="interrupted"))
         # A delayed worker can outlive an expired lease, so request a stop.
         # Signaling stays here to close streams when no executor owns the run.
         if action == "interrupt":

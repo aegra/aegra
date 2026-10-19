@@ -65,7 +65,8 @@ jobs:
       # The webhook E2E tests run their receiver on 127.0.0.1, which the shipped
       # aegra.json rightly refuses to call. Allow loopback for this server only.
       - name: Write E2E config (loopback webhooks allowed)
-        run: jq '.webhooks = {"url": {"require_https": false, "disable_loopback": false}}' aegra.json > aegra.e2e.json
+        run: |
+          jq '.webhooks = {"url": {"require_https": false, "disable_loopback": false}}' aegra.json > aegra.e2e.json
 
       - name: Start Aegra server (dev mode — no Redis)
         env:
@@ -177,7 +178,8 @@ jobs:
         run: uv run alembic upgrade head
 
       - name: Write E2E config (loopback webhooks allowed)
-        run: jq '.webhooks = {"url": {"require_https": false, "disable_loopback": false}}' aegra.json > aegra.e2e.json
+        run: |
+          jq '.webhooks = {"url": {"require_https": false, "disable_loopback": false}}' aegra.json > aegra.e2e.json
 
       - name: Start Aegra server (prod mode — Redis workers)
         env:

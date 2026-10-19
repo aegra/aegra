@@ -17,6 +17,7 @@ from aegra_api.models.crons import (
     CronSearchRequest,
     CronUpdate,
 )
+from aegra_api.services import webhook_policy
 from aegra_api.services.cron_service import (
     CronService,
     _build_payload,
@@ -1363,3 +1364,50 @@ class TestUpdateCronTimezone:
         await cron_service.update_cron("cron-001", CronUpdate(schedule="0 10 * * *"), "test-user")
         # verify execute was called (next_run_date was set)
         mock_session.execute.assert_awaited_once()
+
+
+class TestCronWebhookPolicy:
+    """Cron create/update apply the server's webhook policy before touching the database."""
+
+    @pytest.mark.asyncio
+    async def test_create_rejects_a_blocked_webhook(self, cron_service: CronService, mock_session: AsyncMock) -> None:
+        req = CronCreate(
+            input={"q": 1},
+            assistant_id="asst-001",
+            schedule="*/5 * * * *",
+            webhook="http://169.254.169.254/latest/meta-data",
+        )
+
+        with pytest.raises(HTTPException) as exc_info:
+            await cron_service.create_cron(req, "test-user")
+
+        assert exc_info.value.status_code == 422
+        assert exc_info.value.detail == "Webhook host blocked: cloud metadata endpoint"
+        mock_session.add.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_create_rejects_webhooks_when_disabled(
+        self, cron_service: CronService, mock_session: AsyncMock, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(webhook_policy, "load_http_config", lambda: {"disable_webhooks": True})
+        webhook_policy.webhooks_enabled.cache_clear()
+        req = CronCreate(
+            input={"q": 1}, assistant_id="asst-001", schedule="*/5 * * * *", webhook="https://hooks.example.com/x"
+        )
+
+        with pytest.raises(HTTPException, match="http.disable_webhooks"):
+            await cron_service.create_cron(req, "test-user")
+
+        mock_session.add.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_update_rejects_a_blocked_webhook_before_locking_the_cron(
+        self, cron_service: CronService, mock_session: AsyncMock
+    ) -> None:
+        with pytest.raises(HTTPException) as exc_info:
+            await cron_service.update_cron("cron-001", CronUpdate(webhook="http://localhost:8080/hook"), "test-user")
+
+        assert exc_info.value.status_code == 422
+        assert exc_info.value.detail == "Webhook host blocked: localhost address"
+        mock_session.scalar.assert_not_called()
+        mock_session.execute.assert_not_called()

@@ -22,8 +22,8 @@ OnRunCompleted = Literal["delete", "keep"]
 def _validate_webhook_url(value: str | None) -> str | None:
     """Reject malformed or non-http(s) webhook URLs at the API boundary.
 
-    The cron record stores ``webhook`` verbatim. When a future runtime wires
-    webhook delivery this is the SSRF entry point, so we constrain it now.
+    The cron record stores ``webhook`` verbatim and every fired run calls it.
+    The server's webhooks.url policy is applied on top, in CronService.
     """
     if value is None:
         return None

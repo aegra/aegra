@@ -274,6 +274,7 @@ async def _trigger_first_run(
             run_request,
             user,
             initial_status="pending",
+            validate_webhook=False,
         )
     except Exception:
         if should_delete_thread:

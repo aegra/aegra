@@ -7,6 +7,7 @@ Single source of truth for executing a graph run. Both LocalExecutor
 """
 
 import asyncio
+from datetime import UTC, datetime
 from typing import Any
 
 import structlog
@@ -21,6 +22,7 @@ from aegra_api.services.graph_streaming import stream_graph_events
 from aegra_api.services.langgraph_service import create_run_config, get_langgraph_service
 from aegra_api.services.run_status import finalize_run, start_run
 from aegra_api.services.streaming_service import streaming_service
+from aegra_api.services.webhook_delivery import RunOutcome, notify_run_finished
 from aegra_api.settings import settings
 from aegra_api.utils.run_utils import map_command_to_langgraph
 
@@ -48,15 +50,22 @@ async def execute_run(job: RunJob) -> None:
     user_id = job.user.identity
     resumes_elsewhere = False
     finalized = False
+    # What the completion webhook reports; partial values survive a failed run.
+    result = _GraphResult()
+    final_status = "error"
+    error_info: dict[str, str] | None = None
+    started_at: datetime | None = None
 
     try:
         if not await start_run(run_id, user_id=user_id):
             logger.info("Run became terminal before execution started", run_id=run_id)
             return
+        started_at = datetime.now(UTC)
 
-        final_output = await _stream_graph(job)
+        final_output = await _stream_graph(job, result)
 
         if final_output.has_interrupt:
+            final_status = "interrupted"
             finalized = await finalize_run(
                 run_id,
                 thread_id,
@@ -66,6 +75,7 @@ async def execute_run(job: RunJob) -> None:
                 output=final_output.data,
             )
         else:
+            final_status = "success"
             finalized = await finalize_run(
                 run_id,
                 thread_id,
@@ -85,6 +95,8 @@ async def execute_run(job: RunJob) -> None:
             resumes_elsewhere = True
             logger.info("Shutdown drain cancel, skipping finalize for requeue", run_id=run_id)
         elif run_id in _timeout_cancellations:
+            final_status = "error"
+            error_info = {"error": "TimeoutError", "message": _TIMEOUT_ERROR}
             finalized = await finalize_run(
                 run_id,
                 thread_id,
@@ -102,6 +114,7 @@ async def execute_run(job: RunJob) -> None:
                     "TimeoutError",
                 )
         else:
+            final_status = "interrupted"
             finalized = await finalize_run(
                 run_id,
                 thread_id,
@@ -116,6 +129,9 @@ async def execute_run(job: RunJob) -> None:
     except Exception as exc:
         logger.exception("Run failed", run_id=run_id)
         safe_message = f"{type(exc).__name__}: execution failed"
+        # Also reached when finalizing a success fails, so reset the status set above.
+        final_status = "error"
+        error_info = {"error": type(exc).__name__, "message": str(exc)}
         finalized = await finalize_run(
             run_id,
             thread_id,
@@ -136,6 +152,11 @@ async def execute_run(job: RunJob) -> None:
         _shutdown_cancellations.discard(run_id)
         _timeout_cancellations.discard(run_id)
         active_runs.pop(run_id, None)
+        if finalized:
+            notify_run_finished(
+                job,
+                RunOutcome(status=final_status, values=result.data, error=error_info, run_started_at=started_at),
+            )
         if not resumes_elsewhere:
             await streaming_service.cleanup_run(run_id)
             await _signal_run_done(run_id)
@@ -168,14 +189,17 @@ class _GraphResult:
         self.has_interrupt: bool = False
 
 
-async def _stream_graph(job: RunJob) -> _GraphResult:
-    """Load the graph, stream events to the broker, return final output."""
+async def _stream_graph(job: RunJob, result: _GraphResult | None = None) -> _GraphResult:
+    """Load the graph, stream events to the broker, return final output.
+
+    Pass *result* to keep the values streamed so far when the run fails midway.
+    """
     run_config = _build_run_config(job)
     execution_input = _resolve_input(job)
     stream_modes = _resolve_stream_modes(job.execution.stream_mode)
 
     langgraph_service = get_langgraph_service()
-    result = _GraphResult()
+    result = result if result is not None else _GraphResult()
 
     async with (
         langgraph_service.get_graph(

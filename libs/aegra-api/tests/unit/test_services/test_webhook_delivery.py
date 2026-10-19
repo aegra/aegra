@@ -3,7 +3,7 @@
 import asyncio
 import json
 import logging
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from typing import Any
 from unittest.mock import MagicMock, patch
@@ -23,7 +23,7 @@ from aegra_api.services.webhook_delivery import (
     notify_run_finished,
     redact_webhook_url,
 )
-from aegra_api.services.webhook_policy import WebhookUrlError, get_webhook_settings, webhooks_enabled
+from aegra_api.services.webhook_policy import WebhookDNSError, WebhookUrlError, get_webhook_settings, webhooks_enabled
 
 _WEBHOOK = "https://hooks.example.com/aegra?token=secret"
 _CREATED_AT = datetime(2026, 10, 1, 12, 0, tzinfo=UTC)
@@ -69,11 +69,32 @@ def _use_webhooks_config(monkeypatch: pytest.MonkeyPatch, webhooks: dict[str, An
     get_webhook_settings.cache_clear()
 
 
-def _dispatcher_with(handler: Callable[[httpx.Request], httpx.Response]) -> WebhookDispatcher:
+def _dispatcher_with(
+    handler: Callable[[httpx.Request], httpx.Response] | Callable[[httpx.Request], Awaitable[httpx.Response]],
+) -> WebhookDispatcher:
     """A dispatcher whose HTTP client answers from *handler* instead of the network."""
+    return _dispatcher_with_transport(httpx.MockTransport(handler))
+
+
+def _dispatcher_with_transport(transport: httpx.AsyncBaseTransport) -> WebhookDispatcher:
     dispatcher = WebhookDispatcher()
-    dispatcher._client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    dispatcher._client = httpx.AsyncClient(transport=transport)
     return dispatcher
+
+
+class _ScriptedTransport(httpx.AsyncBaseTransport):
+    """Raises or answers with the next scripted step on each request."""
+
+    def __init__(self, *steps: Exception | int) -> None:
+        self._steps = list(steps)
+        self.calls = 0
+
+    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+        self.calls += 1
+        step = self._steps.pop(0)
+        if isinstance(step, Exception):
+            raise step
+        return httpx.Response(step)
 
 
 @pytest.fixture(autouse=True)
@@ -123,9 +144,10 @@ class TestBuildRunPayload:
         assert payload["status"] == "error"
         assert payload["error"] == error
 
-    def test_values_are_null_when_the_run_produced_none(self) -> None:
-        assert build_run_payload(_job(), _outcome(values={}))["values"] is None
+    def test_values_are_null_only_when_no_state_was_seen(self) -> None:
         assert build_run_payload(_job(), _outcome(values=None))["values"] is None
+        # An empty state is a real result, not a missing one.
+        assert build_run_payload(_job(), _outcome(values={}))["values"] == {}
 
     def test_values_are_json_serialized(self) -> None:
         payload = build_run_payload(_job(), _outcome(values={"messages": [AIMessage(content="done")]}))
@@ -246,6 +268,65 @@ class TestDelivery:
 
         assert len(calls) == 1
         assert warning.call_args.args[0] == "Webhook delivery failed"
+
+    async def test_attempt_that_outlives_the_deadline_is_retried(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # httpx timeouts restart on each byte; the per-attempt deadline must cut a trickling receiver off.
+        monkeypatch.setattr(webhook_delivery, "_REQUEST_TIMEOUT_SECONDS", 0.05)
+        delays = iter([1.0, 0.0])
+
+        async def handler(_request: httpx.Request) -> httpx.Response:
+            await asyncio.sleep(next(delays))
+            return httpx.Response(200)
+
+        with patch.object(webhook_delivery.logger, "info") as info:
+            await _dispatcher_with(handler)._deliver(_job(), _outcome())
+
+        assert info.call_args.kwargs["attempts"] == 2
+
+    async def test_receiver_that_never_answers_fails_after_three_attempts(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(webhook_delivery, "_REQUEST_TIMEOUT_SECONDS", 0.05)
+        calls: list[int] = []
+
+        async def handler(_request: httpx.Request) -> httpx.Response:
+            calls.append(1)
+            await asyncio.sleep(1.0)
+            return httpx.Response(200)
+
+        with patch.object(webhook_delivery.logger, "warning") as warning:
+            await _dispatcher_with(handler)._deliver(_job(), _outcome())
+
+        assert len(calls) == 3
+        assert warning.call_args.args[0] == "Webhook delivery failed"
+        assert warning.call_args.kwargs["error"] == "TimeoutError"
+
+    async def test_dns_failure_is_retried(self) -> None:
+        transport = _ScriptedTransport(WebhookDNSError("Webhook host blocked: DNS resolution failed"), 200)
+
+        with patch.object(webhook_delivery.logger, "info") as info:
+            await _dispatcher_with_transport(transport)._deliver(_job(), _outcome())
+
+        assert info.call_args.kwargs["attempts"] == 2
+
+    async def test_lasting_dns_failure_is_a_delivery_failure_not_a_policy_block(self) -> None:
+        dns_error = WebhookDNSError("Webhook host blocked: DNS resolution failed")
+        transport = _ScriptedTransport(dns_error, dns_error, dns_error)
+
+        with patch.object(webhook_delivery.logger, "warning") as warning:
+            await _dispatcher_with_transport(transport)._deliver(_job(), _outcome())
+
+        assert transport.calls == 3
+        assert warning.call_args.args[0] == "Webhook delivery failed"
+
+    async def test_address_blocked_at_send_time_is_not_retried(self) -> None:
+        transport = _ScriptedTransport(WebhookUrlError("Webhook host blocked: loopback IP range"), 200)
+
+        with patch.object(webhook_delivery.logger, "warning") as warning:
+            await _dispatcher_with_transport(transport)._deliver(_job(), _outcome())
+
+        assert transport.calls == 1
+        assert warning.call_args.args[0] == "Webhook blocked by the URL policy"
 
     async def test_url_rejected_by_the_current_policy_is_not_called(self, monkeypatch: pytest.MonkeyPatch) -> None:
         _use_webhooks_config(monkeypatch, {"url": {"allowed_domains": ["other.example.com"]}})
@@ -415,6 +496,24 @@ class TestDispatcher:
 
         assert cancelled.is_set()
         assert dispatcher._tasks == set()
+
+    async def test_submit_drops_deliveries_beyond_the_backlog_cap(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(webhook_delivery, "_MAX_PENDING_DELIVERIES", 1)
+        dispatcher = WebhookDispatcher()
+        release = asyncio.Event()
+
+        async def _deliver(_job: RunJob, _outcome: RunOutcome) -> None:
+            await release.wait()
+
+        dispatcher._deliver = _deliver  # type: ignore[method-assign]
+        with patch.object(webhook_delivery.logger, "warning") as warning:
+            dispatcher.submit(_job(), _outcome())
+            dispatcher.submit(_job(), _outcome())
+
+        assert len(dispatcher._tasks) == 1
+        assert warning.call_args.args[0] == "Too many webhook deliveries pending, dropping this one"
+        release.set()
+        await dispatcher.stop()
 
     async def test_stop_closes_the_client(self) -> None:
         dispatcher = WebhookDispatcher()

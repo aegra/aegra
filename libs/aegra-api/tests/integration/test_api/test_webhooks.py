@@ -10,12 +10,14 @@ from fastapi.testclient import TestClient
 from aegra_api.api import crons as crons_module
 from aegra_api.core.orm import Run as RunORM
 from aegra_api.core.orm import get_session
+from aegra_api.models.auth import User
+from aegra_api.models.run_job import RunBehavior, RunIdentity, RunJob
 from aegra_api.services import webhook_policy
 from aegra_api.services.cron_service import CronService, get_cron_service
 from tests.fixtures.clients import create_test_app, make_client
 from tests.fixtures.database import DummySessionBase
 from tests.fixtures.session_fixtures import override_session_dependency
-from tests.fixtures.test_helpers import DummyThread
+from tests.fixtures.test_helpers import DummyRun, DummyThread
 
 _WEBHOOK = "https://hooks.example.com/runs?token=secret"
 
@@ -148,6 +150,60 @@ class TestRunWebhook:
 
         assert resp.status_code == 422
         mock_executor.submit.assert_not_awaited()
+
+
+class TestCancelledRunWebhook:
+    """A cancel that makes the run terminal itself reports it; one the executor finishes does not."""
+
+    @staticmethod
+    def _cancel(*, reconciled: bool, webhook: str | None = _WEBHOOK) -> MagicMock:
+        app = create_test_app(include_runs=True, include_threads=False)
+        run = DummyRun(status="running")
+        run.execution_params = RunJob(
+            identity=RunIdentity(run_id="test-run-123", thread_id="test-thread-123", graph_id="test-graph"),
+            user=User(identity="test-user"),
+            behavior=RunBehavior(webhook=webhook),
+        ).to_execution_params()
+
+        class Session(DummySessionBase):
+            async def scalar(self, _stmt: Any) -> Any:
+                return run
+
+            async def refresh(self, _obj: Any) -> None:
+                return None
+
+        override_session_dependency(app, Session)
+        client = make_client(app)
+
+        with (
+            patch("aegra_api.api.runs.streaming_service") as mock_streaming,
+            patch("aegra_api.api.runs.interrupt_unowned_run", new_callable=AsyncMock, return_value=reconciled),
+            patch("aegra_api.api.runs.notify_run_finished") as mock_notify,
+        ):
+            mock_streaming.cancel_run = AsyncMock()
+            mock_streaming.interrupt_run = AsyncMock()
+            mock_streaming.signal_run_cancelled = AsyncMock()
+            resp = client.post("/threads/test-thread-123/runs/test-run-123/cancel")
+
+        assert resp.status_code == 200
+        return mock_notify
+
+    def test_cancel_that_reconciles_the_run_reports_interrupted(self) -> None:
+        # Dev mode never sets claimed_by, so the endpoint, not the executor, commits the cancel.
+        mock_notify = self._cancel(reconciled=True)
+
+        mock_notify.assert_called_once()
+        job, outcome = mock_notify.call_args.args
+        assert job.identity.run_id == "test-run-123"
+        assert job.identity.assistant_id == "test-assistant-123"
+        assert job.behavior.webhook == _WEBHOOK
+        assert outcome.status == "interrupted"
+
+    def test_cancel_of_a_worker_owned_run_leaves_the_report_to_the_worker(self) -> None:
+        assert self._cancel(reconciled=False).call_count == 0
+
+    def test_cancel_of_a_run_without_webhook_reports_nothing(self) -> None:
+        assert self._cancel(reconciled=True, webhook=None).call_count == 0
 
 
 class TestStatelessRunWebhook:

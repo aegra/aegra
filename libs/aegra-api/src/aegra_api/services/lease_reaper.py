@@ -9,10 +9,8 @@ re-enqueues only retryable run IDs.
 import asyncio
 import contextlib
 from datetime import UTC, datetime, timedelta
-from typing import Any
 
 import structlog
-from pydantic import ValidationError
 from redis import RedisError
 from sqlalchemy import select, update
 
@@ -22,33 +20,12 @@ from aegra_api.core.redis_manager import redis_manager
 from aegra_api.models.run_job import RunJob
 from aegra_api.observability.metrics import REAPER_RECOVERED_RUNS
 from aegra_api.services.run_status import set_thread_status_if_no_active_runs
-from aegra_api.services.webhook_delivery import RunOutcome, notify_run_finished
+from aegra_api.services.webhook_delivery import RunOutcome, job_for_webhook, notify_run_finished
 from aegra_api.settings import settings
 
 logger = structlog.getLogger(__name__)
 
 _MAX_RETRIES_ERROR = "Max retries exceeded after repeated worker failures"
-
-
-def _job_for_failure_webhook(
-    params: dict[str, Any],
-    *,
-    run_id: str,
-    thread_id: str,
-    assistant_id: str | None,
-    created_at: datetime | None,
-) -> RunJob | None:
-    """Rebuild the job of an exhausted run that asked for a webhook, else None."""
-    behavior = params.get("behavior")
-    if not isinstance(behavior, dict) or not behavior.get("webhook"):
-        return None
-    try:
-        return RunJob.from_execution_params(
-            params, run_id=run_id, thread_id=thread_id, assistant_id=assistant_id, created_at=created_at
-        )
-    except (KeyError, ValidationError):
-        logger.warning("Cannot rebuild exhausted run for its webhook", run_id=run_id)
-        return None
 
 
 class LeaseReaper:
@@ -212,7 +189,7 @@ class LeaseReaper:
                 if is_exhausted:
                     exhausted.append(run_id)
                     exhausted_threads_by_user.setdefault(user_id, set()).add(thread_id)
-                    failed_job = _job_for_failure_webhook(
+                    failed_job = job_for_webhook(
                         params, run_id=run_id, thread_id=thread_id, assistant_id=assistant_id, created_at=created_at
                     )
                     if failed_job is not None:

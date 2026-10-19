@@ -5,6 +5,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+import aegra_api.main as aegra_main
 from aegra_api.observability.base import get_observability_manager
 from aegra_api.services import run_preparation, webhook_policy
 
@@ -265,9 +266,7 @@ async def test_lifespan_fails_before_any_db_work_on_invalid_webhooks_config(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A webhook header that references an unset variable stops the boot instead of every delivery."""
-    import aegra_api.main as main_module
-
-    importlib.reload(main_module)
+    importlib.reload(aegra_main)
     monkeypatch.delenv("LG_WEBHOOK_TOKEN", raising=False)
     monkeypatch.setattr(
         webhook_policy,
@@ -283,7 +282,7 @@ async def test_lifespan_fails_before_any_db_work_on_invalid_webhooks_config(
         mock_db_manager.initialize = AsyncMock()
 
         with pytest.raises(ValueError, match="LG_WEBHOOK_TOKEN"):
-            async with main_module.lifespan(MagicMock()):
+            async with aegra_main.lifespan(MagicMock()):
                 pass
 
         mock_migrations.assert_not_called()
@@ -294,9 +293,7 @@ async def test_lifespan_fails_before_any_db_work_on_invalid_webhooks_config(
 @pytest.mark.asyncio
 async def test_lifespan_drains_webhooks_after_the_executor() -> None:
     """Runs finalized while the executor drains queue their own webhooks, so the dispatcher stops after it."""
-    import aegra_api.main as main_module
-
-    importlib.reload(main_module)
+    importlib.reload(aegra_main)
     stopped: list[str] = []
 
     with (
@@ -320,7 +317,7 @@ async def test_lifespan_drains_webhooks_after_the_executor() -> None:
         mock_broker.start = AsyncMock()
         mock_broker.stop = AsyncMock(side_effect=lambda: stopped.append("broker"))
 
-        async with main_module.lifespan(MagicMock()):
+        async with aegra_main.lifespan(MagicMock()):
             mock_dispatcher.stop.assert_not_awaited()
 
     assert stopped == ["executor", "webhooks", "broker", "db"]

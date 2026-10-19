@@ -19,7 +19,7 @@ from aegra_api.models.run_job import RunJob
 from aegra_api.services.broker import broker_manager
 from aegra_api.services.event_streaming.native_stream import stream_native_v3_events
 from aegra_api.services.graph_streaming import stream_graph_events
-from aegra_api.services.langgraph_service import create_run_config, get_langgraph_service
+from aegra_api.services.langgraph_service import create_run_config, create_thread_config, get_langgraph_service
 from aegra_api.services.run_status import finalize_run, start_run
 from aegra_api.services.streaming_service import streaming_service
 from aegra_api.services.webhook_delivery import RunOutcome, notify_run_finished
@@ -155,7 +155,7 @@ async def execute_run(job: RunJob) -> None:
         if finalized:
             notify_run_finished(
                 job,
-                RunOutcome(status=final_status, values=result.data, error=error_info, run_started_at=started_at),
+                RunOutcome(status=final_status, values=result.state, error=error_info, run_started_at=started_at),
             )
         if not resumes_elsewhere:
             await streaming_service.cleanup_run(run_id)
@@ -182,11 +182,29 @@ async def _best_effort_signal(fn: Any, *args: Any) -> None:
 class _GraphResult:
     """Accumulates output and interrupt state during graph streaming."""
 
-    __slots__ = ("data", "has_interrupt")
+    __slots__ = ("data", "has_interrupt", "state")
 
     def __init__(self) -> None:
         self.data: dict[str, Any] = {}
         self.has_interrupt: bool = False
+        # Graph state for the completion webhook; None until one is seen or read.
+        self.state: dict[str, Any] | None = None
+
+
+def _is_state(data: Any) -> bool:
+    # Interrupt notices are re-emitted as values events but carry no state.
+    return isinstance(data, dict) and set(data) != {"__interrupt__"}
+
+
+async def _read_final_state(graph: Any, job: RunJob) -> dict[str, Any] | None:
+    """The thread's latest checkpointed values, whichever stream modes the client chose."""
+    try:
+        snapshot = await graph.aget_state(create_thread_config(job.identity.thread_id, job.user))
+    except Exception:
+        # Best effort: the webhook falls back to the values streamed so far.
+        logger.warning("Could not read the final state for the run webhook", run_id=job.identity.run_id, exc_info=True)
+        return None
+    return snapshot.values if snapshot is not None else None
 
 
 async def _stream_graph(job: RunJob, result: _GraphResult | None = None) -> _GraphResult:
@@ -215,6 +233,10 @@ async def _stream_graph(job: RunJob, result: _GraphResult | None = None) -> _Gra
             await _stream_native_v2(job, graph, execution_input, run_config, result)
         else:
             await _stream_legacy(job, graph, execution_input, run_config, stream_modes, result)
+        if job.behavior.webhook:
+            final_state = await _read_final_state(graph, job)
+            if final_state is not None:
+                result.state = final_state
 
     return result
 
@@ -247,6 +269,8 @@ async def _stream_legacy(
             result.has_interrupt = True
         if event_type.startswith("values"):
             result.data = event_data
+        if event_type == "values" and _is_state(event_data):
+            result.state = event_data
 
 
 async def _stream_native_v2(
@@ -281,6 +305,8 @@ async def _stream_native_v2(
             result.has_interrupt = True
         if method == "values" and isinstance(data, dict):
             result.data = data
+            if _is_state(data):
+                result.state = data
 
 
 def _build_run_config(job: RunJob) -> dict[str, Any]:

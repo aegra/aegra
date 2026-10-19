@@ -17,10 +17,12 @@ from typing import Any
 
 import httpx
 import structlog
+from pydantic import ValidationError
 
 from aegra_api.core.serializers import GeneralSerializer
 from aegra_api.models.run_job import RunJob
 from aegra_api.services.webhook_policy import (
+    WebhookDNSError,
     WebhookUrlError,
     check_webhook_url,
     get_webhook_settings,
@@ -36,6 +38,7 @@ _MAX_ATTEMPTS = 3
 _CONNECT_TIMEOUT_SECONDS = 5.0
 _REQUEST_TIMEOUT_SECONDS = 30.0
 _DRAIN_TIMEOUT_SECONDS = 5.0
+_MAX_PENDING_DELIVERIES = 1000
 
 _serializer = GeneralSerializer()
 
@@ -110,7 +113,7 @@ def build_run_payload(job: RunJob, outcome: RunOutcome) -> dict[str, Any]:
         "run_started_at": _isoformat(outcome.run_started_at),
         "run_ended_at": _isoformat(outcome.run_ended_at),
         "webhook_sent_at": datetime.now(UTC).isoformat(),
-        "values": _serialize_values(outcome.values, run_id) if outcome.values else None,
+        "values": _serialize_values(outcome.values, run_id) if outcome.values is not None else None,
     }
     if outcome.error is not None:
         payload["error"] = outcome.error
@@ -175,6 +178,10 @@ class WebhookDispatcher:
 
     def submit(self, job: RunJob, outcome: RunOutcome) -> None:
         """Deliver in the background; the caller never waits on the receiver."""
+        # Each pending delivery holds the run's values, so slow receivers must not grow memory without bound.
+        if len(self._tasks) >= _MAX_PENDING_DELIVERIES:
+            logger.warning("Too many webhook deliveries pending, dropping this one", run_id=job.identity.run_id)
+            return
         task = asyncio.create_task(self._deliver(job, outcome), name=f"webhook-{job.identity.run_id}")
         self._tasks.add(task)
         task.add_done_callback(self._tasks.discard)
@@ -214,24 +221,27 @@ class WebhookDispatcher:
             check_webhook_url(url, settings.url)
             body = json.dumps(build_run_payload(job, outcome), default=str).encode()
             attempts = await self._post(url, body, {"Content-Type": "application/json", **settings.headers})
+        except (httpx.HTTPError, WebhookResponseError, WebhookDNSError, TimeoutError) as exc:
+            error = str(exc) or type(exc).__name__
+            logger.warning("Webhook delivery failed", run_id=run_id, webhook=target, error=error)
         except WebhookUrlError as exc:
             logger.warning("Webhook blocked by the URL policy", run_id=run_id, webhook=target, reason=str(exc))
-        except (httpx.HTTPError, WebhookResponseError) as exc:
-            logger.warning("Webhook delivery failed", run_id=run_id, webhook=target, error=str(exc))
         except Exception:
             logger.exception("Webhook delivery crashed", run_id=run_id, webhook=target)
         else:
             logger.info("Webhook delivered", run_id=run_id, webhook=target, status=outcome.status, attempts=attempts)
 
     async def _post(self, url: str, body: bytes, headers: dict[str, str]) -> int:
-        """POST with retries on network errors, 429 and 5xx; return the attempt that succeeded."""
+        """POST with retries on network and DNS errors, timeouts, 429 and 5xx; return the attempt that succeeded."""
         attempt = 1
         while True:
             try:
-                # Streamed so a large response body is never read into memory.
-                async with self._get_client().stream("POST", url, content=body, headers=headers) as response:
-                    status_code = response.status_code
-            except (httpx.TimeoutException, httpx.NetworkError):
+                # httpx timeouts restart on every byte, so a trickling receiver needs a wall-clock cap.
+                async with asyncio.timeout(_REQUEST_TIMEOUT_SECONDS):
+                    # Streamed so a large response body is never read into memory.
+                    async with self._get_client().stream("POST", url, content=body, headers=headers) as response:
+                        status_code = response.status_code
+            except (httpx.TimeoutException, httpx.NetworkError, WebhookDNSError, TimeoutError):
                 if attempt >= _MAX_ATTEMPTS:
                     raise
             else:
@@ -244,6 +254,32 @@ class WebhookDispatcher:
 
 
 webhook_dispatcher = WebhookDispatcher()
+
+
+def job_for_webhook(
+    params: dict[str, Any] | None,
+    *,
+    run_id: str,
+    thread_id: str,
+    assistant_id: str | None,
+    created_at: datetime | None,
+) -> RunJob | None:
+    """Rebuild a stored run's job when it asked for a webhook, else None.
+
+    For terminal transitions made outside the executor, from the row's ``execution_params``.
+    """
+    if not params:
+        return None
+    behavior = params.get("behavior")
+    if not isinstance(behavior, dict) or not behavior.get("webhook"):
+        return None
+    try:
+        return RunJob.from_execution_params(
+            params, run_id=run_id, thread_id=thread_id, assistant_id=assistant_id, created_at=created_at
+        )
+    except (KeyError, ValidationError):
+        logger.warning("Cannot rebuild the run for its webhook", run_id=run_id)
+        return None
 
 
 def notify_run_finished(job: RunJob, outcome: RunOutcome) -> None:

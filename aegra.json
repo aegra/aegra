@@ -16,12 +16,6 @@
   "http": {
     "app": "./examples/custom_routes_example.py:app"
   },
-  "webhooks": {
-    "url": {
-      "require_https": false,
-      "disable_loopback": false
-    }
-  },
   "store": {
     "scopes": {
       "orgs": ["org_id"]

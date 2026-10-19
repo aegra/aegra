@@ -663,7 +663,7 @@ class TestLangGraphServiceConfigs:
 
         assert result["configurable"]["checkpoint_key"] == "checkpoint_value"
 
-    def test_create_run_config_sets_graph_id_when_absent(self) -> None:
+    def test_create_run_config_sets_graph_id_when_absent(self: "TestLangGraphServiceConfigs") -> None:
         mock_user = Mock()
         mock_user.identity = "user-123"
         mock_user.display_name = "Test User"
@@ -676,7 +676,7 @@ class TestLangGraphServiceConfigs:
 
         assert result["configurable"]["graph_id"] == "agent"
 
-    def test_create_run_config_preserves_client_graph_id(self) -> None:
+    def test_create_run_config_preserves_client_graph_id(self: "TestLangGraphServiceConfigs") -> None:
         mock_user = Mock()
         mock_user.identity = "user-123"
         mock_user.display_name = "Test User"

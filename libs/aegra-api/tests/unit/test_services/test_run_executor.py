@@ -95,9 +95,7 @@ class TestBuildRunConfig:
         job = _make_job()
         job = job.model_copy(
             update={
-                "execution": job.execution.model_copy(
-                    update={"config": {"configurable": {"graph_id": "client-graph"}}}
-                )
+                "execution": job.execution.model_copy(update={"config": {"configurable": {"graph_id": "client-graph"}}})
             }
         )
 

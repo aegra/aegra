@@ -561,7 +561,7 @@ class TestInitFileContents:
         content = (project_dir / f"src/{slug}/state.py").read_text()
         assert "class InputState" in content
         assert "class State(InputState)" in content
-        assert "is_last_step" in content
+        assert "remaining_steps" in content
 
     def test_context_py_has_context_class(
         self: TestInitFileContents, cli_runner: CliRunner, tmp_path: Path
@@ -754,7 +754,7 @@ class TestInitEdgeCases:
         slug = slugify("react-route")
         content = (project_dir / f"src/{slug}/graph.py").read_text()
         assert "route_model_output" in content
-        assert "is_last_step" in content
+        assert "remaining_steps" in content
 
     def test_context_py_imports_from_slug(
         self: TestInitEdgeCases, cli_runner: CliRunner, tmp_path: Path

@@ -392,6 +392,8 @@ When you subscribe to the `input` channel, a graph interrupt arrives as an `inpu
 
 `payload` is the Agent Protocol field consumed by the JavaScript SDK and Vue/React `useStream()` integrations. `value` mirrors it for current Python SDKs, including `ts.interrupts[].value`. If the source interrupt has no value, both content fields are omitted; explicit `null`, empty, and falsy values are preserved under both fields.
 
+Interrupt IDs are deduplicated within each run so the same interrupt is not emitted twice when it appears in both `updates` and `values`. A resumed run may reuse an earlier run's ID; its `input.requested` event is emitted again because it belongs to a new run.
+
 ### Responding to an interrupt
 
 `input.respond` resumes the interrupted run. Only `response` is required; `interrupt_id` targets one interrupt when several are pending.

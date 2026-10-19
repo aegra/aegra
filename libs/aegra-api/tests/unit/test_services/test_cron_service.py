@@ -587,6 +587,17 @@ class TestBuildPayloadExtended:
         payload = _build_payload(req)
         assert payload == {}
 
+    def test_stores_durability_and_checkpoint_during(self) -> None:
+        req = CronCreate(
+            assistant_id="a", schedule="* * * * *", input={"x": 1}, durability="exit", checkpoint_during=True
+        )
+        payload = _build_payload(req)
+        assert payload["durability"] == "exit"
+        assert payload["checkpoint_during"] is True
+
+    def test_cron_update_stores_durability(self) -> None:
+        assert _build_payload(CronUpdate(durability="sync")) == {"durability": "sync"}
+
 
 # ---------------------------------------------------------------------------
 # _compute_next_run — additional coverage

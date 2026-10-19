@@ -22,7 +22,7 @@ from aegra_api.core.database import db_manager
 from aegra_api.core.orm import Run as RunORM
 from aegra_api.core.orm import Thread as ThreadORM
 from aegra_api.core.orm import ThreadTTL as ThreadTTLORM
-from aegra_api.core.orm import get_session
+from aegra_api.core.orm import _get_session_maker, get_session
 from aegra_api.models import (
     Thread,
     ThreadCheckpoint,
@@ -51,6 +51,18 @@ router = APIRouter(tags=["Threads"], dependencies=auth_dependency)
 logger = structlog.getLogger(__name__)
 
 thread_state_service = ThreadStateService()
+
+
+async def _get_thread_graph_id(thread_id: str, user: User) -> str | None:
+    """Resolve graph_id via a short-lived session, so the caller's checkpoint ops hold no pool connection."""
+    maker = _get_session_maker()
+    async with maker() as session:
+        stmt = select(ThreadORM).where(ThreadORM.thread_id == thread_id, ThreadORM.user_id == user.identity)
+        thread = await session.scalar(stmt)
+        if not thread:
+            raise HTTPException(404, f"Thread '{thread_id}' not found")
+        thread_metadata = thread.metadata_json or {}
+        return thread_metadata.get("graph_id")
 
 
 # --- Sort resolution for /threads/search ---
@@ -390,7 +402,6 @@ async def get_thread_state(
     subgraphs: bool = Query(False, description="Include states from subgraphs"),
     checkpoint_ns: str | None = Query(None, description="Checkpoint namespace to scope lookup"),
     user: User = Depends(get_current_user),
-    session: AsyncSession = Depends(get_session),
 ) -> ThreadState:
     """Get the current state of a thread.
 
@@ -399,13 +410,7 @@ async def get_thread_state(
     executed), returns an empty state.
     """
     try:
-        stmt = select(ThreadORM).where(ThreadORM.thread_id == thread_id, ThreadORM.user_id == user.identity)
-        thread = await session.scalar(stmt)
-        if not thread:
-            raise HTTPException(404, f"Thread '{thread_id}' not found")
-
-        thread_metadata = thread.metadata_json or {}
-        graph_id = thread_metadata.get("graph_id")
+        graph_id = await _get_thread_graph_id(thread_id, user)
         if not graph_id:
             logger.info(
                 "state GET: no graph_id set for thread %s, returning empty state",
@@ -490,7 +495,6 @@ async def update_thread_state(
     thread_id: str,
     request: ThreadStateUpdate,
     user: User = Depends(get_current_user),
-    session: AsyncSession = Depends(get_session),
 ) -> ThreadState | ThreadStateUpdateResponse:
     """Update thread state or retrieve it via POST.
 
@@ -513,17 +517,10 @@ async def update_thread_state(
             subgraphs=request.subgraphs or False,
             checkpoint_ns=request.checkpoint_ns,
             user=user,
-            session=session,
         )
 
     try:
-        stmt = select(ThreadORM).where(ThreadORM.thread_id == thread_id, ThreadORM.user_id == user.identity)
-        thread = await session.scalar(stmt)
-        if not thread:
-            raise HTTPException(404, f"Thread '{thread_id}' not found")
-
-        thread_metadata = thread.metadata_json or {}
-        graph_id = thread_metadata.get("graph_id")
+        graph_id = await _get_thread_graph_id(thread_id, user)
         if not graph_id:
             raise HTTPException(
                 400,
@@ -636,7 +633,6 @@ async def get_thread_state_at_checkpoint(
     subgraphs: bool | None = Query(False, description="Include states from subgraphs"),
     checkpoint_ns: str | None = Query(None, description="Checkpoint namespace to scope lookup"),
     user: User = Depends(get_current_user),
-    session: AsyncSession = Depends(get_session),
 ) -> ThreadState:
     """Get the thread state at a specific checkpoint.
 
@@ -644,13 +640,7 @@ async def get_thread_state_at_checkpoint(
     execution history. Returns 404 if the checkpoint does not exist.
     """
     try:
-        stmt = select(ThreadORM).where(ThreadORM.thread_id == thread_id, ThreadORM.user_id == user.identity)
-        thread = await session.scalar(stmt)
-        if not thread:
-            raise HTTPException(404, f"Thread '{thread_id}' not found")
-
-        thread_metadata = thread.metadata_json or {}
-        graph_id = thread_metadata.get("graph_id")
+        graph_id = await _get_thread_graph_id(thread_id, user)
         if not graph_id:
             raise HTTPException(404, f"Thread '{thread_id}' has no associated graph")
 
@@ -715,7 +705,6 @@ async def get_thread_state_at_checkpoint_post(
     thread_id: str,
     request: ThreadCheckpointPostRequest,
     user: User = Depends(get_current_user),
-    session: AsyncSession = Depends(get_session),
 ) -> ThreadState:
     """Get the thread state at a specific checkpoint (POST variant).
 
@@ -736,7 +725,6 @@ async def get_thread_state_at_checkpoint_post(
         subgraphs,
         checkpoint_ns,
         user,
-        session,
     )
     return output
 
@@ -746,7 +734,6 @@ async def get_thread_history_post(
     thread_id: str,
     request: ThreadHistoryRequest,
     user: User = Depends(get_current_user),
-    session: AsyncSession = Depends(get_session),
 ) -> list[ThreadState]:
     """Get the checkpoint history for a thread (POST variant).
 
@@ -764,13 +751,7 @@ async def get_thread_history_post(
         subgraphs = bool(request.subgraphs) if request.subgraphs is not None else False
         checkpoint_ns = request.checkpoint_ns
 
-        stmt = select(ThreadORM).where(ThreadORM.thread_id == thread_id, ThreadORM.user_id == user.identity)
-        thread = await session.scalar(stmt)
-        if not thread:
-            raise HTTPException(404, f"Thread '{thread_id}' not found")
-
-        thread_metadata = thread.metadata_json or {}
-        graph_id = thread_metadata.get("graph_id")
+        graph_id = await _get_thread_graph_id(thread_id, user)
         if not graph_id:
             logger.info(f"history POST: no graph_id set for thread {thread_id}")
             return []
@@ -849,7 +830,6 @@ async def get_thread_history_get(
     checkpoint_ns: str | None = Query(None, description="Checkpoint namespace"),
     metadata: str | None = Query(None, description="JSON-encoded metadata filter"),
     user: User = Depends(get_current_user),
-    session: AsyncSession = Depends(get_session),
 ) -> list[ThreadState]:
     """Get the checkpoint history for a thread.
 
@@ -872,7 +852,7 @@ async def get_thread_history_get(
         subgraphs=subgraphs,
         checkpoint_ns=checkpoint_ns,
     )
-    return await get_thread_history_post(thread_id, req, user, session)
+    return await get_thread_history_post(thread_id, req, user)
 
 
 @router.delete(

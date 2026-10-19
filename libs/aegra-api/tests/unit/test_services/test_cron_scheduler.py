@@ -11,7 +11,7 @@ from unittest.mock import AsyncMock, Mock, patch
 import pytest
 from fastapi import HTTPException
 
-from aegra_api.services.cron_scheduler import CronScheduler
+from aegra_api.services.cron_scheduler import CronScheduler, _build_run_create
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -45,6 +45,24 @@ def _make_cron_orm(
     cron.end_time = end_time
     cron.next_run_date = next_run_date or now
     return cron
+
+
+class TestBuildRunCreate:
+    """Fired runs carry the durability fields stored on the cron."""
+
+    def test_forwards_durability_and_checkpoint_during(self) -> None:
+        cron = _make_cron_orm(payload={"input": {"msg": "tick"}, "durability": "sync", "checkpoint_during": False})
+
+        run_create = _build_run_create(cron)
+
+        assert run_create.durability == "sync"
+        assert run_create.checkpoint_during is False
+
+    def test_cron_stored_before_durability_leaves_both_unset(self) -> None:
+        run_create = _build_run_create(_make_cron_orm(payload={"input": {"msg": "tick"}}))
+
+        assert run_create.durability is None
+        assert run_create.checkpoint_during is None
 
 
 # ---------------------------------------------------------------------------

@@ -6,6 +6,7 @@ from typing import Any
 
 import pytest
 
+from aegra_api.models.runs import Durability
 from aegra_api.services.event_streaming.native_stream import (
     stream_native_v3_events,
     unwrap_message_event,
@@ -103,3 +104,17 @@ class TestStreamNativeV3Events:
         graph = _FakeGraph([_event("messages", [{"no_event": 1}, {}])])
         out = [pair async for pair in stream_native_v3_events(graph=graph, input_data={}, config={})]
         assert out == []
+
+    @pytest.mark.parametrize("mode", ["sync", "async", "exit"])
+    async def test_forwards_durability_to_the_v3_run(self, mode: Durability) -> None:
+        """v3 hands extra kwargs to astream, which is where LangGraph reads durability."""
+        graph = _FakeGraph([_event("values", {"a": 1})])
+        out = [pair async for pair in stream_native_v3_events(graph=graph, input_data={}, config={}, durability=mode)]
+        assert out
+        assert graph.calls[0]["durability"] == mode
+
+    async def test_omits_durability_when_unset(self) -> None:
+        graph = _FakeGraph([_event("values", {"a": 1})])
+        out = [pair async for pair in stream_native_v3_events(graph=graph, input_data={}, config={})]
+        assert out
+        assert "durability" not in graph.calls[0]

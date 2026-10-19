@@ -15,6 +15,7 @@ from typing import Annotated, Literal
 from langchain_core.messages import AIMessage, AnyMessage
 from langchain_core.tools import tool
 from langgraph.graph import StateGraph, add_messages
+from langgraph.managed import RemainingSteps
 from langgraph.prebuilt import ToolNode
 from react_agent.utils import load_chat_model
 
@@ -24,7 +25,7 @@ class State:
     """Agent state with message history."""
 
     messages: Annotated[Sequence[AnyMessage], add_messages] = field(default_factory=list)
-    is_last_step: bool = False
+    remaining_steps: RemainingSteps = 25
 
 
 @tool
@@ -59,7 +60,7 @@ async def call_model(state: State) -> dict[str, list[AIMessage]]:
         [{"role": "system", "content": system_message}, *state.messages],
     )
 
-    if state.is_last_step and response.tool_calls:
+    if state.remaining_steps < 3 and response.tool_calls:
         return {
             "messages": [
                 AIMessage(

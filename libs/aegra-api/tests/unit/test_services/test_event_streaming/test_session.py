@@ -342,6 +342,42 @@ class TestResumeAcrossRuns:
     """A HITL resume starts a fresh run on the thread; its events must reach the
     same open stream, not be dropped when the interrupted run drains first."""
 
+    async def test_repeated_interrupt_id_is_emitted_for_each_run(
+        self: "TestResumeAcrossRuns", manager: BrokerManager
+    ) -> None:
+        """A resumed run may reuse its predecessor's interrupt ID."""
+        for run_id, question in (("run-a", "First question?"), ("run-b", "Second question?")):
+            await _seed(
+                manager,
+                run_id,
+                [
+                    (
+                        "values",
+                        _protocol_event(
+                            "values",
+                            {"messages": []},
+                            interrupts=[{"id": "same-id", "value": {"question": question}}],
+                        ),
+                    ),
+                    ("end", {"status": "interrupted"}),
+                ],
+            )
+
+        events = await _collect(
+            _make_session(
+                "t1",
+                channels={"input", "values", "lifecycle"},
+                run_ids=("run-a", "run-b"),
+                statuses={"run-a": "interrupted", "run-b": "interrupted"},
+            )
+        )
+
+        requests = [event["params"]["data"] for event in events if event["method"] == "input.requested"]
+        assert [request["value"] for request in requests] == [
+            {"question": "First question?"},
+            {"question": "Second question?"},
+        ]
+
     async def test_followup_run_after_interrupt_streams_on_same_session(self, manager: BrokerManager) -> None:
         await _seed(
             manager,

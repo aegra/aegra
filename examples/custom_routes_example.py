@@ -33,9 +33,7 @@ You can also configure CORS:
 }
 """
 
-from typing import Any
-
-from fastapi import Depends, FastAPI, HTTPException
+from fastapi import Depends, FastAPI
 
 from aegra_api.core.auth_deps import require_auth
 from aegra_api.models.auth import User
@@ -93,33 +91,3 @@ async def protected_endpoint(user: User = Depends(require_auth)):
         "user": user.identity,
         "role": getattr(user, "role", None),
     }
-
-
-# Payloads from run-completion webhooks, oldest first. A real receiver would
-# verify a shared token (e.g. ?token=...) and hand the run off to its own queue.
-_received_run_webhooks: dict[str, dict[str, Any]] = {}
-_MAX_RECEIVED_WEBHOOKS = 100
-
-
-@app.post("/custom/webhooks/runs")
-async def receive_run_webhook(payload: dict[str, Any]) -> dict[str, str]:
-    """Receive the POST Aegra sends once a run with ``webhook`` set finishes.
-
-    Point a run or cron at ``http://localhost:2026/custom/webhooks/runs``.
-    Calling the server's own host needs ``webhooks.url.disable_loopback: false``.
-    """
-    run_id = str(payload.get("run_id"))
-    _received_run_webhooks.pop(run_id, None)
-    _received_run_webhooks[run_id] = payload
-    while len(_received_run_webhooks) > _MAX_RECEIVED_WEBHOOKS:
-        _received_run_webhooks.pop(next(iter(_received_run_webhooks)))
-    return {"status": "received"}
-
-
-@app.get("/custom/webhooks/runs/{run_id}")
-async def get_received_run_webhook(run_id: str) -> dict[str, Any]:
-    """Return the webhook payload received for a run; 404 until it arrives."""
-    payload = _received_run_webhooks.get(run_id)
-    if payload is None:
-        raise HTTPException(404, f"No webhook received for run {run_id}")
-    return payload

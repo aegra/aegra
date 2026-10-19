@@ -4,7 +4,11 @@ from unittest.mock import AsyncMock
 
 import pytest
 from fastapi.testclient import TestClient
+from langgraph.store.memory import InMemoryStore
 
+import aegra_api.core.database as db_module
+from aegra_api.core.auth_deps import get_current_user, require_auth
+from aegra_api.models.auth import User
 from aegra_api.settings import settings
 from tests.fixtures.clients import create_test_app, make_client
 from tests.fixtures.test_helpers import DummyStoreItem
@@ -1007,14 +1011,8 @@ class TestStoreIntegration:
 class TestEmailIdentityNamespaces:
     """An identity containing periods (e.g. an email) must not break store writes."""
 
-    def test_put_then_get_with_email_identity(self, client) -> None:
+    def test_put_then_get_with_email_identity(self, client: TestClient) -> None:
         """PUT succeeds against a real store that validates labels, and GET reads it back."""
-        from langgraph.store.memory import InMemoryStore
-
-        import aegra_api.core.database as db_module
-        from aegra_api.core.auth_deps import get_current_user, require_auth
-        from aegra_api.models.auth import User
-
         store = InMemoryStore()
         db_module.db_manager.get_store = lambda: store
         user = User(identity="alice.smith@example.com")

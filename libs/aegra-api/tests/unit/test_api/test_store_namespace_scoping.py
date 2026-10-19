@@ -229,17 +229,16 @@ class TestNamespaceLabelEncoding:
         ns = ["users", "alice%2Esmith@example%2Ecom", "docs"]
         assert apply_namespace_scoping(ns, _user("alice.smith@example.com")) == ns
 
-    def test_raw_own_namespace_is_rewritten_to_encoded_head(self) -> None:
-        """A namespace qualified with the caller's raw identity is the caller's own, not re-buried."""
+    def test_raw_own_namespace_is_buried(self) -> None:
+        """A namespace qualified with the raw identity is not the caller's head, so it is buried."""
         ns = ["users", "alice.smith@example.com", "docs"]
         result = apply_namespace_scoping(ns, _user("alice.smith@example.com"))
-        assert result == ["users", "alice%2Esmith@example%2Ecom", "docs"]
+        assert result == ["users", "alice%2Esmith@example%2Ecom", *ns]
 
-    def test_raw_alias_cannot_reach_another_user(self) -> None:
-        """A raw identity that equals someone else's encoded label still resolves to the caller."""
-        caller = _user("a%2Eb")  # raw head ["users", "a%2Eb"] == encoded head of identity "a.b"
-        result = apply_namespace_scoping(["users", "a%2Eb", "secrets"], caller)
-        assert result == ["users", "a%252Eb", "secrets"]
+    def test_encoded_label_of_other_user_is_buried(self) -> None:
+        """Identity "a%2Eb" cannot pass through as identity "a.b", whose encoded label it equals."""
+        result = apply_namespace_scoping(["users", "a%2Eb", "secrets"], _user("a%2Eb"))
+        assert result == ["users", "a%252Eb", "users", "a%2Eb", "secrets"]
 
     def test_configured_scope_values_are_encoded(self) -> None:
         """Configured scope attribute values with periods are encoded too."""

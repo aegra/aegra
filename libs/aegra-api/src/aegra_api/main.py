@@ -44,6 +44,8 @@ from aegra_api.services.langgraph_service import get_langgraph_service
 from aegra_api.services.lease_reaper import lease_reaper
 from aegra_api.services.run_preparation import get_default_durability
 from aegra_api.services.thread_ttl import get_thread_ttl_config, thread_ttl_sweeper
+from aegra_api.services.webhook_delivery import webhook_dispatcher
+from aegra_api.services.webhook_policy import get_webhook_settings
 from aegra_api.settings import settings
 from aegra_api.utils.setup_logging import setup_logging
 
@@ -86,6 +88,8 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     """FastAPI lifespan context manager for startup/shutdown"""
     # Resolve the durability default up front: an invalid value fails the boot, not every run.
     get_default_durability()
+    # Same for webhooks: a bad URL policy or an unset header variable fails the boot.
+    get_webhook_settings()
 
     # Multi-pod K8s: set RUN_MIGRATIONS_ON_STARTUP=false + run `aegra db upgrade`
     # out-of-band. See docs/guides/deployment.mdx.
@@ -153,7 +157,7 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
 
     yield
 
-    # Shutdown order: ttl sweeper → cron → reaper → executor (drains jobs) → broker → Redis → DB
+    # Shutdown order: ttl sweeper → cron → reaper → executor (drains jobs) → webhooks → broker → Redis → DB
     if get_thread_ttl_config() is not None:
         await thread_ttl_sweeper.stop()
     if settings.cron.CRON_ENABLED:
@@ -161,6 +165,8 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     if settings.redis.REDIS_BROKER_ENABLED:
         await lease_reaper.stop()
     await executor.stop()
+    # After the executor: runs finalized while draining queue webhooks of their own.
+    await webhook_dispatcher.stop()
     await broker_manager.stop()
 
     # Close Redis broker (if enabled)

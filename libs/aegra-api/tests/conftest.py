@@ -4,11 +4,14 @@ This file contains shared fixtures and configuration that are available
 to all tests across the test suite.
 """
 
+import ipaddress
+from collections.abc import Iterator
 from unittest.mock import AsyncMock
 
 import pytest
 from httpx import HTTPStatusError
 
+from aegra_api.services import webhook_policy
 from tests.fixtures.auth import DummyUser
 from tests.fixtures.clients import (
     create_test_app,
@@ -133,6 +136,31 @@ def clear_auth_cache():
     get_auth_backend.cache_clear()
     yield
     get_auth_backend.cache_clear()
+
+
+# Public and outside every blocked range; what the offline resolver answers for any host.
+WEBHOOK_TEST_ADDRESS = ipaddress.ip_address("93.184.215.14")
+
+
+@pytest.fixture(autouse=True)
+def isolated_webhook_policy(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    """Start every test with no ``webhooks`` config and offline DNS.
+
+    The repo's aegra.json must not leak into the policy under test, and webhook
+    validation must not depend on the network. Tests override either as needed.
+    """
+
+    async def _resolve_offline(host: str, port: int) -> list[webhook_policy.IPAddress]:
+        return [WEBHOOK_TEST_ADDRESS]
+
+    monkeypatch.setattr(webhook_policy, "load_webhooks_config", lambda: None)
+    monkeypatch.setattr(webhook_policy, "load_http_config", lambda: None)
+    monkeypatch.setattr(webhook_policy, "_resolve", _resolve_offline)
+    webhook_policy.get_webhook_settings.cache_clear()
+    webhook_policy.webhooks_enabled.cache_clear()
+    yield
+    webhook_policy.get_webhook_settings.cache_clear()
+    webhook_policy.webhooks_enabled.cache_clear()
 
 
 # --- AUTO-SKIP GEO-BLOCK FAILURES ---

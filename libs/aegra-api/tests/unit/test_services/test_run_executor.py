@@ -1,6 +1,9 @@
 """Unit tests for run_executor service."""
 
 import asyncio
+import contextlib
+from collections.abc import AsyncIterator, Awaitable, Callable
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -20,6 +23,7 @@ from aegra_api.services.run_executor import (
     _timeout_cancellations,
     execute_run,
 )
+from aegra_api.services.webhook_delivery import RunOutcome
 
 
 async def _empty_async_gen():  # type: ignore[no-untyped-def]
@@ -502,3 +506,156 @@ class TestTerminalStateRaces:
             await execute_run(_make_job())
 
         mock_signal_end.assert_not_awaited()
+
+
+def _stream_filling(
+    data: dict[str, Any], *, interrupt: bool = False, error: BaseException | None = None
+) -> Callable[[RunJob, _GraphResult], Awaitable[_GraphResult]]:
+    """A ``_stream_graph`` stand-in that streams *data* into the caller's result, then optionally fails."""
+
+    async def _fake(_job: RunJob, result: _GraphResult) -> _GraphResult:
+        result.data = data
+        result.has_interrupt = interrupt
+        if error is not None:
+            raise error
+        return result
+
+    return _fake
+
+
+class TestExecuteRunWebhook:
+    """Every terminal run hands its outcome to the webhook dispatcher; runs that resume elsewhere do not."""
+
+    @staticmethod
+    async def _execute(
+        stream: Callable[[RunJob, _GraphResult], Awaitable[_GraphResult]],
+        *,
+        finalized: bool = True,
+        started: bool = True,
+        finalize: AsyncMock | None = None,
+    ) -> MagicMock:
+        with (
+            patch("aegra_api.services.run_executor.start_run", new_callable=AsyncMock, return_value=started),
+            patch("aegra_api.services.run_executor._stream_graph", stream),
+            patch("aegra_api.services.run_executor.finalize_run", finalize or AsyncMock(return_value=finalized)),
+            patch("aegra_api.services.run_executor._signal_end_event", new_callable=AsyncMock),
+            patch("aegra_api.services.run_executor.streaming_service") as mock_streaming,
+            patch("aegra_api.services.run_executor._signal_run_done", new_callable=AsyncMock),
+            patch("aegra_api.services.run_executor.notify_run_finished") as mock_notify,
+        ):
+            mock_streaming.cleanup_run = AsyncMock()
+            mock_streaming.signal_run_error = AsyncMock()
+            mock_streaming.signal_run_cancelled = AsyncMock()
+            with contextlib.suppress(asyncio.CancelledError):
+                await execute_run(_make_job())
+        return mock_notify
+
+    @staticmethod
+    def _outcome(mock_notify: MagicMock) -> RunOutcome:
+        mock_notify.assert_called_once()
+        job, outcome = mock_notify.call_args.args
+        assert job.identity.run_id == "run-1"
+        return outcome
+
+    async def test_success_reports_final_values(self) -> None:
+        mock_notify = await self._execute(_stream_filling({"count": 2}))
+
+        outcome = self._outcome(mock_notify)
+        assert outcome.status == "success"
+        assert outcome.values == {"count": 2}
+        assert outcome.error is None
+        assert outcome.run_started_at is not None
+        assert outcome.run_started_at <= outcome.run_ended_at
+
+    async def test_graph_interrupt_reports_interrupted(self) -> None:
+        mock_notify = await self._execute(_stream_filling({"count": 1}, interrupt=True))
+
+        assert self._outcome(mock_notify).status == "interrupted"
+
+    async def test_failure_reports_error_and_partial_values(self) -> None:
+        mock_notify = await self._execute(_stream_filling({"count": 1}, error=RuntimeError("graph exploded")))
+
+        outcome = self._outcome(mock_notify)
+        assert outcome.status == "error"
+        assert outcome.error == {"error": "RuntimeError", "message": "graph exploded"}
+        assert outcome.values == {"count": 1}
+
+    async def test_timeout_reports_timeout_error(self) -> None:
+        _timeout_cancellations.add("run-1")
+        try:
+            mock_notify = await self._execute(_stream_filling({}, error=asyncio.CancelledError()))
+        finally:
+            _timeout_cancellations.discard("run-1")
+
+        outcome = self._outcome(mock_notify)
+        assert outcome.status == "error"
+        assert outcome.error == {"error": "TimeoutError", "message": "Job exceeded maximum execution time"}
+
+    async def test_user_cancel_reports_interrupted(self) -> None:
+        mock_notify = await self._execute(_stream_filling({"count": 1}, error=asyncio.CancelledError()))
+
+        outcome = self._outcome(mock_notify)
+        assert outcome.status == "interrupted"
+        assert outcome.error is None
+
+    @pytest.mark.parametrize("cancellations", [_lease_loss_cancellations, _shutdown_cancellations])
+    async def test_run_that_resumes_elsewhere_is_not_reported(self, cancellations: set[str]) -> None:
+        cancellations.add("run-1")
+        try:
+            mock_notify = await self._execute(_stream_filling({}, error=asyncio.CancelledError()))
+        finally:
+            cancellations.discard("run-1")
+
+        mock_notify.assert_not_called()
+
+    async def test_lost_finalization_race_is_not_reported(self) -> None:
+        mock_notify = await self._execute(_stream_filling({"count": 2}), finalized=False)
+
+        mock_notify.assert_not_called()
+
+    async def test_failed_success_finalization_reports_the_error_status_it_stored(self) -> None:
+        # The success write fails, the error path then records the run as an error.
+        finalize = AsyncMock(side_effect=[RuntimeError("db write failed"), True])
+
+        mock_notify = await self._execute(_stream_filling({"count": 2}), finalize=finalize)
+
+        outcome = self._outcome(mock_notify)
+        assert finalize.await_args_list[1].kwargs["status"] == "error"
+        assert outcome.status == "error"
+        assert outcome.error == {"error": "RuntimeError", "message": "db write failed"}
+
+    async def test_run_that_never_started_is_not_reported(self) -> None:
+        mock_notify = await self._execute(_stream_filling({}), started=False)
+
+        mock_notify.assert_not_called()
+
+
+class TestStreamGraphResult:
+    async def test_keeps_values_streamed_before_a_failure_in_the_callers_result(self) -> None:
+        result = _GraphResult()
+
+        async def _events(**_kwargs: Any) -> AsyncIterator[tuple[str, Any]]:
+            yield "values", {"count": 1}
+            raise RuntimeError("mid-run failure")
+
+        mock_graph = MagicMock()
+        mock_graph.__aenter__ = AsyncMock(return_value=mock_graph)
+        mock_graph.__aexit__ = AsyncMock(return_value=False)
+        mock_service = MagicMock()
+        mock_service.get_graph = MagicMock(return_value=mock_graph)
+
+        with (
+            patch.object(run_executor_module, "get_langgraph_service", return_value=mock_service),
+            patch.object(run_executor_module, "stream_graph_events", _events),
+            patch.object(run_executor_module, "with_auth_ctx") as mock_auth,
+            patch.object(run_executor_module, "broker_manager") as bm,
+            patch.object(run_executor_module, "streaming_service") as ss,
+        ):
+            mock_auth.return_value.__aenter__ = AsyncMock(return_value=None)
+            mock_auth.return_value.__aexit__ = AsyncMock(return_value=False)
+            bm.allocate_event_id = AsyncMock(return_value="run-1_event_1")
+            ss.put_to_broker = AsyncMock()
+            with pytest.raises(RuntimeError, match="mid-run failure"):
+                await run_executor_module._stream_graph(_make_job(), result)
+
+        assert result.data == {"count": 1}

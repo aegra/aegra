@@ -64,6 +64,14 @@ class TestBuildRunCreate:
         assert run_create.durability is None
         assert run_create.checkpoint_during is None
 
+    def test_forwards_webhook(self) -> None:
+        cron = _make_cron_orm(payload={"input": {"msg": "tick"}, "webhook": "https://hooks.example.com/cron?t=1"})
+
+        assert _build_run_create(cron).webhook == "https://hooks.example.com/cron?t=1"
+
+    def test_cron_without_webhook_fires_runs_without_one(self) -> None:
+        assert _build_run_create(_make_cron_orm(payload={"input": {"msg": "tick"}})).webhook is None
+
 
 # ---------------------------------------------------------------------------
 # Lifecycle: start / stop
@@ -287,6 +295,19 @@ class TestFireCron:
             # Should advance next_run_date
             mock_session.execute.assert_awaited_once()
             mock_session.commit.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_fires_without_revalidating_the_webhook(self) -> None:
+        # Validated at cron create/update; a later policy change skips the call at delivery instead.
+        cron = _make_cron_orm(payload={"input": {"msg": "hi"}, "webhook": "https://hooks.example.com/cron"})
+        cron.end_time = None
+
+        with patch("aegra_api.services.cron_scheduler._prepare_run", new_callable=AsyncMock) as mock_prepare:
+            mock_prepare.return_value = ("run-1", Mock(), None)
+            await CronScheduler._fire_cron(AsyncMock(), cron)
+
+        assert mock_prepare.await_args.kwargs["validate_webhook"] is False
+        assert mock_prepare.await_args.args[2].webhook == "https://hooks.example.com/cron"
 
     @pytest.mark.asyncio
     async def test_schedules_cleanup_for_stateless_cron_by_default(self) -> None:

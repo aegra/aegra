@@ -12,6 +12,7 @@ Aegra is an open-source, self-hosted alternative to LangSmith Deployments. This 
 - **Streaming Support**: Real-time streaming of agent responses
 - **Human-in-the-Loop**: Built-in support for human approval workflows
 - **Scheduled Cron Jobs**: Trigger runs on a schedule with timezone support and multi-instance safe claim
+- **Webhooks**: Get a POST with the result when a run or a cron-fired run finishes
 - **Vector Store**: Semantic search capabilities with PostgreSQL
 
 ## Installation

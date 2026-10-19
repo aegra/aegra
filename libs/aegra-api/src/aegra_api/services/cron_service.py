@@ -28,6 +28,7 @@ from aegra_api.models.crons import (
     OnRunCompleted,
 )
 from aegra_api.services.langgraph_service import LangGraphService, get_langgraph_service
+from aegra_api.services.webhook_policy import ensure_webhook_allowed
 from aegra_api.settings import settings
 from aegra_api.utils.assistants import resolve_assistant_id
 
@@ -231,6 +232,8 @@ class CronService:
             except (ZoneInfoNotFoundError, KeyError):
                 raise HTTPException(422, f"Invalid timezone: {request.timezone}")
 
+        await ensure_webhook_allowed(request.webhook)
+
         # Per-user cap to prevent one tenant from exhausting the scheduler.
         max_per_user = settings.cron.CRON_MAX_PER_USER
         if max_per_user > 0:
@@ -306,6 +309,8 @@ class CronService:
         user_identity: str,
     ) -> CronResponse:
         """Update an existing cron job and return the updated ``CronResponse``."""
+        # Before the row lock: the check can wait on DNS.
+        await ensure_webhook_allowed(request.webhook)
         cron = await self._get_cron_or_404(cron_id, user_identity, lock=True)
 
         values: dict[str, Any] = {"updated_at": datetime.now(UTC)}

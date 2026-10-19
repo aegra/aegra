@@ -6,7 +6,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from aegra_api.observability.base import get_observability_manager
-from aegra_api.services import run_preparation
+from aegra_api.services import run_preparation, webhook_policy
 
 
 @pytest.mark.unit
@@ -257,3 +257,70 @@ async def test_lifespan_fails_before_any_db_work_on_invalid_durability_default(
             mock_db_manager.initialize.assert_not_called()
     finally:
         run_preparation.get_default_durability.cache_clear()
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_lifespan_fails_before_any_db_work_on_invalid_webhooks_config(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A webhook header that references an unset variable stops the boot instead of every delivery."""
+    import aegra_api.main as main_module
+
+    importlib.reload(main_module)
+    monkeypatch.delenv("LG_WEBHOOK_TOKEN", raising=False)
+    monkeypatch.setattr(
+        webhook_policy,
+        "load_webhooks_config",
+        lambda: {"headers": {"Authorization": "Bearer ${{ env.LG_WEBHOOK_TOKEN }}"}},
+    )
+    webhook_policy.get_webhook_settings.cache_clear()
+
+    with (
+        patch("aegra_api.main.run_migrations_async", new_callable=AsyncMock) as mock_migrations,
+        patch("aegra_api.main.db_manager") as mock_db_manager,
+    ):
+        mock_db_manager.initialize = AsyncMock()
+
+        with pytest.raises(ValueError, match="LG_WEBHOOK_TOKEN"):
+            async with main_module.lifespan(MagicMock()):
+                pass
+
+        mock_migrations.assert_not_called()
+        mock_db_manager.initialize.assert_not_called()
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_lifespan_drains_webhooks_after_the_executor() -> None:
+    """Runs finalized while the executor drains queue their own webhooks, so the dispatcher stops after it."""
+    import aegra_api.main as main_module
+
+    importlib.reload(main_module)
+    stopped: list[str] = []
+
+    with (
+        patch("aegra_api.main.run_migrations_async", new_callable=AsyncMock),
+        patch("aegra_api.main.db_manager") as mock_db_manager,
+        patch("aegra_api.main.get_langgraph_service") as mock_get_langgraph_service,
+        patch("aegra_api.main.setup_observability"),
+        patch("aegra_api.main.cron_scheduler") as mock_cron_scheduler,
+        patch("aegra_api.main.executor") as mock_executor,
+        patch("aegra_api.main.webhook_dispatcher") as mock_dispatcher,
+        patch("aegra_api.main.broker_manager") as mock_broker,
+    ):
+        mock_db_manager.initialize = AsyncMock()
+        mock_db_manager.close = AsyncMock(side_effect=lambda: stopped.append("db"))
+        mock_get_langgraph_service.return_value.initialize = AsyncMock()
+        mock_cron_scheduler.start = AsyncMock()
+        mock_cron_scheduler.stop = AsyncMock()
+        mock_executor.start = AsyncMock()
+        mock_executor.stop = AsyncMock(side_effect=lambda: stopped.append("executor"))
+        mock_dispatcher.stop = AsyncMock(side_effect=lambda: stopped.append("webhooks"))
+        mock_broker.start = AsyncMock()
+        mock_broker.stop = AsyncMock(side_effect=lambda: stopped.append("broker"))
+
+        async with main_module.lifespan(MagicMock()):
+            mock_dispatcher.stop.assert_not_awaited()
+
+    assert stopped == ["executor", "webhooks", "broker", "db"]

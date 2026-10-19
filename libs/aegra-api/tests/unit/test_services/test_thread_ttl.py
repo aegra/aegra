@@ -440,14 +440,24 @@ class TestSweepLimit:
         assert "NOT IN" in second_claim
 
     @pytest.mark.asyncio
-    async def test_tick_is_noop_without_config(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    async def test_tick_uses_default_config_without_server_ttl(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Rows registered by stateless runs are swept without global TTL config."""
         sweeper = ThreadTTLSweeper()
         monkeypatch.setattr("aegra_api.services.thread_ttl.get_thread_ttl_config", lambda: None)
+        session = AsyncMock()
+        maker = MagicMock()
+        maker.return_value.__aenter__ = AsyncMock(return_value=session)
+        maker.return_value.__aexit__ = AsyncMock(return_value=False)
+        monkeypatch.setattr("aegra_api.services.thread_ttl._get_session_maker", lambda: maker)
 
-        with patch("aegra_api.services.thread_ttl._process_expired_batch", new_callable=AsyncMock) as mock_batch:
+        with patch(
+            "aegra_api.services.thread_ttl._process_expired_batch",
+            new_callable=AsyncMock,
+            return_value=(0, 0, 0, []),
+        ) as mock_batch:
             await sweeper._tick()
 
-        mock_batch.assert_not_awaited()
+        mock_batch.assert_awaited_once()
 
 
 class TestStartStop:

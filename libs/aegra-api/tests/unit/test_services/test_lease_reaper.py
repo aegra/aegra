@@ -54,6 +54,27 @@ class TestFindRecoverable:
         assert crashed == []
         assert stuck == []
 
+    @pytest.mark.asyncio
+    async def test_stuck_pending_query_excludes_recently_dispatched_runs(self) -> None:
+        session = AsyncMock()
+        empty_result = MagicMock()
+        empty_result.fetchall.return_value = []
+        session.execute = AsyncMock(return_value=empty_result)
+        maker = _make_session_maker(session)
+
+        with (
+            patch("aegra_api.services.lease_reaper._get_session_maker", return_value=maker),
+            patch("aegra_api.services.lease_reaper.settings") as mock_settings,
+        ):
+            mock_settings.worker.POSTGRES_POLL_INTERVAL_SECONDS = 5
+            mock_settings.worker.STUCK_PENDING_THRESHOLD_SECONDS = 120
+            await LeaseReaper._find_recoverable()
+
+        stuck_query = session.execute.await_args_list[1].args[0]
+        compiled = str(stuck_query.compile())
+        assert "runs.dispatched_at IS NULL" in compiled
+        assert "runs.dispatched_at <" in compiled
+
 
 class TestRecoverCrashedRuns:
     @pytest.mark.asyncio

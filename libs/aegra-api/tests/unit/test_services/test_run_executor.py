@@ -83,6 +83,44 @@ class TestExecuteRunSuccess:
 
 class TestExecuteRunCancelledError:
     @pytest.mark.asyncio
+    async def test_cancelled_during_initial_delay_finalizes_pending_run(
+        self: "TestExecuteRunCancelledError",
+    ) -> None:
+        sleep_started = asyncio.Event()
+        original_sleep = asyncio.sleep
+
+        async def wait_for_cancel(_delay: float) -> None:
+            sleep_started.set()
+            await original_sleep(3600)
+
+        mock_finalize = AsyncMock(return_value=True)
+        with (
+            patch("aegra_api.services.run_executor.asyncio.sleep", side_effect=wait_for_cancel),
+            patch("aegra_api.services.run_executor.start_run", new_callable=AsyncMock) as mock_start,
+            patch("aegra_api.services.run_executor.finalize_run", mock_finalize),
+            patch("aegra_api.services.run_executor.streaming_service") as mock_streaming,
+            patch("aegra_api.services.run_executor._signal_run_done", new_callable=AsyncMock),
+        ):
+            mock_streaming.signal_run_cancelled = AsyncMock()
+            mock_streaming.cleanup_run = AsyncMock()
+            task = asyncio.create_task(execute_run(_make_job(), delay_seconds=3600))
+            await sleep_started.wait()
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+
+        mock_start.assert_not_awaited()
+        mock_finalize.assert_awaited_once_with(
+            "run-1",
+            "thread-1",
+            user_id="user-1",
+            status="interrupted",
+            thread_status="idle",
+            output={},
+        )
+        mock_streaming.signal_run_cancelled.assert_awaited_once_with("run-1")
+
+    @pytest.mark.asyncio
     async def test_cancelled_error_sets_interrupted_and_signals(self) -> None:
         mock_start = AsyncMock(return_value=True)
         mock_finalize = AsyncMock(return_value=True)

@@ -72,14 +72,20 @@ async def delete_thread_by_id(thread_id: str, user_id: str) -> None:
             await session.commit()
 
 
-async def cleanup_after_background_run(run_id: str, thread_id: str, user_id: str) -> None:
+async def cleanup_after_background_run(
+    run_id: str,
+    thread_id: str,
+    user_id: str,
+    *,
+    timeout: float = 3600.0,
+) -> None:
     """Wait for a background run to finish, then delete its ephemeral thread.
 
     executor.wait_for_completion works both in-process (dev) and cross-instance
     (prod with Redis workers).
     """
     try:
-        await executor.wait_for_completion(run_id, timeout=3600.0)
+        await executor.wait_for_completion(run_id, timeout=timeout)
     except (asyncio.CancelledError, TimeoutError):
         # Cancellation = shutdown; timeout = run exceeded 1h cap. Either way we
         # still proceed to delete the thread below — no need to log.
@@ -93,9 +99,15 @@ async def cleanup_after_background_run(run_id: str, thread_id: str, user_id: str
         logger.exception("Failed to delete ephemeral thread", thread_id=thread_id, run_id=run_id)
 
 
-def schedule_background_cleanup(run_id: str, thread_id: str, user_id: str) -> asyncio.Task[None]:
+def schedule_background_cleanup(
+    run_id: str,
+    thread_id: str,
+    user_id: str,
+    *,
+    timeout: float = 3600.0,
+) -> asyncio.Task[None]:
     """Fire-and-forget background cleanup, strong ref held until done."""
-    task = asyncio.create_task(cleanup_after_background_run(run_id, thread_id, user_id))
+    task = asyncio.create_task(cleanup_after_background_run(run_id, thread_id, user_id, timeout=timeout))
     _background_cleanup_tasks.add(task)
     task.add_done_callback(_background_cleanup_tasks.discard)
     return task

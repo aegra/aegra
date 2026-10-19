@@ -10,7 +10,6 @@ from aegra_api.settings import (
     AppSettings,
     CronSettings,
     DatabaseSettings,
-    EphemeralThreadSettings,
     RedisSettings,
     ThreadTTLSettings,
     WorkerSettings,

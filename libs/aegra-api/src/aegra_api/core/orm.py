@@ -149,9 +149,7 @@ class Thread(Base):
     updated_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), server_default=text("now()"))
 
     # Indexes for performance
-    __table_args__ = (
-        Index("idx_thread_user", "user_id"),
-    )
+    __table_args__ = (Index("idx_thread_user", "user_id"),)
 
 
 class Run(Base):

@@ -61,6 +61,37 @@ class TestLocalExecutor:
         active_runs.pop("run-done", None)
 
     @pytest.mark.asyncio
+    async def test_wait_for_completion_raises_timeout_on_slow_run(self) -> None:
+        """Callers distinguish a slow run from a finished one, as WorkerExecutor already allows."""
+        from aegra_api.core.active_runs import active_runs
+
+        executor = LocalExecutor()
+        task = asyncio.create_task(asyncio.sleep(9999))
+        active_runs["run-slow"] = task
+        try:
+            with pytest.raises(TimeoutError):
+                await executor.wait_for_completion("run-slow", timeout=0.01)
+        finally:
+            task.cancel()
+            active_runs.pop("run-slow", None)
+
+    @pytest.mark.asyncio
+    async def test_wait_for_completion_leaves_a_timed_out_run_running(self) -> None:
+        """The wait is shielded: giving up on a run must not cancel it."""
+        from aegra_api.core.active_runs import active_runs
+
+        executor = LocalExecutor()
+        task = asyncio.create_task(asyncio.sleep(9999))
+        active_runs["run-shielded"] = task
+        try:
+            with pytest.raises(TimeoutError):
+                await executor.wait_for_completion("run-shielded", timeout=0.01)
+            assert not task.done()
+        finally:
+            task.cancel()
+            active_runs.pop("run-shielded", None)
+
+    @pytest.mark.asyncio
     async def test_wait_for_completion_returns_on_missing_run(self) -> None:
         executor = LocalExecutor()
         # Should return immediately, not raise

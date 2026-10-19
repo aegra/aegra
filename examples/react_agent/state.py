@@ -8,7 +8,7 @@ from typing import Annotated
 
 from langchain_core.messages import AnyMessage
 from langgraph.graph import add_messages
-from langgraph.managed import IsLastStep
+from langgraph.managed import RemainingSteps
 
 
 @dataclass
@@ -43,10 +43,9 @@ class State(InputState):
     This class can be used to store any information needed throughout the agent's lifecycle.
     """
 
-    is_last_step: IsLastStep = field(default=False)
+    remaining_steps: RemainingSteps = field(default=25)
     """
-    Indicates whether the current step is the last one before the graph raises an error.
+    Steps left, counting the current one, before the graph raises GraphRecursionError.
 
     This is a 'managed' variable, controlled by the state machine rather than user code.
-    It is set to 'True' when the step count reaches recursion_limit - 1.
     """

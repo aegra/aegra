@@ -4,6 +4,10 @@ Tests message accumulation, interrupt filtering, subgraph handling,
 and event processing logic.
 """
 
+from collections.abc import AsyncIterator
+from typing import Any
+from unittest.mock import MagicMock
+
 import pytest
 from langchain_core.messages import (
     AIMessage,
@@ -14,11 +18,13 @@ from langchain_core.messages import (
     ToolMessageChunk,
 )
 
+from aegra_api.models.runs import Durability
 from aegra_api.services.graph_streaming import (
     _normalize_checkpoint_payload,
     _normalize_checkpoint_task,
     _process_stream_event,
     _to_message_chunk,
+    stream_graph_events,
 )
 
 
@@ -725,6 +731,54 @@ class TestStreamGraphEvents:
             # Verify filter called
             mock_filter.assert_called_once()
             assert mock_filter.call_args[0][0] == context
+
+
+class TestStreamGraphEventsDurability:
+    """``durability`` reaches LangGraph on both the astream and astream_events paths."""
+
+    @staticmethod
+    def _graph(calls: list[dict[str, Any]]) -> MagicMock:
+        async def astream(*_args: Any, **kwargs: Any) -> AsyncIterator[tuple[str, dict[str, Any]]]:
+            calls.append(kwargs)
+            yield ("values", {"foo": "bar"})
+
+        async def astream_events(*_args: Any, **kwargs: Any) -> AsyncIterator[dict[str, Any]]:
+            calls.append(kwargs)
+            yield {"event": "on_chain_start", "run_id": "other"}
+
+        graph = MagicMock()
+        graph.astream = astream
+        graph.astream_events = astream_events
+        return graph
+
+    @staticmethod
+    async def _drain(graph: MagicMock, stream_mode: list[str], durability: Durability | None) -> None:
+        async for _ in stream_graph_events(
+            graph, {}, {"run_id": "test-run"}, stream_mode=stream_mode, durability=durability
+        ):
+            pass
+
+    @pytest.mark.parametrize("mode", ["sync", "async", "exit"])
+    async def test_astream_receives_durability(self, mode: Durability) -> None:
+        calls: list[dict[str, Any]] = []
+        await self._drain(self._graph(calls), ["values"], mode)
+
+        assert calls[0]["durability"] == mode
+
+    async def test_astream_events_receives_durability(self) -> None:
+        calls: list[dict[str, Any]] = []
+        await self._drain(self._graph(calls), ["values", "events"], "exit")
+
+        assert calls[0]["version"] == "v2"
+        assert calls[0]["durability"] == "exit"
+
+    @pytest.mark.parametrize("stream_mode", [["values"], ["values", "events"]])
+    async def test_unset_durability_is_not_passed(self, stream_mode: list[str]) -> None:
+        """Runs that never asked for a mode keep calling LangGraph exactly as before."""
+        calls: list[dict[str, Any]] = []
+        await self._drain(self._graph(calls), stream_mode, None)
+
+        assert "durability" not in calls[0]
 
 
 class TestToMessageChunk:

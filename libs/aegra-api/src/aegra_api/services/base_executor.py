@@ -18,7 +18,11 @@ class BaseExecutor(ABC):
 
     @abstractmethod
     async def wait_for_completion(self, run_id: str, *, timeout: float = 300.0) -> None:
-        """Block until the run reaches a terminal state or timeout expires."""
+        """Block until the run reaches a terminal state.
+
+        Raises:
+            TimeoutError: The run was still running after *timeout* seconds.
+        """
 
     @abstractmethod
     async def start(self) -> None:

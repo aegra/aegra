@@ -68,24 +68,79 @@ The `@auth.authenticate` decorator registers your authentication function. It re
 |-------|------|---------|-------------|
 | `display_name` | `string` | Same as `identity` | Display name |
 | `permissions` | `list[str]` | `[]` | Permission strings |
-| `is_authenticated` | `bool` | `True` | Authentication status |
+| `is_authenticated` | `bool` | `True` | Whether this is a signed-in user. Passed to your handlers; Aegra never rejects a request because of it (see [who can use your server](#who-can-use-your-server)) |
 
 Any additional fields you return (like `role`, `team_id`, etc.) are preserved and accessible via `ctx.user` in authorization handlers and via the `User` model in custom routes.
 
-### Denying access
+### Who can use your server
 
-Raise any exception to deny authentication:
+Your `authenticate` handler is the only gate. For each request it does one of two things:
+
+| Your handler | What happens |
+|---|---|
+| Raises an exception | The request is rejected with `401` and never reaches your graphs |
+| Returns a user | The request runs as that user |
+
+Aegra does not look at `is_authenticated` to decide. It is information for your own code: authorization handlers, graphs and custom routes. A user returned with `"is_authenticated": False` still gets in.
+
+Pick one of the two setups below.
+
+#### Signed-in users only
+
+Raise for every request you don't trust. Most deployments want this.
+
+```python
+from langgraph_sdk import Auth
+
+auth = Auth()
+
+
+@auth.authenticate
+async def authenticate(headers: dict) -> dict:
+    token = headers.get("authorization", "").removeprefix("Bearer ")
+    if not token:
+        raise Auth.exceptions.HTTPException(status_code=401, detail="Missing token")
+    user = await verify_token(token)  # your JWT / OAuth / API key check
+    if user is None:
+        raise Auth.exceptions.HTTPException(status_code=401, detail="Invalid token")
+    return {"identity": user.id, "display_name": user.name}
+```
+
+<Warning>
+  Don't return a `guest` or `anonymous` user to mean "no". Returning any user lets the request in. To reject a request, raise.
+</Warning>
+
+#### Signed-in users and guests
+
+Return a guest user when there is no token, marked with `"is_authenticated": False`. Then decide in an authorization handler what guests may do.
 
 ```python
 @auth.authenticate
 async def authenticate(headers: dict) -> dict:
-    token = headers.get("Authorization", "").replace("Bearer ", "")
+    token = headers.get("authorization", "").removeprefix("Bearer ")
     if not token:
-        raise Exception("Authentication required")
-    if not is_valid_token(token):
-        raise Exception("Invalid token")
-    return user_data
+        return {"identity": "guest", "is_authenticated": False}
+    user = await verify_token(token)
+    if user is None:
+        raise Auth.exceptions.HTTPException(status_code=401, detail="Invalid token")
+    return {"identity": user.id, "display_name": user.name}
+
+
+READ_ACTIONS = {"read", "search", "get", "list_namespaces"}  # get / list_namespaces are store reads
+
+
+@auth.on
+async def guests_can_only_read(ctx, value):
+    if not ctx.user.is_authenticated and ctx.action not in READ_ACTIONS:
+        return False  # 403 Forbidden
+    return None
 ```
+
+A guest can now list and read, but can't create threads, start runs or change anything. Keep in mind:
+
+- All guests share the `guest` identity, so they see each other's threads and store items. To keep guests apart, give each one its own identity, for example from a session ID your frontend sends.
+- `@auth.on` is the fallback handler. A more specific handler such as `@auth.on.threads.create` runs instead of it, so repeat the guest check there.
+- A guest that can start runs spends your model budget. Allow that only on purpose.
 
 ## Authorization handlers
 
@@ -465,10 +520,10 @@ See the [custom routes guide](/guides/custom-routes) for more.
 If no auth is configured, Aegra runs in no-auth mode:
 
 - All requests are allowed
-- User is set to `anonymous`
+- User is set to `anonymous`, with `is_authenticated` set to `False`
 - Authorization handlers are not called
 
-This is the default for local development and testing.
+This is the default for local development and testing. Every caller shares the `anonymous` user and its data, so don't expose a server without auth to the internet.
 
 ## Configuration options
 

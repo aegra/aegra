@@ -16,7 +16,7 @@ from typing import Self
 
 import httpx
 from fastapi import HTTPException
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from aegra_api.config import load_http_config, load_webhooks_config
 
@@ -88,8 +88,15 @@ class WebhookUrlError(ValueError):
     """A webhook URL the server refuses to call. The message is safe to return to the caller."""
 
 
+class WebhookDNSError(WebhookUrlError):
+    """The host did not resolve: a 422 when a webhook is set, a retry when it is called."""
+
+
 class WebhookUrlPolicy(BaseModel):
     """The ``webhooks.url`` block. Field defaults apply to keys a configured block leaves out."""
+
+    # A misspelled key would silently weaken the policy, so unknown keys fail the boot.
+    model_config = ConfigDict(extra="forbid")
 
     require_https: bool = True
     allowed_domains: list[str] = Field(default_factory=list)
@@ -159,6 +166,8 @@ def _render_header(value: str, env_prefix: str) -> str:
 
 class WebhookSettings(BaseModel):
     """The validated ``webhooks`` block, with header templates already resolved."""
+
+    model_config = ConfigDict(extra="forbid")
 
     env_prefix: str = DEFAULT_ENV_PREFIX
     url: WebhookUrlPolicy = Field(default_factory=_unconfigured_url_policy)
@@ -300,13 +309,13 @@ async def _resolve(host: str, port: int) -> list[IPAddress]:
         async with asyncio.timeout(_DNS_TIMEOUT_SECONDS):
             infos = await loop.getaddrinfo(host, port, type=socket.SOCK_STREAM)
     except (OSError, TimeoutError):
-        raise WebhookUrlError("Webhook host blocked: DNS resolution failed") from None
+        raise WebhookDNSError("Webhook host blocked: DNS resolution failed") from None
     try:
         addresses: list[IPAddress] = [ipaddress.ip_address(info[4][0]) for info in infos]
     except ValueError:
         raise WebhookUrlError("Webhook host blocked: invalid IP address") from None
     if not addresses:
-        raise WebhookUrlError("Webhook host blocked: DNS resolution failed")
+        raise WebhookDNSError("Webhook host blocked: DNS resolution failed")
     return addresses
 
 

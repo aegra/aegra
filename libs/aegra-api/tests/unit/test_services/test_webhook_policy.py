@@ -12,6 +12,7 @@ from pydantic import ValidationError
 from aegra_api.config import HttpConfig, WebhooksConfig
 from aegra_api.services import webhook_policy
 from aegra_api.services.webhook_policy import (
+    WebhookDNSError,
     WebhookSettings,
     WebhookUrlError,
     WebhookUrlPolicy,
@@ -167,6 +168,18 @@ class TestWebhookSettings:
     def test_rejects_unknown_allowed_fields(self) -> None:
         with pytest.raises(ValidationError, match="unknown fields"):
             WebhookSettings.model_validate({"allowed_fields": ["run_id", "secrets"]})
+
+    @pytest.mark.parametrize(
+        "config",
+        [
+            {"url": {"disable_private_ip": True}},
+            {"header": {"Authorization": "x"}},
+        ],
+    )
+    def test_rejects_misspelled_keys(self, config: dict[str, Any]) -> None:
+        # A typo in a security setting must fail the boot, not leave the default in place.
+        with pytest.raises(ValidationError, match="Extra inputs are not permitted"):
+            WebhookSettings.model_validate(config)
 
 
 class TestConfigLoading:
@@ -380,7 +393,8 @@ class TestResolve:
 
         monkeypatch.setattr(asyncio.get_running_loop(), "getaddrinfo", _getaddrinfo)
 
-        with pytest.raises(WebhookUrlError, match="DNS resolution failed"):
+        # A DNS error is retryable at delivery time, unlike a policy block.
+        with pytest.raises(WebhookDNSError, match="DNS resolution failed"):
             await _real_resolve("missing.example.com", 443)
 
     async def test_empty_answer_is_a_policy_error(self, monkeypatch: pytest.MonkeyPatch) -> None:

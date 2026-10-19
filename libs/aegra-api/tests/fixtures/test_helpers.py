@@ -95,6 +95,7 @@ class DummyRun:
         self.output = output_data
         self.created_at = datetime.now(UTC)
         self.updated_at = datetime.now(UTC)
+        self.execution_params: dict[str, Any] | None = None
 
 
 class DummyThread:

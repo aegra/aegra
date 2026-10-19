@@ -393,7 +393,7 @@ Configure the POST Aegra sends when a run with `webhook` set finishes. The keys 
 | `url.disable_private_ips` | `bool` | `false` | Block private (RFC 1918, `100.64.0.0/10`, `fc00::/7`) addresses |
 | `allowed_fields` | `list[str]` | all fields | Top-level payload keys to send |
 
-The policy applies when a run or cron is created (a violation returns `422`) and again before every call. A header that references an unset variable, or an invalid value, stops the server at startup. See [webhooks](/guides/webhooks) for the payload, retries, and the addresses that are always blocked.
+The policy applies when a run or cron is created (a violation returns `422`) and again before every call. A header that references an unset variable, an unknown key, or an invalid value stops the server at startup. See [webhooks](/guides/webhooks) for the payload, retries, and the addresses that are always blocked.
 
 ## Common configurations
 

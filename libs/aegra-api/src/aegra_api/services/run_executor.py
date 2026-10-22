@@ -10,6 +10,7 @@ import asyncio
 from typing import Any
 
 import structlog
+from sqlalchemy.exc import SQLAlchemyError
 
 from aegra_api.core.active_runs import active_runs
 from aegra_api.core.auth_ctx import with_auth_ctx
@@ -19,7 +20,7 @@ from aegra_api.services.broker import broker_manager
 from aegra_api.services.event_streaming.native_stream import stream_native_v3_events
 from aegra_api.services.graph_streaming import stream_graph_events
 from aegra_api.services.langgraph_service import create_run_config, get_langgraph_service
-from aegra_api.services.run_status import finalize_run, start_run
+from aegra_api.services.run_status import finalize_run, is_run_active, start_run
 from aegra_api.services.streaming_service import streaming_service
 from aegra_api.settings import settings
 from aegra_api.utils.run_utils import map_command_to_langgraph
@@ -37,11 +38,12 @@ _TIMEOUT_ERROR = "Job exceeded maximum execution time"
 _TIMEOUT_SAFE_MESSAGE = "TimeoutError: execution failed"
 
 
-async def execute_run(job: RunJob) -> None:
+async def execute_run(job: RunJob, *, claim_id: str | None = None) -> None:
     """Execute a graph run, stream events to the broker, and update DB.
 
     Handles the full lifecycle: status transitions, event streaming,
-    interrupt detection, cancellation, and error signaling.
+    interrupt detection, cancellation, and error signaling. A worker passes
+    the ``claim_id`` it holds the run under so every run write is fenced on it.
     """
     run_id = job.identity.run_id
     thread_id = job.identity.thread_id
@@ -50,7 +52,7 @@ async def execute_run(job: RunJob) -> None:
     finalized = False
 
     try:
-        if not await start_run(run_id, user_id=user_id):
+        if not await start_run(run_id, user_id=user_id, claim_id=claim_id):
             logger.info("Run became terminal before execution started", run_id=run_id)
             return
 
@@ -61,6 +63,7 @@ async def execute_run(job: RunJob) -> None:
                 run_id,
                 thread_id,
                 user_id=user_id,
+                claim_id=claim_id,
                 status="interrupted",
                 thread_status="interrupted",
                 output=final_output.data,
@@ -70,6 +73,7 @@ async def execute_run(job: RunJob) -> None:
                 run_id,
                 thread_id,
                 user_id=user_id,
+                claim_id=claim_id,
                 status="success",
                 thread_status="idle",
                 output=final_output.data,
@@ -89,6 +93,7 @@ async def execute_run(job: RunJob) -> None:
                 run_id,
                 thread_id,
                 user_id=user_id,
+                claim_id=claim_id,
                 status="error",
                 thread_status="error",
                 output={},
@@ -106,6 +111,7 @@ async def execute_run(job: RunJob) -> None:
                 run_id,
                 thread_id,
                 user_id=user_id,
+                claim_id=claim_id,
                 status="interrupted",
                 thread_status="idle",
                 output={},
@@ -120,6 +126,7 @@ async def execute_run(job: RunJob) -> None:
             run_id,
             thread_id,
             user_id=user_id,
+            claim_id=claim_id,
             status="error",
             thread_status="error",
             output={},
@@ -135,10 +142,28 @@ async def execute_run(job: RunJob) -> None:
         _lease_loss_cancellations.discard(run_id)
         _shutdown_cancellations.discard(run_id)
         _timeout_cancellations.discard(run_id)
-        active_runs.pop(run_id, None)
-        if not resumes_elsewhere:
+        # Worker mode registers the supervising task, which removes its own entry; a reaped
+        # attempt unwinding late must not drop the one a newer attempt registered.
+        if active_runs.get(run_id) is asyncio.current_task():
+            active_runs.pop(run_id, None)
+        if not resumes_elsewhere and await _owns_teardown(run_id, user_id, claim_id, finalized=finalized):
             await streaming_service.cleanup_run(run_id)
             await _signal_run_done(run_id)
+
+
+async def _owns_teardown(run_id: str, user_id: str, claim_id: str | None, *, finalized: bool) -> bool:
+    """Whether this attempt may close the run's stream and signal completion.
+
+    A worker whose finalize lost to a still-active run was reaped and replaced;
+    tearing the broker down would cut off the replacement's subscribers (#502).
+    """
+    if finalized or claim_id is None:
+        return True
+    try:
+        return not await is_run_active(run_id, user_id=user_id)
+    except (SQLAlchemyError, OSError):
+        logger.warning("Could not check run ownership, leaving stream teardown to the owner", run_id=run_id)
+        return False
 
 
 # ------------------------------------------------------------------

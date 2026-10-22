@@ -8,11 +8,11 @@ re-enqueues only retryable run IDs.
 
 import asyncio
 import contextlib
-from datetime import UTC, datetime, timedelta
+from datetime import timedelta
 
 import structlog
 from redis import RedisError
-from sqlalchemy import select, update
+from sqlalchemy import Interval, func, literal, select, update
 
 from aegra_api.core.orm import Run as RunORM
 from aegra_api.core.orm import _get_session_maker
@@ -95,15 +95,18 @@ class LeaseReaper:
 
         Returns (crashed_run_ids, stuck_pending_run_ids) separately so retry
         budget is only charged to crashed runs, not stuck pending ones.
+
+        Both cut-offs are evaluated by Postgres: leases are written by workers on
+        other hosts, so comparing them against this process's clock lets skew
+        reap a lease that is still live (#502).
         """
-        now = datetime.now(UTC)
         maker = _get_session_maker()
         async with maker() as session:
             crashed_result = await session.execute(
                 select(RunORM.run_id).where(
                     RunORM.status == "running",
                     RunORM.lease_expires_at.isnot(None),
-                    RunORM.lease_expires_at < now,
+                    RunORM.lease_expires_at < func.now(),
                 )
             )
             crashed = [row[0] for row in crashed_result.fetchall()]
@@ -112,7 +115,9 @@ class LeaseReaper:
                 select(RunORM.run_id).where(
                     RunORM.status == "pending",
                     RunORM.claimed_by.is_(None),
-                    RunORM.created_at < now - timedelta(seconds=settings.worker.STUCK_PENDING_THRESHOLD_SECONDS),
+                    RunORM.created_at
+                    < func.now()
+                    - literal(timedelta(seconds=settings.worker.STUCK_PENDING_THRESHOLD_SECONDS), Interval),
                 )
             )
             stuck_pending = [row[0] for row in stuck_result.fetchall()]
@@ -122,7 +127,6 @@ class LeaseReaper:
     @staticmethod
     async def _recover_crashed_runs(run_ids: list[str]) -> tuple[list[str], list[str]]:
         """Atomically classify expired runs and apply their next state."""
-        now = datetime.now(UTC)
         max_retries = settings.worker.BG_JOB_MAX_RETRIES
         retryable: list[str] = []
         exhausted: list[str] = []
@@ -140,7 +144,7 @@ class LeaseReaper:
                 .where(
                     RunORM.run_id.in_(run_ids),
                     RunORM.status == "running",
-                    RunORM.lease_expires_at < now,
+                    RunORM.lease_expires_at < func.now(),
                 )
                 .with_for_update(skip_locked=True)
             )
@@ -152,9 +156,11 @@ class LeaseReaper:
 
                 values: dict[str, object] = {
                     "execution_params": params,
+                    # Clearing the claim retires the expired attempt: any write it
+                    # still has in flight can no longer match (#502).
                     "claimed_by": None,
                     "lease_expires_at": None,
-                    "updated_at": now,
+                    "updated_at": func.now(),
                 }
                 is_exhausted = retry_count > max_retries
                 if is_exhausted:
@@ -171,7 +177,7 @@ class LeaseReaper:
                         RunORM.run_id == run_id,
                         RunORM.user_id == user_id,
                         RunORM.status == "running",
-                        RunORM.lease_expires_at < now,
+                        RunORM.lease_expires_at < func.now(),
                     )
                     .values(**values)
                     .returning(RunORM.run_id)

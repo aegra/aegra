@@ -8,6 +8,7 @@ from aegra_api.services.run_status import (
     _safe_serialize,
     finalize_run,
     interrupt_unowned_run,
+    is_run_active,
     set_thread_status,
     set_thread_status_if_no_active_runs,
     start_run,
@@ -177,6 +178,104 @@ class TestFinalizeRun:
         mock_set_thread.assert_not_awaited()
         session.commit.assert_not_awaited()
         session.rollback.assert_awaited_once()
+
+
+class TestClaimFencing:
+    """Worker writes carry the claim id they acquired the run with (#502)."""
+
+    @staticmethod
+    def _session(returned: str | None) -> AsyncMock:
+        session = _make_mock_session()
+        result = MagicMock()
+        result.scalar_one_or_none.return_value = returned
+        session.execute = AsyncMock(return_value=result)
+        return session
+
+    @pytest.mark.asyncio
+    async def test_finalize_with_claim_predicates_on_it(self: "TestClaimFencing") -> None:
+        session = self._session("run-1")
+
+        with (
+            patch("aegra_api.services.run_status._get_session_maker", return_value=_make_mock_session_maker(session)),
+            patch("aegra_api.services.run_status.set_thread_status_if_no_active_runs", new_callable=AsyncMock),
+        ):
+            finalized = await finalize_run(
+                "run-1",
+                "thread-1",
+                user_id="user-1",
+                status="success",
+                thread_status="idle",
+                claim_id="worker-0:abc",
+            )
+
+        assert finalized is True
+        compiled = session.execute.await_args.args[0].compile()
+        assert "runs.claimed_by = " in str(compiled)
+        assert "worker-0:abc" in compiled.params.values()
+        assert "SET status=" in str(compiled) and "claimed_by=" not in str(compiled).split("WHERE")[0]
+
+    @pytest.mark.asyncio
+    async def test_finalize_rejected_for_a_superseded_claim_leaves_the_thread_alone(self: "TestClaimFencing") -> None:
+        session = self._session(None)
+
+        with (
+            patch("aegra_api.services.run_status._get_session_maker", return_value=_make_mock_session_maker(session)),
+            patch(
+                "aegra_api.services.run_status.set_thread_status_if_no_active_runs",
+                new_callable=AsyncMock,
+            ) as mock_set_thread,
+        ):
+            finalized = await finalize_run(
+                "run-1",
+                "thread-1",
+                user_id="user-1",
+                status="success",
+                thread_status="idle",
+                claim_id="worker-0:stale",
+            )
+
+        assert finalized is False
+        mock_set_thread.assert_not_awaited()
+        session.rollback.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_finalize_without_claim_keeps_the_status_only_guard(self: "TestClaimFencing") -> None:
+        session = self._session("run-1")
+
+        with (
+            patch("aegra_api.services.run_status._get_session_maker", return_value=_make_mock_session_maker(session)),
+            patch("aegra_api.services.run_status.set_thread_status_if_no_active_runs", new_callable=AsyncMock),
+        ):
+            await finalize_run("run-1", "thread-1", user_id="user-1", status="success", thread_status="idle")
+
+        where = str(session.execute.await_args.args[0].compile()).split("WHERE", 1)[1]
+        assert "claimed_by" not in where
+
+    @pytest.mark.asyncio
+    async def test_start_with_claim_predicates_on_it(self: "TestClaimFencing") -> None:
+        session = self._session(None)
+
+        with patch("aegra_api.services.run_status._get_session_maker", return_value=_make_mock_session_maker(session)):
+            started = await start_run("run-1", user_id="user-1", claim_id="worker-0:stale")
+
+        assert started is False
+        compiled = session.execute.await_args.args[0].compile()
+        assert "runs.claimed_by = " in str(compiled)
+        assert "worker-0:stale" in compiled.params.values()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("status", "expected"), [("pending", True), ("running", True), ("success", False), (None, False)]
+    )
+    async def test_is_run_active(self: "TestClaimFencing", status: str | None, expected: bool) -> None:
+        session = _make_mock_session()
+        session.scalar = AsyncMock(return_value=status)
+
+        with patch("aegra_api.services.run_status._get_session_maker", return_value=_make_mock_session_maker(session)):
+            assert await is_run_active("run-1", user_id="user-1") is expected
+
+        where = str(session.scalar.await_args.args[0].compile())
+        assert "runs.user_id" in where
 
 
 class TestSetThreadStatus:

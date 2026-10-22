@@ -11,7 +11,7 @@ from datetime import UTC, datetime
 from typing import Any, cast
 
 import structlog
-from sqlalchemy import CursorResult, exists, or_, select, update
+from sqlalchemy import ColumnElement, CursorResult, exists, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from aegra_api.core.orm import Run as RunORM
@@ -25,17 +25,30 @@ _serializer = GeneralSerializer()
 ACTIVE_RUN_STATES = ("pending", "running")
 
 
-async def start_run(run_id: str, *, user_id: str) -> bool:
-    """Move an active run to running without reviving a terminal run."""
+def _owned_active_run(run_id: str, *, user_id: str, claim_id: str | None) -> list[ColumnElement[bool]]:
+    """Predicates for writes by the executor that runs ``run_id``.
+
+    A worker passes the claim id it acquired the run with, so an attempt that
+    was reaped and replaced can no longer write (#502). LocalExecutor holds no
+    lease and API-side callers act on the user's behalf; both pass ``None``.
+    """
+    predicates = [
+        RunORM.run_id == run_id,
+        RunORM.user_id == user_id,
+        RunORM.status.in_(ACTIVE_RUN_STATES),
+    ]
+    if claim_id is not None:
+        predicates.append(RunORM.claimed_by == claim_id)
+    return predicates
+
+
+async def start_run(run_id: str, *, user_id: str, claim_id: str | None = None) -> bool:
+    """Move an active run to running without reviving a terminal or reassigned run."""
     maker = _get_session_maker()
     async with maker() as session:
         result = await session.execute(
             update(RunORM)
-            .where(
-                RunORM.run_id == run_id,
-                RunORM.user_id == user_id,
-                RunORM.status.in_(ACTIVE_RUN_STATES),
-            )
+            .where(*_owned_active_run(run_id, user_id=user_id, claim_id=claim_id))
             .values(status="running", updated_at=datetime.now(UTC))
             .returning(RunORM.run_id)
         )
@@ -128,7 +141,7 @@ async def interrupt_unowned_run(
                 RunORM.status.in_(ACTIVE_RUN_STATES),
                 or_(
                     RunORM.claimed_by.is_(None),
-                    RunORM.lease_expires_at < now,
+                    RunORM.lease_expires_at < func.now(),
                 ),
             )
             .values(
@@ -158,11 +171,13 @@ async def finalize_run(
     thread_status: str,
     output: Any = None,
     error: str | None = None,
+    claim_id: str | None = None,
 ) -> bool:
     """Conditionally update run and thread status in one transaction.
 
-    Returns false when another actor has already made the run terminal. This
-    prevents an expired worker from overwriting a reconciled cancellation.
+    Returns false when another actor has already made the run terminal, or when
+    ``claim_id`` no longer owns the run because the lease was reaped and the run
+    handed to another attempt. The worker releases its lease after this returns.
     """
     validated_run = validate_run_status(status)
     validated_thread = validate_thread_status(thread_status)
@@ -180,17 +195,15 @@ async def finalize_run(
     async with maker() as session:
         result = await session.execute(
             update(RunORM)
-            .where(
-                RunORM.run_id == run_id,
-                RunORM.user_id == user_id,
-                RunORM.status.in_(ACTIVE_RUN_STATES),
-            )
+            .where(*_owned_active_run(run_id, user_id=user_id, claim_id=claim_id))
             .values(**run_values)
             .returning(RunORM.run_id)
         )
         if result.scalar_one_or_none() is None:
             await session.rollback()
-            logger.info("Skipped finalizing terminal run", run_id=run_id, status=validated_run)
+            logger.info(
+                "Skipped finalizing run that is terminal or no longer ours", run_id=run_id, status=validated_run
+            )
             return False
 
         await set_thread_status_if_no_active_runs(
@@ -203,6 +216,14 @@ async def finalize_run(
 
     logger.info("Finalized run", run_id=run_id, status=validated_run, thread_status=validated_thread)
     return True
+
+
+async def is_run_active(run_id: str, *, user_id: str) -> bool:
+    """Whether the run is still pending or running (a missing row counts as inactive)."""
+    maker = _get_session_maker()
+    async with maker() as session:
+        status = await session.scalar(select(RunORM.status).where(RunORM.run_id == run_id, RunORM.user_id == user_id))
+    return status in ACTIVE_RUN_STATES
 
 
 def _safe_serialize(output: Any, run_id: str) -> Any:

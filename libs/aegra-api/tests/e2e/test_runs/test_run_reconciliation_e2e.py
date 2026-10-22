@@ -358,3 +358,47 @@ async def test_retry_exhaustion_marks_run_and_thread_error() -> None:
         assert run.claimed_by is None
         assert run.lease_expires_at is None
         assert thread.status == "error"
+
+
+@pytest.mark.e2e
+@pytest.mark.prod_only
+async def test_reaped_worker_cannot_terminalize_after_the_reaper_reclaims_its_run() -> None:
+    """Regression (#502): the reaper retires the expired attempt's claim id, so a
+    worker that comes back late can no longer write a result for the run."""
+    stale_claim = f"stalled-worker:{uuid4().hex}"
+    expired = datetime.now(UTC) - timedelta(minutes=1)
+    async with _seed_run(
+        run_status="running",
+        thread_status="busy",
+        claimed_by=stale_claim,
+        lease_expires_at=expired,
+    ) as (thread_id, run_id):
+        deadline = asyncio.get_running_loop().time() + settings.worker.REAPER_INTERVAL_SECONDS * 2 + 5
+        while True:
+            run, _thread = await _read_state(thread_id, run_id)
+            if run.claimed_by != stale_claim or asyncio.get_running_loop().time() >= deadline:
+                break
+            await asyncio.sleep(0.5)
+
+        elog("Post-reap state", {"run_status": run.status, "claimed_by": run.claimed_by})
+        assert run.claimed_by != stale_claim, "reaper must retire the expired attempt's claim"
+
+        engine = create_async_engine(settings.db.database_url)
+        maker = async_sessionmaker(engine, expire_on_commit=False)
+        try:
+            with patch("aegra_api.services.run_status._get_session_maker", return_value=maker):
+                finalized = await finalize_run(
+                    run_id,
+                    thread_id,
+                    user_id="anonymous",
+                    status="success",
+                    thread_status="idle",
+                    output={"from": "stalled-worker"},
+                    claim_id=stale_claim,
+                )
+        finally:
+            await engine.dispose()
+
+        run, _thread = await _read_state(thread_id, run_id)
+        assert finalized is False
+        assert run.output != {"from": "stalled-worker"}

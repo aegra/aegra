@@ -5,6 +5,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from aegra_api.core.active_runs import active_runs
 from aegra_api.models.auth import User
 from aegra_api.models.run_job import RunExecution, RunIdentity, RunJob
 from aegra_api.models.runs import Durability
@@ -72,7 +73,7 @@ class TestExecuteRunSuccess:
 
             await execute_run(_make_job())
 
-        mock_start.assert_awaited_once_with("run-1", user_id="user-1")
+        mock_start.assert_awaited_once_with("run-1", user_id="user-1", claim_id=None)
 
         # finalize_run called once for success
         mock_finalize.assert_awaited_once()
@@ -104,7 +105,7 @@ class TestExecuteRunCancelledError:
             with pytest.raises(asyncio.CancelledError):
                 await execute_run(_make_job())
 
-        mock_start.assert_awaited_once_with("run-1", user_id="user-1")
+        mock_start.assert_awaited_once_with("run-1", user_id="user-1", claim_id=None)
         # finalize_run called for "interrupted"
         mock_finalize.assert_awaited_once()
         assert mock_finalize.await_args.kwargs["status"] == "interrupted"
@@ -139,6 +140,7 @@ class TestExecuteRunCancelledError:
             "run-1",
             "thread-1",
             user_id="user-1",
+            claim_id=None,
             status="error",
             thread_status="error",
             output={},
@@ -173,7 +175,7 @@ class TestExecuteRunException:
 
             await execute_run(_make_job())
 
-        mock_start.assert_awaited_once_with("run-1", user_id="user-1")
+        mock_start.assert_awaited_once_with("run-1", user_id="user-1", claim_id=None)
         # finalize_run called for "error"
         mock_finalize.assert_awaited_once()
         assert mock_finalize.await_args.kwargs["status"] == "error"
@@ -502,3 +504,145 @@ class TestTerminalStateRaces:
             await execute_run(_make_job())
 
         mock_signal_end.assert_not_awaited()
+
+
+class TestClaimFencing:
+    """A worker's claim id fences every run write, and stream teardown (#502)."""
+
+    @staticmethod
+    def _patches(*, finalized: bool, run_active: bool) -> tuple[AsyncMock, AsyncMock, AsyncMock, MagicMock, AsyncMock]:
+        graph_result = MagicMock(has_interrupt=False, data={"answer": 42})
+        return (
+            AsyncMock(return_value=True),
+            AsyncMock(return_value=finalized),
+            AsyncMock(return_value=graph_result),
+            MagicMock(),
+            AsyncMock(return_value=run_active),
+        )
+
+    async def _run(
+        self: "TestClaimFencing", *, claim_id: str | None, finalized: bool, run_active: bool
+    ) -> dict[str, AsyncMock]:
+        start, finalize, stream, streaming, is_active = self._patches(finalized=finalized, run_active=run_active)
+        streaming.cleanup_run = AsyncMock()
+        with (
+            patch("aegra_api.services.run_executor.start_run", start),
+            patch("aegra_api.services.run_executor.finalize_run", finalize),
+            patch("aegra_api.services.run_executor._stream_graph", stream),
+            patch("aegra_api.services.run_executor.streaming_service", streaming),
+            patch("aegra_api.services.run_executor.is_run_active", is_active),
+            patch("aegra_api.services.run_executor._signal_end_event", new_callable=AsyncMock),
+            patch("aegra_api.services.run_executor._signal_run_done", new_callable=AsyncMock) as done,
+        ):
+            await execute_run(_make_job(), claim_id=claim_id)
+        return {
+            "start": start,
+            "finalize": finalize,
+            "cleanup": streaming.cleanup_run,
+            "done": done,
+            "active": is_active,
+        }
+
+    @pytest.mark.asyncio
+    async def test_passes_claim_id_to_start_and_finalize(self: "TestClaimFencing") -> None:
+        mocks = await self._run(claim_id="host-1-worker-0:abc", finalized=True, run_active=False)
+
+        mocks["start"].assert_awaited_once_with("run-1", user_id="user-1", claim_id="host-1-worker-0:abc")
+        assert mocks["finalize"].await_args.kwargs["claim_id"] == "host-1-worker-0:abc"
+        mocks["cleanup"].assert_awaited_once_with("run-1")
+        mocks["active"].assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_rejected_finalize_leaves_stream_to_the_attempt_that_replaced_it(self: "TestClaimFencing") -> None:
+        mocks = await self._run(claim_id="host-1-worker-0:stale", finalized=False, run_active=True)
+
+        mocks["active"].assert_awaited_once_with("run-1", user_id="user-1")
+        mocks["cleanup"].assert_not_awaited()
+        mocks["done"].assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_rejected_finalize_on_a_terminal_run_still_tears_down(self: "TestClaimFencing") -> None:
+        mocks = await self._run(claim_id="host-1-worker-0:stale", finalized=False, run_active=False)
+
+        mocks["cleanup"].assert_awaited_once_with("run-1")
+        mocks["done"].assert_awaited_once_with("run-1")
+
+    @pytest.mark.asyncio
+    async def test_unleased_executor_tears_down_without_an_ownership_check(self: "TestClaimFencing") -> None:
+        mocks = await self._run(claim_id=None, finalized=False, run_active=True)
+
+        mocks["active"].assert_not_awaited()
+        mocks["cleanup"].assert_awaited_once_with("run-1")
+
+    @pytest.mark.asyncio
+    async def test_ownership_check_failure_skips_teardown(self: "TestClaimFencing") -> None:
+        start, finalize, stream, streaming, _ = self._patches(finalized=False, run_active=True)
+        streaming.cleanup_run = AsyncMock()
+        with (
+            patch("aegra_api.services.run_executor.start_run", start),
+            patch("aegra_api.services.run_executor.finalize_run", finalize),
+            patch("aegra_api.services.run_executor._stream_graph", stream),
+            patch("aegra_api.services.run_executor.streaming_service", streaming),
+            patch(
+                "aegra_api.services.run_executor.is_run_active",
+                new_callable=AsyncMock,
+                side_effect=OSError("database unreachable"),
+            ),
+            patch("aegra_api.services.run_executor._signal_run_done", new_callable=AsyncMock) as done,
+        ):
+            await execute_run(_make_job(), claim_id="host-1-worker-0:stale")
+
+        streaming.cleanup_run.assert_not_awaited()
+        done.assert_not_awaited()
+
+
+class TestActiveRunRegistration:
+    @pytest.mark.asyncio
+    async def test_finishing_leaves_another_tasks_registration_alone(self: "TestActiveRunRegistration") -> None:
+        """Regression: a reaped worker attempt unwinding late popped the entry of the
+        attempt that replaced it, so cancels could no longer reach the live one."""
+        newer_attempt = asyncio.create_task(asyncio.Event().wait())
+        active_runs["run-1"] = newer_attempt
+        try:
+            with (
+                patch("aegra_api.services.run_executor.start_run", AsyncMock(return_value=True)),
+                patch("aegra_api.services.run_executor.finalize_run", AsyncMock(return_value=True)),
+                patch(
+                    "aegra_api.services.run_executor._stream_graph",
+                    AsyncMock(return_value=MagicMock(has_interrupt=False, data={})),
+                ),
+                patch("aegra_api.services.run_executor.streaming_service") as streaming,
+                patch("aegra_api.services.run_executor._signal_end_event", new_callable=AsyncMock),
+                patch("aegra_api.services.run_executor._signal_run_done", new_callable=AsyncMock),
+            ):
+                streaming.cleanup_run = AsyncMock()
+                await execute_run(_make_job(), claim_id="host-1-worker-0:stale")
+
+            assert active_runs.get("run-1") is newer_attempt
+        finally:
+            active_runs.pop("run-1", None)
+            newer_attempt.cancel()
+            await asyncio.gather(newer_attempt, return_exceptions=True)
+
+    @pytest.mark.asyncio
+    async def test_finishing_removes_its_own_registration(self: "TestActiveRunRegistration") -> None:
+        async def run_registered() -> None:
+            with (
+                patch("aegra_api.services.run_executor.start_run", AsyncMock(return_value=True)),
+                patch("aegra_api.services.run_executor.finalize_run", AsyncMock(return_value=True)),
+                patch(
+                    "aegra_api.services.run_executor._stream_graph",
+                    AsyncMock(return_value=MagicMock(has_interrupt=False, data={})),
+                ),
+                patch("aegra_api.services.run_executor.streaming_service") as streaming,
+                patch("aegra_api.services.run_executor._signal_end_event", new_callable=AsyncMock),
+                patch("aegra_api.services.run_executor._signal_run_done", new_callable=AsyncMock),
+            ):
+                streaming.cleanup_run = AsyncMock()
+                await execute_run(_make_job())
+
+        task = asyncio.create_task(run_registered())
+        active_runs["run-1"] = task
+        await asyncio.wait_for(task, timeout=5)
+
+        assert "run-1" not in active_runs

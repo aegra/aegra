@@ -596,6 +596,8 @@ class TestWorkerSettingsLeaseValidation:
             "BG_JOB_TIMEOUT_SECS",
             "BG_JOB_MAX_RETRIES",
             "POSTGRES_POLL_INTERVAL_SECONDS",
+            "ORPHAN_SWEEP_ENABLED",
+            "ORPHAN_SWEEP_MIN_AGE_SECONDS",
         ):
             monkeypatch.delenv(var, raising=False)
 
@@ -689,3 +691,24 @@ class TestMaxSearchLimit:
         monkeypatch.setenv("MAX_SEARCH_LIMIT", "-1")
         with pytest.raises(ValidationError):
             AppSettings(_env_file=None)
+
+
+class TestOrphanSweepSettings:
+    """The sweep's age threshold is its only guard against reaping a live run."""
+
+    def test_defaults_to_five_minutes_and_enabled(
+        self: "TestOrphanSweepSettings", monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.delenv("ORPHAN_SWEEP_ENABLED", raising=False)
+        monkeypatch.delenv("ORPHAN_SWEEP_MIN_AGE_SECONDS", raising=False)
+        ws = WorkerSettings(_env_file=None)
+        assert ws.ORPHAN_SWEEP_ENABLED is True
+        assert ws.ORPHAN_SWEEP_MIN_AGE_SECONDS == 300
+
+    @pytest.mark.parametrize("value", ["0", "-1"])
+    def test_rejects_non_positive_age(
+        self: "TestOrphanSweepSettings", monkeypatch: pytest.MonkeyPatch, value: str
+    ) -> None:
+        monkeypatch.setenv("ORPHAN_SWEEP_MIN_AGE_SECONDS", value)
+        with pytest.raises(ValidationError, match="ORPHAN_SWEEP_MIN_AGE_SECONDS"):
+            WorkerSettings(_env_file=None)

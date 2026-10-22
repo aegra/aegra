@@ -91,7 +91,7 @@ def test_reaper_counter_exposed_in_default_registry() -> None:
     body = prometheus_client.generate_latest(prometheus_client.REGISTRY).decode()
 
     assert "aegra_reaper_recovered_runs_total" in body
-    for outcome in ("crashed_retried", "crashed_exhausted", "stuck_pending"):
+    for outcome in ("crashed_retried", "crashed_exhausted", "stuck_pending", "local_orphan"):
         assert f'outcome="{outcome}"' in body
 
 

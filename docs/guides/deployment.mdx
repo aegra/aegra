@@ -160,6 +160,8 @@ PostgreSQL should be a managed service (CloudSQL, RDS, etc.) or a StatefulSet wi
 
 Set `terminationGracePeriodSeconds` a few seconds above `WORKER_DRAIN_TIMEOUT` (default 30). On SIGTERM the pod waits that long for in-flight runs to finish, then hands the rest back to the queue for other pods to resume from the last checkpoint. A pod killed mid-hand-off still recovers: before the database reset, the lease reaper reclaims the runs after lease expiry; after the reset but before the queue push, the stuck-pending scan re-enqueues them after `STUCK_PENDING_THRESHOLD_SECONDS`. See the [worker architecture guide](/guides/worker-architecture#graceful-shutdown).
 
+With `REDIS_BROKER_ENABLED=true`, each pod also runs a one-time sweep on startup, before its lease reaper starts. The sweep marks `error` any `running` run that never took a lease and has been idle longer than `ORPHAN_SWEEP_MIN_AGE_SECONDS` (default 300); such runs are left behind when a pod running in local mode crashes. Roll out broker mode to every replica together: the sweep assumes no replica still runs the local executor, and would fail that replica's long-running runs. Set `ORPHAN_SWEEP_ENABLED=false` to skip it. See the [worker architecture guide](/guides/worker-architecture#runs-orphaned-without-a-lease).
+
 ## Database configuration
 
 Two ways to configure the database connection:

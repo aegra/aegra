@@ -11,6 +11,7 @@ from fastapi.dependencies.utils import get_parameterless_sub_dependant
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.routing import APIRoute
+from sqlalchemy.exc import SQLAlchemyError
 from starlette.requests import HTTPConnection
 
 from aegra_api import __version__
@@ -140,6 +141,11 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
 
     # Start lease reaper (recovers crashed worker runs, Redis mode only)
     if settings.redis.REDIS_BROKER_ENABLED:
+        # Lease-less orphans are invisible to the periodic reaper.
+        try:
+            await lease_reaper.sweep_leaseless_orphans()
+        except (SQLAlchemyError, OSError):
+            logger.exception("Orphan sweep failed; continuing startup")
         await lease_reaper.start()
 
     # Start cron scheduler (fires due cron jobs)

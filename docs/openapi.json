@@ -1552,8 +1552,25 @@
           "Threads"
         ],
         "summary": "Prune Threads",
-        "description": "Immediately apply TTL policies to the caller's expired threads.\n\nThreads whose TTL has expired are deleted (strategy `delete`) or have\ntheir checkpoint history compacted (strategy `keep_latest`). Threads with\nactive runs are skipped and handled once their runs settle.",
+        "description": "Prune threads by ID, or apply TTL policies to the caller's expired threads.\n\nWith a body, each listed thread is deleted (strategy `delete`) or has its\ncheckpoint history compacted (strategy `keep_latest`). Without a body,\nthreads whose TTL has expired get their own TTL strategy. Threads with\nactive runs are skipped either way.",
         "operationId": "prune_threads_threads_prune_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/ThreadPruneRequest"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "title": "Request"
+              }
+            }
+          }
+        },
         "responses": {
           "200": {
             "description": "Successful Response",
@@ -1561,6 +1578,16 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/ThreadPruneResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
                 }
               }
             }
@@ -5791,18 +5818,52 @@
         "title": "ThreadList",
         "description": "Response model for listing threads"
       },
+      "ThreadPruneRequest": {
+        "properties": {
+          "thread_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Thread Ids",
+            "description": "Threads to prune. Ids the caller cannot see are skipped."
+          },
+          "strategy": {
+            "type": "string",
+            "enum": [
+              "delete",
+              "keep_latest"
+            ],
+            "title": "Strategy",
+            "description": "'delete' removes the threads entirely; 'keep_latest' keeps each thread and its latest state.",
+            "default": "delete"
+          }
+        },
+        "type": "object",
+        "required": [
+          "thread_ids"
+        ],
+        "title": "ThreadPruneRequest",
+        "description": "Request body for POST /threads/prune"
+      },
       "ThreadPruneResponse": {
         "properties": {
+          "pruned_count": {
+            "type": "integer",
+            "title": "Pruned Count",
+            "description": "Threads deleted or pruned by this request",
+            "default": 0
+          },
           "deleted": {
             "type": "integer",
             "title": "Deleted",
-            "description": "Expired threads fully deleted (strategy 'delete')",
+            "description": "Threads fully deleted (strategy 'delete')",
             "default": 0
           },
           "pruned": {
             "type": "integer",
             "title": "Pruned",
-            "description": "Expired threads whose history was pruned (strategy 'keep_latest')",
+            "description": "Threads whose history was pruned (strategy 'keep_latest')",
             "default": 0
           }
         },

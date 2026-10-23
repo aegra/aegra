@@ -33,9 +33,17 @@ from aegra_api.services.run_executor import (
     _lease_loss_cancellations,
     _shutdown_cancellations,
     _timeout_cancellations,
+    await_pending_finalizes,
     execute_run,
 )
-from aegra_api.services.run_status import finalize_run
+from aegra_api.services.run_status import (
+    ACTIVE_RUN_STATES,
+    end_preempted_runs,
+    finalize_run,
+    interrupt_requested_expr,
+    settle_threads_of,
+    with_thread_status,
+)
 from aegra_api.settings import settings
 
 logger = structlog.getLogger(__name__)
@@ -145,6 +153,7 @@ class WorkerExecutor(BaseExecutor):
 
     async def start(self) -> None:
         self._running = True
+        self._accepting = True
         count = settings.worker.WORKER_COUNT
         if count == 0:
             logger.warning(
@@ -166,6 +175,9 @@ class WorkerExecutor(BaseExecutor):
 
     async def stop(self) -> None:
         self._running = False
+        # No new queued-run promotions past this point; an in-flight one finishes its
+        # rpush first, so the job it promoted lands on a live instance, not in limbo.
+        await self._begin_shutdown()
         drain_timeout = settings.worker.WORKER_DRAIN_TIMEOUT
 
         # Wait for in-flight job tasks to finish
@@ -185,6 +197,8 @@ class WorkerExecutor(BaseExecutor):
                 for task in pending:
                     task.cancel()
                 await asyncio.gather(*pending, return_exceptions=True)
+        # A finalize that a drain cancel interrupted keeps running shielded; let it land.
+        await await_pending_finalizes()
 
         # Cancel worker loops before the requeue push: a loop still blocked in
         # BLPOP would steal the handed-off jobs back onto this dying instance.
@@ -499,14 +513,27 @@ async def _requeue_drained_runs(run_ids: list[str]) -> None:
     """
     maker = _get_session_maker()
     async with maker() as session:
+        # A run a double-text pre-empted ends here as interrupted: requeued, it would run again
+        # ahead of its replacement.
+        preempted_rows = await end_preempted_runs(
+            session, RunORM.run_id.in_(run_ids), RunORM.status.in_(ACTIVE_RUN_STATES)
+        )
         result = await session.execute(
             update(RunORM)
-            .where(RunORM.run_id.in_(run_ids), RunORM.status.in_(["running", "pending"]))
+            .where(
+                RunORM.run_id.in_(run_ids),
+                RunORM.status.in_(ACTIVE_RUN_STATES),
+                interrupt_requested_expr().is_(None),
+            )
             .values(status="pending", claimed_by=None, lease_expires_at=None)
             .returning(RunORM.run_id)
         )
         reset_ids = [row[0] for row in result.fetchall()]
         await session.commit()
+        if preempted_rows:
+            logger.info("Drained pre-empted runs end interrupted", run_ids=[row[0] for row in preempted_rows])
+            await settle_threads_of(session, with_thread_status(preempted_rows, "idle"))
+            await session.commit()
 
     if not reset_ids:
         return
@@ -539,6 +566,15 @@ async def _release_lease(run_id: str, worker_name: str) -> None:
         await session.commit()
 
 
+def _cancel_once(job_task: asyncio.Task[None] | None) -> bool:
+    """A plain cancel (execute_run finalizes the run as interrupted) unless one is already pending on
+    the task, i.e. the broker's landed just before this tick: a second CancelledError would abort its cleanup."""
+    if job_task is None or job_task.done() or job_task.cancelling():
+        return False
+    job_task.cancel()
+    return True
+
+
 async def _heartbeat_loop(
     run_id: str,
     worker_name: str,
@@ -548,33 +584,58 @@ async def _heartbeat_loop(
     """Extend lease periodically while the job is running.
 
     If the lease is lost (another worker claimed the run), cancels
-    ``job_task`` to prevent double execution.
+    ``job_task`` to prevent double execution. A run a double-text pre-empted is
+    cancelled plainly on the first heartbeat that sees the stamp, but keeps its
+    lease until the task has exited, so the pre-emption timeout bounds it.
     """
     interval = settings.worker.HEARTBEAT_INTERVAL_SECONDS
     duration = settings.worker.LEASE_DURATION_SECONDS
     maker = _get_session_maker()
+    preempt_cancelled = False
 
     while True:
         await asyncio.sleep(interval)
         try:
             new_expiry = datetime.now(UTC) + timedelta(seconds=duration)
             async with maker() as session:
-                result = await session.execute(
-                    update(RunORM)
-                    .where(RunORM.run_id == run_id, RunORM.claimed_by == worker_name)
-                    .values(lease_expires_at=new_expiry)
-                )
+                renewed = (
+                    await session.execute(
+                        update(RunORM)
+                        .where(RunORM.run_id == run_id, RunORM.claimed_by == worker_name)
+                        .values(lease_expires_at=new_expiry)
+                        .returning(interrupt_requested_expr())
+                    )
+                ).first()
                 await session.commit()
-            if result.rowcount == 0:  # type: ignore[union-attr]
+                # No claim left: ended by a sweep or deleted (then nothing resumes elsewhere), or
+                # taken over by another worker.
+                ended = (
+                    renewed is None
+                    and await session.scalar(select(RunORM.status).where(RunORM.run_id == run_id))
+                    not in ACTIVE_RUN_STATES
+                )
+            if renewed is None:
+                if job_task is not None and not job_task.done():
+                    # Ended by the sweep: cancel again even if the task swallowed an earlier cancel
+                    # (what the dev sweep does); otherwise a lease loss, which must stop it regardless.
+                    if not ended:
+                        _lease_loss_cancellations.add(run_id)
+                    job_task.cancel()
                 logger.warning(
-                    "Lease lost, cancelling job to prevent double execution",
+                    "Run ended elsewhere, cancelling job"
+                    if ended
+                    else "Lease lost, cancelling job to prevent double execution",
                     run_id=run_id,
                     worker=worker_name,
                 )
-                if job_task is not None and not job_task.done():
-                    _lease_loss_cancellations.add(run_id)
-                    job_task.cancel()
                 return
+            if renewed[0] is not None and not preempt_cancelled:
+                # The fallback for a lost pub/sub cancel: a plain cancel, so execute_run finalizes
+                # the run as interrupted. Retried next tick if a transient cancel was pending.
+                preempt_cancelled = _cancel_once(job_task)
+                if preempt_cancelled:
+                    logger.warning("Run pre-empted by a double-text, cancelling job", run_id=run_id, worker=worker_name)
+                continue
             logger.debug("Lease extended", run_id=run_id, worker=worker_name)
         except Exception:
             logger.warning("Heartbeat lease extension failed", run_id=run_id, worker=worker_name)

@@ -192,6 +192,8 @@ The reaper resets the run to `pending` and re-enqueues it.
 The new worker resumes from the last checkpoint.
 A run created with `durability="exit"` writes no checkpoints until it ends, so it starts over from the thread's state before the run (see [checkpoint durability](/guides/threads-and-state#checkpoint-durability)).
 Once retries are exhausted, the reaper marks the run `error`, clears ownership, and marks the thread `error` in the same transaction when no other run is active.
+A run that a double-text had already pre-empted (see [double-texting](/guides/double-texting)) is never retried: the reaper ends it `interrupted` without charging a retry.
+It ends a pre-empted run the same way when its task ignores the cancel past `MULTITASK_PREEMPT_TIMEOUT_SECONDS`.
 
 The reaper also re-enqueues `pending` runs older than `STUCK_PENDING_THRESHOLD_SECONDS`, but only when they are missing from the job queue. A run still in the queue is waiting for a free worker and is left alone.
 
@@ -233,6 +235,7 @@ The reaper runs on every instance (default every 15 seconds). This is safe — t
 On SIGTERM (rolling deploy, pod reschedule, node drain) the executor waits up to `WORKER_DRAIN_TIMEOUT` (default 30s) for in-flight runs to finish. Runs still executing when the window closes are **handed back to the queue**, not finalized: the run is reset to `pending` with its lease cleared and re-enqueued, so another instance resumes it from the last checkpoint — the same guarantee the crash path provides. Clients streaming the run stay connected and pick up events from the resuming worker.
 
 - A user-initiated cancel that races the shutdown still wins: explicitly cancelled runs are finalized as `interrupted`, never resurrected.
+- A run that a double-text pre-empted is finalized as `interrupted` instead of handed back, so it cannot run again ahead of its replacement.
 - If Redis is unreachable during the hand-off, the rows are already `pending` and unclaimed, so a surviving instance's reaper re-enqueues them after `STUCK_PENDING_THRESHOLD_SECONDS`.
 - Drain hand-offs do not consume the crash retry budget (`BG_JOB_MAX_RETRIES`).
 

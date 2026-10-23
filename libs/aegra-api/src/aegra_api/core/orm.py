@@ -34,6 +34,8 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.orm import Mapped, declarative_base, mapped_column
 from sqlalchemy.types import TypeDecorator
 
+from aegra_api.models.enums import MULTITASK_DEFAULT, MULTITASK_STRATEGIES, MultitaskStrategy
+
 _logger = structlog.getLogger(__name__)
 
 # Safety net against pathological/adversarial nesting. Real agent JSON rarely
@@ -181,6 +183,14 @@ class Run(Base):
     claimed_by: Mapped[str | None] = mapped_column(Text, nullable=True)
     lease_expires_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True), nullable=True)
 
+    @property
+    def multitask_strategy(self) -> MultitaskStrategy:
+        """The strategy the run was created with, read back from execution_params for the API; a row
+        from before the field (or its validation) existed reports the default."""
+        behavior = (self.execution_params or {}).get("behavior") or {}
+        value = behavior.get("multitask_strategy")
+        return value if value in MULTITASK_STRATEGIES else MULTITASK_DEFAULT
+
     # Indexes for performance
     __table_args__ = (
         Index("idx_runs_thread_id", "thread_id"),
@@ -189,6 +199,8 @@ class Run(Base):
         Index("idx_runs_assistant_id", "assistant_id"),
         Index("idx_runs_created_at", "created_at"),
         Index("idx_runs_lease_reaper", "status", "lease_expires_at"),
+        # Per-thread multitask admission + FIFO queued-run dispatch.
+        Index("idx_runs_thread_status_created", "thread_id", "status", "created_at"),
     )
 
 

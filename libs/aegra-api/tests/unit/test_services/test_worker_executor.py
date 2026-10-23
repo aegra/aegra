@@ -1,17 +1,19 @@
 """Unit tests for worker_executor service."""
 
 import asyncio
+import contextlib
 from collections.abc import Iterator
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from redis import ConnectionError as RedisConnectionError
 from redis import TimeoutError as RedisTimeoutError
+from sqlalchemy.dialects import postgresql
 
 from aegra_api.core.active_runs import active_runs, explicit_run_cancellations
 from aegra_api.models.auth import User
 from aegra_api.models.run_job import RunBehavior, RunExecution, RunIdentity, RunJob
-from aegra_api.services.run_executor import _shutdown_cancellations, _timeout_cancellations
+from aegra_api.services.run_executor import _lease_loss_cancellations, _shutdown_cancellations, _timeout_cancellations
 from aegra_api.services.worker_executor import (
     WorkerExecutor,
     _acquire_and_load,
@@ -196,34 +198,59 @@ class TestReleaseLease:
 
 
 class TestHeartbeatLoop:
-    @pytest.mark.asyncio
-    async def test_extends_lease_on_each_iteration(self) -> None:
-        session = AsyncMock()
-        session.execute = AsyncMock()
-        session.commit = AsyncMock()
-        maker = _make_session_maker(session)
+    @pytest.fixture(autouse=True)
+    def _clean_lease_loss_set(self) -> Iterator[None]:
+        """The lease-loss set is process-wide; a failing assertion must not leak an id into later tests."""
+        _lease_loss_cancellations.clear()
+        yield
+        _lease_loss_cancellations.clear()
 
-        call_count = 0
+    @staticmethod
+    def _renewal(stamp: str | None) -> MagicMock:
+        """The renewal UPDATE's RETURNING row: the pre-emption stamp of the still-owned run."""
+        renewal = MagicMock()
+        renewal.first.return_value = (stamp,)
+        return renewal
 
-        async def counting_sleep(delay: float) -> None:
-            nonlocal call_count
-            call_count += 1
-            if call_count >= 2:
+    @staticmethod
+    def _live_task(*, cancelling: int = 0) -> MagicMock:
+        job_task = MagicMock()
+        job_task.done.return_value = False
+        job_task.cancelling.return_value = cancelling
+        return job_task
+
+    @staticmethod
+    async def _run_ticks(
+        session: AsyncMock, job_task: MagicMock | None = None, *, run_id: str = "run-1", ticks: int = 1
+    ) -> None:
+        """Drive the loop for up to ``ticks`` heartbeats, then cancel it like the job wrapper does;
+        a loop that returns on its own (lease lost, run ended) just returns."""
+        sleeps = 0
+
+        async def counting_sleep(_delay: float) -> None:
+            nonlocal sleeps
+            sleeps += 1
+            if sleeps > ticks:
                 raise asyncio.CancelledError
-            # Don't actually sleep
 
         with (
-            patch(f"{MODULE}._get_session_maker", return_value=maker),
+            patch(f"{MODULE}._get_session_maker", return_value=_make_session_maker(session)),
             patch(f"{MODULE}.settings") as mock_settings,
             patch(f"{MODULE}.asyncio.sleep", side_effect=counting_sleep),
+            contextlib.suppress(asyncio.CancelledError),
         ):
             mock_settings.worker.HEARTBEAT_INTERVAL_SECONDS = 1
             mock_settings.worker.LEASE_DURATION_SECONDS = 30
+            await _heartbeat_loop(run_id, "worker-0", job_task=job_task)
 
-            with pytest.raises(asyncio.CancelledError):
-                await _heartbeat_loop("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee", "worker-0")
+    @pytest.mark.asyncio
+    async def test_extends_lease_on_each_iteration(self) -> None:
+        session = AsyncMock()
+        session.execute = AsyncMock(return_value=self._renewal(None))  # owned, never pre-empted
+        session.commit = AsyncMock()
 
-        # One iteration completed before cancellation on second sleep
+        await self._run_ticks(session, ticks=1)
+
         assert session.execute.await_count == 1
         assert session.commit.await_count == 1
 
@@ -231,29 +258,87 @@ class TestHeartbeatLoop:
     async def test_continues_loop_on_db_error(self) -> None:
         session = AsyncMock()
         session.execute = AsyncMock(side_effect=Exception("DB connection lost"))
-        maker = _make_session_maker(session)
 
-        call_count = 0
+        await self._run_ticks(session, ticks=2)
 
-        async def counting_sleep(delay: float) -> None:
-            nonlocal call_count
-            call_count += 1
-            if call_count >= 3:
-                raise asyncio.CancelledError
+        assert session.execute.await_count == 2  # the loop survived both failures
 
-        with (
-            patch(f"{MODULE}._get_session_maker", return_value=maker),
-            patch(f"{MODULE}.settings") as mock_settings,
-            patch(f"{MODULE}.asyncio.sleep", side_effect=counting_sleep),
-        ):
-            mock_settings.worker.HEARTBEAT_INTERVAL_SECONDS = 1
-            mock_settings.worker.LEASE_DURATION_SECONDS = 30
+    @pytest.mark.asyncio
+    async def test_preempted_run_is_cancelled_once_and_keeps_its_lease(self) -> None:
+        # The stamp comes back with the renewal: one plain cancel (execute_run finalizes it as
+        # interrupted) and the lease keeps being renewed, so the row cannot look crashed before the timeout.
+        session = AsyncMock()
+        session.execute = AsyncMock(return_value=self._renewal("2026-10-19T00:00:00+00:00"))
+        job_task = self._live_task()
 
-            with pytest.raises(asyncio.CancelledError):
-                await _heartbeat_loop("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee", "worker-0")
+        await self._run_ticks(session, job_task, run_id="run-pre", ticks=3)
 
-        # Loop continued despite DB errors (2 iterations before cancel on 3rd sleep)
-        assert session.execute.await_count == 2
+        job_task.cancel.assert_called_once()
+        assert "run-pre" not in _lease_loss_cancellations
+        assert session.execute.await_count == 3  # the lease was renewed on every tick
+        renewal = session.execute.await_args.args[0].compile(dialect=postgresql.dialect())
+        assert "UPDATE runs SET lease_expires_at=" in str(renewal)
+        assert "RETURNING runs.execution_params ->> %(execution_params_1)s" in str(renewal)
+        assert renewal.params["execution_params_1"] == "_interrupt_requested_at"
+        session.scalar.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_no_second_cancel_while_the_broker_cancel_unwinds_the_task(self) -> None:
+        # The broker cancel landed just before the tick: stacking another CancelledError on a task
+        # already unwinding would abort its own cleanup awaits.
+        session = AsyncMock()
+        session.execute = AsyncMock(return_value=self._renewal("2026-10-19T00:00:00+00:00"))
+        job_task = self._live_task(cancelling=1)
+
+        await self._run_ticks(session, job_task, run_id="run-pre", ticks=2)
+
+        job_task.cancel.assert_not_called()
+        assert session.execute.await_count == 2  # still renewing
+
+    @pytest.mark.asyncio
+    async def test_fallback_cancel_is_retried_after_a_transient_pending_cancel(self) -> None:
+        # An asyncio.timeout() inside the graph had just called cancel() (uncancelled on the task's
+        # next step): the fallback must not count that as sent, and sends its own on the next tick.
+        session = AsyncMock()
+        session.execute = AsyncMock(return_value=self._renewal("2026-10-19T00:00:00+00:00"))
+        job_task = self._live_task()
+        job_task.cancelling.side_effect = [1, 0, 0]
+
+        await self._run_ticks(session, job_task, run_id="run-pre", ticks=3)
+
+        job_task.cancel.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_lost_claim_is_still_a_lease_loss(self) -> None:
+        session = AsyncMock()
+        renewal = MagicMock()
+        renewal.first.return_value = None  # claimed by someone else
+        session.execute = AsyncMock(return_value=renewal)
+        session.scalar = AsyncMock(return_value="running")
+        job_task = self._live_task()
+
+        await self._run_ticks(session, job_task, run_id="run-lost", ticks=5)
+
+        job_task.cancel.assert_called_once()
+        assert "run-lost" in _lease_loss_cancellations
+        assert session.execute.await_count == 1  # the loop returned on its own
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("status", ["interrupted", None])
+    async def test_run_ended_elsewhere_is_cancelled_plainly(self, status: str | None) -> None:
+        # The pre-emption sweep (or a force delete) ended the row while the task still ran: nothing
+        # resumes it elsewhere, so the job is cancelled plainly and execute_run cleans its stream up.
+        session = AsyncMock()
+        renewal = MagicMock()
+        renewal.first.return_value = None
+        session.execute = AsyncMock(return_value=renewal)
+        session.scalar = AsyncMock(return_value=status)
+        job_task = self._live_task(cancelling=1)  # cancelled again even if it swallowed the first one
+
+        await self._run_ticks(session, job_task, run_id="run-ended", ticks=5)
+
+        job_task.cancel.assert_called_once()
+        assert "run-ended" not in _lease_loss_cancellations
 
 
 # ------------------------------------------------------------------
@@ -922,9 +1007,11 @@ class TestRequeueDrainedRuns:
     @pytest.mark.asyncio
     async def test_resets_rows_and_pushes_to_queue(self) -> None:
         session = AsyncMock()
+        no_preempted = MagicMock()
+        no_preempted.all.return_value = []
         result = MagicMock()
         result.fetchall.return_value = [("run-1",), ("run-2",)]
-        session.execute = AsyncMock(return_value=result)
+        session.execute = AsyncMock(side_effect=[no_preempted, result])
         mock_client = AsyncMock()
 
         with (
@@ -952,9 +1039,11 @@ class TestRequeueDrainedRuns:
         """The DB reset commits first, so the stuck-pending reaper can recover
         even when the queue push fails."""
         session = AsyncMock()
+        no_preempted = MagicMock()
+        no_preempted.all.return_value = []
         result = MagicMock()
         result.fetchall.return_value = [("run-1",)]
-        session.execute = AsyncMock(return_value=result)
+        session.execute = AsyncMock(side_effect=[no_preempted, result])
         mock_client = AsyncMock()
         mock_client.rpush = AsyncMock(side_effect=RedisConnectionError("down"))
 
@@ -987,6 +1076,34 @@ class TestRequeueDrainedRuns:
         ):
             await _requeue_drained_runs(["run-1"])
 
+        mock_redis.get_client.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_preempted_run_ends_interrupted_instead_of_requeued(self) -> None:
+        # A double-text already replaced this run; handing it to another instance would run
+        # it again ahead of its replacement, so the drain finalizes it and frees the thread.
+        session = AsyncMock()
+        preempted = MagicMock()
+        preempted.all.return_value = [("run-1", "thread-1", "user-1")]
+        nothing_to_reset = MagicMock()
+        nothing_to_reset.fetchall.return_value = []
+        session.execute = AsyncMock(side_effect=[preempted, nothing_to_reset, MagicMock()])  # + thread lock
+
+        with (
+            patch(f"{MODULE}._get_session_maker", return_value=_make_session_maker(session)),
+            patch(f"{MODULE}.redis_manager") as mock_redis,
+            patch(
+                "aegra_api.services.run_status.set_thread_status_if_no_active_runs", new_callable=AsyncMock
+            ) as mock_thread,
+        ):
+            await _requeue_drained_runs(["run-1"])
+
+        interrupt_sql = str(session.execute.await_args_list[0].args[0].compile(compile_kwargs={"literal_binds": True}))
+        assert "'interrupted'" in interrupt_sql and "_interrupt_requested_at" in interrupt_sql
+        assert "updated_at=" in interrupt_sql
+        requeue_sql = str(session.execute.await_args_list[1].args[0].compile(compile_kwargs={"literal_binds": True}))
+        assert "IS NULL" in requeue_sql  # only never-pre-empted rows go back to the queue
+        mock_thread.assert_awaited_once_with(session, {"thread-1"}, "idle", user_id="user-1")
         mock_redis.get_client.assert_not_called()
 
 

@@ -18,6 +18,7 @@ from aegra_api.services.run_executor import (
     _stream_legacy,
     _stream_native_v2,
     _timeout_cancellations,
+    await_pending_finalizes,
     execute_run,
 )
 
@@ -25,6 +26,14 @@ from aegra_api.services.run_executor import (
 async def _empty_async_gen():  # type: ignore[no-untyped-def]
     return
     yield  # noqa: RET504 — makes this an async generator
+
+
+@pytest.fixture(autouse=True)
+def _no_queue_dispatch(monkeypatch: pytest.MonkeyPatch) -> AsyncMock:
+    """execute_run promotes the thread's queued runs on some exits; keep that off the DB."""
+    mock = AsyncMock()
+    monkeypatch.setattr("aegra_api.services.run_executor.dispatch_next_queued_run", mock)
+    return mock
 
 
 def _make_job(run_id: str = "run-1") -> RunJob:
@@ -480,6 +489,7 @@ class TestTerminalStateRaces:
             patch("aegra_api.services.run_executor._signal_run_done", new_callable=AsyncMock),
         ):
             mock_streaming.cleanup_run = AsyncMock()
+            mock_streaming.signal_run_cancelled = AsyncMock()
 
             await execute_run(_make_job())
 
@@ -502,3 +512,67 @@ class TestTerminalStateRaces:
             await execute_run(_make_job())
 
         mock_signal_end.assert_not_awaited()
+
+
+class TestPreemptedBeforeStart:
+    @pytest.mark.asyncio
+    async def test_gate_preempted_run_skips_execution_and_finalize(self) -> None:
+        """A run whose start CAS fails must not execute or finalize (the gate owns its status),
+        but it releases attached streams and lets a parked replacement start."""
+        mock_finalize = AsyncMock()
+        mock_dispatch = AsyncMock()
+
+        with (
+            patch("aegra_api.services.run_executor.start_run", AsyncMock(return_value=False)),
+            patch("aegra_api.services.run_executor._stream_graph", new_callable=AsyncMock) as mock_stream,
+            patch("aegra_api.services.run_executor.finalize_run", mock_finalize),
+            patch("aegra_api.services.run_executor.dispatch_next_queued_run", mock_dispatch),
+            patch("aegra_api.services.run_executor.streaming_service") as mock_streaming,
+            patch("aegra_api.services.run_executor._signal_run_done", new_callable=AsyncMock) as mock_done,
+        ):
+            mock_streaming.cleanup_run = AsyncMock()
+            mock_streaming.signal_run_cancelled = AsyncMock()
+
+            await execute_run(_make_job())
+
+        mock_stream.assert_not_awaited()  # graph never runs
+        mock_finalize.assert_not_awaited()  # gate owns the terminal status
+        mock_streaming.signal_run_cancelled.assert_awaited_once()  # SSE clients released
+        mock_done.assert_awaited_once()  # join/wait waiters released
+        mock_dispatch.assert_awaited_once()  # the run parked behind it may start now
+
+
+class TestFinalizeSurvivesCancellation:
+    @pytest.mark.asyncio
+    async def test_cancel_landing_mid_finalize_still_writes_the_terminal_status(self) -> None:
+        # The row is left to the task, so a stop request that arrives while the task is already
+        # finalizing must not abort that write or the run would stay `running` forever.
+        started = asyncio.Event()
+        release = asyncio.Event()
+        written: list[str] = []
+
+        async def slow_finalize(*_args: object, **kwargs: object) -> bool:
+            started.set()
+            await release.wait()
+            written.append(str(kwargs["status"]))
+            return True
+
+        with (
+            patch("aegra_api.services.run_executor.start_run", AsyncMock(return_value=True)),
+            patch("aegra_api.services.run_executor._stream_graph", AsyncMock(side_effect=RuntimeError("boom"))),
+            patch("aegra_api.services.run_executor.finalize_run", slow_finalize),
+            patch("aegra_api.services.run_executor.streaming_service") as mock_streaming,
+            patch("aegra_api.services.run_executor._signal_run_done", new_callable=AsyncMock),
+        ):
+            mock_streaming.cleanup_run = AsyncMock()
+            mock_streaming.signal_run_error = AsyncMock()
+            task = asyncio.create_task(execute_run(_make_job()))
+            await started.wait()
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+            assert task.cancelled()  # the task itself still ends cancelled ...
+            assert written == []  # ... while its finalize is still in flight ...
+            release.set()
+            await await_pending_finalizes()  # ... which the executor's stop() waits for
+
+        assert written == ["error"]  # ... but the shielded finalize ran to completion

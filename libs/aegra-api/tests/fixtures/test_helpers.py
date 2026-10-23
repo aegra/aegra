@@ -3,6 +3,7 @@
 from datetime import UTC, datetime
 from typing import Any
 
+from aegra_api.core.orm import Run as RunORM
 from aegra_api.models import Assistant, Run, Thread
 
 
@@ -122,3 +123,20 @@ class DummyStoreItem:
         self.key = key
         self.value = value
         self.namespace = namespace
+
+
+def make_run_orm(**overrides: Any) -> RunORM:
+    """A real (unpersisted) ORM run row, for response-model and ORM-property tests."""
+    now = datetime.now(UTC)
+    fields: dict[str, Any] = {
+        "run_id": "run-1",
+        "thread_id": "thread-1",
+        "assistant_id": "asst-1",
+        "status": "running",
+        "input": {},
+        "user_id": "user-1",
+        "created_at": now,
+        "updated_at": now,
+        "execution_params": None,
+    }
+    return RunORM(**{**fields, **overrides})

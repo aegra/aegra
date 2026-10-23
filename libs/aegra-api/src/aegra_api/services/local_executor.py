@@ -6,15 +6,40 @@ as background coroutines in the same event loop as the API server.
 
 import asyncio
 import contextlib
+from datetime import UTC, datetime
+from typing import Any, cast
 
 import structlog
+from sqlalchemy import CursorResult, select, update
+from sqlalchemy.exc import SQLAlchemyError
 
 from aegra_api.core.active_runs import active_runs
+from aegra_api.core.orm import Run as RunORM
+from aegra_api.core.orm import Thread as ThreadORM
+from aegra_api.core.orm import _get_session_maker
 from aegra_api.models.run_job import RunJob
 from aegra_api.observability.span_enrichment import make_run_trace_context
 from aegra_api.services.base_executor import BaseExecutor
+from aegra_api.services.run_status import (
+    ACTIVE_RUN_STATES,
+    QUEUED_RUN_STATE,
+    end_preempted_runs,
+    finalize_overdue_preemptions,
+    get_run_status,
+    interrupt_requested_expr,
+    queued_threads_stmt,
+)
 
 logger = structlog.getLogger(__name__)
+
+_STRANDED_SWEEP_INTERVAL_SECONDS = 30
+_QUEUED_POLL_INTERVAL_SECONDS = 0.5
+
+
+async def _is_run_terminal(run_id: str) -> bool:
+    """True if the run reached a terminal state (or no longer exists)."""
+    status = await get_run_status(run_id)
+    return status is None or status not in (*ACTIVE_RUN_STATES, QUEUED_RUN_STATE)
 
 
 class LocalExecutor(BaseExecutor):
@@ -41,23 +66,138 @@ class LocalExecutor(BaseExecutor):
         )
 
     async def wait_for_completion(self, run_id: str, *, timeout: float = 300.0) -> None:
-        """Raises TimeoutError past *timeout*, so callers can tell a slow run from a finished one."""
-        task = active_runs.get(run_id)
-        if task is None:
-            return
-        # Shielded: the run outlives a caller that stops waiting. Its own failure
-        # is recorded by execute_run, so only cancellation reaches here.
-        with contextlib.suppress(asyncio.CancelledError):
-            await asyncio.wait_for(asyncio.shield(task), timeout=timeout)
+        """Raises TimeoutError past *timeout*. Polls while the run is still ``queued`` (no task yet)
+        so join/wait do not return an empty result for a parked run."""
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + timeout
+        poll_count = 0
+        while True:
+            task = active_runs.get(run_id)
+            if task is not None:
+                # Shielded: the run outlives a caller that stops waiting. Its own failure
+                # is recorded by execute_run, so only cancellation reaches here.
+                with contextlib.suppress(asyncio.CancelledError):
+                    await asyncio.wait_for(asyncio.shield(task), timeout=max(0.0, deadline - loop.time()))
+                return
+            # No task: the run is finished (popped), never existed, or still queued. The DB
+            # probe decides, on the first miss and then every other tick.
+            poll_count += 1
+            if poll_count % 2 == 1 and await _is_run_terminal(run_id):
+                return
+            if loop.time() >= deadline:
+                raise TimeoutError(f"Run {run_id} did not complete within {timeout}s")
+            await asyncio.sleep(_QUEUED_POLL_INTERVAL_SECONDS)
 
     async def start(self) -> None:
+        self._accepting = True
         logger.info("Local executor started (in-process asyncio tasks)")
+        await self._recover_orphaned_queue()
+        self._sweep_task = asyncio.create_task(self._stranded_queue_loop())
+
+    async def _stranded_queue_loop(self) -> None:
+        """Dev-mode stand-in for the lease reaper's stranded-queue scan: a swallowed finalize-time
+        dispatch failure would otherwise wedge a queued run until restart."""
+        while self._accepting:
+            try:
+                await asyncio.sleep(_STRANDED_SWEEP_INTERVAL_SECONDS)
+            except asyncio.CancelledError:
+                break
+            if not self._accepting:
+                break
+            # Catch-all (like the prod reaper's loop) so a corrupt-params row or any other
+            # non-SQLAlchemyError cannot permanently kill the periodic recovery task.
+            try:
+                await self._sweep_stranded_queues()
+            except Exception:
+                logger.exception("Stranded-queue sweep failed")
+
+    async def _sweep_stranded_queues(self) -> None:
+        """Re-dispatch every thread holding a queued run (a no-op when one is occupying)."""
+        maker = _get_session_maker()
+        async with maker() as session:
+            # A pre-empted task that ignored its cancel is cut loose after the timeout: its row ends
+            # interrupted here and its thread is promoted below like any other stranded queue.
+            for run_id, _thread_id in await finalize_overdue_preemptions(session):
+                task = active_runs.get(run_id)
+                if task is not None and not task.done():
+                    task.cancel()
+            threads = {row[0] for row in (await session.execute(queued_threads_stmt())).all()}
+        for thread_id in threads:
+            # Per-thread isolation: one bad row must not abort recovery for the rest.
+            try:
+                await self.dispatch_next_for_thread(thread_id)
+            except Exception:
+                logger.exception("Stranded-queue dispatch failed", thread_id=thread_id)
+
+    async def _recover_orphaned_queue(self) -> None:
+        """Fail runs orphaned by the previous process (a fresh process has no live tasks) and
+        dispatch the next queued run on each affected thread."""
+        maker = _get_session_maker()
+        try:
+            async with maker() as session:
+                threads = {
+                    row[0]
+                    for row in (
+                        await session.execute(
+                            select(RunORM.thread_id)
+                            .where(RunORM.status.in_((*ACTIVE_RUN_STATES, QUEUED_RUN_STATE)))
+                            .distinct()
+                        )
+                    ).all()
+                }
+        except SQLAlchemyError:
+            # Recovery is best effort: the periodic sweep retries, and startup must not depend on it.
+            logger.exception("Could not scan for runs orphaned by the previous process")
+            return
+        if not threads:
+            return
+
+        logger.warning("Recovering threads after restart", thread_count=len(threads))
+        for thread_id in threads:
+            try:
+                async with maker() as session:
+                    now = datetime.now(UTC)
+                    orphaned = (RunORM.thread_id == thread_id, RunORM.status.in_(ACTIVE_RUN_STATES))
+                    # A pre-empted orphan ends interrupted, as the worker-mode reaper and drain end it.
+                    preempted = await end_preempted_runs(session, *orphaned)
+                    result = cast(
+                        CursorResult[Any],
+                        await session.execute(
+                            update(RunORM)
+                            .where(*orphaned, interrupt_requested_expr().is_(None))
+                            .values(status="error", error_message="Orphaned by server restart", updated_at=now)
+                        ),
+                    )
+                    if result.rowcount > 0 or preempted:
+                        # The orphans' finalizes never ran: reset the thread as their finalize would.
+                        # Queued-only threads match nothing here, preserving a HITL pause.
+                        await session.execute(
+                            update(ThreadORM)
+                            .where(ThreadORM.thread_id == thread_id)
+                            .values(status="error" if result.rowcount > 0 else "idle", updated_at=now)
+                        )
+                    await session.commit()
+                await self.dispatch_next_for_thread(thread_id)
+            except SQLAlchemyError:
+                logger.exception("Failed to recover thread after restart", thread_id=thread_id)
 
     async def stop(self) -> None:
+        # No new promotions past this point, and any in-flight one has submitted
+        # before we start cancelling — so it is drained below, not orphaned.
+        await self._begin_shutdown()
+        sweep_task = getattr(self, "_sweep_task", None)
+        if sweep_task is not None:
+            sweep_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await sweep_task
         tasks_to_cancel = [task for task in active_runs.values() if not task.done()]
         for task in tasks_to_cancel:
             task.cancel()
         if tasks_to_cancel:
             logger.info("Draining cancelled tasks", count=len(tasks_to_cancel))
             await asyncio.gather(*tasks_to_cancel, return_exceptions=True)
+        # Deferred import: run_executor imports services that reference the executor singleton.
+        from aegra_api.services.run_executor import await_pending_finalizes
+
+        await await_pending_finalizes()
         logger.info("Local executor stopped")

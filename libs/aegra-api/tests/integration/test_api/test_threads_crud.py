@@ -543,6 +543,65 @@ class TestDeleteThread:
         assert deleted == []
         assert committed == []
 
+    def test_delete_thread_drops_queued_run_before_deleting(self, mock_checkpointer: AsyncMock) -> None:
+        """A parked run has no task to cancel: it is dropped with a guarded UPDATE before the
+        active runs are cancelled, so their finalize cannot promote it onto the doomed thread."""
+        app = create_test_app(include_runs=False, include_threads=True)
+
+        thread = _thread_row("test-123")
+        queued_run = MagicMock()
+        queued_run.run_id = "q1"
+        queued_run.status = "queued"
+        executed: list[str] = []
+
+        class Session(DummySessionBase):
+            async def scalar(self, _stmt: Any) -> Any:
+                return thread
+
+            async def execute(self, _stmt: Any) -> Any:
+                compiled = str(_stmt.compile(compile_kwargs={"literal_binds": True}))
+                executed.append(compiled)
+
+                class Result:
+                    def all(self) -> list[tuple[str]]:
+                        return [("q1",)] if compiled.startswith("UPDATE runs") else []
+
+                return Result()
+
+            async def scalars(self, _stmt: Any) -> Any:
+                # Only surface the queued run if the cleanup query's status filter
+                # actually includes 'queued' — so dropping it from threads.py reds this test.
+                compiled = str(_stmt.compile(compile_kwargs={"literal_binds": True}))
+                rows = [queued_run] if "queued" in compiled else []
+
+                class Result:
+                    def all(self) -> list[Any]:
+                        return rows
+
+                return Result()
+
+            async def delete(self, obj: Any) -> None:
+                pass
+
+            async def commit(self) -> None:
+                pass
+
+        with (
+            patch("aegra_api.api.threads.streaming_service.cancel_run", new_callable=AsyncMock) as mock_cancel,
+            patch(
+                "aegra_api.api.threads.streaming_service.signal_run_cancelled", new_callable=AsyncMock
+            ) as mock_signal,
+        ):
+            app.dependency_overrides[core_get_session] = override_get_session_dep(Session)
+            client = make_client(app)
+            resp = client.delete("/threads/test-123")
+
+        assert resp.status_code == 200
+        mock_cancel.assert_not_awaited()  # nothing executes a parked run; the broker has no task for it
+        mock_signal.assert_awaited_once_with("q1")  # but a client may be streaming it: close that stream
+        drop = next(s for s in executed if s.startswith("UPDATE runs"))
+        assert "'interrupted'" in drop and "runs.status = 'queued'" in drop  # guarded drop, before deletion
+
 
 class TestSearchThreads:
     """Test POST /threads/search endpoint"""

@@ -1,7 +1,7 @@
 """keep_latest pruning against a real PostgreSQL checkpointer.
 
 A DeltaChannel's value is rebuilt from ancestor checkpoints' writes, which only a
-real checkpointer shows. These tests skip when no database is reachable.
+real checkpointer shows. Lives under e2e because only those CI jobs have Postgres.
 """
 
 import operator
@@ -56,7 +56,7 @@ async def pool() -> AsyncIterator[AsyncConnectionPool[AsyncConnection[DictRow]]]
         kwargs={"autocommit": True, "prepare_threshold": None, "row_factory": dict_row},
     )
     try:
-        await pool.open(wait=True, timeout=5)
+        await pool.open(wait=True, timeout=10)
     except PoolTimeout as exc:
         pytest.skip(f"PostgreSQL test database is unavailable: {exc}")
     try:
@@ -79,6 +79,7 @@ async def _run_turns(graph: CompiledStateGraph, config: RunnableConfig) -> None:
         await graph.ainvoke({"messages": []}, config)
 
 
+@pytest.mark.e2e
 @pytest.mark.asyncio
 async def test_keep_latest_keeps_delta_channel_state(pool: AsyncConnectionPool[AsyncConnection[DictRow]]) -> None:
     saver = AsyncPostgresSaver(pool)
@@ -98,6 +99,7 @@ async def test_keep_latest_keeps_delta_channel_state(pool: AsyncConnectionPool[A
         await saver.adelete_thread(thread_id)
 
 
+@pytest.mark.e2e
 @pytest.mark.asyncio
 async def test_keep_latest_compacts_plain_channel_thread_to_one_checkpoint(
     pool: AsyncConnectionPool[AsyncConnection[DictRow]],

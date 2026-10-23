@@ -255,7 +255,7 @@ result = await client.threads.prune(["thread-3"])
 print(result["pruned_count"])  # 1
 ```
 
-IDs the caller cannot see, threads with pending or running runs, and
+IDs the caller cannot see, threads with pending, running or just-created runs, and
 `keep_latest` on `DeltaChannel` threads are skipped and not counted in
 `pruned_count`.
 

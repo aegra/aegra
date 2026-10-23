@@ -532,7 +532,7 @@ class TestPruneById:
         sql = str(session.scalars.await_args.args[0].compile(dialect=postgresql.dialect()))
         assert "thread.user_id = " in sql
         assert "NOT (EXISTS" in sql
-        assert "FOR UPDATE OF thread" in sql
+        assert "FOR UPDATE OF thread SKIP LOCKED" in sql
 
     @pytest.mark.asyncio
     async def test_delete_removes_checkpoints_then_thread_rows(self) -> None:

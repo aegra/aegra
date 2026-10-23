@@ -252,8 +252,9 @@ async def prune_threads_by_id(
     )
     if auth_filter is not None:
         stmt = stmt.where(auth_filter)
-    # Row locks make a run INSERT (FK key share) wait instead of being cascade-deleted mid-flight.
-    owned = list((await session.scalars(stmt.with_for_update(of=ThreadORM))).all())
+    # SKIP LOCKED: a thread mid run-creation holds a key-share lock; waiting on it would
+    # recheck active runs against a stale snapshot and cascade-delete the new run.
+    owned = list((await session.scalars(stmt.with_for_update(skip_locked=True, of=ThreadORM))).all())
 
     if strategy == "delete":
         await db_manager.get_checkpointer().aprune(owned, strategy="delete")

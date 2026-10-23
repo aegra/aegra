@@ -3,7 +3,7 @@ name: E2E Tests
 on:
   push:
     branches: [main]
-  # Manual runs must target main: the e2e environment holding OPENAI_API_KEY only allows main.
+  # Manual runs must target main: the e2e environment only allows main.
   workflow_dispatch:
 
 # Workflow-level so pytest steps inherit them: tests that read the database

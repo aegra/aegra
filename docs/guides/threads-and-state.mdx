@@ -214,6 +214,9 @@ A background sweep then applies each thread's policy:
 - `delete` — the thread, its runs and crons, and all checkpoint data are removed.
 - `keep_latest` — checkpoint history is compacted down to the latest state; the
   thread stays usable and the TTL re-arms, so history is pruned periodically.
+  Threads whose state uses a LangGraph `DeltaChannel` (Deep Agents uses one for
+  `messages` and `files`) are skipped for now, because their latest state is rebuilt
+  from older checkpoints. The skip is logged.
 
 Individual threads can override the default at creation:
 

@@ -17,7 +17,7 @@ import json
 from collections.abc import Collection
 from datetime import UTC, datetime, timedelta
 from functools import cache
-from typing import Literal
+from typing import Literal, cast
 
 import structlog
 from psycopg import Error as PsycopgError
@@ -49,13 +49,24 @@ _CLAIM_BATCH = 100
 
 # Cheap probe so idle keep_latest cycles skip the three DELETEs: history is
 # prunable only when some namespace holds more than one checkpoint (PK-indexed).
+# langgraph sets counters_since_delta_snapshot while a DeltaChannel's value is still
+# rebuilt from ancestor writes; pruning those ancestors empties the channel (#688).
 _HAS_PRUNABLE_HISTORY_SQL = """
 SELECT EXISTS (
     SELECT 1 FROM checkpoints
     WHERE thread_id = %(tid)s
     GROUP BY checkpoint_ns
     HAVING count(*) > 1
-) AS has_prunable_history
+) AS has_prunable_history,
+EXISTS (
+    SELECT 1 FROM checkpoints c
+    WHERE c.thread_id = %(tid)s
+      AND c.metadata ? 'counters_since_delta_snapshot'
+      AND c.checkpoint_id = (
+          SELECT max(latest.checkpoint_id) FROM checkpoints latest
+          WHERE latest.thread_id = c.thread_id AND latest.checkpoint_ns = c.checkpoint_ns
+      )
+) AS depends_on_delta_history
 """
 
 # Latest checkpoint per (thread_id, checkpoint_ns) = max(checkpoint_id):
@@ -158,9 +169,12 @@ async def _prune_checkpoint_history(thread_id: str) -> None:
         raise RuntimeError("Database not initialized")
     async with pool.connection() as conn:
         cursor = await conn.execute(_HAS_PRUNABLE_HISTORY_SQL, {"tid": thread_id})
-        row = await cursor.fetchone()
         # The lg_pool is configured with row_factory=dict_row — access by name.
+        row = cast("dict[str, bool] | None", await cursor.fetchone())
         if row is None or not row["has_prunable_history"]:
+            return
+        if row["depends_on_delta_history"]:
+            logger.warning("keep_latest skipped: thread state depends on DeltaChannel history", thread_id=thread_id)
             return
         async with conn.transaction():
             await conn.execute(_PRUNE_CHECKPOINTS_SQL, {"tid": thread_id})

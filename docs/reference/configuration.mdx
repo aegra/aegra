@@ -317,7 +317,7 @@ a background sweep deletes or compacts expired threads.
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `ttl.strategy` | `string` | `delete` | `delete` removes the thread, its runs/crons, and all checkpoint data. `keep_latest` prunes checkpoint history but keeps the thread and its latest state, then re-arms the TTL (periodic compaction). |
+| `ttl.strategy` | `string` | `delete` | `delete` removes the thread, its runs/crons, and all checkpoint data. `keep_latest` prunes checkpoint history but keeps the thread and its latest state, then re-arms the TTL (periodic compaction). Threads using a `DeltaChannel` are skipped, since their state needs the older checkpoints. |
 | `ttl.default_ttl` | `number` | `43200` | Default thread TTL in minutes (43200 = 30 days), applied to threads created after TTL is enabled. |
 | `ttl.sweep_interval_minutes` | `number` | `5` | How often the background sweep runs. |
 | `ttl.sweep_limit` | `integer` | `10000` | Max threads processed per sweep iteration. |

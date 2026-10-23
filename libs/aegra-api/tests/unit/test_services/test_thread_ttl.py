@@ -37,7 +37,9 @@ def _make_lg_pool() -> tuple[MagicMock, AsyncMock]:
     conn.execute.return_value.fetchone for the skip path.
     """
     conn = AsyncMock()
-    conn.execute.return_value.fetchone = AsyncMock(return_value={"has_prunable_history": True})
+    conn.execute.return_value.fetchone = AsyncMock(
+        return_value={"has_prunable_history": True, "depends_on_delta_history": False}
+    )
     tx = AsyncMock()
     tx.__aenter__ = AsyncMock(return_value=None)
     tx.__aexit__ = AsyncMock(return_value=False)
@@ -312,7 +314,9 @@ class TestKeepLatest:
     async def test_skips_deletes_when_history_already_compact(self) -> None:
         """Idle expiry cycles cost one PK-indexed probe, not three DELETEs."""
         pool, conn = _make_lg_pool()
-        conn.execute.return_value.fetchone = AsyncMock(return_value={"has_prunable_history": False})
+        conn.execute.return_value.fetchone = AsyncMock(
+            return_value={"has_prunable_history": False, "depends_on_delta_history": False}
+        )
         db = MagicMock()
         db.lg_pool = pool
         session = AsyncMock()
@@ -326,6 +330,29 @@ class TestKeepLatest:
         assert conn.execute.await_count == 1  # probe only
         conn.transaction.assert_not_called()
         # Still re-arms so the next cycle stays scheduled
+        rearm_sql = str(session.execute.await_args_list[0].args[0].compile(dialect=postgresql.dialect()))
+        assert "UPDATE thread_ttl" in rearm_sql
+
+    @pytest.mark.asyncio
+    async def test_skips_deletes_when_state_depends_on_delta_history(self) -> None:
+        """Pruning the ancestors a DeltaChannel replays would empty it (#688)."""
+        pool, conn = _make_lg_pool()
+        conn.execute.return_value.fetchone = AsyncMock(
+            return_value={"has_prunable_history": True, "depends_on_delta_history": True}
+        )
+        db = MagicMock()
+        db.lg_pool = pool
+        session = AsyncMock()
+
+        with patch("aegra_api.services.thread_ttl.db_manager", db):
+            outcome = await _apply_strategy(
+                session, thread_id="t-1", strategy="keep_latest", ttl_minutes=30.0, now=datetime.now(UTC)
+            )
+
+        assert outcome == "pruned"
+        assert conn.execute.await_count == 1  # probe only
+        assert "counters_since_delta_snapshot" in conn.execute.await_args_list[0].args[0]
+        conn.transaction.assert_not_called()
         rearm_sql = str(session.execute.await_args_list[0].args[0].compile(dialect=postgresql.dialect()))
         assert "UPDATE thread_ttl" in rearm_sql
 

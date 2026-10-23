@@ -90,7 +90,7 @@ async def test_keep_latest_keeps_delta_channel_state(pool: AsyncConnectionPool[A
         await _run_turns(graph, config)
         before = (await graph.aget_state(config)).values
 
-        with patch("aegra_api.services.thread_ttl.db_manager.lg_pool", pool):
+        with patch("aegra_api.services.thread_ttl.db_manager.get_checkpointer", return_value=saver):
             await _prune_checkpoint_history(thread_id)
 
         assert before == {"messages": ["hi"] * _TURNS}
@@ -112,7 +112,7 @@ async def test_keep_latest_compacts_plain_channel_thread_to_one_checkpoint(
         await _run_turns(graph, config)
         before = (await graph.aget_state(config)).values
 
-        with patch("aegra_api.services.thread_ttl.db_manager.lg_pool", pool):
+        with patch("aegra_api.services.thread_ttl.db_manager.get_checkpointer", return_value=saver):
             await _prune_checkpoint_history(thread_id)
 
         assert await _checkpoint_count(pool, thread_id) == 1

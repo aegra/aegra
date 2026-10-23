@@ -17,7 +17,7 @@ import json
 from collections.abc import Collection
 from datetime import UTC, datetime, timedelta
 from functools import cache
-from typing import Literal, cast
+from typing import Literal
 
 import structlog
 from psycopg import Error as PsycopgError
@@ -40,81 +40,6 @@ logger = structlog.getLogger(__name__)
 # Rows claimed per transaction. Bounds lock-hold time and the window a user
 # DELETE on a claimed thread blocks on the thread_ttl cascade.
 _CLAIM_BATCH = 100
-
-# --- keep_latest pruning SQL -------------------------------------------------
-# Raw SQL over the psycopg lg_pool against checkpointer-owned tables. Pinned to
-# the schema of langgraph-checkpoint-postgres 3.x (base.py MIGRATIONS); the
-# schema-drift canary in tests/unit/test_services/test_thread_ttl.py fails
-# loudly if a package bump changes the assumptions below.
-
-# Cheap probe so idle keep_latest cycles skip the three DELETEs: history is
-# prunable only when some namespace holds more than one checkpoint (PK-indexed).
-# langgraph sets counters_since_delta_snapshot while a DeltaChannel's value is still
-# rebuilt from ancestor writes; pruning those ancestors empties the channel (#688).
-_HAS_PRUNABLE_HISTORY_SQL = """
-SELECT EXISTS (
-    SELECT 1 FROM checkpoints
-    WHERE thread_id = %(tid)s
-    GROUP BY checkpoint_ns
-    HAVING count(*) > 1
-) AS has_prunable_history,
-EXISTS (
-    SELECT 1 FROM checkpoints c
-    WHERE c.thread_id = %(tid)s
-      AND c.metadata ? 'counters_since_delta_snapshot'
-      AND c.checkpoint_id = (
-          SELECT max(latest.checkpoint_id) FROM checkpoints latest
-          WHERE latest.thread_id = c.thread_id AND latest.checkpoint_ns = c.checkpoint_ns
-      )
-) AS depends_on_delta_history
-"""
-
-# Latest checkpoint per (thread_id, checkpoint_ns) = max(checkpoint_id):
-# checkpoint_ids are monotonic and langgraph's own "latest" is
-# ORDER BY checkpoint_id DESC.
-_PRUNE_CHECKPOINTS_SQL = """
-DELETE FROM checkpoints c
-USING (
-    SELECT checkpoint_ns, max(checkpoint_id) AS latest_id
-    FROM checkpoints
-    WHERE thread_id = %(tid)s
-    GROUP BY checkpoint_ns
-) keep
-WHERE c.thread_id = %(tid)s
-  AND c.checkpoint_ns = keep.checkpoint_ns
-  AND c.checkpoint_id <> keep.latest_id
-"""
-
-# Writes of surviving checkpoints are pending writes needed on resume — keep
-# them; drop writes whose checkpoint is gone.
-_PRUNE_WRITES_SQL = """
-DELETE FROM checkpoint_writes w
-WHERE w.thread_id = %(tid)s
-  AND NOT EXISTS (
-      SELECT 1 FROM checkpoints c
-      WHERE c.thread_id = w.thread_id
-        AND c.checkpoint_ns = w.checkpoint_ns
-        AND c.checkpoint_id = w.checkpoint_id
-  )
-"""
-
-# A kept checkpoint may reference OLD blob versions for unchanged channels, so
-# keeping max(version) would corrupt state. Keep exactly the (channel, version)
-# pairs the surviving checkpoints reference — the same join langgraph's own
-# SELECT_SQL performs to load channel_values.
-_PRUNE_BLOBS_SQL = """
-DELETE FROM checkpoint_blobs b
-WHERE b.thread_id = %(tid)s
-  AND NOT EXISTS (
-      SELECT 1
-      FROM checkpoints c,
-           jsonb_each_text(c.checkpoint -> 'channel_versions') AS cv(channel, version)
-      WHERE c.thread_id = b.thread_id
-        AND c.checkpoint_ns = b.checkpoint_ns
-        AND cv.channel = b.channel
-        AND cv.version = b.version
-  )
-"""
 
 
 class ThreadTTLConfig(BaseModel):
@@ -158,28 +83,12 @@ def get_thread_ttl_config() -> ThreadTTLConfig | None:
 
 
 async def _prune_checkpoint_history(thread_id: str) -> None:
-    """Delete all checkpoint history for a thread except the latest state.
-
-    One explicit transaction (the lg_pool is autocommit): a concurrent reader
-    sees pre- or post-prune state, never a torn middle. Idempotent — a re-run
-    deletes nothing further.
-    """
-    pool = db_manager.lg_pool
-    if pool is None:
-        raise RuntimeError("Database not initialized")
-    async with pool.connection() as conn:
-        cursor = await conn.execute(_HAS_PRUNABLE_HISTORY_SQL, {"tid": thread_id})
-        # The lg_pool is configured with row_factory=dict_row — access by name.
-        row = cast("dict[str, bool] | None", await cursor.fetchone())
-        if row is None or not row["has_prunable_history"]:
-            return
-        if row["depends_on_delta_history"]:
-            logger.warning("keep_latest skipped: thread state depends on DeltaChannel history", thread_id=thread_id)
-            return
-        async with conn.transaction():
-            await conn.execute(_PRUNE_CHECKPOINTS_SQL, {"tid": thread_id})
-            await conn.execute(_PRUNE_WRITES_SQL, {"tid": thread_id})
-            await conn.execute(_PRUNE_BLOBS_SQL, {"tid": thread_id})
+    """Keep only the latest checkpoint of each namespace; DeltaChannel threads stay whole."""
+    try:
+        await db_manager.get_checkpointer().aprune([thread_id], strategy="keep_latest")
+    except NotImplementedError:
+        # A DeltaChannel value is rebuilt from ancestor writes; pruning them empties it (#688).
+        logger.warning("keep_latest skipped: thread uses a DeltaChannel", thread_id=thread_id)
 
 
 async def _apply_strategy(

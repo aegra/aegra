@@ -97,3 +97,33 @@ async def test_prune_keep_latest_preserves_latest_state() -> None:
     assert counts["checkpoints"] > 1
 
     await client.threads.delete(thread_id)
+
+
+@pytest.mark.e2e
+@pytest.mark.asyncio
+async def test_sdk_prune_by_id_touches_only_named_threads() -> None:
+    """client.threads.prune applies the requested strategy to the listed threads, not to expired ones."""
+    client = get_e2e_client()
+    assistant = await client.assistants.create(graph_id="stress_test", if_exists="do_nothing")
+    kept = (await client.threads.create())["thread_id"]
+    deleted = (await client.threads.create())["thread_id"]
+    expired_bystander = (await client.threads.create(ttl=0.001))["thread_id"]
+    for thread_id in (kept, deleted):
+        await _run_to_completion(client, thread_id, assistant["assistant_id"])
+    state_before = await client.threads.get_state(kept)
+    await asyncio.sleep(1.0)  # the bystander's TTL has now expired
+
+    compacted = await client.threads.prune([kept], strategy="keep_latest")
+    removed = await client.threads.prune([deleted, "no-such-thread"])
+    elog("Prune results", {"keep_latest": compacted, "delete": removed})
+
+    assert compacted["pruned_count"] == 1
+    assert len(await client.threads.get_history(kept)) == 1
+    assert (await client.threads.get_state(kept))["values"] == state_before["values"]
+    assert removed["pruned_count"] == 1
+    with pytest.raises(Exception, match="404|not found|Not Found"):
+        await client.threads.get(deleted)
+    assert (await client.threads.get(expired_bystander))["thread_id"] == expired_bystander
+
+    await client.threads.delete(kept)
+    await client.threads.delete(expired_bystander)

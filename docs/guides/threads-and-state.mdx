@@ -234,12 +234,30 @@ Expired threads can also be cleaned up immediately for the calling user:
 import httpx
 
 resp = httpx.post("http://localhost:2026/threads/prune")
-print(resp.json())  # {"deleted": 3, "pruned": 1}
+print(resp.json())  # {"pruned_count": 4, "deleted": 3, "pruned": 1}
 ```
 
 Threads with pending or running runs are never expired mid-run — they are
 picked up on a later sweep once their runs settle. TTL applies to threads
 created after it is enabled; pre-existing threads are not backfilled.
+
+### Pruning threads by ID
+
+To prune specific threads now, with or without a TTL, pass their IDs. The
+strategy applies to the listed threads only:
+
+```python
+# Keep each thread and its latest state, drop older checkpoints
+await client.threads.prune(["thread-1", "thread-2"], strategy="keep_latest")
+
+# Delete the threads entirely (the default strategy)
+result = await client.threads.prune(["thread-3"])
+print(result["pruned_count"])  # 1
+```
+
+IDs the caller cannot see, threads with pending or running runs, and
+`keep_latest` on `DeltaChannel` threads are skipped and not counted in
+`pruned_count`.
 
 ## Thread metadata
 

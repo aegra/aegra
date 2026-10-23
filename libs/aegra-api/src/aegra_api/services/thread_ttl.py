@@ -14,7 +14,7 @@ and picked up on a later tick once their runs settle.
 import asyncio
 import contextlib
 import json
-from collections.abc import Collection
+from collections.abc import Collection, Sequence
 from datetime import UTC, datetime, timedelta
 from functools import cache
 from typing import Literal
@@ -82,13 +82,15 @@ def get_thread_ttl_config() -> ThreadTTLConfig | None:
     return None
 
 
-async def _prune_checkpoint_history(thread_id: str) -> None:
+async def _prune_checkpoint_history(thread_id: str) -> bool:
     """Keep only the latest checkpoint of each namespace; DeltaChannel threads stay whole."""
     try:
         await db_manager.get_checkpointer().aprune([thread_id], strategy="keep_latest")
     except NotImplementedError:
         # A DeltaChannel value is rebuilt from ancestor writes; pruning them empties it (#688).
         logger.warning("keep_latest skipped: thread uses a DeltaChannel", thread_id=thread_id)
+        return False
+    return True
 
 
 async def _apply_strategy(
@@ -226,6 +228,44 @@ async def prune_expired_threads_for_user(
         total_pruned += pruned
         failed.update(failed_ids)
     return total_deleted, total_pruned
+
+
+async def prune_threads_by_id(
+    session: AsyncSession,
+    *,
+    thread_ids: Sequence[str],
+    strategy: Literal["delete", "keep_latest"],
+    user_id: str,
+    auth_filter: ColumnElement[bool] | None = None,
+) -> int:
+    """Apply a prune strategy to the caller's named threads now; return how many were pruned.
+
+    Ids the caller cannot see, and threads with active runs, are skipped, as in the TTL sweep.
+    """
+    active_runs_exist = (
+        select(RunORM.run_id)
+        .where(RunORM.thread_id == ThreadORM.thread_id, RunORM.status.in_(("pending", "running")))
+        .exists()
+    )
+    stmt = select(ThreadORM.thread_id).where(
+        ThreadORM.thread_id.in_(thread_ids), ThreadORM.user_id == user_id, ~active_runs_exist
+    )
+    if auth_filter is not None:
+        stmt = stmt.where(auth_filter)
+    # Row locks make a run INSERT (FK key share) wait instead of being cascade-deleted mid-flight.
+    owned = list((await session.scalars(stmt.with_for_update(of=ThreadORM))).all())
+
+    if strategy == "delete":
+        await db_manager.get_checkpointer().aprune(owned, strategy="delete")
+        await session.execute(delete(ThreadORM).where(ThreadORM.thread_id.in_(owned)))
+        await session.commit()
+        return len(owned)
+
+    pruned = 0
+    for thread_id in owned:
+        pruned += await _prune_checkpoint_history(thread_id)
+    await session.commit()
+    return pruned
 
 
 class ThreadTTLSweeper:

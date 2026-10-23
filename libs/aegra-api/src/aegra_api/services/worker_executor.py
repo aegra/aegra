@@ -25,6 +25,7 @@ from aegra_api.core.active_runs import active_runs, explicit_run_cancellations
 from aegra_api.core.orm import Run as RunORM
 from aegra_api.core.orm import _get_session_maker
 from aegra_api.core.redis_manager import redis_manager
+from aegra_api.models.enums import CancelReason
 from aegra_api.models.run_job import RunJob
 from aegra_api.observability.span_enrichment import merge_run_metadata, set_trace_context
 from aegra_api.services.base_executor import BaseExecutor
@@ -49,10 +50,19 @@ def _is_valid_run_id(value: str) -> bool:
     return bool(_RUN_ID_PATTERN.match(value))
 
 
+def _forced_cancel_reason(run_id: str) -> CancelReason:
+    """A drain survivor resumes on another instance; every other forced cancel ends the run here."""
+    if run_id in explicit_run_cancellations:
+        return "cancel"
+    if run_id in _shutdown_cancellations:
+        return "requeue"
+    return "cancel"
+
+
 async def _cleanup_cancelled_execution(run_id: str, execution_task: asyncio.Task[None]) -> None:
     """Stop execution and persist an explicit cancellation when applicable."""
     if not execution_task.done():
-        execution_task.cancel()
+        execution_task.cancel(msg=_forced_cancel_reason(run_id))
     await asyncio.gather(execution_task, return_exceptions=True)
 
     if run_id not in explicit_run_cancellations:
@@ -286,7 +296,7 @@ class WorkerExecutor(BaseExecutor):
                     timeout_secs=settings.worker.BG_JOB_TIMEOUT_SECS,
                 )
                 _timeout_cancellations.add(run_id)
-                execution_task.cancel()
+                execution_task.cancel(msg="timeout")
                 await asyncio.gather(execution_task, return_exceptions=True)
 
                 identity = await _get_run_identity(run_id)
@@ -571,7 +581,7 @@ async def _heartbeat_loop(
                 )
                 if job_task is not None and not job_task.done():
                     _lease_loss_cancellations.add(run_id)
-                    job_task.cancel()
+                    job_task.cancel(msg="lease_lost")
                 return
             logger.debug("Lease extended", run_id=run_id, worker=worker_name)
         except Exception:

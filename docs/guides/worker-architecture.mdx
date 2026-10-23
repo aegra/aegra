@@ -235,6 +235,7 @@ On SIGTERM (rolling deploy, pod reschedule, node drain) the executor waits up to
 - A user-initiated cancel that races the shutdown still wins: explicitly cancelled runs are finalized as `interrupted`, never resurrected.
 - If Redis is unreachable during the hand-off, the rows are already `pending` and unclaimed, so a surviving instance's reaper re-enqueues them after `STUCK_PENDING_THRESHOLD_SECONDS`.
 - Drain hand-offs do not consume the crash retry budget (`BG_JOB_MAX_RETRIES`).
+- The graph can tell a hand-off from a cancel: the `CancelledError` that unwinds a drained run carries the message `requeue`. See [what the graph sees when its run is cancelled](#what-the-graph-sees-when-its-run-is-cancelled).
 
 Set your orchestrator's grace period a few seconds above `WORKER_DRAIN_TIMEOUT` (on Kubernetes: `terminationGracePeriodSeconds`), so the requeue completes before the pod is killed. Runs longer than the drain window survive the deploy either way; the timeout only decides how long the old pod waits before handing them off.
 
@@ -246,6 +247,7 @@ That path interrupts the run, clears its lease, and marks the thread idle in one
 The API still broadcasts a best-effort cancellation after this transaction because an expired worker may be delayed rather than dead.
 It emits the terminal stream event itself so connected clients always receive a definitive end event.
 When the run has a live owner, the API leaves the database state unchanged and uses Redis pub/sub to ask that worker to cancel its task and finalize the run.
+That worker cancels the task with the message `cancel`, so the graph can tell a user's cancel from a drain's `requeue` (see [what the graph sees when its run is cancelled](#what-the-graph-sees-when-its-run-is-cancelled)).
 Requests for runs that are already terminal are no-ops, so a late cancellation cannot overwrite a successful or failed result.
 Worker finalization is also conditional on the run remaining active, which prevents a delayed worker from overwriting a terminal state committed by the API.
 The response contains the currently persisted state; set `wait=1` to wait for a live worker to finalize the run before returning.
@@ -269,12 +271,43 @@ sequenceDiagram
         PG-->>A: no row updated
         A->>R: PUBLISH aegra:run:cancel
         R->>B: Cancel message received
-        B->>B: task.cancel()
+        B->>B: task.cancel(msg="cancel")
         B->>PG: Finalize run and thread
         B->>R: PUBLISH end event
     end
     A->>C: 200 with persisted run state
 ```
+
+## What the graph sees when its run is cancelled
+
+Every forced cancel the worker issues names its reason as the message of the `asyncio.CancelledError` that unwinds the run. A graph that holds something outside its checkpoint (a sandbox, a lock, a session with another service) reads it to decide whether to release that resource or keep it for the instance that resumes the run:
+
+| Message | Cancelled by | What happens to the run |
+|:--------|:-------------|:------------------------|
+| `cancel` | `runs.cancel` with `cancel` or `interrupt`, a client that dropped its stream with `on_disconnect="cancel"`, a run or thread deletion | Finalized as `interrupted`; it ends here |
+| `requeue` | The drain window closing with the run still in flight | Handed back to the queue; another instance resumes it from the last checkpoint |
+| `lease_lost` | The heartbeat finding another worker owning the run | That worker continues the run; this copy stops without finalizing |
+| `timeout` | `BG_JOB_TIMEOUT_SECS` elapsing | Finalized as `error`; it ends here |
+
+Read it in a node's exception handler or around a factory's `yield`, and re-raise:
+
+```python
+import asyncio
+
+
+async def node(state):
+    try:
+        return await do_work(state)
+    except asyncio.CancelledError as exc:
+        reason = exc.args[0] if exc.args else None
+        if reason in ("requeue", "lease_lost"):
+            keep_the_workspace()  # another instance picks the run up
+        else:
+            release_the_workspace()  # the run ends here
+        raise
+```
+
+A missing message means the run ends here: the in-process executor of `aegra dev` has no queue to hand runs to and cancels without one, and a `CancelledError` raised by the graph's own code carries whatever that code put in it.
 
 ## Dev vs production mode
 

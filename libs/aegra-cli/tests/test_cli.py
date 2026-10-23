@@ -20,7 +20,7 @@ from aegra_cli.cli import (
 from aegra_cli.env import load_env_file
 
 if TYPE_CHECKING:
-    pass
+    from collections.abc import Generator
 
 
 def create_mock_popen(returncode: int = 0):
@@ -30,6 +30,32 @@ def create_mock_popen(returncode: int = 0):
     mock_process.wait.return_value = returncode
     mock_process.returncode = returncode
     return mock_process
+
+
+class ServeLaunch:
+    """The two launchers serve hands uvicorn to: an exec off Windows, a child on Windows."""
+
+    def __init__(self, execvp: MagicMock, run: MagicMock) -> None:
+        self.execvp = execvp
+        self.run = run
+
+    @property
+    def argv(self) -> list[str]:
+        """The uvicorn argv serve handed to the launcher of the current platform."""
+        if self.execvp.called:
+            return self.execvp.call_args[0][1]
+        return self.run.call_args[0][0]
+
+
+@pytest.fixture
+def serve_launch() -> Generator[ServeLaunch, None, None]:
+    """Mock both launchers, so no serve test replaces the test process with uvicorn."""
+    with (
+        patch("aegra_cli.cli.os.execvp") as mock_execvp,
+        patch("aegra_cli.cli.subprocess.run") as mock_run,
+    ):
+        mock_run.return_value = MagicMock(returncode=0)
+        yield ServeLaunch(mock_execvp, mock_run)
 
 
 class TestVersion:
@@ -1170,25 +1196,69 @@ class TestServeCommand:
             assert result.exit_code == 1
             assert "Could not find aegra.json" in result.output
 
-    def test_serve_runs_uvicorn(self, cli_runner: CliRunner, tmp_path: Path) -> None:
+    def test_serve_runs_uvicorn(
+        self, cli_runner: CliRunner, tmp_path: Path, serve_launch: ServeLaunch
+    ) -> None:
         """Test that serve runs uvicorn with correct arguments."""
         with cli_runner.isolated_filesystem(temp_dir=tmp_path):
             Path("aegra.json").write_text('{"graphs": {}}')
 
-            with patch("aegra_cli.cli.subprocess.run") as mock_run:
-                mock_run.return_value.returncode = 0
-                result = cli_runner.invoke(cli, ["serve"])
+            result = cli_runner.invoke(cli, ["serve"])
 
-                assert result.exit_code == 0
-                mock_run.assert_called_once()
-                cmd = mock_run.call_args[0][0]
-                assert "uvicorn" in cmd
-                assert "--host" in cmd
-                assert "0.0.0.0" in cmd
-                assert "--port" in cmd
-                assert "2026" in cmd
-                # No --reload flag (production mode)
-                assert "--reload" not in cmd
+            assert result.exit_code == 0
+            cmd = serve_launch.argv
+            assert "uvicorn" in cmd
+            assert "--host" in cmd
+            assert "0.0.0.0" in cmd
+            assert "--port" in cmd
+            assert "2026" in cmd
+            # No --reload flag (production mode)
+            assert "--reload" not in cmd
+
+    def test_serve_execs_uvicorn_off_windows(
+        self,
+        cli_runner: CliRunner,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        serve_launch: ServeLaunch,
+    ) -> None:
+        """Off Windows, serve replaces itself with uvicorn instead of wrapping it.
+
+        As a container's PID 1 the server then receives the stop signal
+        directly and drains; a wrapper with no handler would swallow it.
+        """
+        monkeypatch.setattr("aegra_cli.cli.sys.platform", "linux")
+        with cli_runner.isolated_filesystem(temp_dir=tmp_path):
+            Path("aegra.json").write_text('{"graphs": {}}')
+
+            result = cli_runner.invoke(cli, ["serve"])
+
+            assert result.exit_code == 0, result.output
+            serve_launch.execvp.assert_called_once()
+            executable, argv = serve_launch.execvp.call_args[0]
+            assert executable == sys.executable
+            assert argv[:3] == [sys.executable, "-m", "uvicorn"]
+            serve_launch.run.assert_not_called()
+
+    def test_serve_runs_uvicorn_as_a_child_on_windows(
+        self,
+        cli_runner: CliRunner,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        serve_launch: ServeLaunch,
+    ) -> None:
+        """Windows has no exec, so serve keeps uvicorn in a child and exits with its code."""
+        monkeypatch.setattr("aegra_cli.cli.sys.platform", "win32")
+        serve_launch.run.return_value = MagicMock(returncode=3)
+        with cli_runner.isolated_filesystem(temp_dir=tmp_path):
+            Path("aegra.json").write_text('{"graphs": {}}')
+
+            result = cli_runner.invoke(cli, ["serve"])
+
+            assert result.exit_code == 3
+            serve_launch.run.assert_called_once()
+            assert serve_launch.run.call_args[0][0][:3] == [sys.executable, "-m", "uvicorn"]
+            serve_launch.execvp.assert_not_called()
 
     def test_serve_forces_selector_loop_on_windows(
         self, cli_runner: CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -1212,19 +1282,21 @@ class TestServeCommand:
                 assert "aegra_api.utils.event_loop:selector_loop_factory" in cmd
 
     def test_serve_keeps_default_loop_off_windows(
-        self, cli_runner: CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+        self,
+        cli_runner: CliRunner,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        serve_launch: ServeLaunch,
     ) -> None:
         """Linux/macOS keep uvicorn's auto loop (uvloop stays available)."""
         monkeypatch.setattr("aegra_cli.cli.sys.platform", "linux")
         with cli_runner.isolated_filesystem(temp_dir=tmp_path):
             Path("aegra.json").write_text('{"graphs": {}}')
 
-            with patch("aegra_cli.cli.subprocess.run") as mock_run:
-                mock_run.return_value.returncode = 0
-                result = cli_runner.invoke(cli, ["serve"])
+            result = cli_runner.invoke(cli, ["serve"])
 
-                assert result.exit_code == 0
-                assert "--loop" not in mock_run.call_args[0][0]
+            assert result.exit_code == 0
+            assert "--loop" not in serve_launch.argv
 
     def test_serve_skips_loop_when_api_lacks_factory(
         self, cli_runner: CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -1244,71 +1316,67 @@ class TestServeCommand:
                 assert result.exit_code == 0
                 assert "--loop" not in mock_run.call_args[0][0]
 
-    def test_serve_port_from_env_var(self, cli_runner: CliRunner, tmp_path: Path) -> None:
+    def test_serve_port_from_env_var(
+        self, cli_runner: CliRunner, tmp_path: Path, serve_launch: ServeLaunch
+    ) -> None:
         """Test that serve command picks up PORT from env var when no CLI flag is passed."""
         with cli_runner.isolated_filesystem(temp_dir=tmp_path):
             Path("aegra.json").write_text('{"graphs": {}}')
             Path(".env").write_text("PORT=9090\n")
 
-            with (
-                patch.dict(os.environ, {}, clear=False),
-                patch("aegra_cli.cli.subprocess.run") as mock_run,
-            ):
-                mock_run.return_value = MagicMock(returncode=0)
+            with patch.dict(os.environ, {}, clear=False):
                 result = cli_runner.invoke(cli, ["serve"])
                 assert result.exit_code == 0, result.output
 
-                cmd = mock_run.call_args[0][0]
+                cmd = serve_launch.argv
                 port_idx = cmd.index("--port")
                 assert cmd[port_idx + 1] == "9090"
 
-    def test_serve_cli_flag_overrides_env_var(self, cli_runner: CliRunner, tmp_path: Path) -> None:
+    def test_serve_cli_flag_overrides_env_var(
+        self, cli_runner: CliRunner, tmp_path: Path, serve_launch: ServeLaunch
+    ) -> None:
         """Test that explicit --port flag takes precedence over PORT env var."""
         with cli_runner.isolated_filesystem(temp_dir=tmp_path):
             Path("aegra.json").write_text('{"graphs": {}}')
             Path(".env").write_text("PORT=9090\n")
 
-            with (
-                patch.dict(os.environ, {}, clear=False),
-                patch("aegra_cli.cli.subprocess.run") as mock_run,
-            ):
-                mock_run.return_value = MagicMock(returncode=0)
+            with patch.dict(os.environ, {}, clear=False):
                 result = cli_runner.invoke(cli, ["serve", "--port", "7777"])
                 assert result.exit_code == 0, result.output
 
-                cmd = mock_run.call_args[0][0]
+                cmd = serve_launch.argv
                 port_idx = cmd.index("--port")
                 assert cmd[port_idx + 1] == "7777"
 
-    def test_serve_host_from_env_var(self, cli_runner: CliRunner, tmp_path: Path) -> None:
+    def test_serve_host_from_env_var(
+        self, cli_runner: CliRunner, tmp_path: Path, serve_launch: ServeLaunch
+    ) -> None:
         """Test that serve command picks up HOST from env var when no CLI flag is passed."""
         with cli_runner.isolated_filesystem(temp_dir=tmp_path):
             Path("aegra.json").write_text('{"graphs": {}}')
             Path(".env").write_text("HOST=192.168.1.5\n")
 
-            with (
-                patch.dict(os.environ, {}, clear=False),
-                patch("aegra_cli.cli.subprocess.run") as mock_run,
-            ):
-                mock_run.return_value = MagicMock(returncode=0)
+            with patch.dict(os.environ, {}, clear=False):
                 result = cli_runner.invoke(cli, ["serve"])
                 assert result.exit_code == 0, result.output
 
-                cmd = mock_run.call_args[0][0]
+                cmd = serve_launch.argv
                 host_idx = cmd.index("--host")
                 assert cmd[host_idx + 1] == "192.168.1.5"
 
-    def test_serve_uvicorn_not_installed(self, cli_runner: CliRunner, tmp_path: Path) -> None:
+    def test_serve_uvicorn_not_installed(
+        self, cli_runner: CliRunner, tmp_path: Path, serve_launch: ServeLaunch
+    ) -> None:
         """Test error handling when uvicorn is not installed."""
+        serve_launch.execvp.side_effect = FileNotFoundError("uvicorn not found")
+        serve_launch.run.side_effect = FileNotFoundError("uvicorn not found")
         with cli_runner.isolated_filesystem(temp_dir=tmp_path):
             Path("aegra.json").write_text('{"graphs": {}}')
 
-            with patch("aegra_cli.cli.subprocess.run") as mock_run:
-                mock_run.side_effect = FileNotFoundError("uvicorn not found")
-                result = cli_runner.invoke(cli, ["serve"])
+            result = cli_runner.invoke(cli, ["serve"])
 
-                assert result.exit_code == 1
-                assert "uvicorn is not installed" in result.output
+            assert result.exit_code == 1
+            assert "uvicorn is not installed" in result.output
 
 
 class TestLoadEnvFile:

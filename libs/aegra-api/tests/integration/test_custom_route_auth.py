@@ -3,6 +3,7 @@
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
+from unittest.mock import AsyncMock
 
 import pytest
 from fastapi import APIRouter, Depends, FastAPI, WebSocket
@@ -61,7 +62,7 @@ def build_client(monkeypatch: pytest.MonkeyPatch) -> Callable[[bool], TestClient
         monkeypatch.setattr(main, "load_http_config", lambda: http_config)
         monkeypatch.setattr(main, "get_config_dir", lambda: Path("."))
         monkeypatch.setattr(main, "load_custom_app", lambda *_args, **_kwargs: _custom_app())
-        monkeypatch.setattr(auth_deps, "get_auth_backend", _HeaderBackend)
+        monkeypatch.setattr(auth_deps, "get_auth_backend_async", AsyncMock(return_value=_HeaderBackend()))
         return TestClient(main.create_app())
 
     return build

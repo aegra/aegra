@@ -4,11 +4,13 @@ This file contains shared fixtures and configuration that are available
 to all tests across the test suite.
 """
 
+from collections.abc import Iterator
 from unittest.mock import AsyncMock
 
 import pytest
 from httpx import HTTPStatusError
 
+from aegra_api.core.auth_middleware import _clear_auth_loader_caches
 from tests.fixtures.auth import DummyUser
 from tests.fixtures.clients import (
     create_test_app,
@@ -122,17 +124,15 @@ def runs_client():
 
 
 @pytest.fixture(autouse=True)
-def clear_auth_cache():
+def clear_auth_cache() -> Iterator[None]:
     """Clear auth caches before and after each test.
 
-    get_auth_backend() uses @lru_cache which can cause test isolation
-    issues when different tests need different auth configurations.
+    Auth loaders and get_auth_backend() are process-cached; tests that swap
+    aegra.json paths need a clean cache so they do not see a sibling's Auth.
     """
-    from aegra_api.core.auth_middleware import get_auth_backend
-
-    get_auth_backend.cache_clear()
+    _clear_auth_loader_caches()
     yield
-    get_auth_backend.cache_clear()
+    _clear_auth_loader_caches()
 
 
 # --- AUTO-SKIP GEO-BLOCK FAILURES ---

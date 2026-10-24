@@ -1,17 +1,20 @@
 """Unit tests for run_executor service."""
 
 import asyncio
+from collections.abc import AsyncIterator
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 from aegra_api.models.auth import User
-from aegra_api.models.run_job import RunExecution, RunIdentity, RunJob
+from aegra_api.models.run_job import RunBehavior, RunExecution, RunIdentity, RunJob
 from aegra_api.models.runs import Durability
 from aegra_api.services import run_executor as run_executor_module
 from aegra_api.services.run_executor import (
+    _build_run_config,
     _GraphResult,
     _lease_loss_cancellations,
+    _normalize_interrupt_value,
     _shutdown_cancellations,
     _signal_end_event,
     _signal_run_done,
@@ -22,7 +25,7 @@ from aegra_api.services.run_executor import (
 )
 
 
-async def _empty_async_gen():  # type: ignore[no-untyped-def]
+async def _empty_async_gen() -> AsyncIterator[None]:
     return
     yield  # noqa: RET504 — makes this an async generator
 
@@ -38,6 +41,28 @@ def _make_job(run_id: str = "run-1") -> RunJob:
 def _patch_execute_run_deps() -> dict[str, MagicMock | AsyncMock]:
     """Return a dict of patch targets and their mocks for execute_run tests."""
     return {}
+
+
+class TestRunInterruptConfiguration:
+    @pytest.mark.parametrize(
+        ("value", "expected"),
+        [(["agent"], ["agent"]), (["*"], "*"), ("agent", ["agent"]), ("*", "*"), (None, None)],
+    )
+    def test_normalizes_interrupt_value(
+        self: "TestRunInterruptConfiguration",
+        value: str | list[str] | None,
+        expected: str | list[str] | None,
+    ) -> None:
+        assert _normalize_interrupt_value(value) == expected
+
+    def test_interrupts_do_not_enter_run_config(self) -> None:
+        job = _make_job()
+        job = job.model_copy(update={"behavior": RunBehavior(interrupt_before=["agent"], interrupt_after=["tools"])})
+
+        config = _build_run_config(job)
+
+        assert "interrupt_before" not in config
+        assert "interrupt_after" not in config
 
 
 class TestExecuteRunSuccess:
@@ -225,6 +250,98 @@ class TestStreamNativeV2InterruptDetection:
     async def test_no_interrupt_when_absent(self) -> None:
         event = {"params": {"data": {"messages": []}}}
         assert await self._run(("values", event)) is False
+
+    @pytest.mark.asyncio
+    async def test_forwards_interrupt_kwargs_to_native_stream(
+        self: "TestStreamNativeV2InterruptDetection",
+    ) -> None:
+        job = _make_job().model_copy(
+            update={"behavior": RunBehavior(interrupt_before=["agent"], interrupt_after=["tools"])}
+        )
+        stream = MagicMock(return_value=_empty_async_gen())
+        with (
+            patch.object(run_executor_module, "stream_native_v3_events", stream),
+            patch.object(run_executor_module, "broker_manager") as bm,
+            patch.object(run_executor_module, "streaming_service") as ss,
+        ):
+            bm.allocate_event_id = AsyncMock(return_value="run-1_event_1")
+            ss.put_to_broker = AsyncMock()
+            await _stream_native_v2(
+                job,
+                MagicMock(),
+                {"msg": "x"},
+                {},
+                _GraphResult(),
+            )
+
+        assert stream.call_args.kwargs["interrupt_before"] == ["agent"]
+        assert stream.call_args.kwargs["interrupt_after"] == ["tools"]
+
+
+class TestInterruptForwarding:
+    """Both stream producers read normalized interrupt settings from the job."""
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("interrupt_before", "interrupt_after", "expected_before", "expected_after"),
+        [
+            (["agent"], None, ["agent"], None),
+            (None, ["tools"], None, ["tools"]),
+            ("*", None, "*", None),
+            (None, "*", None, "*"),
+            (None, None, None, None),
+        ],
+    )
+    async def test_legacy_stream_reads_job_behavior(
+        self: "TestInterruptForwarding",
+        interrupt_before: str | list[str] | None,
+        interrupt_after: str | list[str] | None,
+        expected_before: str | list[str] | None,
+        expected_after: str | list[str] | None,
+    ) -> None:
+        job = _make_job().model_copy(
+            update={"behavior": RunBehavior(interrupt_before=interrupt_before, interrupt_after=interrupt_after)}
+        )
+        stream = MagicMock(return_value=_empty_async_gen())
+        with patch.object(run_executor_module, "stream_graph_events", stream):
+            await _stream_legacy(job, MagicMock(), {"msg": "x"}, {}, ["values"], _GraphResult())
+
+        assert stream.call_args.kwargs["interrupt_before"] == expected_before
+        assert stream.call_args.kwargs["interrupt_after"] == expected_after
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("interrupt_before", "interrupt_after", "expected_before", "expected_after"),
+        [
+            (["agent"], None, ["agent"], None),
+            (None, ["tools"], None, ["tools"]),
+            ("*", None, "*", None),
+            (None, "*", None, "*"),
+            (None, None, None, None),
+        ],
+    )
+    async def test_native_stream_reads_job_behavior(
+        self: "TestInterruptForwarding",
+        interrupt_before: str | list[str] | None,
+        interrupt_after: str | list[str] | None,
+        expected_before: str | list[str] | None,
+        expected_after: str | list[str] | None,
+    ) -> None:
+        job = _make_job().model_copy(
+            update={"behavior": RunBehavior(interrupt_before=interrupt_before, interrupt_after=interrupt_after)}
+        )
+        stream = MagicMock(return_value=_empty_async_gen())
+        with (
+            patch.object(run_executor_module, "stream_native_v3_events", stream),
+            patch.object(run_executor_module, "broker_manager") as bm,
+            patch.object(run_executor_module, "streaming_service") as ss,
+        ):
+            bm.allocate_event_id = AsyncMock(return_value="run-1_event_1")
+            ss.put_to_broker = AsyncMock()
+            await _stream_native_v2(job, MagicMock(), {"msg": "x"}, {}, _GraphResult())
+
+        assert stream.call_args.kwargs["interrupt_before"] == expected_before
+        assert stream.call_args.kwargs["interrupt_after"] == expected_after
 
 
 class TestDurabilityForwarding:

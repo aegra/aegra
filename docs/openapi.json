@@ -2324,7 +2324,7 @@
           "Thread Runs"
         ],
         "summary": "Cancel Run Endpoint",
-        "description": "Cancel or interrupt a running execution.\n\nUse `action=cancel` to hard-cancel the run immediately, or\n`action=interrupt` to cooperatively interrupt (the graph can handle the\ninterrupt and save partial state). Set `wait=1` to wait up to 10 seconds\nfor the background task to settle before returning the updated run. The\nresponse may still report `pending` or `running` if the timeout expires.\nWithout `wait=1`, a live-owned run is cancelled asynchronously, so the\nresponse may still report `pending` or `running`.",
+        "description": "Cancel a running execution.\n\n`action=cancel` and `action=interrupt` are currently aliases: both stop\nthe run immediately and finalize it as interrupted. Neither action\nprovides cooperative graph-level handling or guarantees saved partial\nstate. Set `wait=1` to wait up to 10 seconds\nfor the background task to settle before returning the updated run. The\nresponse may still report `pending` or `running` if the timeout expires.\nWithout `wait=1`, a live-owned run is cancelled asynchronously, so the\nresponse may still report `pending` or `running`.",
         "operationId": "cancel_run_endpoint_threads__thread_id__runs__run_id__cancel_post",
         "parameters": [
           {
@@ -2369,11 +2369,11 @@
                 "interrupt"
               ],
               "type": "string",
-              "description": "Cancellation strategy: 'cancel' for hard cancel, 'interrupt' for cooperative interrupt.",
+              "description": "Accepted for compatibility: 'cancel' and 'interrupt' both stop the run immediately and finalize it as interrupted.",
               "default": "cancel",
               "title": "Action"
             },
-            "description": "Cancellation strategy: 'cancel' for hard cancel, 'interrupt' for cooperative interrupt."
+            "description": "Accepted for compatibility: 'cancel' and 'interrupt' both stop the run immediately and finalize it as interrupted."
           }
         ],
         "responses": {
@@ -2429,11 +2429,11 @@
                 "interrupt"
               ],
               "type": "string",
-              "description": "Cancellation strategy: 'cancel' for hard cancel, 'interrupt' for cooperative interrupt.",
+              "description": "Accepted for compatibility: 'cancel' and 'interrupt' both stop the run immediately and finalize it as interrupted.",
               "default": "interrupt",
               "title": "Action"
             },
-            "description": "Cancellation strategy: 'cancel' for hard cancel, 'interrupt' for cooperative interrupt."
+            "description": "Accepted for compatibility: 'cancel' and 'interrupt' both stop the run immediately and finalize it as interrupted."
           }
         ],
         "requestBody": {

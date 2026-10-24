@@ -10,6 +10,7 @@ Uses the ``stress_test`` graph (no LLM) so the run is hermetic.
 
 import asyncio
 import json
+import time
 import uuid
 from typing import Any
 
@@ -127,6 +128,44 @@ async def test_input_respond_update_lands_in_thread_state() -> None:
     state = await client.threads.get_state(thread_id)
     contents = [message.get("content") for message in state["values"]["messages"]]
     assert marker in contents, contents
+
+
+@pytest.mark.e2e
+@pytest.mark.asyncio
+async def test_stream_writes_its_first_byte_at_open() -> None:
+    """A stream with no events yet reaches the wire at open, not a ping interval later."""
+    if not await _v2_enabled():
+        pytest.skip("FF_V2_EVENT_STREAMING is disabled on the server under test")
+
+    client = get_client(url=_base_url())
+    thread = await client.threads.create()
+    ping_interval = settings.app.sse_ping_interval_secs
+
+    opening = b""
+    first_byte_at: float | None = None
+    async with httpx.AsyncClient(base_url=_base_url(), timeout=10.0) as http:
+        opened = time.monotonic()
+        async with http.stream(
+            "POST",
+            f"/threads/{thread['thread_id']}/stream/events",
+            json={"channels": ["messages"]},
+        ) as response:
+            assert response.status_code == 200
+            # aiter_raw yields transport chunks, so a frame can arrive split.
+            async for chunk in response.aiter_raw():
+                if not chunk:
+                    continue
+                if first_byte_at is None:
+                    first_byte_at = time.monotonic()
+                opening += chunk
+                if b"\r\n\r\n" in opening:
+                    break
+
+    assert first_byte_at is not None
+    elapsed = first_byte_at - opened
+    elog("first byte", {"elapsed": round(elapsed, 3), "ping_interval": ping_interval})
+    assert opening.startswith(b": heartbeat")
+    assert elapsed < ping_interval
 
 
 @pytest.mark.e2e

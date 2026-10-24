@@ -7,7 +7,7 @@ explicitly sets ``on_completion="keep"``).
 """
 
 import asyncio
-from collections.abc import AsyncIterator, Mapping
+from collections.abc import AsyncGenerator, Mapping
 from uuid import uuid4
 
 import structlog
@@ -163,7 +163,7 @@ async def stateless_wait_for_run(
     # actually subscribes to the broker.
     original_iterator = response.body_iterator
 
-    async def _wrapped_iterator() -> AsyncIterator[bytes]:
+    async def _wrapped_iterator() -> AsyncGenerator[bytes, None]:
         completed = False
         try:
             async for chunk in original_iterator:
@@ -232,7 +232,7 @@ async def stateless_stream_run(
     inner_close_handler = response.client_close_handler_callable
     run_id = _extract_run_id_from_headers(response.headers)
 
-    async def _wrapped_iterator() -> AsyncIterator[bytes]:
+    async def _wrapped_iterator() -> AsyncGenerator[bytes, None]:
         completed = False
         try:
             async for chunk in original_iterator:

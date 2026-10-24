@@ -90,6 +90,25 @@ async for chunk in client.runs.stream(
 
 When multiple modes are active, the `event` field tells you which mode each chunk comes from.
 
+### Static breakpoints with events
+
+`interrupt_before` and `interrupt_after` also pause Python graph execution when
+`stream_mode` includes `events`. Node names and the `"*"` wildcard have the same
+meaning as with ordinary streaming. The checkpoint's `next` lists the nodes
+still pending. Fetch the thread state and resume on the same thread with
+`input=None` and `checkpoint=state["checkpoint"]`.
+
+```python
+async for chunk in client.runs.stream(
+    thread_id=thread_id,
+    assistant_id="agent",
+    input={"messages": [{"type": "human", "content": "Review this"}]},
+    stream_mode=["events", "updates"],
+    interrupt_before=["tools"],
+):
+    print(chunk)
+```
+
 ## Event types
 
 During streaming, you'll receive these event types:

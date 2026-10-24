@@ -1,6 +1,7 @@
 """Unit tests for run_preparation helpers."""
 
 from collections.abc import Iterator
+from datetime import timedelta
 from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import AsyncMock, MagicMock
@@ -9,14 +10,19 @@ import pytest
 from fastapi import HTTPException
 
 from aegra_api.config import CheckpointerConfig
+from aegra_api.core.orm import Thread as ThreadORM
+from aegra_api.core.orm import ThreadTTL as ThreadTTLORM
 from aegra_api.models.runs import RunCreate
 from aegra_api.services import run_preparation as mod
+from aegra_api.services import thread_ttl as thread_ttl_module
 from aegra_api.services.run_preparation import (
     _resolve_checkpoint,
     _resolve_durability,
     _validate_resume_command,
     get_default_durability,
+    update_thread_metadata,
 )
+from aegra_api.services.thread_ttl import ThreadTTLConfig
 
 
 @pytest.fixture(autouse=True)
@@ -189,3 +195,54 @@ class TestResolveDurability:
     def test_none_without_run_value_or_server_default(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(mod, "get_default_durability", lambda: None)
         assert _resolve_durability(RunCreate(assistant_id="agent", input={"x": 1})) is None
+
+
+def _auto_create_session(calls: list[object], existing_thread: object = None) -> AsyncMock:
+    """Session where the thread lookup returns *existing_thread*; add/flush are recorded in order."""
+    session = AsyncMock()
+    session.scalar = AsyncMock(return_value=existing_thread)
+    session.add = MagicMock(side_effect=calls.append)
+    session.flush = AsyncMock(side_effect=lambda: calls.append("flush"))
+    return session
+
+
+class TestUpdateThreadMetadataTTL:
+    """A thread a run auto-creates gets the same server-default TTL as POST /threads."""
+
+    async def test_auto_created_thread_gets_server_default_ttl_row(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        config = ThreadTTLConfig(default_ttl=60, strategy="keep_latest")
+        monkeypatch.setattr(thread_ttl_module, "get_thread_ttl_config", lambda: config)
+        calls: list[object] = []
+
+        await update_thread_metadata(_auto_create_session(calls), "t1", "asst-1", "agent", user_id="u1")
+
+        ttl_rows = [call for call in calls if isinstance(call, ThreadTTLORM)]
+        assert len(ttl_rows) == 1, calls
+        ttl_row = ttl_rows[0]
+        assert ttl_row.thread_id == "t1"
+        assert ttl_row.strategy == "keep_latest"
+        assert ttl_row.ttl_minutes == 60
+        assert ttl_row.expires_at - ttl_row.created_at == timedelta(minutes=60)
+        # thread_ttl has no relationship() to thread, so the thread row must be flushed first.
+        assert isinstance(calls[0], ThreadORM)
+        assert calls.index("flush") < calls.index(ttl_row)
+
+    async def test_auto_created_thread_gets_no_ttl_row_without_server_config(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(thread_ttl_module, "get_thread_ttl_config", lambda: None)
+        calls: list[object] = []
+
+        await update_thread_metadata(_auto_create_session(calls), "t1", "asst-1", "agent", user_id="u1")
+
+        assert len(calls) == 1
+        assert isinstance(calls[0], ThreadORM)
+
+    async def test_existing_thread_gets_no_ttl_row(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(thread_ttl_module, "get_thread_ttl_config", lambda: ThreadTTLConfig(default_ttl=60))
+        calls: list[object] = []
+        session = _auto_create_session(calls, existing_thread=SimpleNamespace(thread_id="t1"))
+
+        await update_thread_metadata(session, "t1", "asst-1", "agent", user_id="u1")
+
+        assert calls == []

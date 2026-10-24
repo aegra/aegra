@@ -6,6 +6,11 @@ verifying HTTP status codes, request validation, and delegation behaviour.
 
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import pytest
+
+from aegra_api.core.orm import ThreadTTL as ThreadTTLORM
+from aegra_api.services import thread_ttl as thread_ttl_module
+from aegra_api.services.thread_ttl import ThreadTTLConfig
 from tests.fixtures.clients import create_test_app, make_client
 from tests.fixtures.database import DummySessionBase
 from tests.fixtures.session_fixtures import BasicSession, override_session_dependency
@@ -402,6 +407,55 @@ class TestStatelessCreateRun:
             )
         # Validation conflict is removed; request proceeds to assistant lookup
         assert resp.status_code == 404
+
+    def test_kept_thread_gets_server_default_ttl_row(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A kept stateless thread expires under the server TTL, like one from POST /threads."""
+        monkeypatch.setattr(
+            thread_ttl_module,
+            "get_thread_ttl_config",
+            lambda: ThreadTTLConfig(default_ttl=60, strategy="delete"),
+        )
+        app = create_test_app(include_runs=True, include_threads=False)
+        assistant = _assistant_row()
+        added: list[object] = []
+
+        class Session(DummySessionBase):
+            async def scalar(self, stmt: object) -> object:
+                return assistant if "from assistant" in str(stmt).lower() else None
+
+            def add(self, obj: object) -> None:
+                added.append(obj)
+
+            async def flush(self) -> None:
+                pass
+
+            async def execute(self, stmt: object) -> object:
+                class Result:
+                    rowcount = 1
+
+                return Result()
+
+        override_session_dependency(app, Session)
+        client = make_client(app)
+
+        with (
+            patch("aegra_api.services.run_preparation.get_langgraph_service") as mock_service,
+            patch("aegra_api.services.run_preparation.executor") as mock_executor,
+        ):
+            mock_service.return_value.list_graphs.return_value = ["test-graph"]
+            mock_executor.submit = AsyncMock(return_value=None)
+
+            resp = client.post(
+                "/runs",
+                json={"assistant_id": "test-assistant-123", "input": {"msg": "hi"}, "on_completion": "keep"},
+            )
+
+        assert resp.status_code == 200
+        ttl_rows = [obj for obj in added if isinstance(obj, ThreadTTLORM)]
+        assert len(ttl_rows) == 1, added
+        assert ttl_rows[0].thread_id == resp.json()["thread_id"]
+        assert ttl_rows[0].ttl_minutes == 60
+        assert ttl_rows[0].strategy == "delete"
 
 
 # ---------------------------------------------------------------------------

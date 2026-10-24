@@ -28,6 +28,7 @@ from aegra_api.models.runs import Durability
 from aegra_api.services.executor import executor
 from aegra_api.services.langgraph_service import get_langgraph_service
 from aegra_api.services.run_status import set_thread_status
+from aegra_api.services.thread_ttl import resolve_thread_ttl_row
 from aegra_api.settings import settings
 from aegra_api.utils.assistants import resolve_assistant_id
 from aegra_api.utils.jsonb import jsonb_patch, jsonb_shallow_merge
@@ -146,7 +147,8 @@ async def update_thread_metadata(
 ) -> None:
     """Update thread metadata with assistant and graph information.
 
-    If thread doesn't exist, auto-creates it.
+    If thread doesn't exist, auto-creates it with the server-default TTL, as
+    POST /threads does.
     When *input_data* is provided and the thread has no name yet, the first
     human message content is used as ``thread_name``.
     Does NOT commit — the caller controls the transaction boundary.
@@ -177,6 +179,11 @@ async def update_thread_metadata(
             user_id=user_id,
         )
         session.add(thread_orm)
+        ttl_row = resolve_thread_ttl_row(thread_id)
+        if ttl_row is not None:
+            # No relationship() orders these inserts, so flush the thread before its FK child.
+            await session.flush()
+            session.add(ttl_row)
         return
 
     patches: list[ColumnElement[Any]] = [

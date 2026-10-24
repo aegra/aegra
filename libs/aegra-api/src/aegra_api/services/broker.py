@@ -132,7 +132,7 @@ class BrokerManager(BaseBrokerManager):
             logger.debug(f"Created new broker for run {run_id}")
         return self._brokers[run_id]
 
-    def get_broker(self, run_id: str) -> RunBroker | None:
+    def get_broker(self, run_id: str, *, for_replay: bool = False) -> RunBroker | None:
         return self._brokers.get(run_id)
 
     def cleanup_broker(self, run_id: str) -> None:

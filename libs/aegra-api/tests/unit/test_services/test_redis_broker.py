@@ -562,6 +562,36 @@ class TestRedisRunBroker:
         broker = self._make_broker()
         assert not broker.is_finished()
 
+    @pytest.mark.asyncio
+    async def test_refresh_ttl_extends_cache_and_counter(self) -> None:
+        """Test that refresh_ttl extends expiration on cache and counter keys."""
+        broker = self._make_broker()
+        mock_pipe = MagicMock()
+        mock_pipe.execute = AsyncMock()
+        mock_client = MagicMock()
+        mock_client.pipeline.return_value = mock_pipe
+
+        with patch("aegra_api.services.redis_broker.redis_manager") as mock_rm:
+            mock_rm.get_client.return_value = mock_client
+            await broker.refresh_ttl(120)
+
+        mock_pipe.expire.assert_any_call("aegra:run:cache:run-123", 120)
+        mock_pipe.expire.assert_any_call("aegra:run:counter:run-123", 120)
+        mock_pipe.execute.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_refresh_ttl_handles_redis_error(self) -> None:
+        """Test that refresh_ttl logs warning and does not raise on RedisError."""
+        broker = self._make_broker()
+        mock_pipe = MagicMock()
+        mock_pipe.execute = AsyncMock(side_effect=RedisConnectionError("Redis down"))
+        mock_client = MagicMock()
+        mock_client.pipeline.return_value = mock_pipe
+
+        with patch("aegra_api.services.redis_broker.redis_manager") as mock_rm:
+            mock_rm.get_client.return_value = mock_client
+            await broker.refresh_ttl()
+
 
 class TestRedisBrokerManager:
     """Test RedisBrokerManager class"""
@@ -772,3 +802,51 @@ class TestRedisBrokerManager:
 
             await manager.stop()
             assert manager._running is False
+
+    @pytest.mark.asyncio
+    async def test_refresh_replay_ttl_delegates_to_cached_broker(self) -> None:
+        """Test that refresh_replay_ttl calls refresh_ttl on active cached broker."""
+        manager = self._make_manager()
+        mock_broker = MagicMock()
+        mock_broker.refresh_ttl = AsyncMock()
+
+        with patch.object(manager, "get_broker", return_value=mock_broker):
+            await manager.refresh_replay_ttl("run-123")
+
+        mock_broker.refresh_ttl.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_refresh_replay_ttl_refreshes_keys_directly_when_no_broker(self) -> None:
+        """Test that refresh_replay_ttl pipelines key expiration when broker is not in memory."""
+        manager = self._make_manager()
+        mock_pipe = MagicMock()
+        mock_pipe.execute = AsyncMock()
+        mock_client = MagicMock()
+        mock_client.pipeline.return_value = mock_pipe
+
+        with (
+            patch.object(manager, "get_broker", return_value=None),
+            patch("aegra_api.services.redis_broker.redis_manager") as mock_rm,
+        ):
+            mock_rm.get_client.return_value = mock_client
+            await manager.refresh_replay_ttl("run-123")
+
+        mock_pipe.expire.assert_any_call("aegra:run:cache:run-123", 600)
+        mock_pipe.expire.assert_any_call("aegra:run:counter:run-123", 600)
+        mock_pipe.execute.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_refresh_replay_ttl_handles_redis_error(self) -> None:
+        """Test that refresh_replay_ttl catches RedisError gracefully when executing pipeline."""
+        manager = self._make_manager()
+        mock_pipe = MagicMock()
+        mock_pipe.execute = AsyncMock(side_effect=RedisConnectionError("Redis down"))
+        mock_client = MagicMock()
+        mock_client.pipeline.return_value = mock_pipe
+
+        with (
+            patch.object(manager, "get_broker", return_value=None),
+            patch("aegra_api.services.redis_broker.redis_manager") as mock_rm,
+        ):
+            mock_rm.get_client.return_value = mock_client
+            await manager.refresh_replay_ttl("run-123")

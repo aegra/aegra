@@ -222,7 +222,12 @@ async def _stream_legacy(
         if isinstance(event_data, dict) and "__interrupt__" in event_data:
             result.has_interrupt = True
         if event_type.startswith("values"):
-            result.data = event_data
+            if isinstance(event_data, dict) and "__interrupt__" in event_data:
+                keys = set(event_data.keys()) - {"__interrupt__"}
+                if keys:
+                    result.data = event_data
+            else:
+                result.data = event_data
 
 
 async def _stream_native_v2(

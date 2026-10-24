@@ -1,12 +1,15 @@
 """Unit tests for run_executor service."""
 
 import asyncio
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from langgraph.graph import StateGraph
+from typing_extensions import TypedDict
 
 from aegra_api.models.auth import User
-from aegra_api.models.run_job import RunExecution, RunIdentity, RunJob
+from aegra_api.models.run_job import RunBehavior, RunExecution, RunIdentity, RunJob
 from aegra_api.models.runs import Durability
 from aegra_api.services import run_executor as run_executor_module
 from aegra_api.services.run_executor import (
@@ -199,6 +202,7 @@ class TestStreamNativeV2InterruptDetection:
     the run finalizes 'success' and the client gets input.requested + completed."""
 
     async def _run(self, *events: tuple[str, dict]) -> bool:
+        """Stream the scripted events through _stream_native_v2 and report has_interrupt."""
         result = _GraphResult()
         with (
             patch.object(run_executor_module, "stream_native_v3_events", _v3_stream(*events)),
@@ -212,19 +216,33 @@ class TestStreamNativeV2InterruptDetection:
 
     @pytest.mark.asyncio
     async def test_interrupt_via_values_params_interrupts(self) -> None:
+        """The documented shape puts interrupts under params.interrupts on a values event."""
         event = {"params": {"data": {"messages": []}, "interrupts": [{"id": "i1", "value": 1}]}}
         assert await self._run(("values", event)) is True
 
     @pytest.mark.asyncio
     async def test_interrupt_via_updates_dunder_interrupt(self) -> None:
-        # The path session.py routes to input.requested but the executor missed.
+        """The path session.py routes to input.requested but the executor missed."""
         event = {"params": {"data": {"__interrupt__": [{"id": "i1", "value": 1}]}}}
         assert await self._run(("updates", event)) is True
 
     @pytest.mark.asyncio
     async def test_no_interrupt_when_absent(self) -> None:
+        """A values event with neither interrupts key nor marker is a normal completion."""
         event = {"params": {"data": {"messages": []}}}
         assert await self._run(("values", event)) is False
+
+    @pytest.mark.asyncio
+    async def test_interrupt_via_empty_updates_dunder_interrupt(self) -> None:
+        """A static-breakpoint marker holds no Interrupt objects yet still means paused."""
+        event = {"params": {"data": {"__interrupt__": ()}}}
+        assert await self._run(("updates", event)) is True
+
+    @pytest.mark.asyncio
+    async def test_interrupt_via_empty_list_updates_dunder_interrupt(self) -> None:
+        """LangGraph serializes the marker as a list as well as a tuple, so both must be checked."""
+        event = {"params": {"data": {"__interrupt__": []}}}
+        assert await self._run(("updates", event)) is True
 
 
 class TestDurabilityForwarding:
@@ -255,6 +273,100 @@ class TestDurabilityForwarding:
             await _stream_native_v2(self._job(durability), MagicMock(), {"msg": "x"}, {}, _GraphResult())
 
         assert stream.call_args.kwargs["durability"] == durability
+
+
+class TestStreamLegacyInterruptDetection:
+    """_stream_legacy must detect interrupts including empty __interrupt__."""
+
+    async def _run(self, *events: tuple[str, dict]) -> bool:
+        """Stream the scripted events through _stream_legacy and report has_interrupt."""
+
+        async def gen(**_kwargs: Any) -> Any:
+            """Replay the scripted events as the legacy stream producer would."""
+            for event_type, event_data in events:
+                yield event_type, event_data
+
+        result = _GraphResult()
+        with (
+            patch.object(run_executor_module, "stream_graph_events", gen),
+            patch.object(run_executor_module, "broker_manager") as bm,
+            patch.object(run_executor_module, "streaming_service") as ss,
+        ):
+            bm.allocate_event_id = AsyncMock(return_value="run-1_event_1")
+            ss.put_to_broker = AsyncMock()
+            await _stream_legacy(_make_job(), MagicMock(), {"msg": "x"}, {}, ["values"], result)
+        return result.has_interrupt
+
+    @pytest.mark.asyncio
+    async def test_interrupt_with_empty_tuple(self) -> None:
+        """The exact shape static breakpoints emit, and the one that went undetected before."""
+        assert await self._run(("updates", {"__interrupt__": ()})) is True
+
+    @pytest.mark.asyncio
+    async def test_interrupt_with_empty_list(self) -> None:
+        """A list arrives where a tuple did, so emptiness must be checked per type."""
+        assert await self._run(("updates", {"__interrupt__": []})) is True
+
+    @pytest.mark.asyncio
+    async def test_interrupt_with_values_and_empty_tuple(self) -> None:
+        """graph_streaming remaps interrupt updates onto values, so that shape must count too."""
+        assert await self._run(("values", {"__interrupt__": ()})) is True
+
+    @pytest.mark.asyncio
+    async def test_interrupt_with_non_empty(self) -> None:
+        """Dynamic interrupt() payloads must keep flagging the run after this change."""
+        assert await self._run(("updates", {"__interrupt__": [{"id": "1"}]})) is True
+
+    @pytest.mark.asyncio
+    async def test_no_interrupt(self) -> None:
+        """A values event with no marker must still finalize as a success."""
+        assert await self._run(("values", {"data": "ok"})) is False
+
+    @pytest.mark.asyncio
+    async def test_static_breakpoint_preserves_partial_output(self) -> None:
+        """The producer remaps a static interrupt onto a values event, so the marker
+        arrives without a new snapshot and the earlier one has to survive it."""
+        result = _GraphResult()
+
+        async def gen(**_kwargs: Any) -> Any:
+            """Emit the pre-breakpoint snapshot, then the empty marker the producer emits."""
+            yield "values", {"state": "after_a"}
+            yield "values", {"__interrupt__": ()}
+
+        with (
+            patch.object(run_executor_module, "stream_graph_events", gen),
+            patch.object(run_executor_module, "broker_manager") as bm,
+            patch.object(run_executor_module, "streaming_service") as ss,
+        ):
+            bm.allocate_event_id = AsyncMock(return_value="run-1_event_1")
+            ss.put_to_broker = AsyncMock()
+            await _stream_legacy(_make_job(), MagicMock(), {"msg": "x"}, {}, ["values"], result)
+
+        assert result.has_interrupt is True
+        assert result.data == {"state": "after_a"}
+
+    @pytest.mark.asyncio
+    async def test_static_breakpoint_values_event_with_only_interrupt_preserves_output(self) -> None:
+        """Same remapped shape as above but with output already saved, isolating the
+        overwrite bug from the empty-snapshot case."""
+        result = _GraphResult()
+        result.data = {"state": "existing"}
+
+        async def gen(**_kwargs: Any) -> Any:
+            """Emit the marker alone, so no new state accompanies the interruption."""
+            yield "values", {"__interrupt__": ()}
+
+        with (
+            patch.object(run_executor_module, "stream_graph_events", gen),
+            patch.object(run_executor_module, "broker_manager") as bm,
+            patch.object(run_executor_module, "streaming_service") as ss,
+        ):
+            bm.allocate_event_id = AsyncMock(return_value="run-1_event_1")
+            ss.put_to_broker = AsyncMock()
+            await _stream_legacy(_make_job(), MagicMock(), {"msg": "x"}, {}, ["values"], result)
+
+        assert result.has_interrupt is True
+        assert result.data == {"state": "existing"}
 
 
 class TestSignalEndEvent:
@@ -502,3 +614,95 @@ class TestTerminalStateRaces:
             await execute_run(_make_job())
 
         mock_signal_end.assert_not_awaited()
+
+
+class TestStaticBreakpointWithRealGraph:
+    """Drives a real compiled graph so the event reaches the executor through the producer."""
+
+    @pytest.mark.asyncio
+    async def test_static_breakpoint_interrupt_before_with_real_graph(self) -> None:
+        """A hand-fed event cannot catch a producer that drops the marker, so this drives a graph."""
+
+        class State(TypedDict):
+            value: int
+
+        def node_a(state: State) -> State:
+            """Runs to completion before the breakpoint, so its state is the partial output."""
+            return {"value": state["value"] + 1}
+
+        def node_b(state: State) -> State:
+            """Never executes, because the breakpoint halts the graph before this node."""
+            return {"value": state["value"] + 10}
+
+        builder = StateGraph(State)
+        builder.add_node("a", node_a)
+        builder.add_node("b", node_b)
+        builder.set_entry_point("a")
+        builder.add_edge("a", "b")
+        builder.add_edge("b", "__end__")
+        graph = builder.compile()
+
+        result = _GraphResult()
+
+        job = RunJob(
+            identity=RunIdentity(run_id="run-1", thread_id="thread-1", graph_id="graph-1"),
+            user=User(identity="user-1"),
+            execution=RunExecution(input_data={"value": 1}),
+            behavior=RunBehavior(interrupt_before=["b"]),
+        )
+
+        await _stream_legacy(
+            job,
+            graph,
+            {"value": 1},
+            {"configurable": {"thread_id": "thread-1", "run_id": "run-1"}, "interrupt_before": ["b"]},
+            ["values"],
+            result,
+        )
+
+        assert result.has_interrupt is True
+        assert result.data == {"value": 2}
+
+    @pytest.mark.asyncio
+    async def test_static_breakpoint_values_event_with_only_interrupt_no_existing_output(self) -> None:
+        """With nothing saved yet the result must stay empty rather than become None,
+        which a naive assign-from-event would produce."""
+        result = _GraphResult()  # no existing data
+
+        async def gen(**_kwargs: Any) -> Any:
+            """Emit the marker alone, with no earlier output saved to retain."""
+            yield "values", {"__interrupt__": ()}
+
+        with (
+            patch.object(run_executor_module, "stream_graph_events", gen),
+            patch.object(run_executor_module, "broker_manager") as bm,
+            patch.object(run_executor_module, "streaming_service") as ss,
+        ):
+            bm.allocate_event_id = AsyncMock(return_value="run-1_event_1")
+            ss.put_to_broker = AsyncMock()
+            await _stream_legacy(_make_job(), MagicMock(), {"msg": "x"}, {}, ["values"], result)
+
+        assert result.has_interrupt is True
+        assert result.data == {}
+
+    @pytest.mark.asyncio
+    async def test_values_event_with_interrupt_and_data_updates_output(self) -> None:
+        """Guards against over-correcting: suppressing output for every event that
+        carries a marker would drop legitimate state that arrives alongside it."""
+        result = _GraphResult()
+
+        async def gen(**_kwargs: Any) -> Any:
+            """Emit a marker that carries real state alongside it, so output must advance."""
+            yield "values", {"state": "updated", "__interrupt__": ()}
+
+        with (
+            patch.object(run_executor_module, "stream_graph_events", gen),
+            patch.object(run_executor_module, "broker_manager") as bm,
+            patch.object(run_executor_module, "streaming_service") as ss,
+        ):
+            bm.allocate_event_id = AsyncMock(return_value="run-1_event_1")
+            ss.put_to_broker = AsyncMock()
+            await _stream_legacy(_make_job(), MagicMock(), {"msg": "x"}, {}, ["values"], result)
+
+        assert result.has_interrupt is True
+        assert result.data == {"state": "updated", "__interrupt__": ()}

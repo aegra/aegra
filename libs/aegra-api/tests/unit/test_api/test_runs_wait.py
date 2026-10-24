@@ -12,6 +12,7 @@ from uuid import uuid4
 
 import pytest
 from fastapi import HTTPException
+from redis import ConnectionError as RedisConnectionError
 
 from aegra_api.api.runs import wait_for_run
 from aegra_api.core.orm import Assistant as AssistantORM
@@ -165,6 +166,51 @@ class TestWaitForRunExceptionPaths:
             result = await _consume_streaming_response(response)
 
         assert result["__error__"]["error"] == "TimeoutError"
+
+    @pytest.mark.asyncio
+    async def test_wait_for_run_waits_when_dispatch_fails_after_commit(self: "TestWaitForRunExceptionPaths") -> None:
+        """The committed run is dispatched later by the reaper; the wait covers that delay."""
+        thread_id = "test-thread-123"
+        run_id = str(uuid4())
+        user = User(identity="test-user", scopes=[])
+        request = _make_request()
+
+        session_1 = AsyncMock()
+        session_1.add = MagicMock()
+        session_1.scalar.side_effect = [None, _make_assistant()]
+        session_2 = AsyncMock()
+        session_2.scalar.return_value = _make_run_orm(run_id, thread_id, output={"result": "late"})
+        mock_maker = _make_multi_session_maker(session_1, session_2)
+
+        with (
+            patch("aegra_api.api.runs._get_session_maker", return_value=mock_maker),
+            patch("aegra_api.services.run_waiters._get_session_maker", return_value=mock_maker),
+            patch("aegra_api.services.run_preparation._validate_resume_command", new_callable=AsyncMock),
+            patch("aegra_api.services.run_preparation.get_langgraph_service") as mock_lg_service,
+            patch("aegra_api.services.run_preparation.resolve_assistant_id", return_value="test-assistant"),
+            patch("aegra_api.services.run_preparation.set_thread_status", new_callable=AsyncMock),
+            patch("aegra_api.services.run_preparation.update_thread_metadata", new_callable=AsyncMock),
+            patch("aegra_api.services.run_preparation.uuid4", return_value=run_id),
+            patch(
+                "aegra_api.services.run_preparation.executor.submit",
+                new_callable=AsyncMock,
+                side_effect=RedisConnectionError("Connection lost"),
+            ),
+            patch("aegra_api.services.run_waiters.executor") as mock_executor,
+            patch("aegra_api.services.run_waiters.settings") as mock_settings,
+            patch("aegra_api.api.runs.active_runs", {}),
+        ):
+            mock_lg_service.return_value.list_graphs.return_value = ["test-graph"]
+            mock_executor.wait_for_completion = AsyncMock()
+            mock_settings.app.KEEPALIVE_INTERVAL_SECS = 5
+            mock_settings.worker.BG_JOB_TIMEOUT_SECS = 3600
+
+            response = await wait_for_run(thread_id, request, user)
+            result = await _consume_streaming_response(response)
+
+        assert result == {"result": "late"}
+        session_1.commit.assert_called_once()
+        mock_executor.wait_for_completion.assert_awaited_once()
 
     @pytest.mark.asyncio
     async def test_wait_for_run_success(self) -> None:

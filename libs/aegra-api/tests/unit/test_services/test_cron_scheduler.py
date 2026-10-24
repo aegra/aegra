@@ -10,7 +10,9 @@ from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
 from fastapi import HTTPException
+from redis import ConnectionError as RedisConnectionError
 
+from aegra_api.core.orm import Assistant as AssistantORM
 from aegra_api.services.cron_scheduler import CronScheduler, _build_run_create
 
 # ---------------------------------------------------------------------------
@@ -369,6 +371,54 @@ class TestFireCron:
             await scheduler._fire_cron(mock_session, cron)
 
         mock_delete.assert_awaited_once_with("eph-thread-fail", cron.user_id)
+
+    @pytest.mark.asyncio
+    async def test_dispatch_failure_after_the_run_is_saved_still_advances_the_schedule(self: "TestFireCron") -> None:
+        """Regression: a failed queue push surfaced as a setup failure, so the claim was
+        released and the next tick fired a second run while the reaper ran the first."""
+        scheduler = CronScheduler()
+        cron = _make_cron_orm(thread_id=None, end_time=None, payload={"input": {"msg": "tick"}})
+        cron.end_time = None
+        assistant = AssistantORM(
+            assistant_id="asst-001",
+            graph_id="test-graph",
+            config={},
+            context={},
+            user_id="test-user",
+            created_at=datetime.now(UTC),
+            updated_at=datetime.now(UTC),
+        )
+        mock_session = AsyncMock()
+        mock_session.add = Mock()
+        mock_session.scalar = AsyncMock(return_value=assistant)
+
+        with (
+            patch("aegra_api.services.cron_scheduler.uuid4", return_value="eph-thread-dispatch"),
+            patch("aegra_api.services.run_preparation._validate_resume_command", new_callable=AsyncMock),
+            patch("aegra_api.services.run_preparation.get_langgraph_service") as mock_lg_service,
+            patch("aegra_api.services.run_preparation.resolve_assistant_id", return_value="asst-001"),
+            patch("aegra_api.services.run_preparation.update_thread_metadata", new_callable=AsyncMock),
+            patch("aegra_api.services.run_preparation.set_thread_status", new_callable=AsyncMock),
+            patch(
+                "aegra_api.services.run_preparation.executor.submit",
+                new_callable=AsyncMock,
+                side_effect=RedisConnectionError("Connection lost"),
+            ),
+            patch("aegra_api.services.cron_scheduler.CronService") as mock_cron_service,
+            patch("aegra_api.services.cron_scheduler.schedule_background_cleanup") as mock_schedule_cleanup,
+            patch(
+                "aegra_api.services.cron_scheduler.delete_thread_by_id",
+                new_callable=AsyncMock,
+            ) as mock_delete,
+        ):
+            mock_lg_service.return_value.list_graphs.return_value = ["test-graph"]
+            mock_cron_service.return_value.advance_next_run = AsyncMock()
+            await scheduler._fire_cron(mock_session, cron)
+
+        mock_session.commit.assert_awaited()
+        mock_cron_service.return_value.advance_next_run.assert_awaited_once_with(cron)
+        mock_delete.assert_not_awaited()
+        mock_schedule_cleanup.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_uses_cron_thread_id_when_set(self) -> None:

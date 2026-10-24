@@ -74,6 +74,9 @@ class DummySessionBase:
         """AsyncSession.add is sync in SQLAlchemy"""
         return None
 
+    async def close(self) -> None:
+        return None
+
     async def commit(self):
         return None
 

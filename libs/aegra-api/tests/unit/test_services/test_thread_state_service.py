@@ -3,6 +3,8 @@
 from datetime import UTC, datetime
 from unittest.mock import patch
 
+from langchain_core.messages import AIMessage
+
 from aegra_api.services.thread_state_service import ThreadStateService
 from tests.fixtures.langgraph import make_interrupt, make_snapshot, make_task
 
@@ -128,3 +130,57 @@ def test_convert_snapshots_to_thread_states_skips_failures():
 
     assert result == ["converted"]
     assert mock_convert.call_count == 2
+
+
+class TestExtractThreadValues:
+    def test_maps_interrupts_by_task_id_and_skips_tasks_without_interrupts(self) -> None:
+        service = ThreadStateService()
+        interrupt = make_interrupt(value="approve?", interrupt_id="int-1")
+        snapshot = make_snapshot(
+            {"messages": ["hi"]},
+            {"configurable": {"checkpoint_id": "cp-1"}},
+            tasks=(
+                make_task(id="task-1", interrupts=(interrupt,)),
+                make_task(id="task-2", interrupts=()),
+            ),
+        )
+
+        result = service.extract_thread_values(snapshot)
+
+        assert result.values == {"messages": ["hi"]}
+        assert result.interrupts == {"task-1": [{"value": "approve?", "id": "int-1"}]}
+        assert result.checkpoint_id == "cp-1"
+
+    def test_serializes_message_objects_to_json_safe_dicts(self) -> None:
+        service = ThreadStateService()
+        snapshot = make_snapshot(
+            {"messages": [AIMessage(content="sunny in Paris", id="msg-1")]},
+            {"configurable": {"checkpoint_id": "cp-1"}},
+            tasks=(),
+        )
+
+        result = service.extract_thread_values(snapshot)
+
+        [message] = result.values["messages"]
+        assert message["type"] == "ai"
+        assert message["content"] == "sunny in Paris"
+        assert result.interrupts == {}
+
+    def test_returns_empty_values_when_snapshot_has_no_state(self) -> None:
+        service = ThreadStateService()
+        snapshot = make_snapshot({}, {"configurable": {}}, tasks=None)
+
+        result = service.extract_thread_values(snapshot)
+
+        assert result.values == {}
+        assert result.interrupts == {}
+        assert result.checkpoint_id is None
+
+    def test_drops_non_mapping_values(self) -> None:
+        service = ThreadStateService()
+        snapshot = make_snapshot({}, {"configurable": {}}, tasks=())
+        snapshot.values = ["not", "a", "mapping"]
+
+        result = service.extract_thread_values(snapshot)
+
+        assert result.values == {}

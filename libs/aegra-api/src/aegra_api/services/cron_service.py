@@ -350,6 +350,10 @@ class CronService:
         if new_payload:
             existing_payload.update(new_payload)
             values["payload"] = existing_payload
+        # An explicit null stops the cron calling its webhook; an omitted field leaves it as is.
+        if "webhook" in request.model_fields_set and request.webhook is None:
+            existing_payload.pop("webhook", None)
+            values["payload"] = existing_payload
 
         # Recompute next_run when schedule/timezone changes OR when re-enabling
         # a cron whose stored next_run_date is already in the past — otherwise

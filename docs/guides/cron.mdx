@@ -192,6 +192,12 @@ updated = await client.crons.update(
 
 Supported update fields: `schedule`, `enabled`, `input`, `config`, `metadata`, `timezone`, `durability`, `webhook`.
 
+To stop a cron calling its webhook, send `"webhook": null`; leaving the field out keeps the current one. The Python SDK drops `None` arguments from `crons.update`, so send the PATCH directly:
+
+```python
+await client.http.patch(f"/runs/crons/{cron_id}", json={"webhook": None})
+```
+
 ## Disabling and re-enabling
 
 ```python

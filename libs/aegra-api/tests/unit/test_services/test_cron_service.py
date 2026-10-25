@@ -914,6 +914,50 @@ class TestUpdateCronExtended:
         assert resp.payload["webhook"] == "https://new.com"
 
     @pytest.mark.asyncio
+    async def test_explicit_null_webhook_removes_it(
+        self,
+        cron_service: CronService,
+        mock_session: AsyncMock,
+    ) -> None:
+        existing = _make_cron_orm(payload={"input": {"q": 1}, "webhook": "https://old.com/hook"})
+        mock_session.scalar.side_effect = [existing, _make_cron_orm(payload={"input": {"q": 1}})]
+
+        await cron_service.update_cron("cron-001", CronUpdate.model_validate({"webhook": None}), "test-user")
+
+        execute_params = mock_session.execute.await_args_list[0].args[0].compile().params
+        assert execute_params["payload"] == {"input": {"q": 1}}
+
+    @pytest.mark.asyncio
+    async def test_null_webhook_is_removed_alongside_other_payload_changes(
+        self,
+        cron_service: CronService,
+        mock_session: AsyncMock,
+    ) -> None:
+        existing = _make_cron_orm(payload={"input": {"q": 1}, "webhook": "https://old.com/hook"})
+        mock_session.scalar.side_effect = [existing, _make_cron_orm(payload={"input": {"q": 2}})]
+
+        await cron_service.update_cron(
+            "cron-001", CronUpdate.model_validate({"webhook": None, "input": {"q": 2}}), "test-user"
+        )
+
+        execute_params = mock_session.execute.await_args_list[0].args[0].compile().params
+        assert execute_params["payload"] == {"input": {"q": 2}}
+
+    @pytest.mark.asyncio
+    async def test_omitted_webhook_leaves_it_in_place(
+        self,
+        cron_service: CronService,
+        mock_session: AsyncMock,
+    ) -> None:
+        existing = _make_cron_orm(payload={"input": {"q": 1}, "webhook": "https://old.com/hook"})
+        mock_session.scalar.side_effect = [existing, existing]
+
+        await cron_service.update_cron("cron-001", CronUpdate(enabled=False), "test-user")
+
+        execute_params = mock_session.execute.await_args_list[0].args[0].compile().params
+        assert "payload" not in execute_params
+
+    @pytest.mark.asyncio
     async def test_empty_update_still_sets_updated_at(
         self,
         cron_service: CronService,

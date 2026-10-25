@@ -37,7 +37,7 @@ A URL the server will not call is rejected with `422` before anything is created
 
 ## When it fires
 
-The webhook fires once per run, after the run's final status is saved:
+Each run schedules one webhook delivery, after its final status is saved:
 
 | `status` | When |
 |:--|:--|
@@ -45,7 +45,7 @@ The webhook fires once per run, after the run's final status is saved:
 | `interrupted` | The graph paused for human input, or the run was cancelled while running. |
 | `error` | The graph raised, the run hit `BG_JOB_TIMEOUT_SECS`, or workers kept crashing until `BG_JOB_MAX_RETRIES` ran out. |
 
-Whoever saves the final status sends the webhook, so each run fires exactly once. A run that a worker hands back (lease loss, shutdown drain) fires when it finishes on the worker that completes it. A run cancelled while it executes reports the state it reached and its `run_started_at`. A run cancelled before it started, or whose worker stopped renewing its lease, fires `interrupted` from the cancel request with `values` and `run_started_at` set to `null`.
+Whoever saves the final status schedules the delivery, so two processes never both report the same run. Delivery itself is [best effort](#delivery): it can be dropped, and a retry after a timeout can reach a receiver that already handled the first attempt, so deduplicate by `run_id`. A run that a worker hands back (lease loss, shutdown drain) fires when it finishes on the worker that completes it. A run cancelled while it executes reports the state it reached and its `run_started_at`. A run cancelled before it started, or whose worker stopped renewing its lease, fires `interrupted` from the cancel request with `values` and `run_started_at` set to `null`.
 
 ## Payload
 

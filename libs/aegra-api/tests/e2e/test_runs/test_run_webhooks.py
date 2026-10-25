@@ -197,6 +197,40 @@ async def test_cancelled_run_reports_interrupted_once(receiver: _Receiver) -> No
     assert len(receiver.deliveries(run["run_id"])) == 1
 
 
+async def _wait_for_checkpointed_steps(client: Any, thread_id: str, steps: int, *, timeout: float = 30.0) -> None:
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
+    while ((await client.threads.get_state(thread_id)).get("values") or {}).get("step_count", 0) < steps:
+        if loop.time() >= deadline:
+            raise AssertionError(f"Thread {thread_id} did not reach step {steps} within {timeout}s")
+        await asyncio.sleep(0.25)
+
+
+@pytest.mark.e2e
+@pytest.mark.asyncio
+async def test_run_cancelled_mid_execution_reports_its_progress(receiver: _Receiver) -> None:
+    client = get_e2e_client()
+    assistant = await client.assistants.create(graph_id="stress_test", if_exists="do_nothing")
+    thread = await client.threads.create()
+
+    run = await _create_run(
+        client,
+        thread["thread_id"],
+        assistant["assistant_id"],
+        input=_stress_input(delay=1, steps=10),
+        webhook=receiver.url,
+    )
+    # Two checkpointed steps, so the executor has certainly consumed the first one's values.
+    await _wait_for_checkpointed_steps(client, thread["thread_id"], 2)
+    await client.runs.cancel(thread["thread_id"], run["run_id"])
+    payload, _headers = await receiver.wait_for(run["run_id"])
+    elog("Cancelled run webhook payload", payload)
+
+    assert payload["status"] == "interrupted"
+    assert payload["run_started_at"] is not None
+    assert payload["values"]["step_count"] >= 1
+
+
 @pytest.mark.e2e
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
@@ -252,6 +286,35 @@ async def test_cron_fired_run_posts_its_webhook(receiver: _Receiver) -> None:
     finally:
         for cron in await client.crons.search(thread_id=thread["thread_id"]):
             await client.crons.delete(cron["cron_id"])
+
+
+@pytest.mark.e2e
+@pytest.mark.asyncio
+async def test_cron_patch_with_null_webhook_removes_it(receiver: _Receiver) -> None:
+    client = get_e2e_client()
+    assistant = await client.assistants.create(graph_id="stress_test", if_exists="do_nothing")
+    try:
+        cron = await client.crons.create(
+            assistant["assistant_id"],
+            schedule="0 4 * * *",
+            input=_stress_input(),
+            webhook=receiver.url,
+            enabled=False,
+        )
+    except httpx.HTTPStatusError as exc:
+        _skip_if_loopback_blocked(exc)
+        raise
+    try:
+        kept = await client.crons.update(cron["cron_id"], schedule="0 5 * * *")
+        # The SDK drops None arguments, so removing the webhook takes a raw PATCH.
+        cleared = await client.http.patch(f"/runs/crons/{cron['cron_id']}", json={"webhook": None})
+
+        assert cron["payload"]["webhook"] == receiver.url
+        assert kept["payload"]["webhook"] == receiver.url
+        assert "webhook" not in cleared["payload"]
+        assert cleared["payload"]["input"] == _stress_input()
+    finally:
+        await client.crons.delete(cron["cron_id"])
 
 
 @pytest.mark.e2e

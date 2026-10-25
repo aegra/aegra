@@ -8,7 +8,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from aegra_api.core.active_runs import reconciled_run_cancellations
+from aegra_api.core.active_runs import executing_runs, reconciled_run_cancellations
 from aegra_api.models.auth import User
 from aegra_api.models.run_job import RunBehavior, RunExecution, RunIdentity, RunJob
 from aegra_api.models.runs import Durability
@@ -658,6 +658,24 @@ class TestExecuteRunWebhook:
         assert outcome.status == "interrupted"
         assert outcome.values is None
         assert outcome.run_started_at is None
+
+    async def test_run_is_listed_as_executing_only_while_execute_run_runs(self) -> None:
+        seen_while_streaming: list[bool] = []
+
+        async def _stream(job: RunJob, result: _GraphResult) -> _GraphResult:
+            seen_while_streaming.append(job.identity.run_id in executing_runs)
+            return result
+
+        await self._execute(_stream)
+
+        assert seen_while_streaming == [True]
+        assert "run-1" not in executing_runs
+
+    @pytest.mark.parametrize("started", [True, False])
+    async def test_run_leaves_executing_runs_however_it_ends(self, started: bool) -> None:
+        await self._execute(_stream_filling({}, error=RuntimeError("boom")), started=started)
+
+        assert "run-1" not in executing_runs
 
     async def test_handover_mark_is_cleared_when_the_run_ends(self) -> None:
         reconciled_run_cancellations.add("run-1")

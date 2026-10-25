@@ -13,7 +13,7 @@ from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sse_starlette import EventSourceResponse
 
-from aegra_api.core.active_runs import active_runs, reconciled_run_cancellations
+from aegra_api.core.active_runs import active_runs, executing_runs, reconciled_run_cancellations
 from aegra_api.core.auth_deps import auth_dependency, get_current_user
 from aegra_api.core.auth_handlers import build_auth_context, handle_event
 from aegra_api.core.orm import Run as RunORM
@@ -73,7 +73,7 @@ async def _request_run_interruption(
     )
 
     if reconciled:
-        if run_orm.run_id in active_runs:
+        if run_orm.run_id in executing_runs:
             # Still executing here: its executor reports it, with the values and start time it has.
             reconciled_run_cancellations.add(run_orm.run_id)
         else:

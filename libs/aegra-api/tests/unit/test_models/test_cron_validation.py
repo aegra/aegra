@@ -35,6 +35,29 @@ class TestWebhookValidation:
         req = CronCreate(input={"q": 1}, assistant_id="a", schedule="* * * * *", webhook=url)
         assert req.webhook == url
 
+    @pytest.mark.parametrize("url", ["https://example.com:bad/hook", "https://example.com:70000/hook"])
+    def test_rejects_invalid_port(self, url: str) -> None:
+        with pytest.raises(ValidationError, match="port"):
+            CronCreate(input={"q": 1}, assistant_id="a", schedule="* * * * *", webhook=url)
+        with pytest.raises(ValidationError, match="port"):
+            CronUpdate(webhook=url)
+
+
+class TestConfigurableMustBeMapping:
+    """A non-mapping ``config.configurable`` fails every firing, so reject it at the boundary."""
+
+    @pytest.mark.parametrize("configurable", [[], "x", 1])
+    def test_rejects_non_mapping_configurable(self, configurable: object) -> None:
+        with pytest.raises(ValidationError, match="configurable"):
+            CronCreate(input={}, assistant_id="a", schedule="* * * * *", config={"configurable": configurable})
+        with pytest.raises(ValidationError, match="configurable"):
+            CronUpdate(config={"configurable": configurable})
+
+    @pytest.mark.parametrize("config", [None, {}, {"configurable": {"k": "v"}}, {"tags": ["x"]}])
+    def test_accepts_mapping_or_absent_configurable(self, config: dict[str, object] | None) -> None:
+        req = CronCreate(input={}, assistant_id="a", schedule="* * * * *", config=config)
+        assert req.config == config
+
 
 class TestEndTimeMustBeFuture:
     def test_rejects_past_end_time_on_create(self) -> None:

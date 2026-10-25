@@ -32,7 +32,17 @@ def _validate_webhook_url(value: str | None) -> str | None:
         raise ValueError("webhook must use http or https scheme")
     if not parsed.netloc:
         raise ValueError("webhook must include a host")
+    try:
+        _ = parsed.port  # urlparse defers port parsing; reading it raises on a bad port
+    except ValueError:
+        raise ValueError("webhook port must be an integer between 0 and 65535") from None
     return value
+
+
+def _validate_configurable(config: dict[str, Any] | None) -> None:
+    """Reject a non-mapping ``config.configurable``; every firing would fail on it."""
+    if config is not None and not isinstance(config.get("configurable", {}), dict):
+        raise ValueError("`config.configurable` must be a mapping")
 
 
 def _validate_payload_size(model: BaseModel) -> None:
@@ -72,6 +82,7 @@ class CronCreate(BaseModel):
     @model_validator(mode="after")
     def _check(self) -> "CronCreate":
         self.webhook = _validate_webhook_url(self.webhook)
+        _validate_configurable(self.config)
         if isinstance(self.stream_mode, str) and len(self.stream_mode) > _STREAM_MODE_MAX_LEN:
             raise ValueError("stream_mode is too long")
         if self.end_time is not None:
@@ -127,6 +138,7 @@ class CronUpdate(BaseModel):
     @model_validator(mode="after")
     def _check(self) -> "CronUpdate":
         self.webhook = _validate_webhook_url(self.webhook)
+        _validate_configurable(self.config)
         if isinstance(self.stream_mode, str) and len(self.stream_mode) > _STREAM_MODE_MAX_LEN:
             raise ValueError("stream_mode is too long")
         if self.end_time is not None:

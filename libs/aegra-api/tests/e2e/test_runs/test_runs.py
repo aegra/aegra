@@ -306,3 +306,25 @@ async def test_runs_wait_with_interrupts_e2e():
         assert last_run["status"] in ("interrupted", "success"), (
             f"Expected interrupted or success status, got {last_run['status']}"
         )
+
+
+@pytest.mark.e2e
+@pytest.mark.asyncio
+async def test_run_interrupt_before_node_stops_execution_e2e() -> None:
+    """An interrupt on a no-LLM graph leaves the node pending, not completed."""
+    client = get_e2e_client()
+    assistant = await client.assistants.create(graph_id="cron_example", if_exists="do_nothing")
+    thread = await client.threads.create()
+    run = await client.runs.create(
+        thread_id=thread["thread_id"],
+        assistant_id=assistant["assistant_id"],
+        input={"messages": []},
+        interrupt_before=["tick"],
+    )
+
+    await client.runs.join(thread["thread_id"], run["run_id"])
+    settled_run = await client.runs.get(thread["thread_id"], run["run_id"])
+    state = await client.threads.get_state(thread["thread_id"])
+
+    assert settled_run["status"] == "interrupted"
+    assert state["next"] == ["tick"]

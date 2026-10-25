@@ -13,7 +13,7 @@ from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sse_starlette import EventSourceResponse
 
-from aegra_api.core.active_runs import active_runs
+from aegra_api.core.active_runs import active_runs, executing_runs, reconciled_run_cancellations
 from aegra_api.core.auth_deps import auth_dependency, get_current_user
 from aegra_api.core.auth_handlers import build_auth_context, handle_event
 from aegra_api.core.orm import Run as RunORM
@@ -28,6 +28,7 @@ from aegra_api.services.run_preparation import _prepare_run
 from aegra_api.services.run_status import interrupt_unowned_run
 from aegra_api.services.run_waiters import TERMINAL_STATES, encode_output, heartbeat_wait_body, run_result_body
 from aegra_api.services.streaming_service import streaming_service
+from aegra_api.services.webhook_delivery import RunOutcome, job_for_webhook, notify_run_finished
 from aegra_api.settings import settings
 from aegra_api.utils.status_compat import validate_run_status
 
@@ -40,6 +41,19 @@ logger = structlog.getLogger(__name__)
 
 # Default stream modes for background run execution
 DEFAULT_STREAM_MODES = ["values"]
+
+
+def _notify_reconciled_run(run_orm: RunORM) -> None:
+    """Report a run cancelled with no executor in this process; its later finalize elsewhere is a no-op."""
+    job = job_for_webhook(
+        run_orm.execution_params,
+        run_id=run_orm.run_id,
+        thread_id=run_orm.thread_id,
+        assistant_id=run_orm.assistant_id,
+        created_at=run_orm.created_at,
+    )
+    if job is not None:
+        notify_run_finished(job, RunOutcome(status="interrupted"))
 
 
 async def _request_run_interruption(
@@ -59,6 +73,11 @@ async def _request_run_interruption(
     )
 
     if reconciled:
+        if run_orm.run_id in executing_runs:
+            # Still executing here: its executor reports it, with the values and start time it has.
+            reconciled_run_cancellations.add(run_orm.run_id)
+        else:
+            _notify_reconciled_run(run_orm)
         # A delayed worker can outlive an expired lease, so request a stop.
         # Signaling stays here to close streams when no executor owns the run.
         if action == "interrupt":

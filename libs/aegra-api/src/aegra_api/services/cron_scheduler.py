@@ -64,6 +64,7 @@ def _build_run_create(cron: CronORM) -> RunCreate:
         multitask_strategy=payload.get("multitask_strategy"),
         durability=payload.get("durability"),
         checkpoint_during=payload.get("checkpoint_during"),
+        webhook=payload.get("webhook"),
         # Cron metadata_dict is stored on the cron record for search/filter, not
         # forwarded onto fired runs. Re-wire here if run-level tagging is needed.
         metadata=None,
@@ -201,6 +202,7 @@ class CronScheduler:
                 run_request,
                 user,
                 initial_status="pending",
+                validate_webhook=False,
             )
             run_created = True
             logger.info("Cron fired run", cron_id=cron.cron_id, run_id=_run_id, thread_id=thread_id)

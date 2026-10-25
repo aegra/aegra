@@ -1,0 +1,219 @@
+---
+title: "Webhooks"
+description: "Get a POST with the result when a run or a cron-fired run finishes."
+---
+
+Set `webhook` on a run or a cron and Aegra POSTs the finished run to that URL once it reaches a terminal status. The parameter, the payload, and the `webhooks` config block follow LangGraph Platform, so receivers and `langgraph.json` settings carry over unchanged.
+
+## Set a webhook
+
+Pass `webhook` when you create a run. It works on `runs.create`, `runs.stream`, and `runs.wait`, threaded or stateless:
+
+```python
+from langgraph_sdk import get_client
+
+client = get_client(url="http://localhost:2026")
+
+run = await client.runs.create(
+    thread_id,
+    "agent",
+    input={"messages": [{"role": "user", "content": "Summarize today's news"}]},
+    webhook="https://my-server.example.com/aegra/runs?token=<secret>",
+)
+```
+
+On a cron, every run it fires calls the webhook, including the first one. See [Cron / scheduled jobs](/guides/cron):
+
+```python
+await client.crons.create(
+    "agent",
+    schedule="0 9 * * *",
+    input={"messages": [{"role": "user", "content": "Daily summary"}]},
+    webhook="https://my-server.example.com/aegra/runs?token=<secret>",
+)
+```
+
+A URL the server will not call is rejected with `422` before anything is created. See [URL policy](#url-policy).
+
+## When it fires
+
+Each run schedules one webhook delivery, after its final status is saved:
+
+| `status` | When |
+|:--|:--|
+| `success` | The graph finished. |
+| `interrupted` | The graph paused for human input, or the run was cancelled while running. |
+| `error` | The graph raised, the run hit `BG_JOB_TIMEOUT_SECS`, or workers kept crashing until `BG_JOB_MAX_RETRIES` ran out. |
+
+Whoever saves the final status schedules the delivery, so two processes never both report the same run. Delivery itself is [best effort](#delivery): it can be dropped, and a retry after a timeout can reach a receiver that already handled the first attempt, so deduplicate by `run_id`. A run that a worker hands back (lease loss, shutdown drain) fires when it finishes on the worker that completes it. A run cancelled while it executes reports the state it reached and its `run_started_at`. A run cancelled before it started, or whose worker stopped renewing its lease, fires `interrupted` from the cancel request with `values` and `run_started_at` set to `null`.
+
+## Payload
+
+The body is the run in LangGraph's webhook format:
+
+```json
+{
+  "run_id": "1f0c2a4e-...",
+  "thread_id": "8d7b9c12-...",
+  "assistant_id": "fe096781-...",
+  "created_at": "2026-10-20T09:00:00.120000+00:00",
+  "updated_at": "2026-10-20T09:00:04.870000+00:00",
+  "status": "success",
+  "metadata": {},
+  "kwargs": {
+    "input": {"messages": [{"role": "user", "content": "Daily summary"}]},
+    "command": null,
+    "config": {"configurable": {}},
+    "context": {},
+    "stream_mode": null,
+    "interrupt_before": null,
+    "interrupt_after": null,
+    "webhook": "https://my-server.example.com/aegra/runs?token=<secret>",
+    "subgraphs": false,
+    "durability": null
+  },
+  "multitask_strategy": null,
+  "run_started_at": "2026-10-20T09:00:00.180000+00:00",
+  "run_ended_at": "2026-10-20T09:00:04.870000+00:00",
+  "webhook_sent_at": "2026-10-20T09:00:04.880000+00:00",
+  "values": {"messages": [...]}
+}
+```
+
+| Field | Description |
+|:--|:--|
+| `status` | `success`, `interrupted`, or `error`. |
+| `values` | The graph state at the end of the run, read from the thread's latest checkpoint whatever `stream_mode` the run used. For a failed or cancelled run, the last state it streamed. `null` when there is none, for example for a run cancelled before it started. |
+| `error` | Present only when `status` is `error`: `{"error": "<exception type>", "message": "<message>"}`. A timeout reports `{"error": "TimeoutError", "message": "Job exceeded maximum execution time"}`. |
+| `kwargs` | What the run was created with: input, command, merged config and context, and the webhook URL. |
+| `metadata` | The run's `metadata`. Runs fired by a cron have none. |
+| `run_started_at`, `run_ended_at` | When execution started and ended. `run_started_at` is `null` for runs failed by the crash-recovery reaper and for runs cancelled before they started. |
+| `webhook_sent_at` | When the delivery started. It stays the same across retries. |
+
+To send fewer fields, list the ones to keep in `webhooks.allowed_fields`:
+
+```json
+{
+  "webhooks": {
+    "allowed_fields": ["run_id", "thread_id", "status", "values", "error"]
+  }
+}
+```
+
+## Delivery
+
+- `POST` with `Content-Type: application/json` and any [static headers](#secure-the-receiver).
+- Up to 3 attempts. Connection errors, DNS failures, timeouts, `429`, and `5xx` are retried after about 1 and 2 seconds. Other statuses are not retried.
+- When the host resolves to several addresses, each attempt tries them in DNS order until one accepts the connection, so an IPv6 address on a host without IPv6 routing does not fail the delivery.
+- Redirects are not followed: a `3xx` answer counts as a failed delivery.
+- Each attempt has a 5 second connect timeout and a 30 second overall timeout.
+- Delivery runs in the background, so the run never waits on your receiver. At shutdown, deliveries still in flight get 5 seconds before they are dropped.
+- At most 1,000 deliveries wait per server process. Beyond that, new ones are dropped and logged, so a slow receiver cannot grow memory without bound.
+
+<Warning>
+Delivery is best effort, as on LangGraph Platform. A delivery that fails all attempts is logged as `Webhook delivery failed` and not retried later. If every result must be processed, also reconcile from the API, for example by searching runs.
+</Warning>
+
+## Secure the receiver
+
+Your receiver should check that a call comes from your Aegra server. Two ways:
+
+- **Token in the URL.** Put a secret in the query string, for example `?token=<secret>`. Aegra's logs show only the scheme, host, and path of a webhook URL.
+- **Static headers.** Set `webhooks.headers` in `aegra.json`. Values can reference environment variables with `${{ env.NAME }}`:
+
+```json
+{
+  "webhooks": {
+    "headers": {
+      "Authorization": "Bearer ${{ env.LG_WEBHOOK_TOKEN }}",
+      "X-Environment": "production"
+    }
+  }
+}
+```
+
+Only variables that start with `webhooks.env_prefix` (default `LG_WEBHOOK_`) can be referenced, so a config file cannot read arbitrary secrets from the environment. Templates are resolved at startup: a missing variable stops the server from booting.
+
+## URL policy
+
+`webhooks.url` limits which URLs runs and crons can register. Aegra applies it when the run or cron is created (a violation is a `422`) and again before every call, so tightening the policy also covers crons created earlier: their calls are skipped and logged.
+
+```json
+{
+  "webhooks": {
+    "url": {
+      "allowed_domains": ["hooks.example.com", "*.internal.example.com"],
+      "require_https": true,
+      "allowed_ports": [443],
+      "disable_private_ips": true
+    }
+  }
+}
+```
+
+| Key | Default | Description |
+|:--|:--|:--|
+| `require_https` | `true` (`false` without a `url` block) | Reject `http://` URLs. |
+| `allowed_domains` | `[]` (any host) | Exact hosts, or `*.example.com` for any subdomain (not the apex). |
+| `allowed_ports` | `[]` (any port) | Allowed ports. A URL without a port uses 443 for https and 80 for http. |
+| `max_url_length` | `2048` (`4096` without a `url` block) | Longest accepted URL. |
+| `disable_loopback` | `true` | Block `localhost`, `host.docker.internal`, `127.0.0.0/8`, and `::1`. |
+| `disable_private_ips` | `false` | Block RFC 1918, `100.64.0.0/10`, and `fc00::/7` addresses. |
+
+These targets are always blocked: link-local addresses and cloud metadata endpoints (`169.254.0.0/16`, `100.100.100.200`, `fd00:ec2::254`, `metadata.google.internal`), unspecified, multicast and reserved ranges, and host names ending in `.svc.cluster.local`.
+
+The last check is by name only. A short service name such as `billing` or `billing.default` resolves through the cluster's search domains to a private address, so only `disable_private_ips: true` keeps webhooks away from services inside your network.
+
+Aegra resolves the host, checks every address it resolves to, and connects only to addresses it checked. DNS cannot send the call somewhere else between the check and the connection.
+
+Exact entries in `allowed_domains` are trusted: the address checks above are skipped for them. To call a service inside your cluster, list its exact name, for example `"billing.default.svc.cluster.local"`. Wildcard entries only narrow which hosts are accepted; their addresses are still checked.
+
+<Note>
+Relative webhook URLs such as `/my-route` are rejected with `422`. LangGraph Platform calls its own routes in-process for those. With Aegra, use an absolute URL instead, for example `http://localhost:2026/my-route`, and set `disable_loopback` to `false`.
+</Note>
+
+## Receive webhooks
+
+Any HTTP endpoint that accepts a JSON POST works. A minimal FastAPI receiver that checks the token from [static headers](#secure-the-receiver):
+
+```python
+import hmac
+import os
+
+from fastapi import FastAPI, Header, HTTPException
+
+app = FastAPI()
+TOKEN = os.environ["LG_WEBHOOK_TOKEN"]
+
+
+@app.post("/aegra/runs")
+async def run_finished(payload: dict, authorization: str = Header("")) -> dict:
+    if not hmac.compare_digest(authorization, f"Bearer {TOKEN}"):
+        raise HTTPException(401)
+    if payload["status"] == "success":
+        ...  # hand payload["run_id"] and payload["values"] to your own queue
+    return {"ok": True}
+```
+
+Answer with a `2xx` quickly and do slow work elsewhere: each attempt waits at most 30 seconds. A run can arrive twice when a response is lost, so deduplicate on `run_id`.
+
+A receiver can also be a [custom route](/guides/custom-routes) on the Aegra server itself. Calling the server's own host is a loopback call, so it needs `"webhooks": {"url": {"disable_loopback": false}}`. Enable that only when you control every route the server exposes.
+
+## Disable webhooks
+
+```json
+{
+  "http": {
+    "disable_webhooks": true
+  }
+}
+```
+
+With webhooks disabled, requests that set `webhook` get a `422`, and runs fired by crons stored earlier skip the call.
+
+## Differences from LangGraph Platform
+
+- Relative webhook URLs return `422` instead of calling the server's own routes.
+- With `http.disable_webhooks`, a request that sets `webhook` gets a `422` instead of being accepted and never called.
+- Redirects are not followed.
+- A run that times out has `status: "error"`, matching how Aegra records the run, with `error.error` set to `TimeoutError`.

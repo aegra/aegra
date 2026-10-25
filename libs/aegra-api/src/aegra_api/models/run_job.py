@@ -10,6 +10,7 @@ frozen=True for immutability. Serialization uses model_dump/model_validate
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -29,6 +30,10 @@ class RunIdentity(BaseModel):
     run_id: str
     thread_id: str
     graph_id: str
+    # Run-row columns the completion webhook reports; carried here because stateless
+    # cleanup can delete the row before the webhook is built.
+    assistant_id: str | None = None
+    created_at: datetime | None = None
 
 
 class RunExecution(BaseModel):
@@ -57,6 +62,8 @@ class RunBehavior(BaseModel):
     interrupt_after: str | list[str] | None = None
     multitask_strategy: str | None = None
     subgraphs: bool = False
+    # URL that receives the run once it reaches a terminal status.
+    webhook: str | None = None
 
 
 class RunJob(BaseModel):
@@ -97,11 +104,32 @@ class RunJob(BaseModel):
         params = run_orm.execution_params
         if params is None:
             raise ValueError(f"Run {run_orm.run_id} has no execution_params")
+        return cls.from_execution_params(
+            params,
+            run_id=run_orm.run_id,
+            thread_id=run_orm.thread_id,
+            assistant_id=run_orm.assistant_id,
+            created_at=run_orm.created_at,
+        )
+
+    @classmethod
+    def from_execution_params(
+        cls,
+        params: dict[str, Any],
+        *,
+        run_id: str,
+        thread_id: str,
+        assistant_id: str | None = None,
+        created_at: datetime | None = None,
+    ) -> RunJob:
+        """Reconstruct a RunJob from the ``execution_params`` JSONB plus the row's own columns."""
         return cls(
             identity=RunIdentity(
-                run_id=run_orm.run_id,
-                thread_id=run_orm.thread_id,
+                run_id=run_id,
+                thread_id=thread_id,
                 graph_id=params["graph_id"],
+                assistant_id=assistant_id,
+                created_at=created_at,
             ),
             user=User.model_validate(params["user"]),
             execution=RunExecution.model_validate(params["execution"]),

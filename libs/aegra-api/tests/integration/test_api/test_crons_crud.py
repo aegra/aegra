@@ -539,6 +539,26 @@ class TestUpdateCronExtended:
         assert resp.status_code == 200
         assert resp.json()["metadata"] == {"new_key": "new_val"}
 
+    def test_null_webhook_reaches_the_service_as_an_explicit_removal(
+        self, client: TestClient, mock_cron_service: AsyncMock
+    ) -> None:
+        mock_cron_service.update_cron.return_value = _cron_response()
+
+        resp = client.patch("/runs/crons/cron-001", json={"webhook": None})
+
+        assert resp.status_code == 200
+        request = mock_cron_service.update_cron.await_args.args[1]
+        assert "webhook" in request.model_fields_set
+        assert request.webhook is None
+
+    def test_body_without_webhook_does_not_touch_it(self, client: TestClient, mock_cron_service: AsyncMock) -> None:
+        mock_cron_service.update_cron.return_value = _cron_response()
+
+        resp = client.patch("/runs/crons/cron-001", json={"enabled": False})
+
+        assert resp.status_code == 200
+        assert "webhook" not in mock_cron_service.update_cron.await_args.args[1].model_fields_set
+
 
 # ---------------------------------------------------------------------------
 # DELETE /runs/crons/{cron_id} — extended

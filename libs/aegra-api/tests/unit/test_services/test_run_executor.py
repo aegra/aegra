@@ -1,12 +1,16 @@
 """Unit tests for run_executor service."""
 
 import asyncio
+import contextlib
+from collections.abc import AsyncIterator, Awaitable, Callable
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from aegra_api.core.active_runs import executing_runs, reconciled_run_cancellations
 from aegra_api.models.auth import User
-from aegra_api.models.run_job import RunExecution, RunIdentity, RunJob
+from aegra_api.models.run_job import RunBehavior, RunExecution, RunIdentity, RunJob
 from aegra_api.models.runs import Durability
 from aegra_api.services import run_executor as run_executor_module
 from aegra_api.services.run_executor import (
@@ -20,6 +24,7 @@ from aegra_api.services.run_executor import (
     _timeout_cancellations,
     execute_run,
 )
+from aegra_api.services.webhook_delivery import RunOutcome
 
 
 async def _empty_async_gen():  # type: ignore[no-untyped-def]
@@ -502,3 +507,278 @@ class TestTerminalStateRaces:
             await execute_run(_make_job())
 
         mock_signal_end.assert_not_awaited()
+
+
+def _stream_filling(
+    data: dict[str, Any], *, interrupt: bool = False, error: BaseException | None = None
+) -> Callable[[RunJob, _GraphResult], Awaitable[_GraphResult]]:
+    """A ``_stream_graph`` stand-in that streams *data* into the caller's result, then optionally fails."""
+
+    async def _fake(_job: RunJob, result: _GraphResult) -> _GraphResult:
+        result.data = data
+        result.state = data
+        result.has_interrupt = interrupt
+        if error is not None:
+            raise error
+        return result
+
+    return _fake
+
+
+class TestExecuteRunWebhook:
+    """Every terminal run hands its outcome to the webhook dispatcher; runs that resume elsewhere do not."""
+
+    @staticmethod
+    async def _execute(
+        stream: Callable[[RunJob, _GraphResult], Awaitable[_GraphResult]],
+        *,
+        finalized: bool = True,
+        started: bool = True,
+        finalize: AsyncMock | None = None,
+    ) -> MagicMock:
+        with (
+            patch("aegra_api.services.run_executor.start_run", new_callable=AsyncMock, return_value=started),
+            patch("aegra_api.services.run_executor._stream_graph", stream),
+            patch("aegra_api.services.run_executor.finalize_run", finalize or AsyncMock(return_value=finalized)),
+            patch("aegra_api.services.run_executor._signal_end_event", new_callable=AsyncMock),
+            patch("aegra_api.services.run_executor.streaming_service") as mock_streaming,
+            patch("aegra_api.services.run_executor._signal_run_done", new_callable=AsyncMock),
+            patch("aegra_api.services.run_executor.notify_run_finished") as mock_notify,
+        ):
+            mock_streaming.cleanup_run = AsyncMock()
+            mock_streaming.signal_run_error = AsyncMock()
+            mock_streaming.signal_run_cancelled = AsyncMock()
+            with contextlib.suppress(asyncio.CancelledError):
+                await execute_run(_make_job())
+        return mock_notify
+
+    @staticmethod
+    def _outcome(mock_notify: MagicMock) -> RunOutcome:
+        mock_notify.assert_called_once()
+        job, outcome = mock_notify.call_args.args
+        assert job.identity.run_id == "run-1"
+        return outcome
+
+    async def test_success_reports_final_values(self) -> None:
+        mock_notify = await self._execute(_stream_filling({"count": 2}))
+
+        outcome = self._outcome(mock_notify)
+        assert outcome.status == "success"
+        assert outcome.values == {"count": 2}
+        assert outcome.error is None
+        assert outcome.run_started_at is not None
+        assert outcome.run_started_at <= outcome.run_ended_at
+
+    async def test_graph_interrupt_reports_interrupted(self) -> None:
+        mock_notify = await self._execute(_stream_filling({"count": 1}, interrupt=True))
+
+        assert self._outcome(mock_notify).status == "interrupted"
+
+    async def test_failure_reports_error_and_partial_values(self) -> None:
+        mock_notify = await self._execute(_stream_filling({"count": 1}, error=RuntimeError("graph exploded")))
+
+        outcome = self._outcome(mock_notify)
+        assert outcome.status == "error"
+        assert outcome.error == {"error": "RuntimeError", "message": "graph exploded"}
+        assert outcome.values == {"count": 1}
+
+    async def test_timeout_reports_timeout_error(self) -> None:
+        _timeout_cancellations.add("run-1")
+        try:
+            mock_notify = await self._execute(_stream_filling({}, error=asyncio.CancelledError()))
+        finally:
+            _timeout_cancellations.discard("run-1")
+
+        outcome = self._outcome(mock_notify)
+        assert outcome.status == "error"
+        assert outcome.error == {"error": "TimeoutError", "message": "Job exceeded maximum execution time"}
+
+    async def test_user_cancel_reports_interrupted(self) -> None:
+        mock_notify = await self._execute(_stream_filling({"count": 1}, error=asyncio.CancelledError()))
+
+        outcome = self._outcome(mock_notify)
+        assert outcome.status == "interrupted"
+        assert outcome.error is None
+
+    @pytest.mark.parametrize("cancellations", [_lease_loss_cancellations, _shutdown_cancellations])
+    async def test_run_that_resumes_elsewhere_is_not_reported(self, cancellations: set[str]) -> None:
+        cancellations.add("run-1")
+        try:
+            mock_notify = await self._execute(_stream_filling({}, error=asyncio.CancelledError()))
+        finally:
+            cancellations.discard("run-1")
+
+        mock_notify.assert_not_called()
+
+    async def test_lost_finalization_race_is_not_reported(self) -> None:
+        mock_notify = await self._execute(_stream_filling({"count": 2}), finalized=False)
+
+        mock_notify.assert_not_called()
+
+    async def test_failed_success_finalization_reports_the_error_status_it_stored(self) -> None:
+        # The success write fails, the error path then records the run as an error.
+        finalize = AsyncMock(side_effect=[RuntimeError("db write failed"), True])
+
+        mock_notify = await self._execute(_stream_filling({"count": 2}), finalize=finalize)
+
+        outcome = self._outcome(mock_notify)
+        assert finalize.await_args_list[1].kwargs["status"] == "error"
+        assert outcome.status == "error"
+        assert outcome.error == {"error": "RuntimeError", "message": "db write failed"}
+
+    async def test_run_that_never_started_is_not_reported(self) -> None:
+        mock_notify = await self._execute(_stream_filling({}), started=False)
+
+        mock_notify.assert_not_called()
+
+    async def test_cancel_the_api_handed_over_reports_streamed_values_and_start_time(self) -> None:
+        # The API committed the cancel, so this finalize loses; the webhook still carries what the run produced.
+        reconciled_run_cancellations.add("run-1")
+        try:
+            mock_notify = await self._execute(
+                _stream_filling({"count": 1}, error=asyncio.CancelledError()), finalized=False
+            )
+        finally:
+            reconciled_run_cancellations.discard("run-1")
+
+        outcome = self._outcome(mock_notify)
+        assert outcome.status == "interrupted"
+        assert outcome.values == {"count": 1}
+        assert outcome.error is None
+        assert outcome.run_started_at is not None
+
+    async def test_handed_over_run_that_never_started_reports_without_values(self) -> None:
+        reconciled_run_cancellations.add("run-1")
+        try:
+            mock_notify = await self._execute(_stream_filling({}), started=False)
+        finally:
+            reconciled_run_cancellations.discard("run-1")
+
+        outcome = self._outcome(mock_notify)
+        assert outcome.status == "interrupted"
+        assert outcome.values is None
+        assert outcome.run_started_at is None
+
+    async def test_run_is_listed_as_executing_only_while_execute_run_runs(self) -> None:
+        seen_while_streaming: list[bool] = []
+
+        async def _stream(job: RunJob, result: _GraphResult) -> _GraphResult:
+            seen_while_streaming.append(job.identity.run_id in executing_runs)
+            return result
+
+        await self._execute(_stream)
+
+        assert seen_while_streaming == [True]
+        assert "run-1" not in executing_runs
+
+    @pytest.mark.parametrize("started", [True, False])
+    async def test_run_leaves_executing_runs_however_it_ends(self, started: bool) -> None:
+        await self._execute(_stream_filling({}, error=RuntimeError("boom")), started=started)
+
+        assert "run-1" not in executing_runs
+
+    async def test_handover_mark_is_cleared_when_the_run_ends(self) -> None:
+        reconciled_run_cancellations.add("run-1")
+        try:
+            await self._execute(_stream_filling({}, error=asyncio.CancelledError()), finalized=False)
+
+            assert "run-1" not in reconciled_run_cancellations
+        finally:
+            reconciled_run_cancellations.discard("run-1")
+
+
+def _webhook_job() -> RunJob:
+    return RunJob(
+        identity=RunIdentity(run_id="run-1", thread_id="thread-1", graph_id="graph-1"),
+        user=User(identity="user-1"),
+        execution=RunExecution(input_data={"msg": "hello"}, stream_mode=["updates"]),
+        behavior=RunBehavior(webhook="https://hooks.example.com/runs"),
+    )
+
+
+class TestStreamGraphResult:
+    """What ``_stream_graph`` keeps for the completion webhook."""
+
+    @staticmethod
+    async def _stream(
+        job: RunJob,
+        *events: tuple[str, Any],
+        error: Exception | None = None,
+        state: Any = None,
+        state_error: Exception | None = None,
+    ) -> tuple[_GraphResult, MagicMock]:
+        result = _GraphResult()
+
+        async def _events(**_kwargs: Any) -> AsyncIterator[tuple[str, Any]]:
+            for event in events:
+                yield event
+            if error is not None:
+                raise error
+
+        mock_graph = MagicMock()
+        mock_graph.__aenter__ = AsyncMock(return_value=mock_graph)
+        mock_graph.__aexit__ = AsyncMock(return_value=False)
+        mock_graph.aget_state = AsyncMock(return_value=state, side_effect=state_error)
+        mock_service = MagicMock()
+        mock_service.get_graph = MagicMock(return_value=mock_graph)
+
+        with (
+            patch.object(run_executor_module, "get_langgraph_service", return_value=mock_service),
+            patch.object(run_executor_module, "stream_graph_events", _events),
+            patch.object(run_executor_module, "with_auth_ctx") as mock_auth,
+            patch.object(run_executor_module, "broker_manager") as bm,
+            patch.object(run_executor_module, "streaming_service") as ss,
+        ):
+            mock_auth.return_value.__aenter__ = AsyncMock(return_value=None)
+            mock_auth.return_value.__aexit__ = AsyncMock(return_value=False)
+            bm.allocate_event_id = AsyncMock(return_value="run-1_event_1")
+            ss.put_to_broker = AsyncMock()
+            if error is None:
+                await run_executor_module._stream_graph(job, result)
+            else:
+                with pytest.raises(type(error)):
+                    await run_executor_module._stream_graph(job, result)
+        return result, mock_graph
+
+    async def test_keeps_values_streamed_before_a_failure_in_the_callers_result(self) -> None:
+        result, _graph = await self._stream(
+            _make_job(), ("values", {"count": 1}), error=RuntimeError("mid-run failure")
+        )
+
+        assert result.data == {"count": 1}
+        assert result.state == {"count": 1}
+
+    async def test_webhook_run_reports_checkpointed_state_without_values_events(self) -> None:
+        # The client only streamed updates; the webhook still gets the final state.
+        result, graph = await self._stream(
+            _webhook_job(), ("updates", {"step": {"count": 3}}), state=MagicMock(values={"count": 3})
+        )
+
+        assert result.state == {"count": 3}
+        config = graph.aget_state.await_args.args[0]
+        assert config["configurable"]["thread_id"] == "thread-1"
+        assert "checkpoint_id" not in config["configurable"]
+
+    async def test_run_without_webhook_skips_the_state_read(self) -> None:
+        result, graph = await self._stream(_make_job(), ("values", {"count": 1}))
+
+        graph.aget_state.assert_not_awaited()
+        assert result.state == {"count": 1}
+
+    async def test_interrupt_notice_is_not_taken_for_state(self) -> None:
+        interrupt = {"__interrupt__": [{"value": "approve?", "id": "i1"}]}
+
+        result, _graph = await self._stream(_make_job(), ("values", {"count": 1}), ("values", interrupt))
+
+        assert result.has_interrupt is True
+        assert result.data == interrupt
+        assert result.state == {"count": 1}
+
+    async def test_failed_state_read_keeps_the_streamed_values_and_the_run(self) -> None:
+        # The read is best effort: it must neither fail the run nor drop what was streamed.
+        result, graph = await self._stream(
+            _webhook_job(), ("values", {"count": 2}), state_error=RuntimeError("checkpointer down")
+        )
+
+        graph.aget_state.assert_awaited_once()
+        assert result.state == {"count": 2}

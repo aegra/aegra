@@ -319,8 +319,8 @@ async def _resolve(host: str, port: int) -> list[IPAddress]:
     return addresses
 
 
-async def resolve_webhook_address(host: str, port: int, policy: WebhookUrlPolicy) -> str | None:
-    """Check where *host* points and return the resolved address to pin the connection to.
+async def resolve_webhook_addresses(host: str, port: int, policy: WebhookUrlPolicy) -> list[str] | None:
+    """Check where *host* points and return every resolved address, in DNS order, to pin to.
 
     None means use the URL's host as-is: an IP literal, a trusted host, or an allowed
     localhost alias (Docker can map those outside the loopback range).
@@ -340,14 +340,14 @@ async def resolve_webhook_address(host: str, port: int, policy: WebhookUrlPolicy
     addresses = await _resolve(host, port)
     for address in addresses:
         _raise_if_blocked(address, policy)
-    return str(addresses[0])
+    return list(dict.fromkeys(str(address) for address in addresses))
 
 
 async def validate_webhook_url(url: str) -> None:
     """Raise WebhookUrlError unless the server's policy allows calling *url*."""
     policy = get_webhook_settings().url
     parsed = check_webhook_url(url, policy)
-    await resolve_webhook_address(webhook_host(parsed), webhook_port(parsed), policy)
+    await resolve_webhook_addresses(webhook_host(parsed), webhook_port(parsed), policy)
 
 
 async def ensure_webhook_allowed(webhook: str | None) -> None:

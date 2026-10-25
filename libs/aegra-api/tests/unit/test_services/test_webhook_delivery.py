@@ -381,31 +381,39 @@ class TestDelivery:
 
 
 class _RecordingTransport(httpx.AsyncBaseTransport):
-    def __init__(self) -> None:
+    def __init__(self, failures: dict[str, Exception] | None = None) -> None:
         self.requests: list[httpx.Request] = []
+        self._failures = failures or {}
 
     async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
         await request.aread()
         self.requests.append(request)
+        failure = self._failures.get(request.url.host)
+        if failure is not None:
+            raise failure
         return httpx.Response(200)
 
 
 class TestPinnedAddressTransport:
     @staticmethod
-    def _transport(monkeypatch: pytest.MonkeyPatch, address: str | None) -> tuple[_PinnedAddressTransport, Any]:
-        async def _resolve(host: str, port: int, policy: webhook_policy.WebhookUrlPolicy) -> str | None:
-            return address
+    def _transport(
+        monkeypatch: pytest.MonkeyPatch,
+        addresses: list[str] | None,
+        failures: dict[str, Exception] | None = None,
+    ) -> tuple[_PinnedAddressTransport, Any]:
+        async def _resolve(host: str, port: int, policy: webhook_policy.WebhookUrlPolicy) -> list[str] | None:
+            return addresses
 
-        monkeypatch.setattr(webhook_delivery, "resolve_webhook_address", _resolve)
+        monkeypatch.setattr(webhook_delivery, "resolve_webhook_addresses", _resolve)
         transport = _PinnedAddressTransport()
-        recorder = _RecordingTransport()
+        recorder = _RecordingTransport(failures)
         transport._inner = recorder  # type: ignore[assignment]
         return transport, recorder
 
     async def test_https_connects_to_the_checked_address_with_original_host_and_sni(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        transport, recorder = self._transport(monkeypatch, "93.184.215.14")
+        transport, recorder = self._transport(monkeypatch, ["93.184.215.14"])
 
         async with httpx.AsyncClient(transport=transport) as client:
             await client.post("https://hooks.example.com/aegra?token=t", content=b"{}")
@@ -419,7 +427,7 @@ class TestPinnedAddressTransport:
         assert sent.content == b"{}"
 
     async def test_http_pins_without_sni(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        transport, recorder = self._transport(monkeypatch, "2606:2800::1")
+        transport, recorder = self._transport(monkeypatch, ["2606:2800::1"])
 
         async with httpx.AsyncClient(transport=transport) as client:
             await client.post("http://hooks.example.com:8080/x", content=b"{}")
@@ -437,6 +445,50 @@ class TestPinnedAddressTransport:
             await client.post("http://10.0.0.5/x", content=b"{}")
 
         assert recorder.requests[0].url.host == "10.0.0.5"
+
+    @pytest.mark.parametrize(
+        "failure", [httpx.ConnectError("Network is unreachable"), httpx.ConnectTimeout("timed out")]
+    )
+    async def test_unreachable_address_falls_back_to_the_next(
+        self, monkeypatch: pytest.MonkeyPatch, failure: Exception
+    ) -> None:
+        # IPv6 listed first on a host with no IPv6 route must not fail the delivery.
+        transport, recorder = self._transport(monkeypatch, ["2606:2800::1", "93.184.215.14"], {"2606:2800::1": failure})
+
+        async with httpx.AsyncClient(transport=transport) as client:
+            response = await client.post("https://hooks.example.com/aegra", content=b"{}")
+
+        assert response.status_code == 200
+        assert [sent.url.host for sent in recorder.requests] == ["2606:2800::1", "93.184.215.14"]
+        assert recorder.requests[1].headers["host"] == "hooks.example.com"
+        assert recorder.requests[1].extensions["sni_hostname"] == "hooks.example.com"
+        assert recorder.requests[1].content == b"{}"
+
+    async def test_raises_the_last_error_when_every_address_is_unreachable(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        failures: dict[str, Exception] = {
+            "2606:2800::1": httpx.ConnectError("Network is unreachable"),
+            "93.184.215.14": httpx.ConnectError("Connection refused"),
+        }
+        transport, recorder = self._transport(monkeypatch, ["2606:2800::1", "93.184.215.14"], failures)
+
+        async with httpx.AsyncClient(transport=transport) as client:
+            with pytest.raises(httpx.ConnectError, match="Connection refused"):
+                await client.post("https://hooks.example.com/aegra", content=b"{}")
+
+        assert len(recorder.requests) == 2
+
+    async def test_does_not_resend_to_another_address_after_connecting(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # Past the connect the receiver may already have the body; a second address would deliver it twice.
+        failures: dict[str, Exception] = {"2606:2800::1": httpx.ReadTimeout("timed out")}
+        transport, recorder = self._transport(monkeypatch, ["2606:2800::1", "93.184.215.14"], failures)
+
+        async with httpx.AsyncClient(transport=transport) as client:
+            with pytest.raises(httpx.ReadTimeout):
+                await client.post("https://hooks.example.com/aegra", content=b"{}")
+
+        assert [sent.url.host for sent in recorder.requests] == ["2606:2800::1"]
 
     async def test_blocked_hosts_raise_before_connecting(self) -> None:
         transport = _PinnedAddressTransport()

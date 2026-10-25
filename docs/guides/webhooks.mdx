@@ -104,6 +104,7 @@ To send fewer fields, list the ones to keep in `webhooks.allowed_fields`:
 
 - `POST` with `Content-Type: application/json` and any [static headers](#secure-the-receiver).
 - Up to 3 attempts. Connection errors, DNS failures, timeouts, `429`, and `5xx` are retried after about 1 and 2 seconds. Other statuses are not retried.
+- When the host resolves to several addresses, each attempt tries them in DNS order until one accepts the connection, so an IPv6 address on a host without IPv6 routing does not fail the delivery.
 - Redirects are not followed: a `3xx` answer counts as a failed delivery.
 - Each attempt has a 5 second connect timeout and a 30 second overall timeout.
 - Delivery runs in the background, so the run never waits on your receiver. At shutdown, deliveries still in flight get 5 seconds before they are dropped.
@@ -163,7 +164,7 @@ These targets are always blocked: link-local addresses and cloud metadata endpoi
 
 The last check is by name only. A short service name such as `billing` or `billing.default` resolves through the cluster's search domains to a private address, so only `disable_private_ips: true` keeps webhooks away from services inside your network.
 
-Aegra resolves the host, checks every address it resolves to, and connects to the address it checked. DNS cannot send the call somewhere else between the check and the connection.
+Aegra resolves the host, checks every address it resolves to, and connects only to addresses it checked. DNS cannot send the call somewhere else between the check and the connection.
 
 Exact entries in `allowed_domains` are trusted: the address checks above are skipped for them. To call a service inside your cluster, list its exact name, for example `"billing.default.svc.cluster.local"`. Wildcard entries only narrow which hosts are accepted; their addresses are still checked.
 

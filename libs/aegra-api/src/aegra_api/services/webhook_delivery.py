@@ -26,7 +26,7 @@ from aegra_api.services.webhook_policy import (
     WebhookUrlError,
     check_webhook_url,
     get_webhook_settings,
-    resolve_webhook_address,
+    resolve_webhook_addresses,
     webhook_host,
     webhook_port,
     webhooks_enabled,
@@ -141,6 +141,17 @@ def _backoff_seconds(attempt: int) -> float:
     return 2 ** (attempt - 1) + random.uniform(0, 1)  # noqa: S311  # nosec B311
 
 
+def _pinned(request: httpx.Request, address: str, extensions: dict[str, Any]) -> httpx.Request:
+    """*request* sent to *address*, keeping the original Host header and TLS name."""
+    return httpx.Request(
+        request.method,
+        request.url.copy_with(host=address),
+        headers=request.headers,
+        stream=request.stream,
+        extensions=extensions,
+    )
+
+
 class _PinnedAddressTransport(httpx.AsyncBaseTransport):
     """Connect to the address the URL policy approved, so DNS cannot change between check and connect."""
 
@@ -150,20 +161,19 @@ class _PinnedAddressTransport(httpx.AsyncBaseTransport):
 
     async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
         host = webhook_host(request.url)
-        address = await resolve_webhook_address(host, webhook_port(request.url), get_webhook_settings().url)
-        if address is None:
+        addresses = await resolve_webhook_addresses(host, webhook_port(request.url), get_webhook_settings().url)
+        if addresses is None:
             return await self._inner.handle_async_request(request)
         extensions = dict(request.extensions)
         if request.url.scheme == "https":
             extensions["sni_hostname"] = host
-        pinned = httpx.Request(
-            request.method,
-            request.url.copy_with(host=address),
-            headers=request.headers,
-            stream=request.stream,
-            extensions=extensions,
-        )
-        return await self._inner.handle_async_request(pinned)
+        # Every address passed the policy; move on when one is unreachable, e.g. IPv6 first on an IPv4-only host.
+        for address in addresses[:-1]:
+            try:
+                return await self._inner.handle_async_request(_pinned(request, address, extensions))
+            except (httpx.ConnectError, httpx.ConnectTimeout):
+                continue
+        return await self._inner.handle_async_request(_pinned(request, addresses[-1], extensions))
 
     async def aclose(self) -> None:
         await self._inner.aclose()

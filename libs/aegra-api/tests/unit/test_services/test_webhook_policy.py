@@ -20,7 +20,7 @@ from aegra_api.services.webhook_policy import (
     check_webhook_url,
     ensure_webhook_allowed,
     get_webhook_settings,
-    resolve_webhook_address,
+    resolve_webhook_addresses,
     validate_webhook_url,
     webhooks_enabled,
 )
@@ -279,7 +279,7 @@ class TestCheckWebhookUrl:
                 check_webhook_url(url, policy)
 
 
-class TestResolveWebhookAddress:
+class TestResolveWebhookAddresses:
     @pytest.mark.parametrize(
         ("host", "reason"),
         [
@@ -299,24 +299,24 @@ class TestResolveWebhookAddress:
     )
     async def test_blocks_ip_literals_by_default(self, host: str, reason: str) -> None:
         with pytest.raises(WebhookUrlError, match=f"Webhook host blocked: {reason}"):
-            await resolve_webhook_address(host, 443, WebhookUrlPolicy())
+            await resolve_webhook_addresses(host, 443, WebhookUrlPolicy())
 
     @pytest.mark.parametrize("host", ["10.0.0.5", "172.16.0.1", "192.168.1.10", "fc00::1", "8.8.8.8"])
     async def test_private_and_public_literals_pass_by_default(self, host: str) -> None:
-        assert await resolve_webhook_address(host, 443, WebhookUrlPolicy()) is None
+        assert await resolve_webhook_addresses(host, 443, WebhookUrlPolicy()) is None
 
     @pytest.mark.parametrize("host", ["10.0.0.5", "100.64.0.1", "fc00::1"])
     async def test_disable_private_ips_blocks_private_ranges(self, host: str) -> None:
         with pytest.raises(WebhookUrlError, match="private IP range"):
-            await resolve_webhook_address(host, 443, WebhookUrlPolicy(disable_private_ips=True))
+            await resolve_webhook_addresses(host, 443, WebhookUrlPolicy(disable_private_ips=True))
 
     async def test_loopback_allowed_when_disable_loopback_is_false(self) -> None:
-        assert await resolve_webhook_address("127.0.0.1", 80, WebhookUrlPolicy(disable_loopback=False)) is None
+        assert await resolve_webhook_addresses("127.0.0.1", 80, WebhookUrlPolicy(disable_loopback=False)) is None
 
     @pytest.mark.parametrize("host", ["localhost", "host.docker.internal", "localhost.localdomain"])
     async def test_blocks_localhost_names(self, host: str) -> None:
         with pytest.raises(WebhookUrlError, match="localhost address"):
-            await resolve_webhook_address(host, 80, WebhookUrlPolicy())
+            await resolve_webhook_addresses(host, 80, WebhookUrlPolicy())
 
     async def test_localhost_names_connect_by_name_when_loopback_is_allowed(
         self, monkeypatch: pytest.MonkeyPatch
@@ -325,7 +325,8 @@ class TestResolveWebhookAddress:
         _resolve_to(monkeypatch, "169.254.1.1")
 
         assert (
-            await resolve_webhook_address("host.docker.internal", 80, WebhookUrlPolicy(disable_loopback=False)) is None
+            await resolve_webhook_addresses("host.docker.internal", 80, WebhookUrlPolicy(disable_loopback=False))
+            is None
         )
 
     @pytest.mark.parametrize(
@@ -338,31 +339,40 @@ class TestResolveWebhookAddress:
     )
     async def test_blocks_internal_hostnames(self, host: str, reason: str) -> None:
         with pytest.raises(WebhookUrlError, match=reason):
-            await resolve_webhook_address(host, 443, WebhookUrlPolicy())
+            await resolve_webhook_addresses(host, 443, WebhookUrlPolicy())
 
     async def test_exact_allow_list_entry_skips_address_checks(self) -> None:
         policy = WebhookUrlPolicy(allowed_domains=["billing.default.svc.cluster.local"])
 
-        assert await resolve_webhook_address("billing.default.svc.cluster.local", 80, policy) is None
+        assert await resolve_webhook_addresses("billing.default.svc.cluster.local", 80, policy) is None
 
     async def test_wildcard_allow_list_entry_still_checks_addresses(self, monkeypatch: pytest.MonkeyPatch) -> None:
         _resolve_to(monkeypatch, "127.0.0.1")
         policy = WebhookUrlPolicy(allowed_domains=["*.corp.com"])
 
         with pytest.raises(WebhookUrlError, match="loopback IP range"):
-            await resolve_webhook_address("hooks.corp.com", 443, policy)
+            await resolve_webhook_addresses("hooks.corp.com", 443, policy)
 
-    async def test_returns_the_first_resolved_address_to_pin(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        _resolve_to(monkeypatch, "93.184.215.14", "2606:2800:21f:cb07:6820:80da:af6b:8b2c")
+    async def test_returns_every_resolved_address_in_dns_order(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        _resolve_to(monkeypatch, "2606:2800:21f:cb07:6820:80da:af6b:8b2c", "93.184.215.14")
 
-        assert await resolve_webhook_address("hooks.example.com", 443, WebhookUrlPolicy()) == "93.184.215.14"
+        addresses = await resolve_webhook_addresses("hooks.example.com", 443, WebhookUrlPolicy())
+
+        assert addresses == ["2606:2800:21f:cb07:6820:80da:af6b:8b2c", "93.184.215.14"]
+
+    async def test_drops_repeated_addresses(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        _resolve_to(monkeypatch, "93.184.215.14", "93.184.215.14", "93.184.215.15")
+
+        addresses = await resolve_webhook_addresses("hooks.example.com", 443, WebhookUrlPolicy())
+
+        assert addresses == ["93.184.215.14", "93.184.215.15"]
 
     async def test_any_blocked_address_rejects_the_host(self, monkeypatch: pytest.MonkeyPatch) -> None:
         # A rebinding-style answer mixing a public and an internal address must not slip through.
         _resolve_to(monkeypatch, "93.184.215.14", "169.254.169.254")
 
         with pytest.raises(WebhookUrlError, match="cloud metadata endpoint"):
-            await resolve_webhook_address("hooks.example.com", 443, WebhookUrlPolicy())
+            await resolve_webhook_addresses("hooks.example.com", 443, WebhookUrlPolicy())
 
     async def test_resolved_private_address_blocked_when_private_ips_disabled(
         self, monkeypatch: pytest.MonkeyPatch
@@ -370,7 +380,7 @@ class TestResolveWebhookAddress:
         _resolve_to(monkeypatch, "10.1.2.3")
 
         with pytest.raises(WebhookUrlError, match="private IP range"):
-            await resolve_webhook_address("internal.example.com", 443, WebhookUrlPolicy(disable_private_ips=True))
+            await resolve_webhook_addresses("internal.example.com", 443, WebhookUrlPolicy(disable_private_ips=True))
 
 
 class TestResolve:

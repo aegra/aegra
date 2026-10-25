@@ -156,7 +156,13 @@ class TestCancelledRunWebhook:
     """A cancel that makes the run terminal itself reports it; one the executor finishes does not."""
 
     @staticmethod
-    def _cancel(*, reconciled: bool, webhook: str | None = _WEBHOOK) -> MagicMock:
+    def _cancel(
+        *,
+        reconciled: bool,
+        webhook: str | None = _WEBHOOK,
+        executing_here: bool = False,
+        handed_over: set[str] | None = None,
+    ) -> MagicMock:
         app = create_test_app(include_runs=True, include_threads=False)
         run = DummyRun(status="running")
         run.execution_params = RunJob(
@@ -179,6 +185,8 @@ class TestCancelledRunWebhook:
             patch("aegra_api.api.runs.streaming_service") as mock_streaming,
             patch("aegra_api.api.runs.interrupt_unowned_run", new_callable=AsyncMock, return_value=reconciled),
             patch("aegra_api.api.runs.notify_run_finished") as mock_notify,
+            patch.dict("aegra_api.api.runs.active_runs", {"test-run-123": MagicMock()} if executing_here else {}),
+            patch("aegra_api.api.runs.reconciled_run_cancellations", handed_over if handed_over is not None else set()),
         ):
             mock_streaming.cancel_run = AsyncMock()
             mock_streaming.interrupt_run = AsyncMock()
@@ -204,6 +212,23 @@ class TestCancelledRunWebhook:
 
     def test_cancel_of_a_run_without_webhook_reports_nothing(self) -> None:
         assert self._cancel(reconciled=True, webhook=None).call_count == 0
+
+    def test_cancel_of_a_run_executing_in_this_process_hands_the_report_to_its_executor(self) -> None:
+        # The executor has the streamed values and start time; the endpoint would report neither.
+        handed_over: set[str] = set()
+
+        mock_notify = self._cancel(reconciled=True, executing_here=True, handed_over=handed_over)
+
+        mock_notify.assert_not_called()
+        assert handed_over == {"test-run-123"}
+
+    def test_cancel_of_a_queued_run_reports_it_without_handing_over(self) -> None:
+        handed_over: set[str] = set()
+
+        mock_notify = self._cancel(reconciled=True, handed_over=handed_over)
+
+        mock_notify.assert_called_once()
+        assert handed_over == set()
 
 
 class TestStatelessRunWebhook:

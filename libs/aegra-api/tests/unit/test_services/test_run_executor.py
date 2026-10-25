@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from aegra_api.core.active_runs import reconciled_run_cancellations
 from aegra_api.models.auth import User
 from aegra_api.models.run_job import RunBehavior, RunExecution, RunIdentity, RunJob
 from aegra_api.models.runs import Durability
@@ -629,6 +630,43 @@ class TestExecuteRunWebhook:
         mock_notify = await self._execute(_stream_filling({}), started=False)
 
         mock_notify.assert_not_called()
+
+    async def test_cancel_the_api_handed_over_reports_streamed_values_and_start_time(self) -> None:
+        # The API committed the cancel, so this finalize loses; the webhook still carries what the run produced.
+        reconciled_run_cancellations.add("run-1")
+        try:
+            mock_notify = await self._execute(
+                _stream_filling({"count": 1}, error=asyncio.CancelledError()), finalized=False
+            )
+        finally:
+            reconciled_run_cancellations.discard("run-1")
+
+        outcome = self._outcome(mock_notify)
+        assert outcome.status == "interrupted"
+        assert outcome.values == {"count": 1}
+        assert outcome.error is None
+        assert outcome.run_started_at is not None
+
+    async def test_handed_over_run_that_never_started_reports_without_values(self) -> None:
+        reconciled_run_cancellations.add("run-1")
+        try:
+            mock_notify = await self._execute(_stream_filling({}), started=False)
+        finally:
+            reconciled_run_cancellations.discard("run-1")
+
+        outcome = self._outcome(mock_notify)
+        assert outcome.status == "interrupted"
+        assert outcome.values is None
+        assert outcome.run_started_at is None
+
+    async def test_handover_mark_is_cleared_when_the_run_ends(self) -> None:
+        reconciled_run_cancellations.add("run-1")
+        try:
+            await self._execute(_stream_filling({}, error=asyncio.CancelledError()), finalized=False)
+
+            assert "run-1" not in reconciled_run_cancellations
+        finally:
+            reconciled_run_cancellations.discard("run-1")
 
 
 def _webhook_job() -> RunJob:

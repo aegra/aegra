@@ -12,7 +12,7 @@ from typing import Any
 
 import structlog
 
-from aegra_api.core.active_runs import active_runs
+from aegra_api.core.active_runs import active_runs, reconciled_run_cancellations
 from aegra_api.core.auth_ctx import with_auth_ctx
 from aegra_api.core.redis_manager import redis_manager
 from aegra_api.models.run_job import RunJob
@@ -152,11 +152,16 @@ async def execute_run(job: RunJob) -> None:
         _shutdown_cancellations.discard(run_id)
         _timeout_cancellations.discard(run_id)
         active_runs.pop(run_id, None)
+        # No await between the pop above and this check, so the API either handed this run over or reports it itself.
+        handed_off = run_id in reconciled_run_cancellations
+        reconciled_run_cancellations.discard(run_id)
         if finalized:
             notify_run_finished(
                 job,
                 RunOutcome(status=final_status, values=result.state, error=error_info, run_started_at=started_at),
             )
+        elif handed_off:
+            notify_run_finished(job, RunOutcome(status="interrupted", values=result.state, run_started_at=started_at))
         if not resumes_elsewhere:
             await streaming_service.cleanup_run(run_id)
             await _signal_run_done(run_id)

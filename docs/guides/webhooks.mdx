@@ -45,7 +45,7 @@ The webhook fires once per run, after the run's final status is saved:
 | `interrupted` | The graph paused for human input, or the run was cancelled while running. |
 | `error` | The graph raised, the run hit `BG_JOB_TIMEOUT_SECS`, or workers kept crashing until `BG_JOB_MAX_RETRIES` ran out. |
 
-Whoever saves the final status sends the webhook, so each run fires exactly once. A run that a worker hands back (lease loss, shutdown drain) fires when it finishes on the worker that completes it. A run cancelled before a worker picks it up fires `interrupted` from the cancel request.
+Whoever saves the final status sends the webhook, so each run fires exactly once. A run that a worker hands back (lease loss, shutdown drain) fires when it finishes on the worker that completes it. A run cancelled while it executes reports the state it reached and its `run_started_at`. A run cancelled before it started, or whose worker stopped renewing its lease, fires `interrupted` from the cancel request with `values` and `run_started_at` set to `null`.
 
 ## Payload
 
@@ -83,11 +83,11 @@ The body is the run in LangGraph's webhook format:
 | Field | Description |
 |:--|:--|
 | `status` | `success`, `interrupted`, or `error`. |
-| `values` | The graph state at the end of the run, read from the thread's latest checkpoint whatever `stream_mode` the run used. For a failed run, the last state it streamed. `null` when there is none, for example for a run cancelled before it started. |
+| `values` | The graph state at the end of the run, read from the thread's latest checkpoint whatever `stream_mode` the run used. For a failed or cancelled run, the last state it streamed. `null` when there is none, for example for a run cancelled before it started. |
 | `error` | Present only when `status` is `error`: `{"error": "<exception type>", "message": "<message>"}`. A timeout reports `{"error": "TimeoutError", "message": "Job exceeded maximum execution time"}`. |
 | `kwargs` | What the run was created with: input, command, merged config and context, and the webhook URL. |
 | `metadata` | The run's `metadata`. Runs fired by a cron have none. |
-| `run_started_at`, `run_ended_at` | When execution started and ended. `run_started_at` is `null` for runs failed by the crash-recovery reaper. |
+| `run_started_at`, `run_ended_at` | When execution started and ended. `run_started_at` is `null` for runs failed by the crash-recovery reaper and for runs cancelled before they started. |
 | `webhook_sent_at` | When the delivery started. It stays the same across retries. |
 
 To send fewer fields, list the ones to keep in `webhooks.allowed_fields`:

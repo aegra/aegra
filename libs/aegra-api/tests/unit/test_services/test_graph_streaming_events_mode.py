@@ -4,13 +4,213 @@ Tests for issue #99: stream_mode="events" does not work
 https://github.com/aegra/aegra/issues/99
 """
 
+import asyncio
+import sys
 from collections.abc import AsyncIterator
-from typing import Any
-from unittest.mock import MagicMock
+from contextlib import asynccontextmanager
+from copy import deepcopy
+from types import ModuleType
+from typing import Any, TypedDict
+from unittest.mock import AsyncMock, MagicMock
+from uuid import uuid4
 
 import pytest
+from langgraph.checkpoint.memory import InMemorySaver
+from langgraph.graph import START, StateGraph
+from langgraph.graph.state import CompiledStateGraph
 
+from aegra_api.models.auth import User
+from aegra_api.models.run_job import RunBehavior, RunExecution, RunIdentity, RunJob
+from aegra_api.services import run_executor
 from aegra_api.services.graph_streaming import stream_graph_events
+
+
+class _BreakpointState(TypedDict):
+    x: int
+
+
+def _breakpoint_graph(executed: list[str], *, interrupt_before: list[str] | None = None) -> CompiledStateGraph:
+    def a(state: _BreakpointState) -> _BreakpointState:
+        executed.append("a")
+        return {"x": state["x"] + 1}
+
+    def b(state: _BreakpointState) -> _BreakpointState:
+        executed.append("b")
+        return {"x": state["x"] + 1}
+
+    builder = StateGraph(_BreakpointState)
+    builder.add_node("a", a)
+    builder.add_node("b", b)
+    builder.add_edge(START, "a")
+    builder.add_edge("a", "b")
+    return builder.compile(checkpointer=InMemorySaver(), interrupt_before=interrupt_before)
+
+
+@pytest.mark.parametrize("stream_mode", [["events"], ["events", "values"], ["events", "updates"], ["updates"]])
+@pytest.mark.parametrize("subgraphs", [False, True])
+@pytest.mark.parametrize(
+    ("interrupt_key", "nodes", "expected_executed", "expected_x", "expected_next"),
+    [
+        ("interrupt_before", ["b"], ["a"], 1, ("b",)),
+        ("interrupt_after", ["a"], ["a"], 1, ("b",)),
+        ("interrupt_before", ["*"], [], 0, ("a",)),
+        ("interrupt_after", ["*"], ["a"], 1, ("b",)),
+    ],
+)
+async def test_static_breakpoints_stop_execution_and_resume(
+    *,
+    stream_mode: list[str],
+    subgraphs: bool,
+    interrupt_key: str,
+    nodes: list[str],
+    expected_executed: list[str],
+    expected_x: int,
+    expected_next: tuple[str, ...],
+) -> None:
+    executed: list[str] = []
+    graph = _breakpoint_graph(executed)
+    compiled_before = list(graph.interrupt_before_nodes)
+    compiled_after = list(graph.interrupt_after_nodes)
+    compiled_channels = dict(graph.channels)
+    run_id = str(uuid4())
+    config: dict[str, Any] = {
+        "run_id": run_id,
+        "configurable": {"thread_id": str(uuid4()), "run_id": run_id},
+        interrupt_key: nodes,
+    }
+
+    events = [
+        event
+        async for event in stream_graph_events(graph, {"x": 0}, config, stream_mode=stream_mode, subgraphs=subgraphs)
+    ]
+    state = await graph.aget_state(config)
+
+    assert executed == expected_executed
+    assert state.values == {"x": expected_x}
+    assert state.next == expected_next
+    assert graph.interrupt_before_nodes == compiled_before
+    assert graph.interrupt_after_nodes == compiled_after
+    assert all(graph.channels[key] is channel for key, channel in compiled_channels.items())
+    assert config[interrupt_key] == nodes
+    if "events" in stream_mode:
+        raw_events = [payload for mode, payload in events if mode == "events"]
+        assert any(event["event"] == "on_chain_start" for event in raw_events)
+        assert any(event["event"] == "on_chain_stream" and event["run_id"] == run_id for event in raw_events)
+        assert any(event["event"] == "on_chain_end" and event["run_id"] == run_id for event in raw_events)
+
+    resume_run_id = str(uuid4())
+    resume_config = {
+        "run_id": resume_run_id,
+        "configurable": {**config["configurable"], "run_id": resume_run_id},
+    }
+    async for _event in stream_graph_events(graph, None, resume_config, stream_mode=stream_mode):
+        pass
+    resumed_state = await graph.aget_state(resume_config)
+
+    assert executed == ["a", "b"]
+    assert resumed_state.values == {"x": 2}
+    assert resumed_state.next == ()
+
+
+@pytest.mark.parametrize("interrupt_override", [None, []])
+async def test_events_mode_retains_compiled_breakpoints(interrupt_override: list[str] | None) -> None:
+    executed: list[str] = []
+    graph = _breakpoint_graph(executed, interrupt_before=["b"])
+    run_id = str(uuid4())
+    config: dict[str, Any] = {
+        "run_id": run_id,
+        "configurable": {"thread_id": str(uuid4()), "run_id": run_id},
+    }
+    if interrupt_override is not None:
+        config["interrupt_before"] = interrupt_override
+
+    async for _event in stream_graph_events(graph, {"x": 0}, config, stream_mode=["events"]):
+        pass
+
+    assert executed == ["a"]
+    assert (await graph.aget_state(config)).next == ("b",)
+    assert graph.interrupt_before_nodes == ["b"]
+
+
+async def test_concurrent_events_runs_isolate_breakpoints_on_shared_graph() -> None:
+    executed: list[str] = []
+    graph = _breakpoint_graph(executed)
+    graph.config = {"metadata": {"owner": "fixture"}, "tags": ["shared"]}
+    compiled_config = deepcopy(graph.config)
+    compiled_channels = dict(graph.channels)
+
+    async def stream(config: dict[str, Any]) -> None:
+        async for _event in stream_graph_events(graph, {"x": 0}, config, stream_mode=["events"]):
+            pass
+
+    paused_id = str(uuid4())
+    completed_id = str(uuid4())
+    paused_config = {
+        "run_id": paused_id,
+        "configurable": {"thread_id": str(uuid4()), "run_id": paused_id},
+        "interrupt_before": ["b"],
+    }
+    completed_config = {
+        "run_id": completed_id,
+        "configurable": {"thread_id": str(uuid4()), "run_id": completed_id},
+    }
+
+    await asyncio.gather(stream(paused_config), stream(completed_config))
+    paused_state = await graph.aget_state(paused_config)
+    completed_state = await graph.aget_state(completed_config)
+
+    assert paused_state.values == {"x": 1}
+    assert paused_state.next == ("b",)
+    assert completed_state.values == {"x": 2}
+    assert completed_state.next == ()
+    assert graph.interrupt_before_nodes == []
+    assert graph.config == compiled_config
+    assert all(graph.channels[key] is channel for key, channel in compiled_channels.items())
+
+
+@pytest.mark.parametrize("stream_mode", [["events", "updates"], ["events", "values", "updates"]])
+@pytest.mark.parametrize(("interrupt_key", "node"), [("interrupt_before", "b"), ("interrupt_after", "a")])
+async def test_events_run_finalizes_interrupted_with_pending_node(
+    monkeypatch: pytest.MonkeyPatch, stream_mode: list[str], interrupt_key: str, node: str
+) -> None:
+    executed: list[str] = []
+    graph = _breakpoint_graph(executed)
+    run_config: dict[str, Any] = {}
+
+    @asynccontextmanager
+    async def get_graph(_graph_id: str, *, config: dict[str, Any], **_kwargs: Any) -> AsyncIterator[CompiledStateGraph]:
+        run_config.update(config)
+        yield graph
+
+    finalize = AsyncMock(return_value=True)
+    signal_end = AsyncMock()
+    put_to_broker = AsyncMock()
+    monkeypatch.setattr(run_executor, "get_langgraph_service", lambda: MagicMock(get_graph=get_graph))
+    monkeypatch.setattr(run_executor, "start_run", AsyncMock(return_value=True))
+    monkeypatch.setattr(run_executor, "finalize_run", finalize)
+    monkeypatch.setattr(run_executor.broker_manager, "allocate_event_id", AsyncMock(return_value="event-1"))
+    monkeypatch.setattr(run_executor.streaming_service, "put_to_broker", put_to_broker)
+    monkeypatch.setattr(run_executor.streaming_service, "cleanup_run", AsyncMock())
+    monkeypatch.setattr(run_executor, "_signal_end_event", signal_end)
+    monkeypatch.setattr(run_executor, "_signal_run_done", AsyncMock())
+    job = RunJob(
+        identity=RunIdentity(run_id=str(uuid4()), thread_id=str(uuid4()), graph_id="breakpoints"),
+        user=User(identity="test-user"),
+        execution=RunExecution(input_data={"x": 0}, stream_mode=stream_mode),
+        behavior=RunBehavior(**{interrupt_key: [node]}),
+    )
+
+    await run_executor.execute_run(job)
+
+    assert executed == ["a"]
+    assert (await graph.aget_state(run_config)).next == ("b",)
+    finalize.assert_awaited_once()
+    assert finalize.await_args.kwargs["status"] == "interrupted"
+    assert finalize.await_args.kwargs["thread_status"] == "interrupted"
+    if "values" in stream_mode:
+        assert finalize.await_args.kwargs["output"] == {"x": 1}
+    signal_end.assert_awaited_once_with(job.identity.run_id, "interrupted")
+    assert any(call.args[2][0] == "events" for call in put_to_broker.await_args_list)
 
 
 class _RecordingGraph:
@@ -33,6 +233,34 @@ class _RecordingGraph:
             "run_id": "run-123",
             "data": {"chunk": ("values", {"done": True})},
         }
+
+
+async def test_js_graph_keeps_remote_events_interface(monkeypatch: pytest.MonkeyPatch) -> None:
+    class RemoteGraph(_RecordingGraph):
+        pass
+
+    js_base = ModuleType("langgraph_api.js.base")
+    js_base.BaseRemotePregel = RemoteGraph
+    monkeypatch.setitem(sys.modules, "langgraph_api", ModuleType("langgraph_api"))
+    monkeypatch.setitem(sys.modules, "langgraph_api.js", ModuleType("langgraph_api.js"))
+    monkeypatch.setitem(sys.modules, "langgraph_api.js.base", js_base)
+    graph = RemoteGraph()
+    config = {
+        "configurable": {"run_id": "run-123"},
+        "interrupt_before": ["*"],
+        "interrupt_after": ["b"],
+    }
+
+    events = [
+        event async for event in stream_graph_events(graph, {"x": 0}, config, stream_mode=["values", "messages-tuple"])
+    ]
+
+    assert graph.astream_kwargs is None
+    assert graph.astream_events_kwargs is not None
+    assert graph.astream_events_kwargs["interrupt_before"] == "*"
+    assert graph.astream_events_kwargs["interrupt_after"] == ["b"]
+    assert "messages-tuple" in graph.astream_events_kwargs["stream_mode"]
+    assert ("values", {"done": True}) in events
 
 
 class TestEventsMode:

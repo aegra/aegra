@@ -315,7 +315,7 @@ async def graph(runtime: ServerRuntime):
 
 Do not decide in a node. In LangGraph 1.2 a node's own handler sees the message only when LangGraph runs the node inline: the node is the only task in its step, the graph is a `StateGraph` with no `step_timeout`, and the run streams no `messages`, `messages-tuple`, or `custom` mode, does not set `stream_subgraphs`, and does not come through [Agent Protocol v2 event streaming](/guides/streaming#agent-protocol-v2-event-streaming), which always streams subgraphs. Otherwise LangGraph runs the node in a separate task that its executor cancels with a marker object, so `exc.args[0]` there is an object, not a string.
 
-A missing message means the run ends here: the in-process executor of `aegra dev` has no queue to hand runs to and cancels without one, and a `CancelledError` raised by the graph's own code carries whatever that code put in it.
+A missing message means the run ends here: the in-process executor (`REDIS_BROKER_ENABLED=false`, as under `aegra dev`) has no queue to hand runs to and cancels without one, and a `CancelledError` raised by the graph's own code carries whatever that code put in it.
 
 ## Dev vs production mode
 

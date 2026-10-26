@@ -95,6 +95,8 @@ All store operations are automatically scoped to the authenticated user's namesp
 
 This ensures users can never access each other's data, even if they craft a request with another user's namespace.
 
+LangGraph does not allow periods in namespace labels, so the user id (and any [configurable scope](#configurable-scoping) value) is encoded before it becomes a label: `%` becomes `%25` and `.` becomes `%2E`. An identity like `alice.smith@example.com` is stored under `["users", "alice%2Esmith@example%2Ecom", ...]`. Ids without periods or percent signs are unchanged. To address your own scope explicitly, use the encoded id, or reuse the namespace the API returns.
+
 ### Configurable scoping
 
 Beyond the default per-user scope, you can define **configurable scopes**: a map of **namespace prefix → list of User attributes** under `store.scopes` in `aegra.json`. A namespace starting with a configured prefix is isolated under `[prefix, *<user attribute values>]`, where the values come from the authenticated user populated by [your auth handler](/guides/authentication).
@@ -206,17 +208,24 @@ Your agents can access the store within graph nodes via LangGraph's built-in sto
 ```python
 from langgraph.store.base import BaseStore
 
+from aegra_api.api.store import namespace_label
+
 
 def my_node(state, *, store: BaseStore):
     """The store is automatically injected by LangGraph."""
+    # Encode the id the same way the /store API does
+    user_label = namespace_label(state["user_id"])
+
     # Read from the store
-    items = store.search(("users", state["user_id"], "preferences"))
+    items = store.search(("users", user_label, "preferences"))
     prefs = items[0].value if items else {}
 
     # Write to the store
-    store.put(("users", state["user_id"], "history"), key="last_query", value={"q": state["query"]})
+    store.put(("users", user_label, "history"), key="last_query", value={"q": state["query"]})
 
     return {"preferences": prefs}
 ```
+
+Pass user ids through `namespace_label` so ids containing `.` or `%` (for example email addresses) become valid labels that match the namespaces the `/store` API uses.
 
 Add the node to your graph as usual — LangGraph injects the `store` parameter automatically when the graph is compiled with a store backend (which Aegra provides).

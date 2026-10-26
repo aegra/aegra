@@ -6,7 +6,10 @@ from uuid import uuid4
 
 import pytest
 from fastapi import HTTPException
+from redis import ConnectionError as RedisConnectionError
 from redis import RedisError
+from redis import TimeoutError as RedisTimeoutError
+from redis.exceptions import OutOfMemoryError, ReadOnlyError
 
 from aegra_api.api.runs import (
     _apply_create_run_auth,
@@ -110,6 +113,77 @@ class TestRunsEndpoints:
 
             # Verify background execution submission
             mock_submit.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "failure",
+        [RedisConnectionError("Connection lost"), RedisTimeoutError("Timeout writing to socket"), OSError("closed")],
+    )
+    async def test_create_run_returns_pending_run_when_dispatch_fails_after_commit(
+        self, mock_user: User, mock_session: AsyncMock, sample_assistant: AssistantORM, failure: Exception
+    ) -> None:
+        """The row is committed before the queue push, and the reaper dispatches a
+        pending run missing from the queue; a 500 here made clients retry into a duplicate."""
+        thread_id = "test-thread-123"
+        run_id = str(uuid4())
+        request = RunCreate(assistant_id="test-assistant", input={"message": "hello"})
+
+        with (
+            patch("aegra_api.services.run_preparation._validate_resume_command", new_callable=AsyncMock),
+            patch("aegra_api.services.run_preparation.get_langgraph_service") as mock_lg_service,
+            patch("aegra_api.services.run_preparation.resolve_assistant_id", return_value="test-assistant"),
+            patch("aegra_api.services.run_preparation.update_thread_metadata", new_callable=AsyncMock),
+            patch("aegra_api.services.run_preparation.set_thread_status", new_callable=AsyncMock),
+            patch("aegra_api.services.run_preparation.uuid4", return_value=run_id),
+            patch(
+                "aegra_api.services.run_preparation.executor.submit",
+                new_callable=AsyncMock,
+                side_effect=failure,
+            ) as mock_submit,
+            patch("aegra_api.services.run_preparation.logger.warning") as mock_warning,
+            patch("aegra_api.api.runs.active_runs", {}),
+        ):
+            mock_lg_service.return_value.list_graphs.return_value = ["test-graph"]
+            mock_session.scalar.side_effect = [None, sample_assistant]
+
+            result = await create_run(thread_id, request, mock_user, mock_session)
+
+        assert result.run_id == run_id
+        assert result.status == "pending"
+        mock_session.commit.assert_called_once()
+        mock_submit.assert_awaited_once()
+        mock_warning.assert_called_once()
+        assert mock_warning.call_args.kwargs["run_id"] == run_id
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "failure",
+        [ValueError("bug"), OutOfMemoryError("OOM command not allowed"), ReadOnlyError("READONLY replica")],
+    )
+    async def test_create_run_still_fails_when_redis_refuses_the_push(
+        self, mock_user: User, mock_session: AsyncMock, sample_assistant: AssistantORM, failure: Exception
+    ) -> None:
+        """Redis answering with an error is not a transient outage: the reaper would hit it too."""
+        request = RunCreate(assistant_id="test-assistant", input={"message": "hello"})
+
+        with (
+            patch("aegra_api.services.run_preparation._validate_resume_command", new_callable=AsyncMock),
+            patch("aegra_api.services.run_preparation.get_langgraph_service") as mock_lg_service,
+            patch("aegra_api.services.run_preparation.resolve_assistant_id", return_value="test-assistant"),
+            patch("aegra_api.services.run_preparation.update_thread_metadata", new_callable=AsyncMock),
+            patch("aegra_api.services.run_preparation.set_thread_status", new_callable=AsyncMock),
+            patch(
+                "aegra_api.services.run_preparation.executor.submit",
+                new_callable=AsyncMock,
+                side_effect=failure,
+            ),
+            patch("aegra_api.api.runs.active_runs", {}),
+        ):
+            mock_lg_service.return_value.list_graphs.return_value = ["test-graph"]
+            mock_session.scalar.side_effect = [None, sample_assistant]
+
+            with pytest.raises(type(failure)):
+                await create_run("test-thread-123", request, mock_user, mock_session)
 
     @pytest.mark.asyncio
     async def test_create_run_assistant_not_found(

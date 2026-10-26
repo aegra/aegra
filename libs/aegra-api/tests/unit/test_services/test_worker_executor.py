@@ -261,15 +261,32 @@ class TestHeartbeatLoop:
         assert session.execute.await_count == 2
 
     @pytest.mark.asyncio
-    async def test_lease_loss_names_lease_lost_to_the_job_task(self) -> None:
-        """The job task's CancelledError says the lease was lost, so a graph can
-        tell "another worker owns this run now" from a user cancel."""
+    @pytest.mark.parametrize(
+        ("row_status", "row_claimed_by", "expected_reason"),
+        [
+            ("running", "worker-1", "lease_lost"),
+            ("pending", None, "lease_lost"),
+            ("interrupted", None, "cancel"),
+            (None, None, "cancel"),
+        ],
+        ids=["claimed-by-another-worker", "requeued-by-the-reaper", "interrupted-by-the-api", "deleted"],
+    )
+    async def test_lost_lease_names_lease_lost_only_while_the_run_stays_active(
+        self, row_status: str | None, row_claimed_by: str | None, expected_reason: str
+    ) -> None:
+        """The job task's CancelledError says lease_lost only when another instance resumes
+        the run; a run that ended or was deleted while the lease was expired says cancel."""
         run_id = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+        row: MagicMock | None = None
+        if row_status is not None:
+            row = _make_run_orm(run_id=run_id, status=row_status)
+            row.claimed_by = row_claimed_by
         session = AsyncMock()
         lost = MagicMock()
         lost.rowcount = 0
         session.execute = AsyncMock(return_value=lost)
         session.commit = AsyncMock()
+        session.scalar = AsyncMock(return_value=row)
         maker = _make_session_maker(session)
         seen: list[tuple[object, ...]] = []
 
@@ -297,7 +314,7 @@ class TestHeartbeatLoop:
         await asyncio.gather(job_task, return_exceptions=True)
 
         assert job_task.cancelled()
-        assert seen == [("lease_lost",)]
+        assert seen == [(expected_reason,)]
 
 
 # ------------------------------------------------------------------

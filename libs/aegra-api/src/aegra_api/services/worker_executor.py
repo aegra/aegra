@@ -59,6 +59,13 @@ def _forced_cancel_reason(run_id: str) -> CancelReason:
     return "cancel"
 
 
+async def _lease_loss_reason(run_id: str) -> CancelReason:
+    """A run that ended while this worker's lease was expired, or whose row is gone, ends here; an active one resumes."""
+    if await _is_run_terminal(run_id):
+        return "cancel"
+    return "lease_lost"
+
+
 async def _cleanup_cancelled_execution(run_id: str, execution_task: asyncio.Task[None]) -> None:
     """Stop execution and persist an explicit cancellation when applicable."""
     if not execution_task.done():
@@ -574,6 +581,7 @@ async def _heartbeat_loop(
                 )
                 await session.commit()
             if result.rowcount == 0:  # type: ignore[union-attr]
+                reason = await _lease_loss_reason(run_id)
                 logger.warning(
                     "Lease lost, cancelling job to prevent double execution",
                     run_id=run_id,
@@ -581,7 +589,7 @@ async def _heartbeat_loop(
                 )
                 if job_task is not None and not job_task.done():
                     _lease_loss_cancellations.add(run_id)
-                    job_task.cancel(msg="lease_lost")
+                    job_task.cancel(msg=reason)
                 return
             logger.debug("Lease extended", run_id=run_id, worker=worker_name)
         except Exception:

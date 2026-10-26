@@ -52,6 +52,12 @@ Aegra supports flexible authentication through configurable auth handlers. You w
   </Step>
 </Steps>
 
+## Authentication module lifetime
+
+Aegra imports the configured `auth.path` module once per server process and shares the resulting `Auth` instance across requests. Concurrent requests share initialization; authentication still runs separately for each request and user.
+
+Keep request-specific data in the handler and its returned user object, rather than mutating module globals. Changes to the auth module or `auth.path` require restarting the server process. `aegra dev` starts a new process when its watched files change, so the new process loads the updated module. A failed or missing module is also cached until restart; correcting the file alone does not retry initialization inside the running process.
+
 ## The authenticate handler
 
 The `@auth.authenticate` decorator registers your authentication function. It receives the request headers and must return a dictionary with user data.

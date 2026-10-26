@@ -4,7 +4,7 @@ from typing import Annotated, Any
 
 from fastapi import Depends, HTTPException, Request
 
-from aegra_api.core.auth_middleware import get_auth_backend
+from aegra_api.core.auth_middleware import get_auth_backend_async
 from aegra_api.models.auth import User
 
 # Several dependencies on one request can call require_auth; the backend must run once
@@ -78,7 +78,7 @@ async def require_auth(request: Request) -> User:
     if cached is not None:
         return cached
 
-    backend = get_auth_backend()
+    backend = await get_auth_backend_async()
 
     try:
         result = await backend.authenticate(request)

@@ -291,23 +291,29 @@ Every forced cancel the worker issues names its reason as the message of the `as
 
 A resource kept for `requeue` or `lease_lost` still needs an expiry of its own: a requeued run can be cancelled while it waits in the queue, and nothing reaches the graph that stopped.
 
-Read it in a node's exception handler or around a factory's `yield`, and re-raise:
+The exit of the factory's context manager sees the message every time, so read it there and re-raise:
 
 ```python
 import asyncio
+from contextlib import asynccontextmanager
+
+from langgraph_sdk.runtime import ServerRuntime
 
 
-async def node(state):
+@asynccontextmanager
+async def graph(runtime: ServerRuntime):
     try:
-        return await do_work(state)
+        yield build_graph()
     except asyncio.CancelledError as exc:
         reason = exc.args[0] if exc.args else None
         if reason in ("requeue", "lease_lost"):
-            keep_the_workspace()  # another instance picks the run up
+            keep_the_workspace()  # another instance resumes the run
         else:
             release_the_workspace()  # the run ends here
         raise
 ```
+
+Do not decide in a node. In LangGraph 1.2 a node's own handler sees the message only when LangGraph runs the node inline: the node is the only task in its step, the graph is a `StateGraph` with no `step_timeout`, and the run streams no `messages`, `messages-tuple`, or `custom` mode, does not set `stream_subgraphs`, and does not come through [Agent Protocol v2 event streaming](/guides/streaming#agent-protocol-v2-event-streaming), which always streams subgraphs. Otherwise LangGraph runs the node in a separate task that its executor cancels with a marker object, so `exc.args[0]` there is an object, not a string.
 
 A missing message means the run ends here: the in-process executor of `aegra dev` has no queue to hand runs to and cancels without one, and a `CancelledError` raised by the graph's own code carries whatever that code put in it.
 

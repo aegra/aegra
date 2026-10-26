@@ -261,7 +261,7 @@ Cancellation is asynchronous while a live worker owns the run.
 The cancel response may therefore still show `pending` or `running`; poll, join, or stream the run until it reaches a terminal status.
 Use the REST endpoint with `wait=1` when the caller needs the request to wait briefly for the worker to settle.
 
-In production mode the cancelled run's task receives `asyncio.CancelledError("cancel")` inside the graph. The message lets a graph that holds a resource outside its checkpoint tell this from a worker hand-off: `cancel` and `timeout` end the run here, while `requeue` and `lease_lost` mean another instance resumes it. See [what the graph sees when its run is cancelled](/guides/worker-architecture#what-the-graph-sees-when-its-run-is-cancelled).
+In production mode the cancelled run's task unwinds with `asyncio.CancelledError("cancel")`, which a graph factory reads at the exit of its context manager. The message lets a graph that holds a resource outside its checkpoint tell this from a worker hand-off: `cancel` and `timeout` end the run here, while `requeue` and `lease_lost` mean another instance resumes it. See [what the graph sees when its run is cancelled](/guides/worker-architecture#what-the-graph-sees-when-its-run-is-cancelled).
 
 ### Cancelling several runs
 

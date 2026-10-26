@@ -1,0 +1,66 @@
+name: Latest dependencies
+
+# pyproject.toml only sets floors, so users get each new langgraph release the day it ships,
+# while CI tests uv.lock. This job resolves everything to the newest versions every night.
+on:
+  schedule:
+    - cron: "0 3 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      issues: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+
+      - name: Set up Python
+        run: uv python install 3.12
+
+      - name: Resolve to the newest versions
+        run: uv lock --upgrade
+
+      - name: Install workspace dependencies
+        run: uv sync --all-packages
+
+      - name: Show resolved langgraph packages
+        run: uv pip list | grep -iE "^(langgraph|langchain-core)"
+
+      - name: Run aegra-api tests
+        env:
+          AEGRA_CONFIG: ""
+          POSTGRES_USER: "user"
+          POSTGRES_PASSWORD: "password"
+          POSTGRES_HOST: "localhost"
+          POSTGRES_PORT: "5432"
+          POSTGRES_DB: "aegra"
+        run: uv run --package aegra-api pytest libs/aegra-api/tests/unit libs/aegra-api/tests/integration
+
+      - name: Run aegra-cli tests
+        run: uv run --package aegra-cli pytest libs/aegra-cli/tests/
+
+      # One open issue at a time; later failures comment on it instead of opening duplicates.
+      - name: Report failure
+        if: failure() && github.event_name == 'schedule'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          title="Tests fail against the newest dependency releases"
+          body="The nightly run against the newest releases failed: $RUN_URL"
+          existing=$(gh issue list --state open --search "in:title \"$title\"" --json number -q '.[0].number')
+          if [ -n "$existing" ]; then
+            gh issue comment "$existing" --body "$body"
+          else
+            gh issue create --title "$title" --body "$body"
+          fi

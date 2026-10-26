@@ -118,6 +118,21 @@ aegra down --volumes    # Stop and remove data volumes
 
 ---
 
+### `aegra db`
+
+Out-of-band database migrations. Use this for multi-pod deploys when `RUN_MIGRATIONS_ON_STARTUP=false`.
+
+```bash
+aegra db upgrade        # apply pending migrations (session advisory lock in alembic/env.py)
+aegra db current        # show current revision
+aegra db history -v     # show migration history
+aegra db downgrade -1   # roll back one revision
+```
+
+See [Migrations](/guides/deployment#migrations) in the deployment guide.
+
+---
+
 ### `aegra version`
 
 Show version information.

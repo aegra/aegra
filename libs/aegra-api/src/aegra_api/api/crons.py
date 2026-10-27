@@ -245,6 +245,9 @@ async def _create_cron_atomic(
         return await _trigger_first_run(session, cron, user, thread_id=thread_id)
     except Exception:
         try:
+            # Drop the failed run setup (thread metadata merge, or a failed transaction) so the
+            # delete below runs on a clean session; the cron row itself was committed already.
+            await session.rollback()
             await service.delete_cron(cron.cron_id, user.identity)
         except Exception:
             logger.exception(

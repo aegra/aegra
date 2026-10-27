@@ -6,7 +6,7 @@ from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
 
-from aegra_api.api.crons import _authorize_cron_create, _trigger_first_run
+from aegra_api.api.crons import _authorize_cron_create, _create_cron_atomic, _trigger_first_run
 from aegra_api.models import Run, User
 from aegra_api.models.crons import CronCreate
 
@@ -203,3 +203,26 @@ class TestAuthorizeCronCreate:
         assert exc_info.value.status_code == 403
         # Only crons.create and assistants.read should have run.
         assert mock_handle.await_count == 2
+
+
+class TestCreateCronAtomic:
+    @pytest.mark.asyncio
+    async def test_failed_first_run_rolls_back_before_deleting_the_cron(self) -> None:
+        # The gate's 409 leaves the thread update of the failed run setup pending on the request
+        # session (and a DB error leaves it failed): delete the committed cron on a clean session.
+        session = AsyncMock()
+        service = AsyncMock()
+        service.create_cron.return_value = SimpleNamespace(cron_id="cron-1", thread_id="t1")
+        order = Mock()
+        order.attach_mock(session.rollback, "rollback")
+        order.attach_mock(service.delete_cron, "delete_cron")
+        request = Mock(enabled=True)
+
+        with (
+            patch("aegra_api.api.crons._trigger_first_run", new_callable=AsyncMock, side_effect=RuntimeError("409")),
+            pytest.raises(RuntimeError),
+        ):
+            await _create_cron_atomic(request, User(identity="u"), service, session, thread_id="t1")
+
+        assert [c[0] for c in order.mock_calls] == ["rollback", "delete_cron"]
+        service.delete_cron.assert_awaited_once_with("cron-1", "u")

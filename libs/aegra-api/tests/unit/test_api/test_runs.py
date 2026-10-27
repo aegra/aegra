@@ -94,6 +94,10 @@ class TestRunsEndpoints:
 
             # DB setup: first scalar = thread ownership check (None = new thread), second = assistant
             mock_session.scalar.side_effect = [None, sample_assistant]
+            # No in-flight run on the thread → multitask gate lets this run start now.
+            no_active = MagicMock()
+            no_active.all.return_value = []
+            mock_session.scalars.return_value = no_active
 
             result = await create_run(thread_id, request, mock_user, mock_session)
 

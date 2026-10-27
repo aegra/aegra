@@ -51,7 +51,8 @@
               "guides/threads-and-state",
               "guides/streaming",
               "guides/human-in-the-loop",
-              "guides/cron"
+              "guides/cron",
+              "guides/double-texting"
             ]
           },
           {

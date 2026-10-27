@@ -286,7 +286,7 @@ Every forced cancel the worker issues names its reason as the message of the `as
 |:--------|:-------------|:------------------------|
 | `cancel` | `runs.cancel` with `cancel` or `interrupt`, a client that dropped its stream with `on_disconnect="cancel"`, a run or thread deletion, or the heartbeat finding the run already ended or deleted (the API interrupted it or the reaper gave it up, both while this worker's lease was expired, or a deletion removed it) | Finalized as `interrupted`, or left in the state it already ended in; it ends here |
 | `requeue` | The drain window closing with the run still in flight | Handed back to the queue; another instance resumes it from the last checkpoint |
-| `lease_lost` | The heartbeat finding the run's row still active but no longer leased to this worker (the reaper requeued it or another worker claimed it), or, as the fallback, failing to read the row at all after losing the lease | Another worker continues the run; this copy stops without finalizing |
+| `lease_lost` | The heartbeat finding the run's row still active but no longer leased to this worker (the reaper requeued it or another worker claimed it), or, as the fallback, failing to read the row within one heartbeat interval after losing the lease | Another worker continues the run; this copy stops without finalizing |
 | `timeout` | `BG_JOB_TIMEOUT_SECS` elapsing | Finalized as `error`; it ends here |
 
 A resource kept for `requeue` or `lease_lost` still needs an expiry of its own: a requeued run can be cancelled while it waits in the queue, a fallback `lease_lost` can come from a run that already ended, and nothing reaches the graph that stopped.

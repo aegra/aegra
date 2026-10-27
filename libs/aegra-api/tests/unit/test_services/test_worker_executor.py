@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from redis import ConnectionError as RedisConnectionError
 from redis import TimeoutError as RedisTimeoutError
+from sqlalchemy.exc import TimeoutError as SQLAlchemyTimeoutError
 
 from aegra_api.core.active_runs import active_runs, explicit_run_cancellations
 from aegra_api.models.auth import User
@@ -317,7 +318,18 @@ class TestHeartbeatLoop:
         assert seen == [(expected_reason,)]
 
     @pytest.mark.asyncio
-    async def test_lost_lease_still_cancels_as_lease_lost_when_the_status_read_fails(self) -> None:
+    @pytest.mark.parametrize(
+        "read_error",
+        [
+            TimeoutError(),
+            ConnectionRefusedError(),
+            SQLAlchemyTimeoutError("QueuePool limit of size 5 overflow 10 reached"),
+        ],
+        ids=["asyncpg-checkout-timeout", "connection-refused", "pool-queue-timeout"],
+    )
+    async def test_lost_lease_still_cancels_as_lease_lost_when_the_status_read_fails(
+        self, read_error: Exception
+    ) -> None:
         """A failed read must not leave running a job that another worker may already own."""
         run_id = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
         session = AsyncMock()
@@ -325,8 +337,9 @@ class TestHeartbeatLoop:
         lost.rowcount = 0
         session.execute = AsyncMock(return_value=lost)
         session.commit = AsyncMock()
-        # What asyncpg raises from the read's connection checkout when the database is unreachable.
-        session.scalar = AsyncMock(side_effect=TimeoutError())
+        # asyncpg's checkout timeout and a refused connection arrive unwrapped;
+        # the pool's own queue timeout arrives as SQLAlchemy's TimeoutError.
+        session.scalar = AsyncMock(side_effect=read_error)
         maker = _make_session_maker(session)
         seen: list[tuple[object, ...]] = []
         sleeps = 0
@@ -356,6 +369,60 @@ class TestHeartbeatLoop:
             mock_settings.worker.LEASE_DURATION_SECONDS = 30
             try:
                 await _heartbeat_loop(run_id, "worker-0", job_task=job_task)
+                marked_lost = run_id in _lease_loss_cancellations
+            finally:
+                _lease_loss_cancellations.discard(run_id)
+        await asyncio.gather(job_task, return_exceptions=True)
+
+        assert sleeps == 1
+        assert marked_lost
+        assert job_task.cancelled()
+        assert seen == [("lease_lost",)]
+
+    @pytest.mark.asyncio
+    async def test_lost_lease_cancels_as_lease_lost_when_the_status_read_hangs(self) -> None:
+        """A read waiting in the pool's queue for a connection must not hold the cancel past one heartbeat."""
+        run_id = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+        session = AsyncMock()
+        lost = MagicMock()
+        lost.rowcount = 0
+        session.execute = AsyncMock(return_value=lost)
+        session.commit = AsyncMock()
+        never_set = asyncio.Event()
+
+        async def _hung_read(*_args: object) -> None:
+            await never_set.wait()
+
+        session.scalar = AsyncMock(side_effect=_hung_read)
+        maker = _make_session_maker(session)
+        seen: list[tuple[object, ...]] = []
+        sleeps = 0
+
+        async def _job() -> None:
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError as exc:
+                seen.append(exc.args)
+                raise
+
+        async def counting_sleep(delay: float) -> None:
+            nonlocal sleeps
+            sleeps += 1
+            if sleeps >= 2:
+                raise asyncio.CancelledError
+
+        job_task = asyncio.create_task(_job())
+        await asyncio.sleep(0)
+
+        with (
+            patch(f"{MODULE}._get_session_maker", return_value=maker),
+            patch(f"{MODULE}.settings") as mock_settings,
+            patch(f"{MODULE}.asyncio.sleep", side_effect=counting_sleep),
+        ):
+            mock_settings.worker.HEARTBEAT_INTERVAL_SECONDS = 0.05
+            mock_settings.worker.LEASE_DURATION_SECONDS = 30
+            try:
+                await asyncio.wait_for(_heartbeat_loop(run_id, "worker-0", job_task=job_task), timeout=5)
                 marked_lost = run_id in _lease_loss_cancellations
             finally:
                 _lease_loss_cancellations.discard(run_id)

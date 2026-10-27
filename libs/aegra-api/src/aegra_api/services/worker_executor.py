@@ -65,11 +65,11 @@ async def _lease_loss_reason(run_id: str) -> CancelReason:
     A failed read falls back to ``lease_lost``, since a run another worker resumes must keep its resources.
     """
     try:
-        ended = await _is_run_terminal(run_id)
+        ended = await asyncio.wait_for(_is_run_terminal(run_id), timeout=settings.worker.HEARTBEAT_INTERVAL_SECONDS)
     except Exception:
         # A connection checkout failure arrives unwrapped (OSError, asyncpg errors), and any escape here
         # would reach the heartbeat's own handler and skip the cancel.
-        logger.exception("Lease-loss status read failed, cancelling as lease_lost", run_id=run_id)
+        logger.exception("Lease-loss status read failed or timed out, cancelling as lease_lost", run_id=run_id)
         return "lease_lost"
     if ended:
         return "cancel"

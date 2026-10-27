@@ -60,8 +60,18 @@ def _forced_cancel_reason(run_id: str) -> CancelReason:
 
 
 async def _lease_loss_reason(run_id: str) -> CancelReason:
-    """A run that ended while this worker's lease was expired, or whose row is gone, ends here; an active one resumes."""
-    if await _is_run_terminal(run_id):
+    """A run that ended while this worker's lease was expired, or whose row is gone, ends here; an active one resumes.
+
+    A failed read falls back to ``lease_lost``, since a run another worker resumes must keep its resources.
+    """
+    try:
+        ended = await _is_run_terminal(run_id)
+    except Exception:
+        # A connection checkout failure arrives unwrapped (OSError, asyncpg errors), and any escape here
+        # would reach the heartbeat's own handler and skip the cancel.
+        logger.exception("Lease-loss status read failed, cancelling as lease_lost", run_id=run_id)
+        return "lease_lost"
+    if ended:
         return "cancel"
     return "lease_lost"
 

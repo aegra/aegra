@@ -316,6 +316,56 @@ class TestHeartbeatLoop:
         assert job_task.cancelled()
         assert seen == [(expected_reason,)]
 
+    @pytest.mark.asyncio
+    async def test_lost_lease_still_cancels_as_lease_lost_when_the_status_read_fails(self) -> None:
+        """A failed read must not leave running a job that another worker may already own."""
+        run_id = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+        session = AsyncMock()
+        lost = MagicMock()
+        lost.rowcount = 0
+        session.execute = AsyncMock(return_value=lost)
+        session.commit = AsyncMock()
+        # What asyncpg raises from the read's connection checkout when the database is unreachable.
+        session.scalar = AsyncMock(side_effect=TimeoutError())
+        maker = _make_session_maker(session)
+        seen: list[tuple[object, ...]] = []
+        sleeps = 0
+
+        async def _job() -> None:
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError as exc:
+                seen.append(exc.args)
+                raise
+
+        async def counting_sleep(delay: float) -> None:
+            nonlocal sleeps
+            sleeps += 1
+            if sleeps >= 2:
+                raise asyncio.CancelledError
+
+        job_task = asyncio.create_task(_job())
+        await asyncio.sleep(0)
+
+        with (
+            patch(f"{MODULE}._get_session_maker", return_value=maker),
+            patch(f"{MODULE}.settings") as mock_settings,
+            patch(f"{MODULE}.asyncio.sleep", side_effect=counting_sleep),
+        ):
+            mock_settings.worker.HEARTBEAT_INTERVAL_SECONDS = 1
+            mock_settings.worker.LEASE_DURATION_SECONDS = 30
+            try:
+                await _heartbeat_loop(run_id, "worker-0", job_task=job_task)
+                marked_lost = run_id in _lease_loss_cancellations
+            finally:
+                _lease_loss_cancellations.discard(run_id)
+        await asyncio.gather(job_task, return_exceptions=True)
+
+        assert sleeps == 1
+        assert marked_lost
+        assert job_task.cancelled()
+        assert seen == [("lease_lost",)]
+
 
 # ------------------------------------------------------------------
 # _is_run_terminal

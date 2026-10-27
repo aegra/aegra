@@ -1,9 +1,14 @@
 """Unit tests for run_executor service."""
 
 import asyncio
+from collections.abc import AsyncGenerator
+from contextlib import asynccontextmanager
+from typing import TypedDict
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from langgraph.graph import END, START, StateGraph
+from langgraph.graph.state import CompiledStateGraph
 
 from aegra_api.models.auth import User
 from aegra_api.models.run_job import RunExecution, RunIdentity, RunJob
@@ -25,6 +30,10 @@ from aegra_api.services.run_executor import (
 async def _empty_async_gen():  # type: ignore[no-untyped-def]
     return
     yield  # noqa: RET504 — makes this an async generator
+
+
+class _WaitingState(TypedDict):
+    steps: list[str]
 
 
 def _make_job(run_id: str = "run-1") -> RunJob:
@@ -690,6 +699,122 @@ class TestShutdownDrainCancellation:
                 await execute_run(_make_job())
 
         assert "run-1" not in _shutdown_cancellations
+
+    @pytest.mark.asyncio
+    async def test_cancel_reason_reaches_the_graph_factory_exit(self) -> None:
+        """The message the worker puts on the cancel arrives, unchanged, where a
+        factory graph tears down: the exit of the get_graph context manager."""
+        seen: list[tuple[object, ...]] = []
+        streaming = asyncio.Event()
+
+        @asynccontextmanager
+        async def fake_get_graph(*args: object, **kwargs: object) -> AsyncGenerator[MagicMock, None]:
+            try:
+                yield MagicMock()
+            except asyncio.CancelledError as exc:
+                seen.append(exc.args)
+                raise
+
+        async def hang_forever(**_kwargs: object) -> AsyncGenerator[tuple[str, dict[str, object]], None]:
+            streaming.set()
+            await asyncio.Event().wait()
+            yield ("values", {})
+
+        mock_service = MagicMock()
+        mock_service.get_graph = fake_get_graph
+
+        with (
+            patch("aegra_api.services.run_executor.get_langgraph_service", return_value=mock_service),
+            patch("aegra_api.services.run_executor.start_run", new_callable=AsyncMock, return_value=True),
+            patch("aegra_api.services.run_executor.finalize_run", new_callable=AsyncMock),
+            patch("aegra_api.services.run_executor.streaming_service") as mock_streaming,
+            patch("aegra_api.services.run_executor.stream_graph_events", side_effect=hang_forever),
+            patch("aegra_api.services.run_executor._signal_run_done", new_callable=AsyncMock),
+            patch("aegra_api.services.run_executor.with_auth_ctx") as mock_auth,
+        ):
+            mock_auth_ctx = AsyncMock()
+            mock_auth_ctx.__aenter__ = AsyncMock(return_value=None)
+            mock_auth_ctx.__aexit__ = AsyncMock(return_value=False)
+            mock_auth.return_value = mock_auth_ctx
+            mock_streaming.cleanup_run = AsyncMock()
+
+            _shutdown_cancellations.add("run-1")
+            try:
+                task = asyncio.create_task(execute_run(_make_job()))
+                await asyncio.wait_for(streaming.wait(), timeout=1)
+                task.cancel(msg="requeue")
+                with pytest.raises(asyncio.CancelledError):
+                    await task
+            finally:
+                _shutdown_cancellations.discard("run-1")
+
+        assert seen == [("requeue",)]
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("stream_mode", [["values"], ["messages-tuple"]], ids=["values", "messages-tuple"])
+    async def test_cancel_reason_reaches_the_factory_exit_through_a_real_graph(self, stream_mode: list[str]) -> None:
+        """A compiled graph streamed by the real stream_graph_events still hands the worker's
+        message to the factory exit, also in messages mode where LangGraph runs nodes in a child task."""
+        seen: list[tuple[object, ...]] = []
+        node_started = asyncio.Event()
+
+        async def wait_forever(state: _WaitingState) -> _WaitingState:
+            node_started.set()
+            await asyncio.Event().wait()
+            return state
+
+        compiled = (
+            StateGraph(_WaitingState)
+            .add_node("wait_forever", wait_forever)
+            .add_edge(START, "wait_forever")
+            .add_edge("wait_forever", END)
+            .compile()
+        )
+
+        @asynccontextmanager
+        async def fake_get_graph(*args: object, **kwargs: object) -> AsyncGenerator[CompiledStateGraph, None]:
+            try:
+                yield compiled
+            except asyncio.CancelledError as exc:
+                seen.append(exc.args)
+                raise
+
+        mock_service = MagicMock()
+        mock_service.get_graph = fake_get_graph
+        job = RunJob(
+            identity=RunIdentity(run_id="run-1", thread_id="thread-1", graph_id="graph-1"),
+            user=User(identity="user-1"),
+            execution=RunExecution(input_data={"steps": []}, stream_mode=stream_mode),
+        )
+
+        with (
+            patch("aegra_api.services.run_executor.get_langgraph_service", return_value=mock_service),
+            patch("aegra_api.services.run_executor.start_run", new_callable=AsyncMock, return_value=True),
+            patch("aegra_api.services.run_executor.finalize_run", new_callable=AsyncMock),
+            patch("aegra_api.services.run_executor.broker_manager") as mock_broker_manager,
+            patch("aegra_api.services.run_executor.streaming_service") as mock_streaming,
+            patch("aegra_api.services.run_executor._signal_run_done", new_callable=AsyncMock),
+            patch("aegra_api.services.run_executor.with_auth_ctx") as mock_auth,
+        ):
+            mock_auth_ctx = AsyncMock()
+            mock_auth_ctx.__aenter__ = AsyncMock(return_value=None)
+            mock_auth_ctx.__aexit__ = AsyncMock(return_value=False)
+            mock_auth.return_value = mock_auth_ctx
+            mock_broker_manager.allocate_event_id = AsyncMock(return_value="run-1_event_1")
+            mock_streaming.put_to_broker = AsyncMock()
+            mock_streaming.cleanup_run = AsyncMock()
+
+            _shutdown_cancellations.add("run-1")
+            try:
+                task = asyncio.create_task(execute_run(job))
+                await asyncio.wait_for(node_started.wait(), timeout=5)
+                task.cancel(msg="requeue")
+                with pytest.raises(asyncio.CancelledError):
+                    await task
+            finally:
+                _shutdown_cancellations.discard("run-1")
+
+        assert seen == [("requeue",)]
 
 
 class TestTerminalStateRaces:

@@ -29,3 +29,7 @@ MultitaskStrategy = Literal[
 ]
 
 RunCancellationAction = Literal["cancel", "interrupt"]
+
+# Why the worker cancelled a run's task, carried as the message of the CancelledError
+# that unwinds the run: a graph reads it to tell a hand-off from a cancel that ends the run.
+CancelReason = Literal["cancel", "requeue", "lease_lost", "timeout"]

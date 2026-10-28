@@ -21,7 +21,13 @@ from aegra_api.api.runs import router as runs_router
 from aegra_api.api.stateless_runs import router as stateless_runs_router
 from aegra_api.api.store import router as store_router
 from aegra_api.api.threads import router as threads_router
-from aegra_api.config import CorsConfig, HttpConfig, get_config_dir, load_http_config
+from aegra_api.config import (
+    CorsConfig,
+    HttpConfig,
+    get_config_dir,
+    get_default_graph_id,
+    load_http_config,
+)
 from aegra_api.core.app_loader import load_custom_app
 from aegra_api.core.auth_deps import require_auth
 from aegra_api.core.auth_enforcement import apply_auth_enforcement
@@ -84,7 +90,10 @@ def _log_connection_help(error: Exception) -> None:
 @asynccontextmanager
 async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     """FastAPI lifespan context manager for startup/shutdown"""
-    # Resolve the durability default up front: an invalid value fails the boot, not every run.
+    # Resolve both config defaults first: either one invalid is a typo, and should
+    # fail the boot before anything expensive starts rather than every run later.
+    if (default_graph_id := get_default_graph_id()) is not None:
+        logger.info("assistants default to graph", graph_id=default_graph_id)
     get_default_durability()
 
     # Multi-pod K8s: set RUN_MIGRATIONS_ON_STARTUP=false + run `aegra db upgrade`

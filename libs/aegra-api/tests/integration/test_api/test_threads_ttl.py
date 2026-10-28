@@ -168,7 +168,7 @@ class TestPruneEndpoint:
         resp = client.post("/threads/prune")
 
         assert resp.status_code == 200
-        assert resp.json() == {"deleted": 2, "pruned": 1}
+        assert resp.json() == {"pruned_count": 3, "deleted": 2, "pruned": 1}
         assert called["user_id"] == "test-user"
 
     def test_prune_with_nothing_expired_returns_zeros(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -182,4 +182,54 @@ class TestPruneEndpoint:
         resp = client.post("/threads/prune")
 
         assert resp.status_code == 200
-        assert resp.json() == {"deleted": 0, "pruned": 0}
+        assert resp.json() == {"pruned_count": 0, "deleted": 0, "pruned": 0}
+
+
+class TestPruneByIdEndpoint:
+    """POST /threads/prune with the SDK body prunes the named threads."""
+
+    @staticmethod
+    def _fake(called: dict[str, object], count: int) -> object:
+        async def fake_prune_by_id(
+            session: object, *, thread_ids: list[str], strategy: str, user_id: str, auth_filter: object = None
+        ) -> int:
+            called.update(thread_ids=thread_ids, strategy=strategy, user_id=user_id)
+            return count
+
+        return fake_prune_by_id
+
+    def test_keep_latest_prunes_named_threads(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        called: dict[str, object] = {}
+        monkeypatch.setattr(threads_module, "prune_threads_by_id", self._fake(called, 2))
+        client = _make_client(RecordingSession())
+
+        resp = client.post("/threads/prune", json={"thread_ids": ["t-1", "t-2"], "strategy": "keep_latest"})
+
+        assert resp.status_code == 200
+        assert resp.json() == {"pruned_count": 2, "deleted": 0, "pruned": 2}
+        assert called == {"thread_ids": ["t-1", "t-2"], "strategy": "keep_latest", "user_id": "test-user"}
+
+    def test_strategy_defaults_to_delete(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        called: dict[str, object] = {}
+        monkeypatch.setattr(threads_module, "prune_threads_by_id", self._fake(called, 1))
+        client = _make_client(RecordingSession())
+
+        resp = client.post("/threads/prune", json={"thread_ids": ["t-1"]})
+
+        assert resp.status_code == 200
+        assert resp.json() == {"pruned_count": 1, "deleted": 1, "pruned": 0}
+        assert called["strategy"] == "delete"
+
+    @pytest.mark.parametrize(
+        "body",
+        [{"thread_ids": ["t-1"], "strategy": "archive"}, {"strategy": "keep_latest"}, {}],
+    )
+    def test_returns_422_for_invalid_body(self, monkeypatch: pytest.MonkeyPatch, body: dict[str, object]) -> None:
+        called: dict[str, object] = {}
+        monkeypatch.setattr(threads_module, "prune_threads_by_id", self._fake(called, 0))
+        client = _make_client(RecordingSession())
+
+        resp = client.post("/threads/prune", json=body)
+
+        assert resp.status_code == 422
+        assert called == {}

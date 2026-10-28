@@ -546,6 +546,11 @@ def serve(ctx: click.Context, host: str, port: int, app: str, config_file: Path 
     Starts uvicorn without --reload for production use.
     This command is typically used inside Docker containers.
 
+    On Linux and macOS the command replaces itself with uvicorn, so the
+    server is the container's PID 1: SIGTERM and SIGINT reach it directly,
+    in-flight runs drain, and the exit code is uvicorn's own. Windows has
+    no exec, so uvicorn runs there as a child process.
+
     Examples:
 
         aegra serve                         # Start production server
@@ -608,8 +613,12 @@ def serve(ctx: click.Context, host: str, port: int, app: str, config_file: Path 
     ]
 
     try:
-        result = subprocess.run(cmd, check=False)
-        sys.exit(result.returncode)
+        if sys.platform == "win32":
+            # os.exec* on Windows spawns a new process and ends this one at once,
+            # so the server runs as a child there.
+            result = subprocess.run(cmd, check=False)
+            sys.exit(result.returncode)
+        os.execvp(sys.executable, cmd)  # nosec B606 - the argv built above, no shell
     except FileNotFoundError:
         console.print(
             "[bold red]Error:[/bold red] uvicorn is not installed.\n"

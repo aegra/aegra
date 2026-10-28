@@ -79,11 +79,22 @@ class ThreadUpdate(BaseModel):
     metadata: dict[str, Any] | None = Field(None, description="Thread metadata to update")
 
 
+class ThreadPruneRequest(BaseModel):
+    """Request body for POST /threads/prune"""
+
+    thread_ids: list[str] = Field(..., description="Threads to prune. Ids the caller cannot see are skipped.")
+    strategy: Literal["delete", "keep_latest"] = Field(
+        "delete",
+        description="'delete' removes the threads entirely; 'keep_latest' keeps each thread and its latest state.",
+    )
+
+
 class ThreadPruneResponse(BaseModel):
     """Response model for POST /threads/prune"""
 
-    deleted: int = Field(0, description="Expired threads fully deleted (strategy 'delete')")
-    pruned: int = Field(0, description="Expired threads whose history was pruned (strategy 'keep_latest')")
+    pruned_count: int = Field(0, description="Threads deleted or pruned by this request")
+    deleted: int = Field(0, description="Threads fully deleted (strategy 'delete')")
+    pruned: int = Field(0, description="Threads whose history was pruned (strategy 'keep_latest')")
 
 
 class Thread(BaseModel):

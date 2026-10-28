@@ -240,13 +240,16 @@ print(output)
 
 ## Cancelling runs
 
-Cancel or interrupt a running execution:
+Stop a running execution. `cancel` (the default) and `interrupt` are currently
+accepted as compatibility aliases: both stop the run immediately and finalize
+it as interrupted. Neither provides cooperative graph-level handling or
+guarantees that partial state is saved.
 
 ```python
-# Hard cancel
+# Stop the run (the default action is "cancel")
 await client.runs.cancel(thread_id=thread_id, run_id=run["run_id"])
 
-# Cooperative interrupt (if graph supports it)
+# "interrupt" is currently an alias for "cancel"
 await client.runs.cancel(
     thread_id=thread_id,
     run_id=run["run_id"],
@@ -270,7 +273,7 @@ await client.runs.cancel_many(thread_id=thread_id, run_ids=[run_a, run_b], actio
 await client.runs.cancel_many(status="all")
 ```
 
-Runs that already finished are skipped, and only the caller's runs are affected. `action` accepts `cancel` and `interrupt`, the same values as the per-run endpoint. The response is `204 No Content`.
+Runs that already finished are skipped, and only the caller's runs are affected. `action` accepts `cancel` and `interrupt`, the same values as the per-run endpoint; both currently stop runs the same way. The response is `204 No Content`.
 
 ## SSE reconnection
 

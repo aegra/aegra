@@ -14,7 +14,7 @@ cp .env.example .env
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `PROJECT_NAME` | `Aegra` | Application name |
-| `VERSION` | `0.10.8` | Application version |
+| `VERSION` | `0.11.0` | Application version |
 | `DEBUG` | `false` | Enable debug mode |
 | `AEGRA_CONFIG` | `aegra.json` | Path to the configuration file |
 | `MAX_SEARCH_LIMIT` | `1000` | Max `limit` for `POST /threads/search` and `POST /store/items/search`. Omitted or null `limit` uses `min(20, MAX_SEARCH_LIMIT)`. Default cap matches LangGraph Platform threads.search (`1..1000`). |
@@ -146,6 +146,8 @@ In dev mode (`REDIS_BROKER_ENABLED=false`), runs execute as in-process asyncio t
 | `HEARTBEAT_INTERVAL_SECONDS` | `10` | How often workers extend their lease |
 | `REAPER_INTERVAL_SECONDS` | `15` | How often the reaper scans for expired leases |
 | `POSTGRES_POLL_INTERVAL_SECONDS` | `5` | Fallback poll interval when Redis is unavailable |
+| `BLPOP_TIMEOUT_SECONDS` | `5` | Server-side block time of each job-queue `BLPOP`. Must be positive (`0` would block forever) |
+| `BLOCKING_SOCKET_TIMEOUT_SECONDS` | `15.0` | Read timeout of the dedicated Redis connections that issue `BLPOP`. Must exceed `BLPOP_TIMEOUT_SECONDS` by at least 5s, or a job popped at the end of the block can be lost. Takes precedence over a `socket_timeout` in `REDIS_URL` |
 | `WORKER_DRAIN_TIMEOUT` | `30.0` | Graceful shutdown wait time (seconds) |
 
 Total capacity per instance = `WORKER_COUNT` x `N_JOBS_PER_WORKER` (default: 30 concurrent runs).

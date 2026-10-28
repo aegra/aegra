@@ -3,22 +3,36 @@
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from sqlalchemy.exc import DBAPIError
 
 from aegra_api.services.run_status import (
     _safe_serialize,
+    clear_thread_values,
     finalize_run,
     interrupt_unowned_run,
     set_thread_status,
     set_thread_status_if_no_active_runs,
+    set_thread_values,
     start_run,
+)
+from aegra_api.services.thread_state_service import ThreadValues
+
+_THREAD_VALUES = ThreadValues(
+    values={"messages": [{"type": "ai", "content": "done"}]},
+    interrupts={"task-1": [{"value": "approve?", "id": "int-1"}]},
+    checkpoint_id="1f0a-cp-2",
 )
 
 
 def _make_mock_session() -> AsyncMock:
-    """Create a mock async session with execute and commit."""
+    """Create a mock async session with execute, commit and savepoints."""
     session = AsyncMock()
     session.execute = AsyncMock()
     session.commit = AsyncMock()
+    savepoint = AsyncMock()
+    savepoint.__aenter__ = AsyncMock(return_value=None)
+    savepoint.__aexit__ = AsyncMock(return_value=False)
+    session.begin_nested = MagicMock(return_value=savepoint)
     return session
 
 
@@ -177,6 +191,248 @@ class TestFinalizeRun:
         mock_set_thread.assert_not_awaited()
         session.commit.assert_not_awaited()
         session.rollback.assert_awaited_once()
+
+
+class TestFinalizeRunThreadValues:
+    @pytest.mark.asyncio
+    async def test_caches_thread_values_in_the_finalize_transaction(self) -> None:
+        session = _make_mock_session()
+        result = MagicMock()
+        result.scalar_one_or_none.return_value = "run-1"
+        session.execute = AsyncMock(return_value=result)
+
+        with (
+            patch("aegra_api.services.run_status._get_session_maker", return_value=_make_mock_session_maker(session)),
+            patch("aegra_api.services.run_status.set_thread_status_if_no_active_runs", new_callable=AsyncMock),
+            patch("aegra_api.services.run_status.set_thread_values", new_callable=AsyncMock) as mock_set_values,
+        ):
+            finalized = await finalize_run(
+                "run-1",
+                "thread-1",
+                user_id="user-1",
+                status="success",
+                thread_status="idle",
+                thread_values=_THREAD_VALUES,
+                refresh_thread_values=True,
+            )
+
+        assert finalized is True
+        mock_set_values.assert_awaited_once_with(session, "thread-1", _THREAD_VALUES, user_id="user-1")
+        session.begin_nested.assert_called_once_with()
+        session.commit.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_rejected_cache_write_still_commits_terminal_status(self) -> None:
+        session = _make_mock_session()
+        result = MagicMock()
+        result.scalar_one_or_none.return_value = "run-1"
+        session.execute = AsyncMock(return_value=result)
+        rejected = DBAPIError("UPDATE thread", {}, Exception("invalid input syntax for type json"))
+
+        with (
+            patch("aegra_api.services.run_status._get_session_maker", return_value=_make_mock_session_maker(session)),
+            patch(
+                "aegra_api.services.run_status.set_thread_status_if_no_active_runs", new_callable=AsyncMock
+            ) as mock_set_status,
+            patch("aegra_api.services.run_status.set_thread_values", new_callable=AsyncMock, side_effect=rejected),
+            patch("aegra_api.services.run_status.clear_thread_values", new_callable=AsyncMock) as mock_clear,
+        ):
+            finalized = await finalize_run(
+                "run-1",
+                "thread-1",
+                user_id="user-1",
+                status="success",
+                thread_status="idle",
+                thread_values=_THREAD_VALUES,
+                refresh_thread_values=True,
+            )
+
+        assert finalized is True
+        mock_set_status.assert_awaited_once()
+        session.commit.assert_awaited_once()
+        # The previous run's values must not survive as if they were this run's result.
+        mock_clear.assert_awaited_once_with(session, "thread-1", user_id="user-1", checkpoint_id="1f0a-cp-2")
+
+    @pytest.mark.asyncio
+    async def test_missing_snapshot_clears_up_to_the_latest_checkpoint(self) -> None:
+        session = _make_mock_session()
+        result = MagicMock()
+        result.scalar_one_or_none.return_value = "run-1"
+        session.execute = AsyncMock(return_value=result)
+
+        with (
+            patch("aegra_api.services.run_status._get_session_maker", return_value=_make_mock_session_maker(session)),
+            patch("aegra_api.services.run_status.set_thread_status_if_no_active_runs", new_callable=AsyncMock),
+            patch("aegra_api.services.run_status.set_thread_values", new_callable=AsyncMock) as mock_set_values,
+            patch("aegra_api.services.run_status.clear_thread_values", new_callable=AsyncMock) as mock_clear,
+        ):
+            finalized = await finalize_run(
+                "run-1",
+                "thread-1",
+                user_id="user-1",
+                status="success",
+                thread_status="idle",
+                thread_values=None,
+                refresh_thread_values=True,
+                latest_checkpoint_id="1f0a-cp-1",
+            )
+
+        assert finalized is True
+        mock_set_values.assert_not_awaited()
+        mock_clear.assert_awaited_once_with(session, "thread-1", user_id="user-1", checkpoint_id="1f0a-cp-1")
+        session.commit.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_missing_snapshot_without_latest_checkpoint_leaves_cache_alone(self) -> None:
+        """No ordering bound means a clear could erase a newer update_state snapshot, so none happens."""
+        session = _make_mock_session()
+        result = MagicMock()
+        result.scalar_one_or_none.return_value = "run-1"
+        session.execute = AsyncMock(return_value=result)
+
+        with (
+            patch("aegra_api.services.run_status._get_session_maker", return_value=_make_mock_session_maker(session)),
+            patch("aegra_api.services.run_status.set_thread_status_if_no_active_runs", new_callable=AsyncMock),
+            patch("aegra_api.services.run_status.clear_thread_values", new_callable=AsyncMock) as mock_clear,
+        ):
+            finalized = await finalize_run(
+                "run-1",
+                "thread-1",
+                user_id="user-1",
+                status="success",
+                thread_status="idle",
+                thread_values=None,
+                refresh_thread_values=True,
+                latest_checkpoint_id=None,
+            )
+
+        assert finalized is True
+        mock_clear.assert_not_awaited()
+        session.commit.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_failed_clear_still_commits_terminal_status(self) -> None:
+        session = _make_mock_session()
+        result = MagicMock()
+        result.scalar_one_or_none.return_value = "run-1"
+        session.execute = AsyncMock(return_value=result)
+        rejected = DBAPIError("UPDATE thread", {}, Exception("connection reset"))
+
+        with (
+            patch("aegra_api.services.run_status._get_session_maker", return_value=_make_mock_session_maker(session)),
+            patch(
+                "aegra_api.services.run_status.set_thread_status_if_no_active_runs", new_callable=AsyncMock
+            ) as mock_set_status,
+            patch("aegra_api.services.run_status.clear_thread_values", new_callable=AsyncMock, side_effect=rejected),
+        ):
+            finalized = await finalize_run(
+                "run-1",
+                "thread-1",
+                user_id="user-1",
+                status="success",
+                thread_status="idle",
+                refresh_thread_values=True,
+                latest_checkpoint_id="1f0a-cp-1",
+            )
+
+        assert finalized is True
+        mock_set_status.assert_awaited_once()
+        session.commit.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_leaves_thread_values_untouched_when_not_provided(self) -> None:
+        session = _make_mock_session()
+        result = MagicMock()
+        result.scalar_one_or_none.return_value = "run-1"
+        session.execute = AsyncMock(return_value=result)
+
+        with (
+            patch("aegra_api.services.run_status._get_session_maker", return_value=_make_mock_session_maker(session)),
+            patch("aegra_api.services.run_status.set_thread_status_if_no_active_runs", new_callable=AsyncMock),
+            patch("aegra_api.services.run_status.set_thread_values", new_callable=AsyncMock) as mock_set_values,
+            patch("aegra_api.services.run_status.clear_thread_values", new_callable=AsyncMock) as mock_clear,
+        ):
+            await finalize_run("run-1", "thread-1", user_id="user-1", status="error", thread_status="error")
+
+        mock_set_values.assert_not_awaited()
+        mock_clear.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_does_not_cache_values_when_run_already_terminal(self) -> None:
+        session = _make_mock_session()
+        result = MagicMock()
+        result.scalar_one_or_none.return_value = None
+        session.execute = AsyncMock(return_value=result)
+
+        with (
+            patch("aegra_api.services.run_status._get_session_maker", return_value=_make_mock_session_maker(session)),
+            patch("aegra_api.services.run_status.set_thread_values", new_callable=AsyncMock) as mock_set_values,
+        ):
+            finalized = await finalize_run(
+                "run-1",
+                "thread-1",
+                user_id="user-1",
+                status="success",
+                thread_status="idle",
+                thread_values=_THREAD_VALUES,
+                refresh_thread_values=True,
+            )
+
+        assert finalized is False
+        mock_set_values.assert_not_awaited()
+
+
+class TestSetThreadValues:
+    @pytest.mark.asyncio
+    async def test_updates_owned_thread_without_committing(self) -> None:
+        session = _make_mock_session()
+
+        await set_thread_values(session, "thread-1", _THREAD_VALUES, user_id="user-1")
+
+        statement = session.execute.await_args.args[0]
+        compiled = statement.compile()
+        assert "thread.user_id" in str(compiled)
+        assert compiled.params["user_id_1"] == "user-1"
+        assert compiled.params["values_json"] == _THREAD_VALUES.values
+        assert compiled.params["interrupts_json"] == _THREAD_VALUES.interrupts
+        assert compiled.params["values_checkpoint_id"] == "1f0a-cp-2"
+        session.commit.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_only_moves_cache_forward_by_checkpoint(self) -> None:
+        session = _make_mock_session()
+
+        await set_thread_values(session, "thread-1", _THREAD_VALUES, user_id="user-1")
+
+        sql = str(session.execute.await_args.args[0].compile())
+        assert "thread.values_checkpoint_id IS NULL OR thread.values_checkpoint_id <=" in sql
+
+    @pytest.mark.asyncio
+    async def test_snapshot_without_checkpoint_only_fills_an_empty_cache(self) -> None:
+        session = _make_mock_session()
+        empty = ThreadValues(values={}, interrupts={}, checkpoint_id=None)
+
+        await set_thread_values(session, "thread-1", empty, user_id="user-1")
+
+        sql = str(session.execute.await_args.args[0].compile())
+        assert "thread.values_checkpoint_id IS NULL" in sql
+        assert "<=" not in sql
+
+
+class TestClearThreadValues:
+    @pytest.mark.asyncio
+    async def test_clears_only_when_not_older_than_cached_checkpoint(self) -> None:
+        session = _make_mock_session()
+
+        await clear_thread_values(session, "thread-1", user_id="user-1", checkpoint_id="1f0a-cp-2")
+
+        compiled = session.execute.await_args.args[0].compile()
+        sql = str(compiled)
+        assert "thread.user_id" in sql
+        assert "thread.values_checkpoint_id IS NULL OR thread.values_checkpoint_id <=" in sql
+        assert "values_json=NULL" in sql.replace(" ", "")
+        assert compiled.params["values_checkpoint_id"] == "1f0a-cp-2"
+        session.commit.assert_not_awaited()
 
 
 class TestSetThreadStatus:

@@ -110,6 +110,7 @@ OPENAI_API_KEY=sk-...
 
 # Observability (optional)
 OTEL_TARGETS=LANGFUSE,PHOENIX
+
 ```
 
 ## API Endpoints

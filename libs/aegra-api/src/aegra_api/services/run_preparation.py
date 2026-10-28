@@ -5,7 +5,10 @@ resume-command validation, and config/context merging logic.
 """
 
 import asyncio
-from datetime import UTC, datetime
+from collections.abc import Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
+from datetime import UTC, datetime, timedelta
 from functools import cache
 from typing import Any
 from uuid import uuid4
@@ -21,6 +24,7 @@ from aegra_api.config import load_checkpointer_config
 from aegra_api.core.orm import Assistant as AssistantORM
 from aegra_api.core.orm import Run as RunORM
 from aegra_api.core.orm import Thread as ThreadORM
+from aegra_api.core.orm import ThreadTTL as ThreadTTLORM
 from aegra_api.core.orm import _get_session_maker
 from aegra_api.models import Run, RunCreate, User
 from aegra_api.models.run_job import RunBehavior, RunExecution, RunIdentity, RunJob
@@ -34,6 +38,20 @@ from aegra_api.utils.jsonb import jsonb_patch, jsonb_shallow_merge
 from aegra_api.utils.run_utils import _merge_jsonb
 
 logger = structlog.getLogger(__name__)
+
+_STATELESS_THREAD_TTL_MINUTES = 60
+
+_EPHEMERAL_RUN = ContextVar("aegra_ephemeral_run", default=False)
+
+
+@contextmanager
+def ephemeral_run_context() -> Iterator[None]:
+    """Mark the next run prepared in this task as a stateless ephemeral run."""
+    token = _EPHEMERAL_RUN.set(True)
+    try:
+        yield
+    finally:
+        _EPHEMERAL_RUN.reset(token)
 
 
 # The interrupt reaches the client (via the broker/SSE) before the run executor
@@ -143,6 +161,7 @@ async def update_thread_metadata(
     *,
     user_id: str | None = None,
     input_data: dict[str, Any] | None = None,
+    is_ephemeral: bool = False,
 ) -> None:
     """Update thread metadata with assistant and graph information.
 
@@ -177,6 +196,17 @@ async def update_thread_metadata(
             user_id=user_id,
         )
         session.add(thread_orm)
+        if is_ephemeral:
+            created_at = datetime.now(UTC)
+            session.add(
+                ThreadTTLORM(
+                    thread_id=thread_id,
+                    strategy="delete",
+                    ttl_minutes=_STATELESS_THREAD_TTL_MINUTES,
+                    created_at=created_at,
+                    expires_at=created_at + timedelta(minutes=_STATELESS_THREAD_TTL_MINUTES),
+                )
+            )
         return
 
     patches: list[ColumnElement[Any]] = [
@@ -306,7 +336,13 @@ async def _prepare_run(
 
     # Mark thread as busy and update metadata
     await update_thread_metadata(
-        session, thread_id, assistant.assistant_id, assistant.graph_id, user_id=user.identity, input_data=request.input
+        session,
+        thread_id,
+        assistant.assistant_id,
+        assistant.graph_id,
+        user_id=user.identity,
+        input_data=request.input,
+        is_ephemeral=_EPHEMERAL_RUN.get(),
     )
     await set_thread_status(session, thread_id, "busy")
 

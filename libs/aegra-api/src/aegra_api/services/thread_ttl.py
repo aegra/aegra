@@ -284,8 +284,8 @@ class ThreadTTLSweeper:
         config = get_thread_ttl_config()
         logger.info(
             "Thread TTL sweeper started",
-            interval_minutes=config.sweep_interval_minutes if config else None,
-            sweep_limit=config.sweep_limit if config else None,
+            interval_minutes=(config or ThreadTTLConfig()).sweep_interval_minutes,
+            sweep_limit=(config or ThreadTTLConfig()).sweep_limit,
         )
 
     async def stop(self) -> None:
@@ -305,7 +305,7 @@ class ThreadTTLSweeper:
         cannot spin the loop at CPU speed.
         """
         config = get_thread_ttl_config()
-        interval_seconds = (config.sweep_interval_minutes if config else 5.0) * 60
+        interval_seconds = (config or ThreadTTLConfig()).sweep_interval_minutes * 60
         while self._running:
             try:
                 await self._tick()
@@ -320,9 +320,7 @@ class ThreadTTLSweeper:
 
     async def _tick(self) -> None:
         """Sweep up to sweep_limit expired threads in sub-batched transactions."""
-        config = get_thread_ttl_config()
-        if config is None:
-            return
+        config = get_thread_ttl_config() or ThreadTTLConfig()
 
         maker = _get_session_maker()
         claimed_total = 0

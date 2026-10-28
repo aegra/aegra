@@ -3,7 +3,7 @@
 import contextlib
 import json
 import re
-from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Mapping, MutableMapping
+from collections.abc import AsyncGenerator, Awaitable, Callable, Mapping, MutableMapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
@@ -21,6 +21,7 @@ _serializer = GeneralSerializer()
 # Platform, and avoids per-tick datetime formatting that sse-starlette's
 # default ping does.
 _HEARTBEAT_EVENT = ServerSentEvent(comment="heartbeat")
+_HEARTBEAT_BYTES = _HEARTBEAT_EVENT.encode()
 
 
 def heartbeat_factory() -> ServerSentEvent:
@@ -88,21 +89,33 @@ async def sse_to_bytes(inner: AsyncGenerator[str, None]) -> AsyncGenerator[bytes
             yield chunk.encode("utf-8")
 
 
+async def _open_with_keepalive(body: AsyncGenerator[bytes, None], *, keepalive: bool) -> AsyncGenerator[bytes, None]:
+    """Send a keepalive before ``body`` so the first byte leaves at open.
+    Proxies such as Next.js route handlers hold the response head until a body chunk, stalling first-byte clients."""
+    async with contextlib.aclosing(body) as managed:
+        if keepalive:
+            yield _HEARTBEAT_BYTES
+        async for chunk in managed:
+            yield chunk
+
+
 def make_sse_response(
-    body: AsyncIterator[bytes],
+    body: AsyncGenerator[bytes, None],
     *,
     headers: Mapping[str, str],
     close_handler: Callable[[MutableMapping[str, Any]], Awaitable[None]] | None = None,
     status_code: int = 200,
+    open_with_keepalive: bool = True,
 ) -> EventSourceResponse:
     """Construct an ``EventSourceResponse`` with our shared SSE defaults.
 
     Centralizes ping interval + heartbeat factory so every SSE endpoint
-    emits identical wire-format keepalives. ``settings`` is read at call
-    time so live overrides (e.g. tests, env reloads) take effect.
+    emits identical wire-format keepalives, and opens each stream with one
+    unless ``body`` already does. ``settings`` is read at call time so live
+    overrides (e.g. tests, env reloads) take effect.
     """
     return EventSourceResponse(
-        body,
+        _open_with_keepalive(body, keepalive=open_with_keepalive),
         status_code=status_code,
         ping=settings.app.sse_ping_interval_secs,
         ping_message_factory=heartbeat_factory,

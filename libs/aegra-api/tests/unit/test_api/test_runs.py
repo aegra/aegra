@@ -1,11 +1,15 @@
 """Unit tests for standard run endpoints (create, get, list, update, join)."""
 
+from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import UTC, datetime
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
 
 import pytest
 from fastapi import HTTPException
+from pydantic import BaseModel
 from redis import RedisError
 
 from aegra_api.api.runs import (
@@ -21,6 +25,7 @@ from aegra_api.core.orm import Assistant as AssistantORM
 from aegra_api.core.orm import Run as RunORM
 from aegra_api.core.orm import Thread as ThreadORM
 from aegra_api.models import Run, RunCreate, RunStatus, User
+from aegra_api.services.graph_factory import _FACTORY_CONTEXT_TYPES
 
 
 class TestRunsEndpoints:
@@ -599,3 +604,152 @@ class TestApplyCreateRunAuth:
 
         assert request.config == {"original": "kept", "injected": True}
         assert request.context == {"injected_ctx": 2}
+
+
+class _RunContext(BaseModel):
+    """Context type a graph factory declares via ``ServerRuntime[_RunContext]``."""
+
+    prompt_version: int
+
+
+class TestCreateRunContextValidation:
+    """A context the graph's declared type rejects must 422, not create a run."""
+
+    @pytest.fixture
+    def mock_user(self) -> User:
+        return User(identity="test-user", scopes=[])
+
+    @pytest.fixture
+    def mock_session(self) -> AsyncMock:
+        session = AsyncMock()
+        session.refresh = AsyncMock()
+        session.add = MagicMock()  # session.add is synchronous
+        return session
+
+    @pytest.fixture
+    def declared_context_type(self) -> Iterator[None]:
+        _FACTORY_CONTEXT_TYPES.clear()
+        _FACTORY_CONTEXT_TYPES["test-graph"] = _RunContext
+        try:
+            yield
+        finally:
+            _FACTORY_CONTEXT_TYPES.clear()
+
+    @pytest.fixture
+    def assistant(self) -> AssistantORM:
+        return AssistantORM(
+            assistant_id="test-assistant",
+            graph_id="test-graph",
+            config={},
+            context={},
+            created_at=datetime.now(UTC),
+            updated_at=datetime.now(UTC),
+        )
+
+    @contextmanager
+    def _prepared(self, mock_session: AsyncMock, assistant: AssistantORM) -> Iterator[SimpleNamespace]:
+        with (
+            patch("aegra_api.services.run_preparation._validate_resume_command", new_callable=AsyncMock),
+            patch("aegra_api.services.run_preparation.get_langgraph_service") as mock_lg_service,
+            patch("aegra_api.services.run_preparation.resolve_assistant_id", return_value="test-assistant"),
+            patch("aegra_api.services.run_preparation.update_thread_metadata", new_callable=AsyncMock) as mock_metadata,
+            patch("aegra_api.services.run_preparation.set_thread_status", new_callable=AsyncMock) as mock_status,
+            patch("aegra_api.services.run_preparation.executor.submit", new_callable=AsyncMock) as mock_submit,
+            patch("aegra_api.api.runs.active_runs", {}),
+        ):
+            mock_lg_service.return_value.list_graphs.return_value = ["test-graph"]
+            mock_session.scalar.side_effect = [None, assistant]
+            yield SimpleNamespace(submit=mock_submit, thread_metadata=mock_metadata, thread_status=mock_status)
+
+    @pytest.mark.asyncio
+    async def test_invalid_context_returns_422_and_touches_nothing(
+        self,
+        mock_user: User,
+        mock_session: AsyncMock,
+        assistant: AssistantORM,
+        declared_context_type: None,
+    ) -> None:
+        """Rejection precedes every write: no run row, no ghost thread, no busy status."""
+        request = RunCreate(assistant_id="test-assistant", input={}, context={"prompt_version": "abc"})
+
+        with self._prepared(mock_session, assistant) as mocks:
+            with pytest.raises(HTTPException) as exc:
+                await create_run("test-thread-123", request, mock_user, mock_session)
+
+            assert exc.value.status_code == 422
+            assert "context.prompt_version" in exc.value.detail
+            mock_session.add.assert_not_called()
+            mock_session.commit.assert_not_called()
+            mocks.thread_metadata.assert_not_awaited()
+            mocks.thread_status.assert_not_awaited()
+            mocks.submit.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_valid_context_still_creates_the_run(
+        self,
+        mock_user: User,
+        mock_session: AsyncMock,
+        assistant: AssistantORM,
+        declared_context_type: None,
+    ) -> None:
+        request = RunCreate(assistant_id="test-assistant", input={}, context={"prompt_version": 3})
+
+        with self._prepared(mock_session, assistant) as mocks:
+            result = await create_run("test-thread-123", request, mock_user, mock_session)
+
+        assert result.context == {"prompt_version": 3}
+        mocks.submit.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_graph_without_declared_type_accepts_any_context(
+        self, mock_user: User, mock_session: AsyncMock, assistant: AssistantORM
+    ) -> None:
+        """No ``ServerRuntime[T]`` annotation → the context reaches the graph unchecked, as before."""
+        _FACTORY_CONTEXT_TYPES.clear()
+        request = RunCreate(assistant_id="test-assistant", input={}, context={"prompt_version": "abc"})
+
+        with self._prepared(mock_session, assistant) as mocks:
+            result = await create_run("test-thread-123", request, mock_user, mock_session)
+
+        assert result.context == {"prompt_version": "abc"}
+        mocks.submit.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_context_inherited_from_the_assistant_is_validated(
+        self, mock_user: User, mock_session: AsyncMock, declared_context_type: None
+    ) -> None:
+        """The merged context is what runs, so a bad stored context is rejected too."""
+        assistant = AssistantORM(
+            assistant_id="test-assistant",
+            graph_id="test-graph",
+            config={},
+            context={"prompt_version": "abc"},
+            created_at=datetime.now(UTC),
+            updated_at=datetime.now(UTC),
+        )
+        request = RunCreate(assistant_id="test-assistant", input={})
+
+        with self._prepared(mock_session, assistant), pytest.raises(HTTPException) as exc:
+            await create_run("test-thread-123", request, mock_user, mock_session)
+
+        assert exc.value.status_code == 422
+
+    @pytest.mark.asyncio
+    async def test_configurable_fallback_is_validated(
+        self,
+        mock_user: User,
+        mock_session: AsyncMock,
+        assistant: AssistantORM,
+        declared_context_type: None,
+    ) -> None:
+        """``config.configurable`` becomes the context when none is given, so it is checked."""
+        request = RunCreate(
+            assistant_id="test-assistant",
+            input={},
+            config={"configurable": {"prompt_version": "abc"}},
+        )
+
+        with self._prepared(mock_session, assistant), pytest.raises(HTTPException) as exc:
+            await create_run("test-thread-123", request, mock_user, mock_session)
+
+        assert exc.value.status_code == 422

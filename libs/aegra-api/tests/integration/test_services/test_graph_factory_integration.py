@@ -26,6 +26,7 @@ from pydantic import BaseModel
 from aegra_api.services.graph_factory import (
     _FACTORY_CONTEXT_TYPES,
     _FACTORY_KWARGS,
+    ContextValidationError,
     classify_factory,
 )
 from aegra_api.services.langgraph_service import LangGraphService
@@ -589,37 +590,40 @@ class TestGetGraphWithContext:
         assert received_runtime.context is ctx
 
     @pytest.mark.asyncio
-    async def test_invalid_context_falls_back_to_raw_dict(self) -> None:
-        """Factory with ServerRuntime[_TestRequiredConfig] + invalid context → fallback."""
-        received_runtime = None
+    async def test_invalid_context_never_reaches_the_factory(self) -> None:
+        """An invalid context fails the run rather than reaching the factory as a raw dict."""
+        called = False
 
         def factory(runtime: ServerRuntime[_TestRequiredConfig]) -> Mock:
-            nonlocal received_runtime
-            received_runtime = runtime
+            nonlocal called
+            called = True
             g = Mock(spec=Pregel)
             g.copy = Mock(return_value=g)
             return g
 
         service = LangGraphService()
-        service._graph_registry = {"fallback": {"file_path": "f.py", "export_name": "graph"}}
-        service._graph_factories = {"fallback": factory}
-        classify_factory(factory, "fallback")
+        service._graph_registry = {"strict": {"file_path": "f.py", "export_name": "graph"}}
+        service._graph_factories = {"strict": factory}
+        classify_factory(factory, "strict")
 
-        invalid_ctx = {"wrong_field": "oops"}
-        with patch("aegra_api.core.database.db_manager") as mock_db:
+        with (
+            patch("aegra_api.core.database.db_manager") as mock_db,
+            pytest.raises(ContextValidationError) as exc_info,
+        ):
             mock_db.get_checkpointer = Mock(return_value=Mock())
             mock_db.get_store = Mock(return_value=Mock())
 
             async with service.get_graph(
-                "fallback",
+                "strict",
                 access_context="threads.create_run",
-                context=invalid_ctx,
+                context={"wrong_field": "oops"},
             ) as _graph:
                 pass
 
-        assert isinstance(received_runtime, _ExecutionRuntime)
-        # Should fall back to raw dict, not crash
-        assert received_runtime.context is invalid_ctx
+        assert not called
+        assert exc_info.value.errors == [
+            {"loc": ["context", "required_field"], "msg": "Field required", "type": "missing"}
+        ]
 
 
 # ---------------------------------------------------------------------------

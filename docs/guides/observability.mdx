@@ -139,6 +139,33 @@ Aegra injects a small number of runtime keys into the same metadata stream so th
 
 If the request `metadata` contains a key already populated by the runtime, the system value wins, the user value is dropped, and a warning is logged from `aegra_api.observability.span_enrichment`. This makes the OTEL view a reliable join key with logs and the runs table; user audit fidelity is preserved by keeping the original payload in `execution_params.run_metadata`.
 
+## Trace identification
+
+By default (`OTEL_TRACE_ID_FROM_RUN_ID=true`), each run's OTEL `trace_id` is derived from its `run_id` (`UUID(run_id).int`). This applies to **every** exporter — Langfuse, Phoenix, and generic OTLP alike.
+
+Backends show the id as **32 hex characters** (no dashes). Search or score with the run id without hyphens:
+
+```python
+# Submit feedback to Langfuse using just the run_id
+langfuse.score(
+    trace_id=run_id.replace("-", ""),
+    name="thumbs_up",
+    value=1.0,
+)
+```
+
+Set `OTEL_TRACE_ID_FROM_RUN_ID=false` to turn seeding off and use random trace ids.
+
+### Ratio sampling
+
+Stock `TraceIdRatioBased` reads the low 64 bits of `trace_id`. UUID v4 values pin those bits in the 50–75% band, so rates like `0.1` / `0.5` would keep 0% of runs. When `OTEL_TRACES_SAMPLER` is `traceidratio` or `parentbased_traceidratio`, Aegra **disables** run_id seeding (random trace ids) and logs one warning at startup so sampling rates work correctly.
+
+### Upstream W3C `traceparent`
+
+Each run starts its own trace — Aegra does **not** continue an incoming W3C `traceparent` from an API gateway or proxy. When seeding is enabled, the deterministic `trace_id` takes precedence.
+
+If you need to correlate Aegra traces with an upstream distributed trace (e.g. from Envoy, Istio, or AWS ALB), put a correlation id in request `metadata`. On the Redis worker path only, an HTTP correlation-id header is also exposed as `original_request_id` in [run metadata](#system-key-collisions). LocalExecutor does not set `original_request_id`.
+
 ## Key environment variables
 
 The main variables you'll need:
@@ -148,6 +175,7 @@ The main variables you'll need:
 | `OTEL_TARGETS` | Comma-separated list of backends: `LANGFUSE`, `PHOENIX`, `GENERIC` |
 | `OTEL_SERVICE_NAME` | Service name for traces (default: `aegra-backend`) |
 | `OTEL_CONSOLE_EXPORT` | Log traces to console (`true`/`false`) |
+| `OTEL_TRACE_ID_FROM_RUN_ID` | Seed `trace_id` from `run_id` (default `true`; auto-off with ratio samplers) |
 
 Each provider has its own set of variables (endpoints, API keys). See the [environment variables reference](/reference/environment-variables) for the full list including all Langfuse, Phoenix, and generic OTLP variables.
 

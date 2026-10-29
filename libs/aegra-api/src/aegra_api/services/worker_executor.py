@@ -26,7 +26,7 @@ from aegra_api.core.orm import Run as RunORM
 from aegra_api.core.orm import _get_session_maker
 from aegra_api.core.redis_manager import redis_manager
 from aegra_api.models.run_job import RunJob
-from aegra_api.observability.span_enrichment import merge_run_metadata, set_trace_context
+from aegra_api.observability.span_enrichment import merge_run_metadata, prepare_run_otel_trace, set_trace_context
 from aegra_api.services.base_executor import BaseExecutor
 from aegra_api.services.run_executor import (
     _lease_loss_cancellations,
@@ -601,6 +601,8 @@ def _restore_trace_context(run_id: str, job: RunJob, trace: dict[str, str]) -> N
     original_request_id = trace.get("correlation_id", "")
     if original_request_id:
         correlation_id.set(original_request_id)
+
+    prepare_run_otel_trace(run_id)
 
     system_metadata: dict[str, str | int | float | bool] = {
         "run_id": run_id,

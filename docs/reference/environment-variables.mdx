@@ -219,6 +219,7 @@ When enabled, a `/metrics` endpoint serves standard HTTP request metrics (reques
 | `OTEL_SERVICE_NAME` | `aegra-backend` | Service name for traces |
 | `OTEL_TARGETS` | `""` | Comma-separated list: `LANGFUSE`, `PHOENIX`, `GENERIC` |
 | `OTEL_CONSOLE_EXPORT` | `false` | Log traces to console |
+| `OTEL_TRACE_ID_FROM_RUN_ID` | `true` | Seed OTEL `trace_id` from `run_id` (auto-disabled for ratio samplers) |
 
 ### Langfuse
 

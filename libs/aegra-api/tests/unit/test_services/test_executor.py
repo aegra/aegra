@@ -1,12 +1,20 @@
 """Tests for executor abstraction (local and worker)."""
 
 import asyncio
+import os
+import uuid
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
+from opentelemetry.trace import get_current_span
 
 from aegra_api.models.auth import User
 from aegra_api.models.run_job import RunExecution, RunIdentity, RunJob
+from aegra_api.observability.sampling import configure_trace_id_from_run_id, reset_trace_id_seeding_for_tests
+from aegra_api.observability.span_enrichment import RunIdAwareIdGenerator, _run_trace_id
 from aegra_api.services.local_executor import LocalExecutor
 
 
@@ -114,6 +122,54 @@ class TestLocalExecutor:
         await asyncio.sleep(0.01)
         assert task.done()
         active_runs.pop("run-hang", None)
+
+    @pytest.mark.asyncio
+    async def test_concurrent_runs_each_keep_own_seeded_trace_id(self) -> None:
+        """Two LocalExecutor submits at once: each task's trace_id equals its run_id (#692)."""
+        from aegra_api.core.active_runs import active_runs
+
+        prev_sampler = os.environ.pop("OTEL_TRACES_SAMPLER", None)
+        prev_arg = os.environ.pop("OTEL_TRACES_SAMPLER_ARG", None)
+        reset_trace_id_seeding_for_tests()
+        configure_trace_id_from_run_id(enabled_by_settings=True)
+        _run_trace_id.set(None)
+
+        run_a = "aaaaaaaa-1111-2222-3333-bbbbbbbbbbbb"
+        run_b = "bbbbbbbb-2222-3333-4444-cccccccccccc"
+        captured: dict[str, int] = {}
+
+        provider = TracerProvider(id_generator=RunIdAwareIdGenerator())
+        provider.add_span_processor(SimpleSpanProcessor(InMemorySpanExporter()))
+        tracer = provider.get_tracer(__name__)
+
+        async def fake_execute_run(job: RunJob) -> None:
+            await asyncio.sleep(0.02)
+            with tracer.start_as_current_span(f"run-{job.identity.run_id}"):
+                captured[job.identity.run_id] = get_current_span().get_span_context().trace_id
+
+        executor = LocalExecutor()
+        try:
+            with patch("aegra_api.services.run_executor.execute_run", new=fake_execute_run):
+                await executor.submit(_make_job(run_a))
+                await executor.submit(_make_job(run_b))
+                await asyncio.gather(
+                    executor.wait_for_completion(run_a, timeout=5.0),
+                    executor.wait_for_completion(run_b, timeout=5.0),
+                )
+
+            assert captured[run_a] == uuid.UUID(run_a).int
+            assert captured[run_b] == uuid.UUID(run_b).int
+            assert captured[run_a] != captured[run_b]
+        finally:
+            provider.shutdown()
+            active_runs.pop(run_a, None)
+            active_runs.pop(run_b, None)
+            _run_trace_id.set(None)
+            reset_trace_id_seeding_for_tests()
+            if prev_sampler is not None:
+                os.environ["OTEL_TRACES_SAMPLER"] = prev_sampler
+            if prev_arg is not None:
+                os.environ["OTEL_TRACES_SAMPLER_ARG"] = prev_arg
 
 
 class TestRunExecutorBoundaryConditions:

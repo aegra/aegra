@@ -32,6 +32,15 @@ class HttpConfig(TypedDict, total=False):
     """Apply Aegra authentication dependency to custom routes (uses FastAPI dependencies, not middleware)"""
     cors: CorsConfig | None
     """Custom CORS configuration"""
+    responses: bool
+    """Mount the Open Responses API at /v1/responses and /v1/conversations."""
+
+
+def responses_enabled(http_config: HttpConfig | None) -> bool:
+    """True only when aegra.json sets ``http.responses`` to boolean true."""
+    if not http_config:
+        return False
+    return http_config.get("responses") is True
 
 
 class StoreIndexConfig(TypedDict, total=False):

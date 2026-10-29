@@ -15,6 +15,7 @@ from sse_starlette import EventSourceResponse
 
 from aegra_api.core.active_runs import active_runs
 from aegra_api.core.auth_deps import auth_dependency, get_current_user
+from aegra_api.core.auth_filters import build_metadata_filter
 from aegra_api.core.auth_handlers import build_auth_context, handle_event
 from aegra_api.core.orm import Run as RunORM
 from aegra_api.core.orm import Thread as ThreadORM
@@ -83,13 +84,19 @@ async def _request_run_interruption(
         await streaming_service.cancel_run(run_orm.run_id)
 
 
-async def _apply_create_run_auth(user: User, thread_id: str, request: RunCreate) -> None:
+async def _apply_create_run_auth(
+    user: User,
+    thread_id: str,
+    request: RunCreate,
+    session: AsyncSession | None = None,
+) -> None:
     """Authorize threads.create_run and merge config/context overrides into request.
 
-    Handler-returned filter dict wins; otherwise fall back to in-place value mutations.
+    A metadata filter in the handler result must match an existing thread.
     """
     ctx = build_auth_context(user, "threads", "create_run")
     value = {**request.model_dump(), "thread_id": thread_id}
+    value.pop("run_id", None)
     filters = await handle_event(ctx, value)
 
     source = filters if filters is not None else value
@@ -100,12 +107,37 @@ async def _apply_create_run_auth(user: User, thread_id: str, request: RunCreate)
     if isinstance(context_overrides, dict):
         request.context = {**(request.context or {}), **context_overrides}
 
+    if session is not None and isinstance(filters, dict) and isinstance(filters.get("metadata"), dict):
+        await _require_existing_thread_matches(session, user, thread_id, filters)
+
     # Creating a run also reads its assistant, so per-assistant handler rules
     # apply here exactly as they do in the cron-create chain.
     await handle_event(
         build_auth_context(user, "assistants", "read"),
         {"assistant_id": request.assistant_id},
     )
+
+
+async def _require_existing_thread_matches(
+    session: AsyncSession,
+    user: User,
+    thread_id: str,
+    filters: dict[str, Any],
+) -> None:
+    """404 when the thread already exists but the handler filter excludes it."""
+    exists = await session.scalar(select(ThreadORM.thread_id).where(ThreadORM.thread_id == thread_id))
+    if exists is None:
+        return
+    stmt = select(ThreadORM.thread_id).where(
+        ThreadORM.thread_id == thread_id,
+        ThreadORM.user_id == user.identity,
+    )
+    auth_filter = build_metadata_filter(ThreadORM.metadata_json, {"metadata": filters["metadata"]})
+    if auth_filter is not None:
+        stmt = stmt.where(auth_filter)
+    visible = await session.scalar(stmt)
+    if visible is None:
+        raise HTTPException(404, f"Thread '{thread_id}' not found")
 
 
 @router.post("/threads/{thread_id}/runs", response_model=Run, responses={**NOT_FOUND, **CONFLICT})
@@ -126,7 +158,7 @@ async def create_run(
     if existing_thread and existing_thread.user_id != user.identity:
         raise HTTPException(404, f"Thread '{thread_id}' not found")
 
-    await _apply_create_run_auth(user, thread_id, request)
+    await _apply_create_run_auth(user, thread_id, request, session)
 
     _run_id, run, _job = await _prepare_run(session, thread_id, request, user, initial_status="pending")
 
@@ -159,7 +191,7 @@ async def create_and_stream_run(
         if existing_thread and existing_thread.user_id != user.identity:
             raise HTTPException(404, f"Thread '{thread_id}' not found")
 
-        await _apply_create_run_auth(user, thread_id, request)
+        await _apply_create_run_auth(user, thread_id, request, session)
 
         run_id, run, _job = await _prepare_run(session, thread_id, request, user, initial_status="pending")
 
@@ -391,7 +423,7 @@ async def wait_for_run(
         if existing_thread and existing_thread.user_id != user.identity:
             raise HTTPException(404, f"Thread '{thread_id}' not found")
 
-        await _apply_create_run_auth(user, thread_id, request)
+        await _apply_create_run_auth(user, thread_id, request, session)
 
         run_id, _run, _job = await _prepare_run(session, thread_id, request, user, initial_status="pending")
 

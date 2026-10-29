@@ -178,8 +178,28 @@ class TestRunJob:
 
         restored = RunJob.from_run_orm(LegacyORM())
         assert restored.run_metadata == {}
+        assert restored.responses_meta is None
         # Queued before durability existed: the worker keeps LangGraph's default.
         assert restored.execution.durability is None
+
+    def test_responses_meta_survives_the_worker_round_trip(self) -> None:
+        """Facade bookkeeping stays on the job and off the trace metadata."""
+        meta = {"model": "agent", "previous_response_id": "run-0", "background": False}
+        job = RunJob(
+            identity=RunIdentity(run_id="r1", thread_id="t1", graph_id="g1"),
+            user=User(identity="u1"),
+            responses_meta=meta,
+        )
+        params = job.to_execution_params()
+        assert params["responses_meta"] == meta
+        assert "model" not in params["run_metadata"]
+
+        class FakeORM:
+            run_id = "r1"
+            thread_id = "t1"
+            execution_params = params
+
+        assert RunJob.from_run_orm(FakeORM()).responses_meta == meta
 
     def test_durability_survives_the_worker_round_trip(self) -> None:
         """Redis workers rebuild the job from execution_params, so the mode must be in them."""

@@ -1,0 +1,25 @@
+{
+  "dependencies": ["./examples"],
+  "graphs": {
+    "agent": {
+      "path": "./examples/react_agent/graph.py:graph",
+      "description": "ReAct agent with tools"
+    },
+    "agent_hitl": "./examples/react_agent_hitl/graph.py:graph",
+    "subgraph_agent": "./examples/subgraph_agent/graph.py:graph",
+    "subgraph_hitl_agent": "./examples/subgraph_hitl_agent/graph.py:graph",
+    "factory": "./examples/factory/graph.py:graph",
+    "stress_test": "./examples/stress_test/graph.py:graph",
+    "stress_tool_agent": "./examples/stress_tool_agent/graph.py:graph",
+    "cron_example": "./examples/cron_example/graph.py:graph"
+  },
+  "http": {
+    "app": "./examples/custom_routes_example.py:app",
+    "responses": true
+  },
+  "store": {
+    "scopes": {
+      "orgs": ["org_id"]
+    }
+  }
+}

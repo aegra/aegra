@@ -17,11 +17,12 @@ from aegra_api import __version__
 from aegra_api.api.assistants import router as assistants_router
 from aegra_api.api.crons import router as crons_router
 from aegra_api.api.event_streaming import router as event_streaming_router
+from aegra_api.api.responses import router as responses_router
 from aegra_api.api.runs import router as runs_router
 from aegra_api.api.stateless_runs import router as stateless_runs_router
 from aegra_api.api.store import router as store_router
 from aegra_api.api.threads import router as threads_router
-from aegra_api.config import CorsConfig, HttpConfig, get_config_dir, load_http_config
+from aegra_api.config import CorsConfig, HttpConfig, get_config_dir, load_http_config, responses_enabled
 from aegra_api.core.app_loader import load_custom_app
 from aegra_api.core.auth_deps import require_auth
 from aegra_api.core.auth_enforcement import apply_auth_enforcement
@@ -56,6 +57,14 @@ OPENAPI_TAGS: list[dict[str, Any]] = [
     {"name": "Store", "description": "Persistent key-value and semantic storage available from any thread."},
     {"name": "Event Streaming", "description": "Agent Protocol v2 thread event streaming and commands."},
     {"name": "Health", "description": "Server health checks and service information."},
+    {
+        "name": "Responses",
+        "description": "Open Responses API for running an agent. Mounted only when http.responses is true.",
+    },
+    {
+        "name": "Conversations",
+        "description": "Open Responses conversations backed by threads. Mounted only when http.responses is true.",
+    },
 ]
 
 setup_logging()
@@ -344,7 +353,7 @@ def _add_common_middleware(app: FastAPI, cors_config: CorsConfig | None) -> None
     app.add_middleware(ContentTypeFixMiddleware)
 
 
-def _include_core_routers(app: FastAPI) -> None:
+def _include_core_routers(app: FastAPI, *, include_responses: bool = False) -> None:
     """Include all core API routers with auth dependency.
 
     Routers are included in consistent order:
@@ -355,9 +364,11 @@ def _include_core_routers(app: FastAPI) -> None:
     5. Stateless Runs (with auth)
     6. Crons (with auth)
     7. Store (with auth)
+    8. Open Responses, only when ``http.responses`` is true
 
     Args:
         app: FastAPI application instance
+        include_responses: Mount ``/v1/responses`` and ``/v1/conversations``.
     """
     app.include_router(health_router)
     app.include_router(assistants_router)
@@ -367,6 +378,8 @@ def _include_core_routers(app: FastAPI) -> None:
     app.include_router(crons_router)
     app.include_router(store_router)
     app.include_router(event_streaming_router)
+    if include_responses:
+        app.include_router(responses_router)
 
     # Attach @auth.on dispatch from the route registry. Routes must opt out
     # explicitly; forgetting the in-body call no longer disables authorization.
@@ -381,6 +394,7 @@ def create_app() -> FastAPI:
     """
     http_config: HttpConfig | None = load_http_config()
     cors_config: CorsConfig | None = http_config.get("cors") if http_config else None
+    include_responses = responses_enabled(http_config)
 
     # Try to load custom app if configured
     user_app = None
@@ -404,7 +418,7 @@ def create_app() -> FastAPI:
             _apply_auth_to_custom_routes(application, CUSTOM_ROUTE_AUTH)
         if not application.openapi_tags:
             application.openapi_tags = OPENAPI_TAGS
-        _include_core_routers(application)
+        _include_core_routers(application, include_responses=include_responses)
 
         # Add root endpoint if not already defined
         if not any(route.path == "/" for route in application.routes if hasattr(route, "path")):
@@ -426,7 +440,7 @@ def create_app() -> FastAPI:
         )
 
         _add_common_middleware(application, cors_config)
-        _include_core_routers(application)
+        _include_core_routers(application, include_responses=include_responses)
 
         for exc_type, handler in exception_handlers.items():
             application.exception_handler(exc_type)(handler)

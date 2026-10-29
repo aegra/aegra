@@ -56,6 +56,8 @@ make e2e-auth      # Auth E2E (JWT mock auth)
 make clean         # Clean cache files
 ```
 
+`make e2e-dev` and `make e2e-prod` start the server with `aegra.responses.json`, which mounts the Open Responses routes. `docker compose up` uses `aegra.json` and leaves those routes off.
+
 ## Commit messages
 
 **Required format:** `type(scope): description`

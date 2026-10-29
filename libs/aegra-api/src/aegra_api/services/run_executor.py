@@ -64,7 +64,7 @@ async def execute_run(job: RunJob) -> None:
                 user_id=user_id,
                 status="interrupted",
                 thread_status="interrupted",
-                output=final_output.data,
+                output=final_output.persisted_output(),
             )
         else:
             finalized = await finalize_run(
@@ -73,7 +73,7 @@ async def execute_run(job: RunJob) -> None:
                 user_id=user_id,
                 status="success",
                 thread_status="idle",
-                output=final_output.data,
+                output=final_output.persisted_output(),
             )
 
     except asyncio.CancelledError:
@@ -175,11 +175,19 @@ async def _best_effort_signal(fn: Any, *args: Any) -> None:
 class _GraphResult:
     """Accumulates output and interrupt state during graph streaming."""
 
-    __slots__ = ("data", "has_interrupt")
+    __slots__ = ("data", "has_interrupt", "interrupts")
 
     def __init__(self) -> None:
         self.data: dict[str, Any] = {}
         self.has_interrupt: bool = False
+        self.interrupts: list[Any] | None = None
+
+    def persisted_output(self) -> dict[str, Any]:
+        """Final values, with the interrupt list kept if a later event replaced it."""
+        data = dict(self.data)
+        if self.has_interrupt and self.interrupts is not None and "__interrupt__" not in data:
+            data["__interrupt__"] = self.interrupts
+        return data
 
 
 async def _stream_graph(job: RunJob) -> _GraphResult:
@@ -235,6 +243,9 @@ async def _stream_legacy(
 
         if isinstance(event_data, dict) and "__interrupt__" in event_data:
             result.has_interrupt = True
+            raw_interrupts = event_data.get("__interrupt__")
+            if isinstance(raw_interrupts, list):
+                result.interrupts = raw_interrupts
         if event_type.startswith("values"):
             result.data = event_data
 
@@ -267,8 +278,15 @@ async def _stream_native_v2(
         data = params.get("data")
         # Interrupts ride on values.params.interrupts, or as an __interrupt__ key
         # in a values/updates payload (the path session.py routes to input.requested).
-        if params.get("interrupts") or (isinstance(data, dict) and "__interrupt__" in data):
+        raw_interrupts = params.get("interrupts")
+        if not raw_interrupts and isinstance(data, dict):
+            nested = data.get("__interrupt__")
+            if isinstance(nested, list):
+                raw_interrupts = nested
+        if raw_interrupts or (isinstance(data, dict) and "__interrupt__" in data):
             result.has_interrupt = True
+            if isinstance(raw_interrupts, list):
+                result.interrupts = raw_interrupts
         if method == "values" and isinstance(data, dict):
             result.data = data
 

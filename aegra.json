@@ -14,7 +14,8 @@
     "cron_example": "./examples/cron_example/graph.py:graph"
   },
   "http": {
-    "app": "./examples/custom_routes_example.py:app"
+    "app": "./examples/custom_routes_example.py:app",
+    "responses": false
   },
   "store": {
     "scopes": {

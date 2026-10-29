@@ -22,8 +22,9 @@ from aegra_api.core.auth_registry import (
 _IGNORED_METHODS = frozenset({"HEAD", "OPTIONS"})
 
 # User-defined routes from a custom app are governed by `enable_custom_route_auth`,
-# not by the protocol registry. Only Aegra's own surface is checked here.
-_CUSTOM_ROUTE_PREFIXES = ("/custom",)
+# not by the protocol registry. `/v1/` is the optional Open Responses surface,
+# which authorizes inside its handlers and is not part of the protocol snapshot.
+_CUSTOM_ROUTE_PREFIXES = ("/custom", "/v1/")
 
 
 def _protocol_routes() -> list[tuple[str, str]]:

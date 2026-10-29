@@ -1,0 +1,73 @@
+---
+title: "Open Responses"
+description: "Run an Aegra agent from any OpenAI Responses client."
+---
+
+Aegra can expose an OpenAI-shaped [Responses](https://www.openresponses.org) API next to the Agent Server API. OpenAI SDKs, and chat front ends that speak Responses, then call the same threads, runs, and interrupts the LangGraph SDK uses.
+
+The surface is off until you opt in. Assistant CRUD, the store, crons, and checkpoint history stay on the Agent Server API.
+
+## Enable it
+
+```json
+{
+  "http": {
+    "responses": true
+  }
+}
+```
+
+Restart the server. The routes are not mounted when the key is missing or `false`.
+
+| Responses | Aegra |
+| --- | --- |
+| `model` | Assistant id, or a graph id such as `agent` |
+| `conversation` | Thread id |
+| `previous_response_id` | Earlier run id; the next call continues that thread |
+| `POST /v1/responses` | Create a run. `stream: true` returns SSE. `background: true` returns immediately |
+| `GET /v1/responses/{id}` | Run status and output. `?stream=true&starting_after=` resumes SSE after that event |
+| `POST /v1/responses/{id}/cancel` | Cancel the run |
+| `GET /v1/conversations/{id}/items` | Thread messages, with OpenAI `role` values |
+
+Response ids are run ids. Conversation ids are thread ids. Authentication is the same `@auth.authenticate` dependency, and each route dispatches `@auth.on` for the thread or assistant it touches.
+
+`starting_after` reads the shared replay buffer. With Redis enabled, a reconnect can land on a server that did not run the agent and still receive events after that id. When the buffer has expired, a finished response is sent as a snapshot of its stored output.
+
+## Call it
+
+```python
+from openai import OpenAI
+
+client = OpenAI(base_url="http://localhost:2026/v1", api_key="not-used")
+
+conversation = client.conversations.create()
+response = client.responses.create(
+    model="agent",
+    input="Say hello in one word.",
+    conversation=conversation.id,
+    store=True,
+)
+print(response.output_text)
+```
+
+`store` defaults to `true`, so a normal create keeps the response and a later call can continue it with `previous_response_id`. Set `store` to `false` on a call with no conversation and no `previous_response_id` to delete the thread after the response is returned, unless the run stops on an approval interrupt. That response is `incomplete` and the thread is kept so the client can resume the pending interrupt with `previous_response_id`. Other `store: false` runs are still deleted. `background: true` requires the response to be stored.
+
+`model` must already be an assistant you can run. Graph ids resolve to the system assistant Aegra creates at startup for each graph in `aegra.json`.
+
+## What is rejected
+
+Null and omitted SDK defaults are accepted. A value that would change OpenAI behavior and is not implemented returns `422` with an OpenAI error document:
+
+```json
+{"error": {"message": "tools is not supported", "type": "invalid_request_error", "code": "invalid_request"}}
+```
+
+That includes non-empty `tools`, a `tool_choice` other than `auto` or `none`, `temperature`, `top_p`, `max_output_tokens`, `truncation`, `reasoning`, `text`, `prompt`, and image or file input parts. This is a facade for running an agent and reading the conversation, not a model server.
+
+## Approvals
+
+A pending interrupt is an `mcp_approval_request` item whose id is the LangGraph interrupt id. The response status is `incomplete`.
+
+`mcp_approval_response` with `approve: true` resumes with `Command(resume={"decisions": [{"type": "approve"}]})`, which is what LangChain's human-in-the-loop middleware expects. The `approval_request_id` has to be a pending interrupt on that thread, or the request is `409`. When several interrupts are pending, the same value is sent as a map keyed by that id so it cannot be applied to a different one. `approve: false` does not resume. The response fails with `code: "interrupt_rejected"` and the checkpoint stays interrupted so a later approval can retry.
+
+Graphs in this repo that expect a custom resume value, such as `[{"type": "accept"}]`, send that JSON as a `function_call_output` whose `call_id` is the interrupt id. `edit` and `respond` travel only on that channel.

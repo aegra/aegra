@@ -29,6 +29,8 @@ Aegra is a drop-in replacement for LangSmith Deployments. Use the same LangGraph
 
 **Works with:** [Agent Chat UI](https://github.com/langchain-ai/agent-chat-ui) | [LangGraph Studio](https://github.com/langchain-ai/langgraph-studio) | [AG-UI / CopilotKit](https://github.com/CopilotKit/CopilotKit)
 
+Set `http.responses` to `true` to also expose an [Open Responses](https://docs.aegra.dev/guides/open-responses) API (`POST /v1/responses`) for OpenAI-shaped clients. It is off unless you opt in.
+
 > **🆕 New: Agent Protocol v2 streaming.** Thread-scoped SSE with content-block events, per-subgraph lifecycle, and native human-in-the-loop resume — the wire the latest LangGraph SDKs and `useStream()` target. Enabled by default. See the [streaming guide](https://docs.aegra.dev/guides/streaming).
 
 ## 🚀 Quick Start

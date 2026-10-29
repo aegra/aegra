@@ -77,32 +77,32 @@ E2E_IGNORE := --ignore=libs/aegra-api/tests/e2e/manual_auth_tests --ignore=libs/
 
 e2e-dev:
 	@echo "Starting dev mode (LocalExecutor, no Redis)..."
-	@docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d
+	@docker compose -f docker-compose.yml -f docker-compose.dev.yml -f docker-compose.responses.yml up -d
 	@echo "Waiting for server..."; \
 	ready=0; \
 	for i in $$(seq 1 30); do \
 		if curl -s http://localhost:2026/health > /dev/null 2>&1; then ready=1; break; fi; \
 		sleep 2; \
 	done; \
-	if [ "$$ready" = "0" ]; then echo "Server failed to start within 60s"; docker compose -f docker-compose.yml -f docker-compose.dev.yml down; exit 1; fi
+	if [ "$$ready" = "0" ]; then echo "Server failed to start within 60s"; docker compose -f docker-compose.yml -f docker-compose.dev.yml -f docker-compose.responses.yml down; exit 1; fi
 	@rc=0; \
 	uv run --package aegra-api pytest libs/aegra-api/tests/e2e/ -m "not prod_only" $(E2E_IGNORE) -v --tb=short || rc=$$?; \
-	docker compose -f docker-compose.yml -f docker-compose.dev.yml down; \
+	docker compose -f docker-compose.yml -f docker-compose.dev.yml -f docker-compose.responses.yml down; \
 	exit $$rc
 
 e2e-prod:
 	@echo "Starting prod mode (WorkerExecutor + Redis)..."
-	@docker compose up -d
+	@docker compose -f docker-compose.yml -f docker-compose.responses.yml up -d
 	@echo "Waiting for server..."; \
 	ready=0; \
 	for i in $$(seq 1 30); do \
 		if curl -s http://localhost:2026/health > /dev/null 2>&1; then ready=1; break; fi; \
 		sleep 2; \
 	done; \
-	if [ "$$ready" = "0" ]; then echo "Server failed to start within 60s"; docker compose down; exit 1; fi
+	if [ "$$ready" = "0" ]; then echo "Server failed to start within 60s"; docker compose -f docker-compose.yml -f docker-compose.responses.yml down; exit 1; fi
 	@rc=0; \
 	uv run --package aegra-api pytest libs/aegra-api/tests/e2e/ $(E2E_IGNORE) -v --tb=short || rc=$$?; \
-	docker compose down; \
+	docker compose -f docker-compose.yml -f docker-compose.responses.yml down; \
 	exit $$rc
 
 e2e-auth:

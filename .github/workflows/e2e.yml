@@ -65,7 +65,7 @@ jobs:
 
       - name: Start Aegra server (dev mode — no Redis)
         env:
-          AEGRA_CONFIG: ${{ github.workspace }}/aegra.json
+          AEGRA_CONFIG: ${{ github.workspace }}/aegra.responses.json
           POSTGRES_USER: "user"
           POSTGRES_PASSWORD: "password"
           POSTGRES_HOST: "localhost"
@@ -175,7 +175,7 @@ jobs:
 
       - name: Start Aegra server (prod mode — Redis workers)
         env:
-          AEGRA_CONFIG: ${{ github.workspace }}/aegra.json
+          AEGRA_CONFIG: ${{ github.workspace }}/aegra.responses.json
           POSTGRES_USER: "user"
           POSTGRES_PASSWORD: "password"
           POSTGRES_HOST: "localhost"

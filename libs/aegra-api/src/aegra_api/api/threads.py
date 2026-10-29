@@ -790,7 +790,8 @@ async def get_thread_history_post(
             "before": before_config,
         }
         if metadata is not None:
-            kwargs["metadata"] = metadata
+            # LangGraph names the checkpoint-metadata filter `filter`.
+            kwargs["filter"] = metadata
 
         async with langgraph_service.get_graph(
             graph_id,

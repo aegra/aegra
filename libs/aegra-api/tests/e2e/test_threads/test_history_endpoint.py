@@ -66,6 +66,35 @@ async def test_history_endpoint_e2e():
     assert len(limited) == 1
 
 
+@pytest.mark.e2e
+@pytest.mark.asyncio
+async def test_history_metadata_filter_returns_only_matching_checkpoints() -> None:
+    """Regression: a history metadata filter selects checkpoints instead of failing with a 500."""
+    client = get_e2e_client()
+    assistant = await client.assistants.create(graph_id="stress_test", if_exists="do_nothing")
+    thread_id = (await client.threads.create())["thread_id"]
+    run = await client.runs.create(
+        thread_id=thread_id,
+        assistant_id=assistant["assistant_id"],
+        input={"messages": [{"role": "user", "content": json.dumps({"delay": 0, "steps": 2})}]},
+    )
+    await client.runs.join(thread_id, run["run_id"])
+
+    # A two-step run checkpoints steps -1 (the input) through 3, so each filter matches one checkpoint.
+    by_step = await client.threads.get_history(thread_id, metadata={"step": 1})
+    by_source = await client.threads.get_history(thread_id, metadata={"source": "input"})
+    no_match = await client.threads.get_history(thread_id, metadata={"step": 99})
+    async with httpx.AsyncClient(base_url=settings.app.SERVER_URL) as http:
+        via_get = await http.get(f"/threads/{thread_id}/history", params={"metadata": json.dumps({"step": 1})})
+    elog("Threads.get_history metadata={'step': 1}", by_step)
+
+    assert [s["metadata"]["step"] for s in by_step] == [1]
+    assert [s["metadata"]["source"] for s in by_source] == ["input"]
+    assert no_match == []
+    assert via_get.status_code == 200, via_get.text
+    assert [s["metadata"]["step"] for s in via_get.json()] == [1]
+
+
 async def _count_stuck_thread_lookups(engine: AsyncEngine) -> int:
     # A leaked lookup session sits "idle in transaction" on its thread SELECT until returned to the pool.
     async with engine.connect() as conn:

@@ -55,9 +55,16 @@ Aegra requires Python 3.12+ for both the API server and the CLI.
 
 ### LangGraph
 
-`aegra-api` requires `langgraph>=1.2.16`, and projects created with `aegra init` start on the same minimum. Because only a minimum is set, installing gets you the newest LangGraph release.
+`aegra-api` requires `langgraph>=1.2.16`, and projects created with `aegra init` start on the same minimum. Only a minimum is set, so a fresh install (`pip install aegra-cli`, or a project without a lock file) gets the newest LangGraph release. A project with a `uv.lock` keeps the versions in that lock file until you run `uv lock --upgrade`.
 
-Each Aegra release is tested against the exact versions in the repository's [`uv.lock`](https://github.com/aegra/aegra/blob/main/uv.lock) at that release tag. A nightly CI job also runs the test suite against the newest releases of every dependency, so a breaking LangGraph release is caught soon after it ships. If a newer release causes errors, pin `langgraph`, `langgraph-checkpoint` and `langchain-core` to the versions in that lock file and [open an issue](https://github.com/aegra/aegra/issues).
+Each Aegra release is tested against the exact versions in the repository's `uv.lock` at that release tag. A nightly CI job also runs the test suite against the newest releases of every dependency, so a breaking LangGraph release is caught soon after it ships.
+
+If a newer release causes errors:
+
+1. Find your Aegra version with `pip show aegra-api`.
+2. Open `uv.lock` at that release tag, for example `https://github.com/aegra/aegra/blob/v0.11.0/uv.lock`.
+3. Pin `langgraph`, `langgraph-checkpoint` and `langchain-core` to the versions in that file.
+4. [Open an issue](https://github.com/aegra/aegra/issues) with the LangGraph version that fails.
 
 ### PostgreSQL
 

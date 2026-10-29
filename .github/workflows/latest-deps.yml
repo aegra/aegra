@@ -20,6 +20,8 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - name: Install uv
         uses: astral-sh/setup-uv@v4
@@ -31,6 +33,7 @@ jobs:
         run: uv lock --upgrade
 
       - name: Install workspace dependencies
+        id: sync
         run: uv sync --all-packages
 
       - name: Show resolved langgraph packages
@@ -46,7 +49,9 @@ jobs:
           POSTGRES_DB: "aegra"
         run: uv run --package aegra-api pytest libs/aegra-api/tests/unit libs/aegra-api/tests/integration
 
+      # Runs even when the api tests fail, so one nightly report covers both packages.
       - name: Run aegra-cli tests
+        if: ${{ !cancelled() && steps.sync.outcome == 'success' }}
         run: uv run --package aegra-cli pytest libs/aegra-cli/tests/
 
       # One open issue at a time; later failures comment on it instead of opening duplicates.

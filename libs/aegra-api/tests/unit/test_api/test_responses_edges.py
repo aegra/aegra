@@ -12,6 +12,7 @@ import pytest
 from fastapi import HTTPException
 from fastapi.exceptions import RequestValidationError
 from pydantic import ValidationError
+from sqlalchemy.dialects import postgresql
 
 from aegra_api.api.responses import _cancel_on_disconnect, _http_message, _validation_message
 from aegra_api.core.orm import Thread as ThreadORM
@@ -57,6 +58,7 @@ from aegra_api.services.responses_service import (
     _interrupt_ids_from_output,
     _message_offset,
     _persist_rejection,
+    _require_create_run_visible,
     _retains_run,
     _run_create,
     _timeout_payload,
@@ -341,6 +343,40 @@ async def test_disconnect_cancel_logs_and_continues(monkeypatch: pytest.MonkeyPa
 
 def _user() -> User:
     return User(identity="user-1")
+
+
+def _interrupted_row() -> SimpleNamespace:
+    return SimpleNamespace(
+        thread_id="thread-1",
+        status="interrupted",
+        run_id="run-prev",
+        output={"__interrupt__": [{"id": "int-1", "value": "wait"}]},
+        assistant_id="asst",
+        graph_id="agent",
+        user_id="user-1",
+        created_at=_now(),
+        updated_at=_now(),
+        execution_params={},
+        error_message=None,
+        input=None,
+        config={},
+        context={},
+        metadata_json={"team_id": "team-1"},
+    )
+
+
+class _FilterSession(_Session):
+    def __init__(self, row: Any, *, hide_metadata: bool) -> None:
+        super().__init__(row)
+        self.hide_metadata = hide_metadata
+        self.statements: list[Any] = []
+
+    async def scalar(self, stmt: Any) -> Any:
+        self.statements.append(stmt)
+        compiled = str(stmt.compile(dialect=postgresql.dialect()))
+        if self.hide_metadata and "@>" in compiled:
+            return None
+        return self.row
 
 
 @pytest.mark.asyncio
@@ -805,3 +841,117 @@ async def test_persist_rejection_records_the_reason(monkeypatch: pytest.MonkeyPa
     result = await _persist_rejection(_Session(assistant), _user(), body, thread, reason="stop")
     assert result["error"]["message"] == "stop"
     assert result["error"]["code"] == "interrupt_rejected"
+
+
+def _rejection_body() -> ResponseCreate:
+    return _create(
+        conversation="thread-1",
+        input=[
+            {
+                "type": "mcp_approval_response",
+                "approve": False,
+                "approval_request_id": "int-1",
+                "reason": "no",
+            }
+        ],
+    )
+
+
+def _install_rejection(monkeypatch: pytest.MonkeyPatch, *, hide_metadata: bool) -> list[_FilterSession]:
+    sessions: list[_FilterSession] = []
+
+    def maker() -> _FilterSession:
+        session = _FilterSession(_interrupted_row(), hide_metadata=hide_metadata)
+        sessions.append(session)
+        return session
+
+    class _Graphs:
+        def list_graphs(self) -> dict[str, str]:
+            return {}
+
+    monkeypatch.setattr("aegra_api.services.responses_service.get_langgraph_service", lambda: _Graphs())
+    monkeypatch.setattr("aegra_api.services.responses_service._get_session_maker", lambda: maker)
+    return sessions
+
+
+@pytest.mark.asyncio
+async def test_rejection_404s_when_a_flat_create_run_filter_excludes_the_thread(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A flat threads.create_run filter is applied before the rejection run is stored."""
+    sessions = _install_rejection(monkeypatch, hide_metadata=True)
+
+    async def handler(ctx: Any, _value: dict[str, Any]) -> dict[str, str] | None:
+        if ctx.resource == "threads" and ctx.action == "create_run":
+            return {"team_id": "other-team"}
+        return None
+
+    monkeypatch.setattr("aegra_api.services.responses_service.handle_event", handler)
+    with pytest.raises(HTTPException) as exc:
+        await execute_response(_user(), _rejection_body())
+
+    assert exc.value.status_code == 404
+    assert sessions[0].added == []
+    compiled = next(
+        stmt.compile(dialect=postgresql.dialect())
+        for stmt in sessions[0].statements
+        if "@>" in str(stmt.compile(dialect=postgresql.dialect()))
+    )
+    assert {"team_id": "other-team"} in compiled.params.values()
+
+
+@pytest.mark.asyncio
+async def test_rejection_stores_when_the_flat_create_run_filter_matches(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A flat filter that the thread satisfies still records the rejection."""
+    sessions = _install_rejection(monkeypatch, hide_metadata=False)
+
+    async def handler(ctx: Any, _value: dict[str, Any]) -> dict[str, str] | None:
+        if ctx.resource == "threads" and ctx.action == "create_run":
+            return {"team_id": "team-1"}
+        return None
+
+    monkeypatch.setattr("aegra_api.services.responses_service.handle_event", handler)
+    result = await execute_response(_user(), _rejection_body())
+
+    assert isinstance(result, dict)
+    assert result["error"]["code"] == "interrupt_rejected"
+    assert sessions[0].added
+    assert any("@>" in str(stmt.compile(dialect=postgresql.dialect())) for stmt in sessions[0].statements)
+
+
+@pytest.mark.asyncio
+async def test_rejection_does_not_treat_config_injection_as_a_metadata_filter(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """config and context on the create_run result are injections, so they are not compiled."""
+    sessions = _install_rejection(monkeypatch, hide_metadata=True)
+
+    async def handler(ctx: Any, _value: dict[str, Any]) -> dict[str, Any] | None:
+        if ctx.resource == "threads" and ctx.action == "create_run":
+            return {"config": {"configurable": {"x": 1}, "tags": ["a"]}, "context": {"k": 1}}
+        return None
+
+    monkeypatch.setattr("aegra_api.services.responses_service.handle_event", handler)
+    result = await execute_response(_user(), _rejection_body())
+
+    assert isinstance(result, dict)
+    assert result["error"]["code"] == "interrupt_rejected"
+    assert not any("@>" in str(stmt.compile(dialect=postgresql.dialect())) for stmt in sessions[0].statements)
+
+
+@pytest.mark.asyncio
+async def test_enveloped_create_run_filter_excludes_a_thread_and_drops_config() -> None:
+    """An enveloped filter is compiled, and a sibling config key is not part of the predicate."""
+    session = _FilterSession(_interrupted_row(), hide_metadata=True)
+    with pytest.raises(HTTPException) as exc:
+        await _require_create_run_visible(
+            session,
+            _user(),
+            "thread-1",
+            {"metadata": {"team_id": "team-1"}, "config": {"injected": True}},
+        )
+
+    assert exc.value.status_code == 404
+    compiled = session.statements[0].compile(dialect=postgresql.dialect())
+    assert {"team_id": "team-1"} in compiled.params.values()
+    assert "injected" not in compiled.params.values()

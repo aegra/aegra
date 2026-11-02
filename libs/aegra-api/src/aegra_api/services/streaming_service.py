@@ -9,6 +9,7 @@ import structlog
 from aegra_api.core.active_runs import active_runs
 from aegra_api.core.sse import create_error_event
 from aegra_api.models import Run
+from aegra_api.services.base_broker import BaseRunBroker
 from aegra_api.services.broker import broker_manager
 from aegra_api.services.event_converter import EventConverter
 from aegra_api.utils import extract_event_sequence
@@ -104,7 +105,7 @@ class StreamingService:
             if last_event_id:
                 last_sent_sequence = extract_event_sequence(last_event_id)
 
-            async for event_id, sse_event in self._replay_stored_events(run_id, last_event_id):
+            async for event_id, sse_event in self._replay_stored_events(run, last_event_id):
                 # Track the highest replayed sequence for live dedup
                 replayed_seq = extract_event_sequence(event_id)
                 if replayed_seq > last_sent_sequence:
@@ -128,13 +129,13 @@ class StreamingService:
             logger.exception("stream execution failed", run_id=run_id)
             yield create_error_event({"error": type(e).__name__, "message": "execution failed"})
 
-    async def _replay_stored_events(self, run_id: str, last_event_id: str | None) -> AsyncIterator[tuple[str, str]]:
+    async def _replay_stored_events(self, run: Run, last_event_id: str | None) -> AsyncIterator[tuple[str, str]]:
         """Replay stored events from the broker's replay buffer.
 
         Yields (event_id, sse_event) tuples so the caller can track
         the highest replayed sequence for live deduplication.
         """
-        broker = broker_manager.get_or_create_broker(run_id)
+        broker = self._replay_broker(run)
         stored_events = await broker.replay(last_event_id)
 
         for event_id, raw_event in stored_events:
@@ -150,7 +151,7 @@ class StreamingService:
         # If run is in a terminal state and broker is either missing or finished,
         # there are no live events to stream. Using get_broker (not get_or_create)
         # avoids creating a blank broker that would hang forever in aiter().
-        if run.status in ["success", "error", "interrupted"] and (broker is None or broker.is_finished()):
+        if run.status in _TERMINAL_RUN_STATUSES and (broker is None or broker.is_finished()):
             return
 
         if broker is None:
@@ -225,13 +226,20 @@ class StreamingService:
         async for event_id, event_type, payload in self._live_raw_events(run, last_sent_sequence):
             yield event_id, event_type, payload
 
+    def _replay_broker(self, run: Run) -> BaseRunBroker:
+        """Broker for replay. A finished run with no local producer is not cached."""
+        if run.status in _TERMINAL_RUN_STATUSES and run.run_id not in active_runs:
+            return broker_manager.open_replay_broker(run.run_id)
+        return broker_manager.get_or_create_broker(run.run_id)
+
     async def _replay_raw_events(
         self,
         run: Run,
         last_event_id: str | None,
     ) -> AsyncIterator[tuple[str, str, Any]]:
-        # Redis keeps the replay list after this process drops its local broker.
-        broker = broker_manager.get_or_create_broker(run.run_id)
+        # History lives in Redis or the producer's buffer. A new handle for a
+        # finished run stays out of the cache; mark_finished does not remove it.
+        broker = self._replay_broker(run)
         try:
             for event_id, raw_event in await broker.replay(last_event_id):
                 parsed = parse_broker_event(raw_event)
@@ -240,7 +248,8 @@ class StreamingService:
                 event_type, payload = parsed
                 yield event_id, event_type, payload
         finally:
-            # No local executor left to publish, so the live tail must not wait.
+            # Status commits before ``end``. Waiting hangs when that publish never
+            # arrives; the responses stream closes from the saved response instead.
             if run.status in _TERMINAL_RUN_STATUSES and run.run_id not in active_runs:
                 broker.mark_finished()
 

@@ -153,6 +153,18 @@ class TestBrokerManager:
         assert broker1.run_id == "run-123"
 
     @pytest.mark.asyncio
+    async def test_open_replay_broker_is_not_cached(self) -> None:
+        """A replay handle is cached only when this process already owns the broker."""
+        manager = BrokerManager()
+        replay = manager.open_replay_broker("run-old")
+
+        assert replay.run_id == "run-old"
+        assert manager.get_broker("run-old") is None
+
+        cached = manager.get_or_create_broker("run-live")
+        assert manager.open_replay_broker("run-live") is cached
+
+    @pytest.mark.asyncio
     async def test_get_or_create_different_runs(self):
         """Test creating brokers for different runs"""
         manager = BrokerManager()

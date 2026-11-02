@@ -178,6 +178,42 @@ class ResponsesTranslator:
             events.append({"type": "response.output_item.done", "output_index": index, "item": item})
         return events
 
+    def finish_from_saved(self, run_status: str) -> list[dict[str, Any]]:
+        """Terminal frame when replay ended without ``end`` on an already finished run."""
+        if self._closed:
+            return []
+        if run_status in ("error", "timeout"):
+            return self._fail(self._stored_error())
+        if run_status == "interrupted":
+            return self._finish_interrupted()
+        if run_status != "success":
+            return []
+        self.response["status"] = "completed"
+        self._prefer_saved_output()
+        return [self._terminal("response.completed")]
+
+    def _finish_interrupted(self) -> list[dict[str, Any]]:
+        stored = self.response.get("status")
+        if stored == "cancelled":
+            self._prefer_saved_output()
+            return [self._terminal("response.completed")]
+        if stored == "incomplete" or self.saw_interrupt:
+            self.response["status"] = "incomplete"
+            if not isinstance(self.response.get("incomplete_details"), dict):
+                self.response["incomplete_details"] = {"reason": "approval_required"}
+            self._prefer_saved_output()
+            return [self._terminal("response.incomplete")]
+        self.response["status"] = "cancelled"
+        self._prefer_saved_output()
+        return [self._terminal("response.completed")]
+
+    def _prefer_saved_output(self) -> None:
+        """The committed response wins; replay is the fallback when that output is empty."""
+        if self._initial_output:
+            self._copy_output(self._initial_output)
+            return
+        self._reconcile_final_values()
+
     def _on_end(self, payload: dict[str, Any]) -> list[dict[str, Any]]:
         status = payload.get("status")
         if status == "error":
@@ -312,7 +348,7 @@ async def iter_responses_sse(
     starting_after: str | None,
     message_offset: int = 0,
 ) -> AsyncGenerator[str, None]:
-    """Stream a run. Replay stored events first; snapshot only when that history is gone."""
+    """Replay broker events, then close a finished run whose history never delivered ``end``."""
     translator = ResponsesTranslator(response, message_offset=message_offset)
     if starting_after is None:
         for event in translator.opening_events():
@@ -356,6 +392,13 @@ async def iter_responses_sse(
 
     if not saw_event and run.status in _TERMINAL_RUN_STATUSES:
         for event in translator.snapshot_events():
+            yield encode_responses_event(event, None)
+        return
+
+    # The row commits before ``end``. A replay that already has earlier events
+    # must still finish, because this server will not wait on the live tail.
+    if run.status in _TERMINAL_RUN_STATUSES:
+        for event in translator.finish_from_saved(run.status):
             yield encode_responses_event(event, None)
 
 

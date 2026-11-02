@@ -101,6 +101,71 @@ def test_values_only_success_projects_the_final_message() -> None:
     assert finished[0]["response"]["output"][0]["content"][0]["text"] == "Done"
 
 
+def test_finish_from_saved_prefers_the_stored_output() -> None:
+    """A missing ``end`` closes with the committed output, not the partial replay."""
+    stored = _response()
+    stored["status"] = "completed"
+    stored["output"] = [
+        {
+            "id": "m1",
+            "type": "message",
+            "role": "assistant",
+            "status": "completed",
+            "content": [{"type": "output_text", "text": "STORED", "annotations": []}],
+        }
+    ]
+    translator = ResponsesTranslator(stored)
+    translator.feed("messages/partial", [{"id": "m1", "type": "ai", "content": "partial"}])
+    finished = translator.finish_from_saved("success")
+
+    assert finished[0]["type"] == "response.completed"
+    assert finished[0]["response"]["status"] == "completed"
+    assert finished[0]["response"]["output"][0]["content"][0]["text"] == "STORED"
+    assert translator.finish_from_saved("success") == []
+
+
+def test_finish_from_saved_maps_each_terminal_run_status() -> None:
+    """Error, timeout, approval, and cancel each keep the stored outcome."""
+    failed = _response()
+    failed["status"] = "failed"
+    failed["error"] = {"code": "server_error", "message": "disk quota exceeded"}
+    error = ResponsesTranslator(failed).finish_from_saved("error")
+    timeout = ResponsesTranslator(failed).finish_from_saved("timeout")
+    assert error[0]["type"] == "response.failed"
+    assert timeout[0]["response"]["error"]["message"] == "disk quota exceeded"
+
+    incomplete = _response()
+    incomplete["status"] = "incomplete"
+    incomplete["incomplete_details"] = {"reason": "approval_required"}
+    incomplete["output"] = [{"id": "int-1", "type": "mcp_approval_request", "name": "approve-payment"}]
+    approval = ResponsesTranslator(incomplete).finish_from_saved("interrupted")
+    assert approval[0]["type"] == "response.incomplete"
+    assert approval[0]["response"]["output"][0]["name"] == "approve-payment"
+
+    cancelled = _response()
+    cancelled["status"] = "cancelled"
+    cancel = ResponsesTranslator(cancelled).finish_from_saved("interrupted")
+    assert cancel[0]["type"] == "response.completed"
+    assert cancel[0]["response"]["status"] == "cancelled"
+
+    replayed = ResponsesTranslator(_response())
+    replayed.feed("values", {"messages": [{"id": "a1", "type": "ai", "content": "Done"}]})
+    reconciled = replayed.finish_from_saved("success")
+    assert reconciled[0]["response"]["output"][0]["content"][0]["text"] == "Done"
+    assert ResponsesTranslator(_response()).finish_from_saved("running") == []
+
+
+def test_finish_from_saved_is_a_no_op_after_a_terminal_broker_event() -> None:
+    """``end`` or ``error`` already closed the stream, so the saved response is not sent again."""
+    finished = ResponsesTranslator(_response())
+    finished.feed("end", {"status": "success"})
+    assert finished.finish_from_saved("success") == []
+
+    failed = ResponsesTranslator(_response())
+    failed.feed("error", {"message": "boom"})
+    assert failed.finish_from_saved("error") == []
+
+
 def test_snapshot_of_a_finished_response_includes_its_output() -> None:
     """Reattaching after the broker is gone replays the stored output, not an empty body."""
     stored = _response()
@@ -462,6 +527,9 @@ class _EmptyProcessCache:
         self.created = True
         return self._broker
 
+    def open_replay_broker(self, _run_id: str) -> RedisRunBroker:
+        return self.get_or_create_broker(_run_id)
+
 
 def _resume_run(run_id: str, status: str) -> Run:
     run = _run(status)
@@ -490,11 +558,13 @@ async def _frames_from_remote_redis(
     cached: list[str],
     *,
     broker: _RemoteRedisBroker,
-    starting_after: str,
+    starting_after: str | None,
+    saved: dict[str, Any] | None = None,
 ) -> tuple[list[str], _EmptyProcessCache, AsyncMock]:
     cache = _EmptyProcessCache(broker)
     client = AsyncMock()
     client.lrange.return_value = cached
+    payload = _stored_snapshot(run.run_id) if saved is None else saved
     with (
         patch("aegra_api.services.streaming_service.broker_manager", cache),
         patch("aegra_api.services.redis_broker.redis_manager") as redis,
@@ -505,7 +575,7 @@ async def _frames_from_remote_redis(
                 frame
                 async for frame in iter_responses_sse(
                     run,
-                    _stored_snapshot(run.run_id),
+                    payload,
                     starting_after=starting_after,
                 )
             ]
@@ -583,6 +653,134 @@ async def test_starting_after_snapshots_when_the_redis_buffer_is_gone() -> None:
     assert any("response.created" in frame for frame in frames)
     assert any("SNAPSHOT-ONLY" in frame for frame in frames)
     assert not any("no longer available" in frame for frame in frames)
+
+
+def _event_frames(frames: list[str], event_name: str) -> list[str]:
+    return [frame for frame in frames if frame.startswith(f"event: {event_name}\n")]
+
+
+@pytest.mark.asyncio
+async def test_reconnect_without_end_finishes_from_the_saved_response() -> None:
+    """A terminal row can commit before ``end``; another server still closes the stream."""
+    run_id = "run-remote-no-end"
+    broker = _RemoteRedisBroker(run_id)
+    frames, cache, client = await _frames_from_remote_redis(
+        _resume_run(run_id, "success"),
+        [
+            _cached_event(f"{run_id}_event_1", ["messages/partial", [{"id": "m1", "type": "ai", "content": "Hel"}]]),
+            _cached_event(f"{run_id}_event_2", ["messages/partial", [{"id": "m1", "type": "ai", "content": "Hello"}]]),
+        ],
+        broker=broker,
+        starting_after=f"{run_id}_event_1",
+    )
+
+    assert cache.created is True
+    assert client.lrange.await_args.args[0] == f"cache:{run_id}"
+    assert broker.live_entered is False
+    assert broker.is_finished() is True
+    assert any('"delta":"lo"' in frame for frame in frames)
+    completed = _event_frames(frames, "response.completed")
+    assert len(completed) == 1
+    assert "SNAPSHOT-ONLY" in completed[0]
+    assert not any("response.created" in frame for frame in frames)
+
+
+@pytest.mark.asyncio
+async def test_reconnect_without_end_finishes_failed_and_incomplete_responses() -> None:
+    """The stored status picks ``response.failed`` or ``response.incomplete`` when ``end`` is absent."""
+    failed_id = "run-remote-failed"
+    failed = _stored_snapshot(failed_id)
+    failed["status"] = "failed"
+    failed["output"] = []
+    failed["error"] = {"code": "server_error", "message": "disk quota exceeded"}
+    failed_broker = _RemoteRedisBroker(failed_id)
+    failed_frames, _, _ = await _frames_from_remote_redis(
+        _resume_run(failed_id, "error"),
+        [_cached_event(f"{failed_id}_event_1", ["values", {"a": 1}])],
+        broker=failed_broker,
+        starting_after=f"{failed_id}_event_1",
+        saved=failed,
+    )
+    assert failed_broker.live_entered is False
+    assert len(_event_frames(failed_frames, "response.failed")) == 1
+    assert "disk quota exceeded" in failed_frames[-1]
+    assert _event_frames(failed_frames, "response.completed") == []
+
+    incomplete_id = "run-remote-incomplete"
+    incomplete = _stored_snapshot(incomplete_id)
+    incomplete["status"] = "incomplete"
+    incomplete["incomplete_details"] = {"reason": "approval_required"}
+    incomplete["output"] = [
+        {
+            "id": "int-1",
+            "type": "mcp_approval_request",
+            "server_label": "aegra",
+            "name": "approve-payment",
+            "arguments": "{}",
+        }
+    ]
+    incomplete_broker = _RemoteRedisBroker(incomplete_id)
+    incomplete_frames, _, _ = await _frames_from_remote_redis(
+        _resume_run(incomplete_id, "interrupted"),
+        [_cached_event(f"{incomplete_id}_event_1", ["values", {"a": 1}])],
+        broker=incomplete_broker,
+        starting_after=f"{incomplete_id}_event_1",
+        saved=incomplete,
+    )
+    assert incomplete_broker.live_entered is False
+    approval = _event_frames(incomplete_frames, "response.incomplete")
+    assert len(approval) == 1
+    assert "approve-payment" in approval[0]
+
+    cancelled_id = "run-remote-cancelled"
+    cancelled = _stored_snapshot(cancelled_id)
+    cancelled["status"] = "cancelled"
+    cancelled_broker = _RemoteRedisBroker(cancelled_id)
+    cancelled_frames, _, _ = await _frames_from_remote_redis(
+        _resume_run(cancelled_id, "interrupted"),
+        [_cached_event(f"{cancelled_id}_event_1", ["values", {"a": 1}])],
+        broker=cancelled_broker,
+        starting_after=f"{cancelled_id}_event_1",
+        saved=cancelled,
+    )
+    assert len(_event_frames(cancelled_frames, "response.completed")) == 1
+    assert '"status":"cancelled"' in cancelled_frames[-1]
+
+
+@pytest.mark.asyncio
+async def test_open_run_without_end_does_not_invent_a_terminal_event(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A run that is still in progress stays open when the broker iterator returns early."""
+
+    async def fake_iter(_run: Run, _last_event_id: str | None = None) -> Any:
+        yield ("run-1_event_1", "messages/partial", [{"id": "m1", "type": "ai", "content": "Hi"}])
+
+    monkeypatch.setattr(
+        "aegra_api.services.responses_stream.streaming_service.iter_broker_events",
+        fake_iter,
+    )
+    frames = [frame async for frame in iter_responses_sse(_run("running"), _response(), starting_after=None)]
+
+    assert any(frame.startswith("event: response.created\n") for frame in frames)
+    assert _event_frames(frames, "response.completed") == []
+    assert _event_frames(frames, "response.incomplete") == []
+    assert _event_frames(frames, "response.failed") == []
+
+
+@pytest.mark.asyncio
+async def test_replayed_end_is_not_followed_by_a_second_completion(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Seeing ``end`` in the replay closes the translator once."""
+
+    async def fake_iter(_run: Run, _last_event_id: str | None = None) -> Any:
+        yield ("run-1_event_1", "messages/partial", [{"id": "m1", "type": "ai", "content": "Hi"}])
+        yield ("run-1_event_2", "end", {"status": "success"})
+
+    monkeypatch.setattr(
+        "aegra_api.services.responses_stream.streaming_service.iter_broker_events",
+        fake_iter,
+    )
+    frames = [frame async for frame in iter_responses_sse(_run("success"), _response(), starting_after=None)]
+
+    assert len(_event_frames(frames, "response.completed")) == 1
 
 
 def test_encode_uses_the_event_type_as_the_sse_name() -> None:

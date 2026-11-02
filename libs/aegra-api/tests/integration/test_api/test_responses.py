@@ -496,6 +496,28 @@ def test_cancel_missing_response_is_not_found(monkeypatch: pytest.MonkeyPatch) -
     assert response.json()["error"]["message"] == "Response 'missing' not found"
 
 
+def test_get_stream_finishes_when_replay_has_no_end(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Reattach still emits the stored completion when broker history has no ``end`` event."""
+
+    async def fake_iter(_run: Run, _last_event_id: str | None = None) -> Any:
+        yield ("run-1_event_1", "messages/partial", [{"id": "m1", "type": "ai", "content": "Yo"}])
+
+    monkeypatch.setattr(
+        "aegra_api.services.responses_stream.streaming_service.iter_broker_events",
+        fake_iter,
+    )
+    stored = _run(status="success", output={"messages": [{"id": "a1", "type": "ai", "content": "STORED"}]})
+    client, _session, _calls = _client(monkeypatch, stored)
+
+    response = client.get("/v1/responses/run-1", params={"stream": "true"})
+
+    assert response.status_code == 200, response.text
+    assert "event: response.output_text.delta" in response.text
+    assert response.text.count("event: response.created") == 1
+    assert response.text.count("event: response.completed") == 1
+    assert "STORED" in response.text
+
+
 def test_get_stream_reattaches_with_the_stored_offset(monkeypatch: pytest.MonkeyPatch) -> None:
     """GET stream=true reattaches SSE and only keeps a positive integer message offset."""
 
@@ -519,3 +541,78 @@ def test_get_stream_reattaches_with_the_stored_offset(monkeypatch: pytest.Monkey
     assert response.status_code == 200
     assert "text/event-stream" in response.headers["content-type"]
     assert "data: 3" in response.text
+
+
+def test_rejection_is_not_found_when_create_run_filter_excludes_the_thread(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """POST /v1/responses does not store a rejection the threads.create_run filter hides."""
+    row = SimpleNamespace(
+        thread_id="thread-1",
+        status="interrupted",
+        run_id="run-prev",
+        output={"__interrupt__": [{"id": "int-1", "value": "wait"}]},
+        assistant_id="assistant-1",
+        graph_id="agent",
+        user_id="test-user",
+        created_at=_now(),
+        updated_at=_now(),
+        execution_params={},
+        error_message=None,
+        input=None,
+        config={},
+        context={},
+        metadata_json={"team_id": "team-1"},
+    )
+
+    class FilteringSession(ScalarSession):
+        def __init__(self) -> None:
+            super().__init__(row)
+            self.added: list[Any] = []
+
+        def add(self, obj: Any) -> None:
+            self.added.append(obj)
+
+        async def scalar(self, stmt: Any) -> Any:
+            self.statements.append(stmt)
+            compiled = str(stmt.compile(dialect=postgresql.dialect()))
+            if "@>" in compiled:
+                return None
+            return self.row
+
+    sessions: list[FilteringSession] = []
+
+    def maker() -> FilteringSession:
+        session = FilteringSession()
+        sessions.append(session)
+        return session
+
+    async def handler(ctx: Any, _value: dict[str, Any]) -> dict[str, str] | None:
+        if ctx.resource == "threads" and ctx.action == "create_run":
+            return {"team_id": "other-team"}
+        return None
+
+    client, _session, _calls = _client(monkeypatch, row)
+    monkeypatch.setattr("aegra_api.services.responses_service._get_session_maker", lambda: maker)
+    monkeypatch.setattr("aegra_api.services.responses_service.handle_event", handler)
+
+    response = client.post(
+        "/v1/responses",
+        json={
+            "model": "agent",
+            "conversation": "thread-1",
+            "input": [
+                {
+                    "type": "mcp_approval_response",
+                    "approve": False,
+                    "approval_request_id": "int-1",
+                    "reason": "no",
+                }
+            ],
+        },
+    )
+
+    assert response.status_code == 404, response.text
+    assert response.json()["error"]["code"] == "not_found"
+    assert sessions[0].added == []
+    assert any("@>" in str(stmt.compile(dialect=postgresql.dialect())) for stmt in sessions[0].statements)

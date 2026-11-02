@@ -56,7 +56,7 @@ make e2e-auth      # Auth E2E (JWT mock auth)
 make clean         # Clean cache files
 ```
 
-`make e2e-dev` and `make e2e-prod` start the server with `aegra.responses.json`, which mounts the Open Responses routes. `docker compose up` uses `aegra.json` and leaves those routes off.
+`make test` runs the Open Responses E2E test with the rest of the suite. That test calls `/v1/conversations`, which is mounted only when the server is started with `aegra.responses.json`. `make e2e-dev` and `make e2e-prod` do that. Plain `docker compose up` uses `aegra.json` and leaves the route off, so the test gets a 404.
 
 ## Commit messages
 

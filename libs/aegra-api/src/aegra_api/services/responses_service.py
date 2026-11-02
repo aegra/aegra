@@ -52,6 +52,8 @@ from aegra_api.utils.assistants import resolve_assistant_id
 
 logger = structlog.getLogger(__name__)
 
+# Returned by create_run handlers as request injections, not thread metadata.
+_CREATE_RUN_INJECTIONS = frozenset({"config", "context"})
 _RESPONSE_STREAM_MODES = ["messages", "values"]
 # Same window as run resume validation: the interrupt event is published
 # before the executor commits thread and run status.
@@ -171,7 +173,8 @@ async def execute_response(user: User, body: ResponseCreate) -> dict[str, Any] |
                 await session.refresh(resolved.thread)
             if resolved.thread is None or resolved.thread.status != "interrupted":
                 raise HTTPException(409, "Cannot reject an approval when the conversation is not interrupted")
-            await _authorize_run(user, resolved.thread_id, body.model)
+            create_filters = await _authorize_run(user, resolved.thread_id, body.model)
+            await _require_create_run_visible(session, user, resolved.thread_id, create_filters)
             return await _persist_rejection(
                 session, user, body, resolved.thread, reason=turn.reject_reason or "interrupt rejected"
             )
@@ -347,12 +350,37 @@ async def _authorize_thread(user: User, resolved: ResolvedThread) -> None:
     await handle_event(build_auth_context(user, "threads", "create"), {"thread_id": resolved.thread_id})
 
 
-async def _authorize_run(user: User, thread_id: str, assistant_id: str) -> None:
-    await handle_event(
+async def _authorize_run(user: User, thread_id: str, assistant_id: str) -> dict[str, Any] | None:
+    filters = await handle_event(
         build_auth_context(user, "threads", "create_run"),
         {"thread_id": thread_id, "assistant_id": assistant_id},
     )
     await handle_event(build_auth_context(user, "assistants", "read"), {"assistant_id": assistant_id})
+    return filters if isinstance(filters, dict) else None
+
+
+async def _require_create_run_visible(
+    session: AsyncSession,
+    user: User,
+    thread_id: str,
+    filters: dict[str, Any] | None,
+) -> None:
+    """404 when a create_run filter, flat or enveloped, excludes this thread."""
+    if not filters:
+        return
+    constraints = {key: value for key, value in filters.items() if key not in _CREATE_RUN_INJECTIONS}
+    auth_filter = build_metadata_filter(ThreadORM.metadata_json, constraints)
+    if auth_filter is None:
+        return
+    visible = await session.scalar(
+        select(ThreadORM.thread_id).where(
+            ThreadORM.thread_id == thread_id,
+            ThreadORM.user_id == user.identity,
+            auth_filter,
+        )
+    )
+    if visible is None:
+        raise HTTPException(404, f"Thread '{thread_id}' not found")
 
 
 async def _persist_rejection(

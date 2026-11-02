@@ -603,6 +603,18 @@ class TestRedisBrokerManager:
 
         assert broker is None
 
+    def test_open_replay_broker_is_not_cached(self) -> None:
+        """Historical replay must not insert a broker the worker will never clean up."""
+        manager = self._make_manager()
+        replay = manager.open_replay_broker("run-old")
+
+        assert replay.run_id == "run-old"
+        assert manager.get_broker("run-old") is None
+        assert manager.open_replay_broker("run-old") is not replay
+
+        cached = manager.get_or_create_broker("run-live")
+        assert manager.open_replay_broker("run-live") is cached
+
     def test_cleanup_broker(self) -> None:
         manager = self._make_manager()
         broker = manager.get_or_create_broker("run-123")

@@ -31,7 +31,7 @@ Restart the server. The routes are not mounted when the key is missing or `false
 
 Response ids are run ids. Conversation ids are thread ids. Authentication is the same `@auth.authenticate` dependency, and each route dispatches `@auth.on` for the thread or assistant it touches.
 
-`starting_after` reads the shared replay buffer. With Redis enabled, a reconnect can land on a server that did not run the agent and still receive events after that id. When the buffer has expired, a finished response is sent as a snapshot of its stored output.
+`starting_after` reads the shared replay buffer. With Redis enabled, a reconnect can land on a server that did not run the agent and still receive events after that id. A finished response whose history is gone is sent as a snapshot of its stored output. If that history is present but has no terminal event, the stream still ends with `response.completed`, `response.incomplete`, or `response.failed` from the stored response.
 
 ## Call it
 
@@ -50,7 +50,7 @@ response = client.responses.create(
 print(response.output_text)
 ```
 
-`store` defaults to `true`, so a normal create keeps the response and a later call can continue it with `previous_response_id`. Set `store` to `false` on a call with no conversation and no `previous_response_id` to delete the thread after the response is returned, unless the run stops on an approval interrupt. That response is `incomplete` and the thread is kept so the client can resume the pending interrupt with `previous_response_id`. Other `store: false` runs are still deleted. `background: true` requires the response to be stored.
+`store` defaults to `true`, so a normal create keeps the response and a later call can continue it with `previous_response_id`. Set `store` to `false` on a call with no conversation and no `previous_response_id` to delete that new thread after the response is returned, unless the run stops on an approval interrupt. That response is `incomplete` and the thread is kept so the client can resume the pending interrupt with `previous_response_id`. A `store: false` call that passes `conversation` or `previous_response_id` keeps the existing thread and the run. `background: true` requires the response to be stored.
 
 `model` must already be an assistant you can run. Graph ids resolve to the system assistant Aegra creates at startup for each graph in `aegra.json`.
 

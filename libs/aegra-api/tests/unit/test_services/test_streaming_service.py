@@ -1,7 +1,6 @@
 """Unit tests for streaming_service module"""
 
 import asyncio
-import contextlib
 import json
 from collections.abc import AsyncGenerator, AsyncIterator
 from datetime import UTC, datetime
@@ -13,7 +12,7 @@ import pytest
 from aegra_api.core.active_runs import active_runs
 from aegra_api.models import Run
 from aegra_api.services.broker import RunBroker, broker_manager
-from aegra_api.services.redis_broker import RedisRunBroker
+from aegra_api.services.redis_broker import RedisBrokerManager, RedisRunBroker
 from aegra_api.services.streaming_service import StreamingService, parse_broker_event
 
 
@@ -33,6 +32,15 @@ def _run(run_id: str, status: str) -> Run:
 
 def _cached(event_id: str, payload: list[Any]) -> str:
     return json.dumps({"event_id": event_id, "payload": payload})
+
+
+def _reraise_unless_cancelled(outcome: list[object]) -> None:
+    """Surface a joined task's failure. Cancellation is the expected result."""
+    for item in outcome:
+        if isinstance(item, asyncio.CancelledError):
+            continue
+        if isinstance(item, BaseException):
+            raise item
 
 
 class _RemoteRedisBroker(RedisRunBroker):
@@ -82,6 +90,9 @@ class _EmptyLocalCache:
     def get_or_create_broker(self, _run_id: str) -> RedisRunBroker:
         self._visible = True
         return self._broker
+
+    def open_replay_broker(self, _run_id: str) -> RedisRunBroker:
+        return self.get_or_create_broker(_run_id)
 
 
 @pytest.mark.asyncio
@@ -501,6 +512,66 @@ class TestStreamingService:
         assert broker.live_entered is False
 
     @pytest.mark.asyncio
+    async def test_finished_replay_does_not_retain_reader_brokers(self) -> None:
+        """Each historical response must leave the Redis broker cache empty."""
+        service = StreamingService()
+        manager = RedisBrokerManager()
+        run_ids = ("run-historical-a", "run-historical-b")
+        client = AsyncMock()
+        client.lrange.side_effect = [
+            [
+                _cached(f"{run_ids[0]}_event_1", ["values", {"a": 1}]),
+                _cached(f"{run_ids[0]}_event_2", ["end", {"status": "success"}]),
+            ],
+            [
+                _cached(f"{run_ids[1]}_event_1", ["values", {"a": 1}]),
+                _cached(f"{run_ids[1]}_event_2", ["end", {"status": "interrupted"}]),
+            ],
+        ]
+
+        with (
+            patch("aegra_api.services.streaming_service.broker_manager", manager),
+            patch("aegra_api.services.redis_broker.redis_manager") as redis,
+        ):
+            redis.get_client.return_value = client
+            async with asyncio.timeout(1):
+                first = [event async for event in service.iter_broker_events(_run(run_ids[0], "success"), None)]
+                second = [event async for event in service.iter_broker_events(_run(run_ids[1], "interrupted"), None)]
+
+        assert [event[1] for event in first] == ["values", "end"]
+        assert [event[1] for event in second] == ["values", "end"]
+        assert manager._brokers == {}
+
+    @pytest.mark.asyncio
+    async def test_finished_replay_keeps_the_producer_broker(self) -> None:
+        """In-memory history lives on the producer broker, so replay must not drop it."""
+        service = StreamingService()
+        run_id = "run-local-history"
+        broker = broker_manager.get_or_create_broker(run_id)
+        try:
+            await broker.put(f"{run_id}_event_1", ("values", {"a": 1}))
+            await broker.put(f"{run_id}_event_2", ("end", {"status": "success"}))
+            async with asyncio.timeout(1):
+                events = [event async for event in service.iter_broker_events(_run(run_id, "success"), None)]
+            assert [event[1] for event in events] == ["values", "end"]
+            assert broker_manager.get_broker(run_id) is broker
+        finally:
+            broker_manager.remove_broker(run_id)
+
+    @pytest.mark.asyncio
+    async def test_finished_replay_without_a_producer_broker_is_not_cached(self) -> None:
+        """A finished run with no local buffer does not create a cache entry."""
+        service = StreamingService()
+        run_id = "run-absent-history"
+        broker_manager.remove_broker(run_id)
+
+        async with asyncio.timeout(1):
+            events = [event async for event in service.iter_broker_events(_run(run_id, "error"), None)]
+
+        assert events == []
+        assert broker_manager.get_broker(run_id) is None
+
+    @pytest.mark.asyncio
     async def test_active_run_replays_redis_history_without_a_local_broker(self) -> None:
         """An active run on another instance replays Redis history and then follows live events."""
         service = StreamingService()
@@ -562,11 +633,11 @@ class TestStreamingService:
         finally:
             if stream is not None and not stream.done():
                 stream.cancel()
-                with contextlib.suppress(asyncio.CancelledError):
-                    await stream
+                stream_outcome = await asyncio.gather(stream, return_exceptions=True)
+                _reraise_unless_cancelled(stream_outcome)
             producer.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await producer
+            producer_outcome = await asyncio.gather(producer, return_exceptions=True)
+            _reraise_unless_cancelled(producer_outcome)
             active_runs.pop(run_id, None)
             broker_manager.remove_broker(run_id)
 

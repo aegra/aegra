@@ -8,7 +8,11 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
+import structlog
+
 from aegra_api.models.responses import ResponseCreate, ResponsesError
+
+logger = structlog.getLogger(__name__)
 
 _ROLE_BY_TYPE = {
     "human": "user",
@@ -459,6 +463,7 @@ def _as_mapping(message: Any) -> dict[str, Any] | None:
         try:
             dumped = message.model_dump()
         except (TypeError, ValueError):
+            logger.warning("response message model_dump failed", exc_info=True)
             dumped = None
         if isinstance(dumped, dict):
             return dumped

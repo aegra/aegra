@@ -312,6 +312,18 @@ def test_message_content_and_tool_shapes_are_projected() -> None:
     assert _as_mapping(_DumpOk())["content"] == "Hi"
     assert _as_mapping(_DumpFails()) is None
     assert _as_mapping(_Message())["content"] == "Hello"
+
+
+def test_as_mapping_logs_when_model_dump_fails(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A message that cannot be dumped is skipped, and the failure is logged."""
+    seen: list[tuple[str, bool]] = []
+
+    def warning(event: str, **kwargs: object) -> None:
+        seen.append((event, kwargs.get("exc_info") is True))
+
+    monkeypatch.setattr("aegra_api.services.responses_mapping.logger.warning", warning)
+    assert _as_mapping(_DumpFails()) is None
+    assert seen == [("response message model_dump failed", True)]
     assert _as_mapping(1) is None
 
 

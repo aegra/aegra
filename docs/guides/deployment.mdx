@@ -233,6 +233,8 @@ Aegra provides health check endpoints for load balancers, Docker, and Kubernetes
 | `GET /live` | Liveness check |
 | `GET /info` | Server info |
 
+Failed `/ready` checks return HTTP 503 with generic messages that do not expose internal database or component exception details. For database or component-acquisition failures, consult the server warning logs for diagnostic details, including exception tracebacks.
+
 The generated `docker-compose.yml` uses `/health` to monitor the API container. If the server hangs or becomes unresponsive, Docker marks it unhealthy after 3 consecutive failures (every 30 seconds). Combined with `restart: unless-stopped`, unhealthy containers are automatically restarted.
 
 ## Troubleshooting
@@ -252,5 +254,8 @@ The generated `docker-compose.yml` uses `/health` to monitor the API container. 
   </Accordion>
   <Accordion title="Pods restart-loop on rolling deploy (Kubernetes)">
     All replicas race for Alembic's advisory lock on boot. As fleet size grows, later pods queue past their probe deadline and the kubelet kills them. Set `RUN_MIGRATIONS_ON_STARTUP=false` and run `aegra db upgrade` once per release from a Helm pre-upgrade Job or init container.
+  </Accordion>
+  <Accordion title="Server exits with 'Application startup failed'">
+    A startup step failed after the database connected, for example a graph in `aegra.json` that raises on import. Aegra closes the database connections and exits with a non-zero code instead of hanging. Check the traceback above the message in the logs, fix the error, and restart.
   </Accordion>
 </AccordionGroup>

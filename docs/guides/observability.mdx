@@ -147,7 +147,10 @@ Backends show the id as **32 hex characters** (no dashes). Search or score with 
 
 ```python
 # Submit feedback to Langfuse using just the run_id
-langfuse.score(
+from langfuse import get_client
+
+langfuse = get_client()
+langfuse.create_score(
     trace_id=run_id.replace("-", ""),
     name="thumbs_up",
     value=1.0,

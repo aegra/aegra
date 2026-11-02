@@ -1,7 +1,6 @@
 """Tests for executor abstraction (local and worker)."""
 
 import asyncio
-import os
 import uuid
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -11,11 +10,13 @@ from opentelemetry.sdk.trace.export import SimpleSpanProcessor
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 from opentelemetry.trace import get_current_span
 
+from aegra_api.core.active_runs import active_runs
 from aegra_api.models.auth import User
 from aegra_api.models.run_job import RunExecution, RunIdentity, RunJob
-from aegra_api.observability.sampling import configure_trace_id_from_run_id, reset_trace_id_seeding_for_tests
+from aegra_api.observability.sampling import is_trace_id_from_run_id_enabled
 from aegra_api.observability.span_enrichment import RunIdAwareIdGenerator, _run_trace_id
 from aegra_api.services.local_executor import LocalExecutor
+from aegra_api.settings import settings
 
 
 async def _empty_async_gen():
@@ -44,9 +45,6 @@ class TestLocalExecutor:
             job = _make_job()
             await executor.submit(job)
 
-            # Task should be registered in active_runs
-            from aegra_api.core.active_runs import active_runs
-
             assert "run-1" in active_runs
             task = active_runs.pop("run-1")
             task.cancel()
@@ -59,8 +57,6 @@ class TestLocalExecutor:
         async def quick() -> None:
             pass
 
-        from aegra_api.core.active_runs import active_runs
-
         task = asyncio.create_task(quick())
         active_runs["run-done"] = task
         await asyncio.sleep(0.01)
@@ -71,8 +67,6 @@ class TestLocalExecutor:
     @pytest.mark.asyncio
     async def test_wait_for_completion_raises_timeout_on_slow_run(self) -> None:
         """Callers distinguish a slow run from a finished one, as WorkerExecutor already allows."""
-        from aegra_api.core.active_runs import active_runs
-
         executor = LocalExecutor()
         task = asyncio.create_task(asyncio.sleep(9999))
         active_runs["run-slow"] = task
@@ -86,8 +80,6 @@ class TestLocalExecutor:
     @pytest.mark.asyncio
     async def test_wait_for_completion_leaves_a_timed_out_run_running(self) -> None:
         """The wait is shielded: giving up on a run must not cancel it."""
-        from aegra_api.core.active_runs import active_runs
-
         executor = LocalExecutor()
         task = asyncio.create_task(asyncio.sleep(9999))
         active_runs["run-shielded"] = task
@@ -109,8 +101,6 @@ class TestLocalExecutor:
     async def test_stop_cancels_active_tasks(self) -> None:
         executor = LocalExecutor()
 
-        from aegra_api.core.active_runs import active_runs
-
         async def hang_forever() -> None:
             await asyncio.sleep(9999)
 
@@ -124,14 +114,12 @@ class TestLocalExecutor:
         active_runs.pop("run-hang", None)
 
     @pytest.mark.asyncio
-    async def test_concurrent_runs_each_keep_own_seeded_trace_id(self) -> None:
+    async def test_concurrent_runs_each_keep_own_seeded_trace_id(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Two LocalExecutor submits at once: each task's trace_id equals its run_id (#692)."""
-        from aegra_api.core.active_runs import active_runs
-
-        prev_sampler = os.environ.pop("OTEL_TRACES_SAMPLER", None)
-        prev_arg = os.environ.pop("OTEL_TRACES_SAMPLER_ARG", None)
-        reset_trace_id_seeding_for_tests()
-        configure_trace_id_from_run_id(enabled_by_settings=True)
+        monkeypatch.delenv("OTEL_TRACES_SAMPLER", raising=False)
+        monkeypatch.delenv("OTEL_TRACES_SAMPLER_ARG", raising=False)
+        monkeypatch.setattr(settings.observability, "OTEL_TRACE_ID_FROM_RUN_ID", True)
+        is_trace_id_from_run_id_enabled.cache_clear()
         _run_trace_id.set(None)
 
         run_a = "aaaaaaaa-1111-2222-3333-bbbbbbbbbbbb"
@@ -165,11 +153,7 @@ class TestLocalExecutor:
             active_runs.pop(run_a, None)
             active_runs.pop(run_b, None)
             _run_trace_id.set(None)
-            reset_trace_id_seeding_for_tests()
-            if prev_sampler is not None:
-                os.environ["OTEL_TRACES_SAMPLER"] = prev_sampler
-            if prev_arg is not None:
-                os.environ["OTEL_TRACES_SAMPLER_ARG"] = prev_arg
+            is_trace_id_from_run_id_enabled.cache_clear()
 
 
 class TestRunExecutorBoundaryConditions:

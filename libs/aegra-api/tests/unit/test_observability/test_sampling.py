@@ -9,12 +9,11 @@ import pytest
 from opentelemetry.sdk.trace.sampling import Decision, TraceIdRatioBased
 
 from aegra_api.observability.sampling import (
-    configure_trace_id_from_run_id,
     is_ratio_sampler_configured,
     is_trace_id_from_run_id_enabled,
-    reset_trace_id_seeding_for_tests,
 )
 from aegra_api.observability.span_enrichment import _run_trace_id, prepare_run_otel_trace
+from aegra_api.settings import settings
 
 
 class TestUuidTraceIdRatioBias:
@@ -41,21 +40,21 @@ class TestUuidTraceIdRatioBias:
 
 class TestTraceIdFromRunIdPolicy:
     def setup_method(self) -> None:
-        reset_trace_id_seeding_for_tests()
+        is_trace_id_from_run_id_enabled.cache_clear()
         _run_trace_id.set(None)
 
     def teardown_method(self) -> None:
-        reset_trace_id_seeding_for_tests()
+        is_trace_id_from_run_id_enabled.cache_clear()
         _run_trace_id.set(None)
 
     def test_enabled_when_settings_true_and_no_ratio_sampler(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.delenv("OTEL_TRACES_SAMPLER", raising=False)
-        assert configure_trace_id_from_run_id(enabled_by_settings=True) is True
+        monkeypatch.setattr(settings.observability, "OTEL_TRACE_ID_FROM_RUN_ID", True)
         assert is_trace_id_from_run_id_enabled() is True
 
     def test_disabled_when_settings_false(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.delenv("OTEL_TRACES_SAMPLER", raising=False)
-        assert configure_trace_id_from_run_id(enabled_by_settings=False) is False
+        monkeypatch.setattr(settings.observability, "OTEL_TRACE_ID_FROM_RUN_ID", False)
         assert is_trace_id_from_run_id_enabled() is False
 
     def test_ratio_sampler_disables_seeding_and_warns(
@@ -63,22 +62,22 @@ class TestTraceIdFromRunIdPolicy:
     ) -> None:
         monkeypatch.setenv("OTEL_TRACES_SAMPLER", "parentbased_traceidratio")
         monkeypatch.setenv("OTEL_TRACES_SAMPLER_ARG", "0.1")
+        monkeypatch.setattr(settings.observability, "OTEL_TRACE_ID_FROM_RUN_ID", True)
         assert is_ratio_sampler_configured() is True
         with caplog.at_level(logging.WARNING, logger="aegra_api.observability.sampling"):
-            assert configure_trace_id_from_run_id(enabled_by_settings=True) is False
-        assert is_trace_id_from_run_id_enabled() is False
+            assert is_trace_id_from_run_id_enabled() is False
         assert any("ratio sampler" in r.message for r in caplog.records)
 
     def test_prepare_skips_seed_when_disabled(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.delenv("OTEL_TRACES_SAMPLER", raising=False)
-        configure_trace_id_from_run_id(enabled_by_settings=False)
+        monkeypatch.setattr(settings.observability, "OTEL_TRACE_ID_FROM_RUN_ID", False)
         run_id = "aaaaaaaa-1111-2222-3333-bbbbbbbbbbbb"
         prepare_run_otel_trace(run_id)
         assert _run_trace_id.get() is None
 
     def test_prepare_seeds_when_enabled(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.delenv("OTEL_TRACES_SAMPLER", raising=False)
-        configure_trace_id_from_run_id(enabled_by_settings=True)
+        monkeypatch.setattr(settings.observability, "OTEL_TRACE_ID_FROM_RUN_ID", True)
         run_id = "aaaaaaaa-1111-2222-3333-bbbbbbbbbbbb"
         prepare_run_otel_trace(run_id)
         assert _run_trace_id.get() == uuid.UUID(run_id).int

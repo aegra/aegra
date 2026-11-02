@@ -1,7 +1,10 @@
 {
   "dependencies": ["./examples"],
   "graphs": {
-    "agent": "./examples/react_agent/graph.py:graph",
+    "agent": {
+      "path": "./examples/react_agent/graph.py:graph",
+      "description": "ReAct agent with tools"
+    },
     "agent_hitl": "./examples/react_agent_hitl/graph.py:graph",
     "subgraph_agent": "./examples/subgraph_agent/graph.py:graph",
     "subgraph_hitl_agent": "./examples/subgraph_hitl_agent/graph.py:graph",

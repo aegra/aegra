@@ -3,8 +3,8 @@
 import asyncio
 import contextvars
 import logging
-import os
 import uuid
+from collections.abc import Iterator
 from unittest.mock import MagicMock
 
 import pytest
@@ -18,7 +18,7 @@ from opentelemetry.sdk.trace.export.in_memory_span_exporter import (
 )
 from opentelemetry.trace import NonRecordingSpan, SpanContext, TraceFlags, get_current_span
 
-from aegra_api.observability.sampling import configure_trace_id_from_run_id, reset_trace_id_seeding_for_tests
+from aegra_api.observability.sampling import is_trace_id_from_run_id_enabled
 from aegra_api.observability.span_enrichment import (
     RunIdAwareIdGenerator,
     SpanEnrichmentProcessor,
@@ -29,22 +29,20 @@ from aegra_api.observability.span_enrichment import (
     prepare_run_otel_trace,
     set_trace_context,
 )
+from aegra_api.settings import settings
 
 _RUN_ID = "aaaaaaaa-1111-2222-3333-bbbbbbbbbbbb"
 _RUN_ID_2 = "bbbbbbbb-2222-3333-4444-cccccccccccc"
 
 
-def _clear_ratio_sampler_env() -> tuple[str | None, str | None]:
-    prev_sampler = os.environ.pop("OTEL_TRACES_SAMPLER", None)
-    prev_arg = os.environ.pop("OTEL_TRACES_SAMPLER_ARG", None)
-    return prev_sampler, prev_arg
-
-
-def _restore_ratio_sampler_env(prev_sampler: str | None, prev_arg: str | None) -> None:
-    if prev_sampler is not None:
-        os.environ["OTEL_TRACES_SAMPLER"] = prev_sampler
-    if prev_arg is not None:
-        os.environ["OTEL_TRACES_SAMPLER_ARG"] = prev_arg
+@pytest.fixture
+def enable_trace_id_seeding(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    monkeypatch.delenv("OTEL_TRACES_SAMPLER", raising=False)
+    monkeypatch.delenv("OTEL_TRACES_SAMPLER_ARG", raising=False)
+    monkeypatch.setattr(settings.observability, "OTEL_TRACE_ID_FROM_RUN_ID", True)
+    is_trace_id_from_run_id_enabled.cache_clear()
+    yield
+    is_trace_id_from_run_id_enabled.cache_clear()
 
 
 class TestSetTraceContext:
@@ -234,22 +232,18 @@ class TestSpanEnrichmentProcessor:
         SpanEnrichmentProcessor().shutdown()  # Should not raise
 
 
+@pytest.mark.usefixtures("enable_trace_id_seeding")
 class TestMakeRunTraceContext:
     """Tests for make_run_trace_context()."""
 
     def setup_method(self) -> None:
         """Reset context vars before each test."""
-        self._prev_sampler, self._prev_arg = _clear_ratio_sampler_env()
-        reset_trace_id_seeding_for_tests()
-        configure_trace_id_from_run_id(enabled_by_settings=True)
         _trace_attrs.set(None)
         _run_trace_id.set(None)
         structlog.contextvars.clear_contextvars()
 
     def teardown_method(self) -> None:
         _run_trace_id.set(None)
-        reset_trace_id_seeding_for_tests()
-        _restore_ratio_sampler_env(self._prev_sampler, self._prev_arg)
 
     def test_returned_context_contains_expected_attributes(self) -> None:
         """Returned context has all trace attributes pre-set."""
@@ -349,19 +343,15 @@ class TestMakeRunTraceContext:
         assert bound["graph_id"] == "my_graph"
 
 
+@pytest.mark.usefixtures("enable_trace_id_seeding")
 class TestRunIdAwareIdGenerator:
     """Tests for deterministic trace_id seeding."""
 
     def setup_method(self) -> None:
-        self._prev_sampler, self._prev_arg = _clear_ratio_sampler_env()
-        reset_trace_id_seeding_for_tests()
-        configure_trace_id_from_run_id(enabled_by_settings=True)
         _run_trace_id.set(None)
 
     def teardown_method(self) -> None:
         _run_trace_id.set(None)
-        reset_trace_id_seeding_for_tests()
-        _restore_ratio_sampler_env(self._prev_sampler, self._prev_arg)
 
     def test_returns_seeded_trace_id_without_consuming(self) -> None:
         """Sticky seed: factory + graph roots both get UUID(run_id).int."""
@@ -504,6 +494,7 @@ class TestMergeRunMetadata:
         assert result["b"] is True
 
 
+@pytest.mark.usefixtures("enable_trace_id_seeding")
 class TestSpanEnrichmentEndToEnd:
     """End-to-end verification with the real OpenTelemetry SDK.
 
@@ -522,9 +513,6 @@ class TestSpanEnrichmentEndToEnd:
     """
 
     def setup_method(self) -> None:
-        self._prev_sampler, self._prev_arg = _clear_ratio_sampler_env()
-        reset_trace_id_seeding_for_tests()
-        configure_trace_id_from_run_id(enabled_by_settings=True)
         _trace_attrs.set(None)
         _run_trace_id.set(None)
         self.exporter = InMemorySpanExporter()
@@ -539,8 +527,6 @@ class TestSpanEnrichmentEndToEnd:
         self.provider.shutdown()
         _trace_attrs.set(None)
         _run_trace_id.set(None)
-        reset_trace_id_seeding_for_tests()
-        _restore_ratio_sampler_env(self._prev_sampler, self._prev_arg)
 
     def _emit_root_span(self, ctx: contextvars.Context) -> None:
         """Open and close a root span inside the supplied context."""

@@ -19,7 +19,6 @@ from datetime import UTC, datetime, timedelta
 import structlog
 from asgi_correlation_id import correlation_id
 from redis import RedisError
-from redis import TimeoutError as RedisTimeoutError
 from sqlalchemy import select, update
 
 from aegra_api.core.active_runs import active_runs, explicit_run_cancellations
@@ -321,17 +320,16 @@ class WorkerExecutor(BaseExecutor):
     # ------------------------------------------------------------------
 
     async def _dequeue(self) -> str | None:
-        """BLPOP with 5s timeout. Falls back to Postgres polling if Redis is down."""
+        """BLPOP on the blocking client. Any Redis error, timeout included, falls back to Postgres:
+        the block may have popped a run whose reply never arrived."""
         try:
-            client = redis_manager.get_client()
-            result = await client.blpop(settings.worker.WORKER_QUEUE_KEY, timeout=5)  # type: ignore[arg-type]
+            client = redis_manager.get_blocking_client()
+            result = await client.blpop(  # type: ignore[arg-type]
+                settings.worker.WORKER_QUEUE_KEY, timeout=settings.worker.BLPOP_TIMEOUT_SECONDS
+            )
             if result is None:
                 return None
             return result[1]
-        except RedisTimeoutError:
-            # Idle expiry: a blocking BLPOP hit the socket timeout with no jobs.
-            # Normal when the queue is empty, not a connectivity failure — re-loop.
-            return None
         except RedisError as exc:
             logger.warning("Redis BLPOP failed, falling back to Postgres poll", error=str(exc))
             await asyncio.sleep(settings.worker.POSTGRES_POLL_INTERVAL_SECONDS)

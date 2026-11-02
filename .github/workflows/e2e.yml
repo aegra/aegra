@@ -3,7 +3,7 @@ name: E2E Tests
 on:
   push:
     branches: [main]
-  # Allow manual trigger
+  # Manual runs must target main: the e2e environment only allows main.
   workflow_dispatch:
 
 # Workflow-level so pytest steps inherit them: tests that read the database
@@ -19,6 +19,7 @@ jobs:
   e2e-dev-mode:
     name: E2E (Dev Mode — LocalExecutor)
     runs-on: ubuntu-latest
+    environment: e2e
     permissions:
       contents: read
 
@@ -118,6 +119,7 @@ jobs:
   e2e-prod-mode:
     name: E2E (Prod Mode — WorkerExecutor + Redis)
     runs-on: ubuntu-latest
+    environment: e2e
     permissions:
       contents: read
 
@@ -230,6 +232,7 @@ jobs:
   e2e-auth:
     name: E2E (Auth Enabled)
     runs-on: ubuntu-latest
+    environment: e2e
     permissions:
       contents: read
 

@@ -2,6 +2,7 @@
 
 import contextlib
 
+import structlog
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
 from sqlalchemy import text
@@ -11,6 +12,7 @@ from aegra_api.core.database import db_manager
 from aegra_api.models.errors import UNAVAILABLE
 from aegra_api.settings import settings
 
+logger = structlog.get_logger(__name__)
 router = APIRouter(tags=["Health"])
 
 
@@ -120,7 +122,8 @@ async def readiness_check(_request: Request) -> dict[str, str]:
         async with db_manager.engine.begin() as conn:
             await conn.execute(text("SELECT 1"))
     except Exception as e:
-        raise HTTPException(status_code=503, detail=f"Service not ready - database error: {str(e)}") from e
+        logger.warning("readiness check failed: database", exc_info=True)
+        raise HTTPException(status_code=503, detail="Service not ready - database error") from e
 
     # Check that LangGraph components can be obtained (lazy init) and respond
     try:
@@ -132,9 +135,10 @@ async def readiness_check(_request: Request) -> dict[str, str]:
         with contextlib.suppress(Exception):
             await store.aget(("ready",), "check")
     except Exception as e:
+        logger.warning("readiness check failed: components", exc_info=True)
         raise HTTPException(
             status_code=503,
-            detail=f"Service not ready - components unavailable: {str(e)}",
+            detail="Service not ready - components unavailable",
         ) from e
 
     return {"status": "ready"}

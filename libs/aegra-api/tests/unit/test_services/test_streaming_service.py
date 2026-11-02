@@ -75,6 +75,46 @@ class _SignalingBroker(RunBroker):
             yield event
 
 
+class _HandoffBroker:
+    """Replay buffer plus an optional live tail. Records whether the tail is entered."""
+
+    def __init__(self, replayed: list[tuple[str, Any]], live: list[tuple[str, Any]] | None = None) -> None:
+        self._replayed = replayed
+        self._live = [] if live is None else live
+        self.live_entered = False
+
+    def is_finished(self) -> bool:
+        return False
+
+    async def replay(self, _last_event_id: str | None) -> list[tuple[str, Any]]:
+        return list(self._replayed)
+
+    async def aiter(self) -> AsyncIterator[tuple[str, Any]]:
+        self.live_entered = True
+        for event in self._live:
+            yield event
+
+
+class _ReplayCache:
+    """Caches a broker only when ``get_or_create_broker`` is used."""
+
+    def __init__(self, broker: _HandoffBroker) -> None:
+        self._broker = broker
+        self._cached: _HandoffBroker | None = None
+
+    def get_broker(self, _run_id: str) -> _HandoffBroker | None:
+        return self._cached
+
+    def get_or_create_broker(self, _run_id: str) -> _HandoffBroker:
+        self._cached = self._broker
+        return self._broker
+
+    def open_replay_broker(self, _run_id: str) -> _HandoffBroker:
+        if self._cached is not None:
+            return self._cached
+        return self._broker
+
+
 class _EmptyLocalCache:
     """Starts with no local broker, then keeps the one replay creates."""
 
@@ -420,6 +460,83 @@ class TestStreamingService:
             # Should get replay (5, 6) + live (7, 8) — event_6 NOT duplicated
             assert len(events) == 4
             assert events == ["sse5", "sse6", "sse7", "sse8"]
+
+    async def test_terminal_reconnect_without_end_emits_the_stored_status(self) -> None:
+        """A finished run on another server still closes when replay has no ``end``."""
+        service = StreamingService()
+        run_id = "run-remote-end"
+        broker = _HandoffBroker([(f"{run_id}_event_2", ("values", {"a": 1}))])
+        cache = _ReplayCache(broker)
+
+        with patch("aegra_api.services.streaming_service.broker_manager", cache):
+            events = [
+                event async for event in service.stream_run_execution(_run(run_id, "success"), f"{run_id}_event_1")
+            ]
+
+        assert broker.live_entered is False
+        assert cache.get_broker(run_id) is None
+        assert any(event.startswith("event: values\n") for event in events)
+        assert sum(event.startswith("event: end\n") for event in events) == 1
+        assert '"status":"success"' in events[-1]
+
+    async def test_terminal_reconnect_does_not_repeat_a_replayed_end(self) -> None:
+        """An ``end`` already in the buffer is the closing frame."""
+        service = StreamingService()
+        run_id = "run-remote-closed"
+        broker = _HandoffBroker([(f"{run_id}_event_2", ("end", {"status": "success"}))])
+
+        with patch("aegra_api.services.streaming_service.broker_manager", _ReplayCache(broker)):
+            events = [
+                event async for event in service.stream_run_execution(_run(run_id, "success"), f"{run_id}_event_1")
+            ]
+
+        assert broker.live_entered is False
+        assert sum(event.startswith("event: end\n") for event in events) == 1
+
+    async def test_terminal_reconnect_closes_an_error_after_its_error_event(self) -> None:
+        """A stored error without ``end`` still finishes the stream as ``error``."""
+        service = StreamingService()
+        run_id = "run-remote-error"
+        broker = _HandoffBroker([(f"{run_id}_event_2", ("error", {"error": "Error", "message": "execution failed"}))])
+
+        with patch("aegra_api.services.streaming_service.broker_manager", _ReplayCache(broker)):
+            events = [event async for event in service.stream_run_execution(_run(run_id, "error"), f"{run_id}_event_1")]
+
+        assert any(event.startswith("event: error\n") for event in events)
+        assert events[-1].startswith("event: end\n")
+        assert '"status":"error"' in events[-1]
+
+    async def test_running_reconnect_does_not_invent_an_end(self) -> None:
+        """An in-progress run stays open when the live tail has nothing yet."""
+        service = StreamingService()
+        run_id = "run-still-open"
+        broker = _HandoffBroker([(f"{run_id}_event_1", ("values", {"a": 1}))])
+
+        with patch("aegra_api.services.streaming_service.broker_manager", _ReplayCache(broker)):
+            events = [event async for event in service.stream_run_execution(_run(run_id, "running"), None)]
+
+        assert broker.live_entered is True
+        assert not any(event.startswith("event: end\n") for event in events)
+
+    async def test_local_producer_waits_for_its_own_end(self) -> None:
+        """A producer still on this server publishes ``end``; the stored status is not sent early."""
+        service = StreamingService()
+        run_id = "run-local-end"
+        broker = _HandoffBroker([], live=[(f"{run_id}_event_2", ("end", {"status": "interrupted"}))])
+        producer = asyncio.create_task(asyncio.sleep(3600))
+        active_runs[run_id] = producer
+        try:
+            with patch("aegra_api.services.streaming_service.broker_manager", _ReplayCache(broker)):
+                events = [event async for event in service.stream_run_execution(_run(run_id, "interrupted"), None)]
+        finally:
+            producer.cancel()
+            outcome = await asyncio.gather(producer, return_exceptions=True)
+            _reraise_unless_cancelled(outcome)
+            active_runs.pop(run_id, None)
+
+        assert broker.live_entered is True
+        assert sum(event.startswith("event: end\n") for event in events) == 1
+        assert '"status":"interrupted"' in events[-1]
 
     async def test_interrupt_run_delegates_to_broker_manager(self) -> None:
         """Test run interruption delegates to broker_manager"""

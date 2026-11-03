@@ -559,6 +559,28 @@ class TestUpdateCronExtended:
         assert resp.status_code == 200
         assert "webhook" not in mock_cron_service.update_cron.await_args.args[1].model_fields_set
 
+    def test_auth_handler_sees_an_explicit_webhook_null(self, client: TestClient, mock_cron_service: AsyncMock) -> None:
+        # A handler that forbids changing the webhook must not see an omitted field while the service removes it.
+        mock_cron_service.update_cron.return_value = _cron_response()
+
+        with patch("aegra_api.api.crons.handle_event", new_callable=AsyncMock) as mock_handle:
+            resp = client.patch("/runs/crons/cron-001", json={"webhook": None, "enabled": False})
+
+        assert resp.status_code == 200
+        _ctx, value = mock_handle.await_args.args
+        assert value["webhook"] is None
+        assert value["enabled"] is False
+
+    def test_auth_payload_has_no_webhook_when_the_body_omits_it(
+        self, client: TestClient, mock_cron_service: AsyncMock
+    ) -> None:
+        mock_cron_service.update_cron.return_value = _cron_response()
+
+        with patch("aegra_api.api.crons.handle_event", new_callable=AsyncMock) as mock_handle:
+            client.patch("/runs/crons/cron-001", json={"enabled": False})
+
+        assert "webhook" not in mock_handle.await_args.args[1]
+
 
 # ---------------------------------------------------------------------------
 # DELETE /runs/crons/{cron_id} — extended

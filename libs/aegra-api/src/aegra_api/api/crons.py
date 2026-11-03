@@ -153,6 +153,9 @@ async def update_cron(
     """
     ctx = build_auth_context(user, "crons", "update")
     value = {"cron_id": cron_id, **request.model_dump(exclude_none=True)}
+    # An explicit null clears the end time, so a handler guarding end_time must see it.
+    if "end_time" in request.model_fields_set:
+        value["end_time"] = request.end_time
     await handle_event(ctx, value)
 
     return await service.update_cron(cron_id, request, user.identity)

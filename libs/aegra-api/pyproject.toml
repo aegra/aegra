@@ -40,7 +40,7 @@ dependencies = [
     "alembic>=1.16.4",
 
     # Observability (OpenTelemetry)
-    "opentelemetry-api>=1.39.1",
+    "opentelemetry-api>=1.45.1",
     "opentelemetry-sdk>=1.39.1",
     "opentelemetry-exporter-otlp>=1.39.1",
     "openinference-instrumentation-langchain>=0.1.58",

@@ -1,17 +1,30 @@
-"""Docker utility functions for aegra-cli.
+"""Docker and Podman helpers for local Compose workflows."""
 
-This module provides helpers to detect Docker installation, check if Docker is running,
-and manage PostgreSQL containers for local development.
-"""
-
+import os
 import platform
 import shutil
 import subprocess
+import time
+from enum import StrEnum
 from pathlib import Path
 
 from rich.console import Console
+from rich.progress import Progress, SpinnerColumn, TextColumn
 
 console = Console()
+
+ENV_CONTAINER_RUNTIME = "AEGRA_CONTAINER_RUNTIME"
+
+
+class ContainerRuntime(StrEnum):
+    """Local container CLI used to run Compose."""
+
+    DOCKER = "docker"
+    PODMAN = "podman"
+
+
+class RuntimeSelectionError(Exception):
+    """Raised when no usable Docker or Podman runtime can be selected."""
 
 
 def is_docker_installed() -> bool:
@@ -36,6 +49,134 @@ def is_docker_running() -> bool:
         return result.returncode == 0
     except (subprocess.TimeoutExpired, FileNotFoundError):
         return False
+
+
+def is_podman_installed() -> bool:
+    """Check if the Podman CLI is installed and available in PATH."""
+    return shutil.which("podman") is not None
+
+
+def is_podman_running() -> bool:
+    """Check if Podman answers `podman info`."""
+    if not is_podman_installed():
+        return False
+
+    try:
+        result = subprocess.run(
+            ["podman", "info"],
+            capture_output=True,
+            timeout=10,
+        )
+        return result.returncode == 0
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        return False
+
+
+def is_runtime_running(runtime: ContainerRuntime) -> bool:
+    """Return whether the selected runtime responds to its info command."""
+    if runtime is ContainerRuntime.DOCKER:
+        return is_docker_running()
+    return is_podman_running()
+
+
+def runtime_label(runtime: ContainerRuntime) -> str:
+    """Human-readable runtime name for CLI messages."""
+    if runtime is ContainerRuntime.DOCKER:
+        return "Docker"
+    return "Podman"
+
+
+def _runtime_installed(runtime: ContainerRuntime) -> bool:
+    if runtime is ContainerRuntime.DOCKER:
+        return is_docker_installed()
+    return is_podman_installed()
+
+
+def resolve_container_runtime() -> ContainerRuntime:
+    """Honor AEGRA_CONTAINER_RUNTIME, else a running Docker daemon, else Podman."""
+    raw = os.environ.get(ENV_CONTAINER_RUNTIME, "").strip().lower()
+    if raw:
+        try:
+            runtime = ContainerRuntime(raw)
+        except ValueError:
+            raise RuntimeSelectionError(
+                f"Invalid {ENV_CONTAINER_RUNTIME}={raw!r}. Expected 'docker' or 'podman'."
+            ) from None
+        if not _runtime_installed(runtime):
+            url = (
+                "https://docs.docker.com/get-docker/"
+                if runtime is ContainerRuntime.DOCKER
+                else "https://podman.io/docs/installation"
+            )
+            raise RuntimeSelectionError(
+                f"{runtime_label(runtime)} is not installed. Install it from {url}"
+            )
+        return runtime
+
+    if is_docker_installed() and is_docker_running():
+        return ContainerRuntime.DOCKER
+    if is_podman_installed():
+        return ContainerRuntime.PODMAN
+    if is_docker_installed():
+        return ContainerRuntime.DOCKER
+    raise RuntimeSelectionError(
+        "Neither Docker nor Podman is available. "
+        "Install Docker (https://docs.docker.com/get-docker/) "
+        "or Podman (https://podman.io/docs/installation)."
+    )
+
+
+def compose_argv(
+    runtime: ContainerRuntime,
+    compose_file: Path | None,
+    *args: str,
+) -> list[str]:
+    """Build a `docker compose` or `podman compose` argument list."""
+    command = [runtime.value, "compose"]
+    if compose_file is not None:
+        command.extend(["-f", str(compose_file)])
+    command.extend(args)
+    return command
+
+
+def podman_compose_available() -> bool:
+    """Return True when `podman compose version` succeeds."""
+    try:
+        result = subprocess.run(
+            ["podman", "compose", "version"],
+            capture_output=True,
+            timeout=10,
+        )
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        return False
+    return result.returncode == 0
+
+
+def ensure_compose_plugin(runtime: ContainerRuntime) -> bool:
+    """Podman must provide `podman compose`. Aegra does not call podman-compose."""
+    if runtime is not ContainerRuntime.PODMAN:
+        return True
+    if podman_compose_available():
+        return True
+    console.print(
+        "\n[bold red]Podman Compose is not available.[/bold red]\n\n"
+        "Aegra runs [cyan]podman compose[/cyan] and does not invoke [cyan]podman-compose[/cyan].\n"
+        "Install the Podman Compose plugin, then run the command again."
+    )
+    return False
+
+
+def missing_binary_message(runtime: ContainerRuntime) -> str:
+    """Error text when the selected CLI binary cannot be executed."""
+    if runtime is ContainerRuntime.DOCKER:
+        return (
+            "[bold red]Error:[/bold red] docker is not installed or not in PATH.\n"
+            "Please install Docker Desktop or Docker Engine."
+        )
+    return (
+        "[bold red]Error:[/bold red] podman is not installed or not in PATH.\n"
+        "Please install Podman."
+    )
 
 
 def get_docker_start_instructions() -> str:
@@ -185,21 +326,152 @@ def _wait_for_docker_ready(timeout_seconds: int = 60) -> bool:
     return False
 
 
-def is_postgres_container_running(compose_file: Path | None = None) -> bool:
-    """Check if PostgreSQL container is running.
+def get_podman_start_instructions() -> str:
+    """Platform-specific instructions for starting Podman."""
+    system = platform.system().lower()
+    if system == "darwin":
+        return (
+            "[bold cyan]macOS:[/bold cyan] Start Podman Machine or Podman Desktop:\n"
+            "  [cyan]podman machine start[/cyan]\n"
+            "  [cyan]open -a 'Podman Desktop'[/cyan]"
+        )
+    if system == "linux":
+        return (
+            "[bold cyan]Linux:[/bold cyan] Start the Podman socket:\n"
+            "  [cyan]systemctl --user start podman.socket[/cyan]"
+        )
+    if system == "windows":
+        return (
+            "[bold cyan]Windows:[/bold cyan] Start Podman Machine:\n"
+            "  [cyan]podman machine start[/cyan]"
+        )
+    return "[dim]Please start Podman manually for your platform.[/dim]"
 
-    Args:
-        compose_file: Optional path to docker-compose.yml file.
 
-    Returns:
-        True if postgres service is running.
-    """
-    cmd = ["docker", "compose"]
+def get_runtime_start_instructions(runtime: ContainerRuntime) -> str:
+    """Start hints for the selected runtime."""
+    if runtime is ContainerRuntime.DOCKER:
+        return get_docker_start_instructions()
+    return get_podman_start_instructions()
 
-    if compose_file:
-        cmd.extend(["-f", str(compose_file)])
 
-    cmd.extend(["ps", "--services", "--filter", "status=running"])
+def _wait_for_podman_ready(timeout_seconds: int = 60) -> bool:
+    """Wait until `podman info` succeeds."""
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[dim]Waiting for Podman to be ready..."),
+        console=console,
+        transient=True,
+    ) as progress:
+        task = progress.add_task("waiting", total=None)
+        start_time = time.time()
+        while time.time() - start_time < timeout_seconds:
+            if is_podman_running():
+                progress.stop()
+                console.print("[green]Podman is ready![/green]")
+                return True
+            elapsed = int(time.time() - start_time)
+            progress.update(
+                task, description=f"[dim]Waiting for Podman to be ready... ({elapsed}s)"
+            )
+            time.sleep(2)
+
+    console.print(f"[yellow]Timed out after {timeout_seconds}s waiting for Podman.[/yellow]")
+    return False
+
+
+def try_start_podman() -> bool:
+    """Attempt to start Podman. Returns True when `podman info` succeeds."""
+    system = platform.system().lower()
+    console.print("[yellow]Attempting to start Podman...[/yellow]")
+    try:
+        if system == "darwin":
+            started = subprocess.run(
+                ["podman", "machine", "start"],
+                capture_output=True,
+                timeout=60,
+            )
+            if started.returncode == 0 and _wait_for_podman_ready():
+                return True
+            opened = subprocess.run(
+                ["open", "-a", "Podman Desktop"],
+                capture_output=True,
+                timeout=10,
+            )
+            if opened.returncode == 0:
+                return _wait_for_podman_ready()
+        elif system == "linux":
+            started = subprocess.run(
+                ["systemctl", "--user", "start", "podman.socket"],
+                capture_output=True,
+                timeout=30,
+            )
+            if started.returncode == 0:
+                return _wait_for_podman_ready()
+        elif system == "windows":
+            started = subprocess.run(
+                ["podman", "machine", "start"],
+                capture_output=True,
+                timeout=60,
+            )
+            if started.returncode == 0:
+                return _wait_for_podman_ready()
+    except (subprocess.TimeoutExpired, FileNotFoundError, PermissionError):
+        return False
+    return False
+
+
+def try_start_runtime(runtime: ContainerRuntime) -> bool:
+    """Attempt to start the selected runtime."""
+    if runtime is ContainerRuntime.DOCKER:
+        return try_start_docker()
+    return try_start_podman()
+
+
+def ensure_runtime_ready(runtime: ContainerRuntime) -> bool:
+    """Return True when the runtime is running, starting it when needed."""
+    if is_runtime_running(runtime):
+        return True
+    label = runtime_label(runtime)
+    console.print(f"\n[yellow]{label} is not running.[/yellow]")
+    if try_start_runtime(runtime):
+        console.print(f"[green]{label} started successfully![/green]")
+        return True
+    console.print(
+        f"\n[bold red]Could not start {label} automatically.[/bold red]\n\n"
+        f"{get_runtime_start_instructions(runtime)}\n\n"
+        "[dim]Then run the command again.[/dim]"
+    )
+    return False
+
+
+def _selected_runtime(runtime: ContainerRuntime | None) -> ContainerRuntime | None:
+    if runtime is not None:
+        return runtime
+    try:
+        return resolve_container_runtime()
+    except RuntimeSelectionError:
+        return None
+
+
+def is_postgres_container_running(
+    compose_file: Path | None = None,
+    *,
+    runtime: ContainerRuntime | None = None,
+) -> bool:
+    """Check if the PostgreSQL Compose service is running."""
+    selected = _selected_runtime(runtime)
+    if selected is None:
+        return False
+
+    cmd = compose_argv(
+        selected,
+        compose_file,
+        "ps",
+        "--services",
+        "--filter",
+        "status=running",
+    )
 
     try:
         result = subprocess.run(
@@ -208,48 +480,46 @@ def is_postgres_container_running(compose_file: Path | None = None) -> bool:
             text=True,
             timeout=10,
         )
-        if result.returncode == 0:
-            running_services = result.stdout.strip().split("\n")
-            return "postgres" in running_services
     except (subprocess.TimeoutExpired, FileNotFoundError):
-        pass
+        return False
+    if result.returncode != 0:
+        return False
+    running_services = result.stdout.strip().split("\n")
+    return "postgres" in running_services
 
-    return False
 
+def start_postgres_container(
+    compose_file: Path | None = None,
+    *,
+    runtime: ContainerRuntime | None = None,
+) -> bool:
+    """Start the PostgreSQL service with docker compose or podman compose."""
+    selected = _selected_runtime(runtime)
+    if selected is None:
+        return False
+    if not ensure_compose_plugin(selected):
+        return False
 
-def start_postgres_container(compose_file: Path | None = None) -> bool:
-    """Start the PostgreSQL container using docker compose.
-
-    Args:
-        compose_file: Optional path to docker-compose.yml file.
-
-    Returns:
-        True if postgres was started successfully.
-    """
-    cmd = ["docker", "compose"]
-
-    if compose_file:
-        cmd.extend(["-f", str(compose_file)])
-
-    cmd.extend(["up", "-d", "--wait", "postgres"])
+    cmd = compose_argv(selected, compose_file, "up", "-d", "--wait", "postgres")
 
     console.print("[cyan]Starting PostgreSQL container...[/cyan]")
     console.print(f"[dim]Running: {' '.join(cmd)}[/dim]")
 
     try:
         result = subprocess.run(cmd, timeout=120)
-        if result.returncode == 0:
-            console.print("[green]PostgreSQL container started successfully![/green]")
-            return True
-        else:
-            console.print(
-                f"[red]Failed to start PostgreSQL container (exit code {result.returncode})[/red]"
-            )
     except subprocess.TimeoutExpired:
         console.print("[red]Timeout while starting PostgreSQL container[/red]")
+        return False
     except FileNotFoundError:
-        console.print("[red]Docker command not found[/red]")
+        console.print(f"[red]{selected.value} command not found[/red]")
+        return False
 
+    if result.returncode == 0:
+        console.print("[green]PostgreSQL container started successfully![/green]")
+        return True
+    console.print(
+        f"[red]Failed to start PostgreSQL container (exit code {result.returncode})[/red]"
+    )
     return False
 
 
@@ -280,10 +550,7 @@ def find_compose_file() -> Path | None:
 
 
 def ensure_postgres_running(compose_file: Path | None = None) -> bool:
-    """Ensure PostgreSQL is running, starting it if necessary.
-
-    This function checks Docker and PostgreSQL status, attempting to start
-    them if needed. It provides helpful error messages if something fails.
+    """Ensure PostgreSQL is running, starting Docker or Podman if needed.
 
     Args:
         compose_file: Optional path to docker-compose.yml file.
@@ -291,32 +558,17 @@ def ensure_postgres_running(compose_file: Path | None = None) -> bool:
     Returns:
         True if PostgreSQL is running (either was already running or was started).
     """
-    # Step 1: Check if Docker is installed
-    if not is_docker_installed():
-        console.print(
-            "\n[bold red]Docker is not installed![/bold red]\n\n"
-            "Aegra requires Docker to run PostgreSQL for state persistence.\n\n"
-            "[bold]Installation instructions:[/bold]\n"
-            "  • [cyan]https://docs.docker.com/get-docker/[/cyan]\n"
-        )
+    try:
+        runtime = resolve_container_runtime()
+    except RuntimeSelectionError as exc:
+        console.print(f"\n[bold red]{exc}[/bold red]")
         return False
 
-    # Step 2: Check if Docker daemon is running
-    if not is_docker_running():
-        console.print("\n[yellow]Docker is not running.[/yellow]")
+    if not ensure_runtime_ready(runtime):
+        return False
+    if not ensure_compose_plugin(runtime):
+        return False
 
-        # Try to start Docker automatically
-        if try_start_docker():
-            console.print("[green]Docker started successfully![/green]")
-        else:
-            console.print(
-                "\n[bold red]Could not start Docker automatically.[/bold red]\n\n"
-                f"{get_docker_start_instructions()}\n\n"
-                "[dim]Then run 'aegra dev' again.[/dim]"
-            )
-            return False
-
-    # Step 3: Find docker-compose.yml if not provided
     if compose_file is None:
         compose_file = find_compose_file()
         if compose_file is None:
@@ -329,11 +581,9 @@ def ensure_postgres_running(compose_file: Path | None = None) -> bool:
 
     console.print(f"[dim]Using compose file: {compose_file}[/dim]")
 
-    # Step 4: Check if PostgreSQL container is already running
-    if is_postgres_container_running(compose_file):
+    if is_postgres_container_running(compose_file, runtime=runtime):
         console.print("[green]PostgreSQL is already running.[/green]")
         return True
 
-    # Step 5: Start PostgreSQL container
     console.print("\n[yellow]PostgreSQL is not running.[/yellow]")
-    return start_postgres_container(compose_file)
+    return start_postgres_container(compose_file, runtime=runtime)

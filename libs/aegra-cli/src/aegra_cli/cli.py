@@ -24,7 +24,16 @@ from aegra_cli.templates import (
     get_dockerfile,
     slugify,
 )
-from aegra_cli.utils.docker import ensure_postgres_running
+from aegra_cli.utils.docker import (
+    ContainerRuntime,
+    RuntimeSelectionError,
+    compose_argv,
+    ensure_compose_plugin,
+    ensure_postgres_running,
+    ensure_runtime_ready,
+    missing_binary_message,
+    resolve_container_runtime,
+)
 
 console = Console()
 
@@ -93,7 +102,7 @@ def cli():
     """Aegra CLI - Manage your self-hosted agent deployments.
 
     Aegra is an open-source, self-hosted alternative to LangSmith Deployments.
-    Use this CLI to run development servers, manage Docker services, and more.
+    Use this CLI to run development servers, manage container services, and more.
     """
     pass
 
@@ -291,8 +300,9 @@ def dev(
     Aegra auto-discovers aegra.json in the current directory, so you
     should run 'aegra dev' from your project root.
 
-    By default, Aegra will check if Docker is running and start PostgreSQL
-    automatically if needed. Use --no-db-check to skip this behavior.
+    By default, Aegra checks Docker or Podman and starts PostgreSQL if needed.
+    Docker is the default. Set AEGRA_CONTAINER_RUNTIME=podman to use Podman.
+    Use --no-db-check to skip this behavior.
 
     Examples:
 
@@ -630,6 +640,21 @@ def serve(ctx: click.Context, host: str, port: int, app: str, config_file: Path 
         sys.exit(0)
 
 
+def _select_runtime() -> ContainerRuntime | None:
+    # up/down ignore .env unless we load it. Existing shell variables still win.
+    load_env_file(None)
+    try:
+        runtime = resolve_container_runtime()
+    except RuntimeSelectionError as exc:
+        console.print(f"\n[bold red]{exc}[/bold red]")
+        return None
+    if not ensure_runtime_ready(runtime):
+        return None
+    if not ensure_compose_plugin(runtime):
+        return None
+    return runtime
+
+
 @cli.command()
 @click.option(
     "--file",
@@ -645,11 +670,12 @@ def serve(ctx: click.Context, host: str, port: int, app: str, config_file: Path 
     help="Build images before starting containers.",
 )
 @click.argument("services", nargs=-1)
-def up(compose_file: Path | None, build: bool, services: tuple[str, ...]):
-    """Start services with Docker Compose.
+def up(compose_file: Path | None, build: bool, services: tuple[str, ...]) -> None:
+    """Start services with Docker Compose or Podman Compose.
 
     Uses docker-compose.yml which contains both postgres and the API service.
-    Auto-generates Docker files if they don't exist.
+    Auto-generates Docker files if they don't exist. Docker is the default.
+    Set AEGRA_CONTAINER_RUNTIME=podman to use `podman compose`.
 
     Examples:
 
@@ -681,10 +707,11 @@ def up(compose_file: Path | None, build: bool, services: tuple[str, ...]):
         )
     )
 
-    cmd = ["docker", "compose", "-f", str(compose_file)]
+    runtime = _select_runtime()
+    if runtime is None:
+        sys.exit(1)
 
-    cmd.append("up")
-    cmd.append("-d")
+    cmd = compose_argv(runtime, compose_file, "up", "-d")
 
     # Build unless --no-build is specified
     if build:
@@ -703,20 +730,17 @@ def up(compose_file: Path | None, build: bool, services: tuple[str, ...]):
         if result.returncode == 0:
             console.print("\n[bold green]Services started successfully![/bold green]")
             console.print()
-            console.print(
-                "[dim]View logs:    docker compose -f " + str(compose_file) + " logs -f[/dim]"
-            )
+            logs_cmd = " ".join(compose_argv(runtime, compose_file, "logs", "-f"))
+            console.print(f"[dim]View logs:    {logs_cmd}[/dim]")
             console.print("[dim]Stop:         aegra down[/dim]")
         else:
             console.print(
-                f"\n[bold red]Error:[/bold red] Docker Compose exited with code {result.returncode}"
+                f"\n[bold red]Error:[/bold red] {runtime.value} compose exited with code "
+                f"{result.returncode}"
             )
         sys.exit(result.returncode)
     except FileNotFoundError:
-        console.print(
-            "[bold red]Error:[/bold red] docker is not installed or not in PATH.\n"
-            "Please install Docker Desktop or Docker Engine."
-        )
+        console.print(missing_binary_message(runtime))
         sys.exit(1)
 
 
@@ -736,10 +760,10 @@ def up(compose_file: Path | None, build: bool, services: tuple[str, ...]):
     default=False,
     help="Remove named volumes declared in the compose file.",
 )
-def down(compose_file: Path | None, volumes: bool):
-    """Stop services with Docker Compose.
+def down(compose_file: Path | None, volumes: bool) -> None:
+    """Stop services with Docker Compose or Podman Compose.
 
-    Runs 'docker compose down' to stop and remove containers.
+    Runs 'docker compose down' or 'podman compose down'. Docker is the default.
 
     Examples:
 
@@ -775,7 +799,11 @@ def down(compose_file: Path | None, volumes: bool):
 
     console.print(f"\n[cyan]Stopping:[/cyan] {target_compose}")
 
-    cmd = ["docker", "compose", "-f", str(target_compose), "down"]
+    runtime = _select_runtime()
+    if runtime is None:
+        sys.exit(1)
+
+    cmd = compose_argv(runtime, target_compose, "down")
 
     if volumes:
         cmd.append("-v")
@@ -791,10 +819,7 @@ def down(compose_file: Path | None, volumes: bool):
             console.print("\n[bold red]Some services failed to stop.[/bold red]")
             sys.exit(1)
     except FileNotFoundError:
-        console.print(
-            "[bold red]Error:[/bold red] docker is not installed or not in PATH.\n"
-            "Please install Docker Desktop or Docker Engine."
-        )
+        console.print(missing_binary_message(runtime))
         sys.exit(1)
 
 

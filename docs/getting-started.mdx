@@ -19,7 +19,7 @@ A ReAct agent that can search the web and hold multi-turn conversations with ful
 ## Prerequisites
 
 - Python 3.12+
-- Docker (for PostgreSQL)
+- Docker or Podman (for PostgreSQL). Docker is the default. Set `AEGRA_CONTAINER_RUNTIME=podman` to use Podman.
 - An OpenAI API key
 
 ## Step 1: Create the project
@@ -78,7 +78,7 @@ uv sync
 uv run aegra dev
 ```
 
-This starts PostgreSQL in Docker, runs migrations, and launches the server with hot reload. You should see:
+This starts PostgreSQL with Docker Compose (or Podman Compose when `AEGRA_CONTAINER_RUNTIME=podman`), runs migrations, and launches the server with hot reload. You should see:
 
 ```
 INFO:     Application startup complete.

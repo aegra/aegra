@@ -2,17 +2,38 @@
 
 from __future__ import annotations
 
+import subprocess
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
 from aegra_cli.utils.docker import (
+    ContainerRuntime,
+    RuntimeSelectionError,
+    _wait_for_podman_ready,
+    compose_argv,
+    console,
+    ensure_compose_plugin,
+    ensure_postgres_running,
+    ensure_runtime_ready,
     find_compose_file,
     get_docker_start_instructions,
+    get_podman_start_instructions,
+    get_runtime_start_instructions,
     is_docker_installed,
     is_docker_running,
+    is_podman_installed,
+    is_podman_running,
     is_postgres_container_running,
+    is_runtime_running,
+    missing_binary_message,
+    podman_compose_available,
+    resolve_container_runtime,
+    runtime_label,
+    start_postgres_container,
+    try_start_podman,
+    try_start_runtime,
 )
 
 
@@ -123,7 +144,7 @@ class TestIsPostgresContainerRunning:
             mock_run.return_value.returncode = 0
             mock_run.return_value.stdout = "postgres\nredis\n"
 
-            assert is_postgres_container_running() is True
+            assert is_postgres_container_running(runtime=ContainerRuntime.DOCKER) is True
 
     def test_returns_false_when_postgres_not_running(self) -> None:
         """Test that function returns False when postgres is not in running services."""
@@ -131,7 +152,7 @@ class TestIsPostgresContainerRunning:
             mock_run.return_value.returncode = 0
             mock_run.return_value.stdout = "redis\n"
 
-            assert is_postgres_container_running() is False
+            assert is_postgres_container_running(runtime=ContainerRuntime.DOCKER) is False
 
     def test_returns_false_when_no_services_running(self) -> None:
         """Test that function returns False when no services are running."""
@@ -139,14 +160,14 @@ class TestIsPostgresContainerRunning:
             mock_run.return_value.returncode = 0
             mock_run.return_value.stdout = ""
 
-            assert is_postgres_container_running() is False
+            assert is_postgres_container_running(runtime=ContainerRuntime.DOCKER) is False
 
     def test_returns_false_on_docker_compose_failure(self) -> None:
         """Test that function returns False when docker compose fails."""
         with patch("aegra_cli.utils.docker.subprocess.run") as mock_run:
             mock_run.return_value.returncode = 1
 
-            assert is_postgres_container_running() is False
+            assert is_postgres_container_running(runtime=ContainerRuntime.DOCKER) is False
 
     def test_uses_compose_file_when_provided(self) -> None:
         """Test that function uses compose file when provided."""
@@ -155,7 +176,7 @@ class TestIsPostgresContainerRunning:
             mock_run.return_value.stdout = "postgres\n"
 
             compose_file = Path("/path/to/docker-compose.yml")
-            result = is_postgres_container_running(compose_file)
+            result = is_postgres_container_running(compose_file, runtime=ContainerRuntime.DOCKER)
 
             call_args = mock_run.call_args[0][0]
             assert "-f" in call_args
@@ -253,12 +274,14 @@ class TestDevCommandWithDockerCheck:
         with cli_runner.isolated_filesystem(temp_dir=tmp_path):
             Path("aegra.json").write_text('{"graphs": {}}')
 
-            with patch("aegra_cli.utils.docker.is_docker_installed") as mock_installed:
-                mock_installed.return_value = False
+            with (
+                patch("aegra_cli.utils.docker.is_docker_installed", return_value=False),
+                patch("aegra_cli.utils.docker.is_podman_installed", return_value=False),
+            ):
                 result = cli_runner.invoke(cli, ["dev"])
 
                 assert result.exit_code == 1
-                assert "Docker is not installed" in result.output
+                assert "Neither Docker nor Podman" in result.output
 
     def test_dev_fails_when_docker_not_running(self, cli_runner, tmp_path) -> None:
         """Test that dev fails gracefully when Docker is not running."""
@@ -270,18 +293,27 @@ class TestDevCommandWithDockerCheck:
             Path("aegra.json").write_text('{"graphs": {}}')
 
             with (
-                patch("aegra_cli.utils.docker.is_docker_installed") as mock_installed,
-                patch("aegra_cli.utils.docker.is_docker_running") as mock_running,
-                patch("aegra_cli.utils.docker.try_start_docker") as mock_try_start,
+                patch("aegra_cli.utils.docker.is_docker_installed", return_value=True),
+                patch("aegra_cli.utils.docker.is_docker_running", return_value=False),
+                patch("aegra_cli.utils.docker.is_podman_installed", return_value=False),
+                patch("aegra_cli.utils.docker.try_start_docker", return_value=False),
             ):
-                mock_installed.return_value = True
-                mock_running.return_value = False
-                mock_try_start.return_value = False
-
                 result = cli_runner.invoke(cli, ["dev"])
 
                 assert result.exit_code == 1
                 assert "Docker is not running" in result.output
+
+
+def _completed(returncode: int, stdout: str = "") -> MagicMock:
+    result = MagicMock()
+    result.returncode = returncode
+    result.stdout = stdout
+    return result
+
+
+@pytest.fixture(autouse=True)
+def clear_container_runtime_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("AEGRA_CONTAINER_RUNTIME", raising=False)
 
 
 @pytest.fixture
@@ -290,3 +322,591 @@ def cli_runner():
     from click.testing import CliRunner
 
     return CliRunner()
+
+
+class TestPodmanDetection:
+    """Podman install and health checks."""
+
+    def test_installed_when_binary_is_on_path(self) -> None:
+        with patch("aegra_cli.utils.docker.shutil.which", return_value="/usr/bin/podman"):
+            assert is_podman_installed() is True
+
+    def test_not_installed_when_binary_is_missing(self) -> None:
+        with patch("aegra_cli.utils.docker.shutil.which", return_value=None):
+            assert is_podman_installed() is False
+
+    def test_running_when_info_succeeds(self) -> None:
+        with (
+            patch("aegra_cli.utils.docker.is_podman_installed", return_value=True),
+            patch("aegra_cli.utils.docker.subprocess.run", return_value=_completed(0)),
+        ):
+            assert is_podman_running() is True
+
+    def test_not_running_when_not_installed(self) -> None:
+        with patch("aegra_cli.utils.docker.is_podman_installed", return_value=False):
+            assert is_podman_running() is False
+
+    def test_not_running_when_info_fails(self) -> None:
+        with (
+            patch("aegra_cli.utils.docker.is_podman_installed", return_value=True),
+            patch("aegra_cli.utils.docker.subprocess.run", return_value=_completed(1)),
+        ):
+            assert is_podman_running() is False
+
+    def test_not_running_on_timeout(self) -> None:
+        with (
+            patch("aegra_cli.utils.docker.is_podman_installed", return_value=True),
+            patch(
+                "aegra_cli.utils.docker.subprocess.run",
+                side_effect=subprocess.TimeoutExpired("podman", 10),
+            ),
+        ):
+            assert is_podman_running() is False
+
+    def test_not_running_when_binary_disappears(self) -> None:
+        with (
+            patch("aegra_cli.utils.docker.is_podman_installed", return_value=True),
+            patch(
+                "aegra_cli.utils.docker.subprocess.run",
+                side_effect=FileNotFoundError("podman"),
+            ),
+        ):
+            assert is_podman_running() is False
+
+    def test_runtime_running_follows_each_cli(self) -> None:
+        with (
+            patch("aegra_cli.utils.docker.is_docker_running", return_value=True),
+            patch("aegra_cli.utils.docker.is_podman_running", return_value=False),
+        ):
+            assert is_runtime_running(ContainerRuntime.DOCKER) is True
+            assert is_runtime_running(ContainerRuntime.PODMAN) is False
+
+
+class TestResolveContainerRuntime:
+    """Selection via AEGRA_CONTAINER_RUNTIME and auto-detect."""
+
+    def test_explicit_docker_ignores_case(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("AEGRA_CONTAINER_RUNTIME", " Docker ")
+        with patch("aegra_cli.utils.docker.is_docker_installed", return_value=True):
+            assert resolve_container_runtime() is ContainerRuntime.DOCKER
+
+    def test_explicit_podman(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("AEGRA_CONTAINER_RUNTIME", "podman")
+        with patch("aegra_cli.utils.docker.is_podman_installed", return_value=True):
+            assert resolve_container_runtime() is ContainerRuntime.PODMAN
+
+    def test_explicit_docker_missing(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("AEGRA_CONTAINER_RUNTIME", "docker")
+        with (
+            patch("aegra_cli.utils.docker.is_docker_installed", return_value=False),
+            pytest.raises(RuntimeSelectionError, match="Docker is not installed"),
+        ):
+            resolve_container_runtime()
+
+    def test_explicit_podman_missing(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("AEGRA_CONTAINER_RUNTIME", "podman")
+        with (
+            patch("aegra_cli.utils.docker.is_podman_installed", return_value=False),
+            pytest.raises(RuntimeSelectionError, match="Podman is not installed"),
+        ):
+            resolve_container_runtime()
+
+    def test_invalid_value_does_not_auto_detect(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("AEGRA_CONTAINER_RUNTIME", "containerd")
+        with (
+            patch("aegra_cli.utils.docker.is_docker_installed", return_value=True),
+            pytest.raises(RuntimeSelectionError, match="Invalid AEGRA_CONTAINER_RUNTIME"),
+        ):
+            resolve_container_runtime()
+
+    def test_auto_prefers_running_docker_over_podman(self) -> None:
+        with (
+            patch("aegra_cli.utils.docker.is_docker_installed", return_value=True),
+            patch("aegra_cli.utils.docker.is_docker_running", return_value=True),
+            patch("aegra_cli.utils.docker.is_podman_installed", return_value=True),
+        ):
+            assert resolve_container_runtime() is ContainerRuntime.DOCKER
+
+    def test_auto_uses_podman_when_docker_is_stopped(self) -> None:
+        with (
+            patch("aegra_cli.utils.docker.is_docker_installed", return_value=True),
+            patch("aegra_cli.utils.docker.is_docker_running", return_value=False),
+            patch("aegra_cli.utils.docker.is_podman_installed", return_value=True),
+        ):
+            assert resolve_container_runtime() is ContainerRuntime.PODMAN
+
+    def test_auto_uses_podman_when_only_podman_is_installed(self) -> None:
+        with (
+            patch("aegra_cli.utils.docker.is_docker_installed", return_value=False),
+            patch("aegra_cli.utils.docker.is_podman_installed", return_value=True),
+        ):
+            assert resolve_container_runtime() is ContainerRuntime.PODMAN
+
+    def test_auto_uses_stopped_docker_when_podman_is_absent(self) -> None:
+        with (
+            patch("aegra_cli.utils.docker.is_docker_installed", return_value=True),
+            patch("aegra_cli.utils.docker.is_docker_running", return_value=False),
+            patch("aegra_cli.utils.docker.is_podman_installed", return_value=False),
+        ):
+            assert resolve_container_runtime() is ContainerRuntime.DOCKER
+
+    def test_auto_errors_when_neither_runtime_exists(self) -> None:
+        with (
+            patch("aegra_cli.utils.docker.is_docker_installed", return_value=False),
+            patch("aegra_cli.utils.docker.is_podman_installed", return_value=False),
+            pytest.raises(RuntimeSelectionError, match="Neither Docker nor Podman"),
+        ):
+            resolve_container_runtime()
+
+    def test_blank_env_uses_auto_detect(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("AEGRA_CONTAINER_RUNTIME", "   ")
+        with (
+            patch("aegra_cli.utils.docker.is_docker_installed", return_value=False),
+            patch("aegra_cli.utils.docker.is_podman_installed", return_value=True),
+        ):
+            assert resolve_container_runtime() is ContainerRuntime.PODMAN
+
+
+class TestComposeCommand:
+    """Compose argv and the Podman compose plugin check."""
+
+    def test_docker_argv_includes_file_and_args(self) -> None:
+        command = compose_argv(
+            ContainerRuntime.DOCKER,
+            Path("docker-compose.yml"),
+            "up",
+            "-d",
+        )
+        assert command == ["docker", "compose", "-f", "docker-compose.yml", "up", "-d"]
+
+    def test_podman_argv_without_file(self) -> None:
+        assert compose_argv(ContainerRuntime.PODMAN, None, "down") == [
+            "podman",
+            "compose",
+            "down",
+        ]
+
+    def test_podman_compose_version_success(self) -> None:
+        with patch(
+            "aegra_cli.utils.docker.subprocess.run",
+            return_value=_completed(0),
+        ) as mock_run:
+            assert podman_compose_available() is True
+            assert mock_run.call_args[0][0] == ["podman", "compose", "version"]
+
+    def test_podman_compose_version_failure(self) -> None:
+        with patch("aegra_cli.utils.docker.subprocess.run", return_value=_completed(1)):
+            assert podman_compose_available() is False
+
+    def test_podman_compose_version_timeout(self) -> None:
+        with patch(
+            "aegra_cli.utils.docker.subprocess.run",
+            side_effect=subprocess.TimeoutExpired("podman", 10),
+        ):
+            assert podman_compose_available() is False
+
+    def test_podman_compose_version_missing_binary(self) -> None:
+        with patch(
+            "aegra_cli.utils.docker.subprocess.run",
+            side_effect=FileNotFoundError("podman"),
+        ):
+            assert podman_compose_available() is False
+
+    def test_docker_skips_podman_plugin_check(self) -> None:
+        with patch("aegra_cli.utils.docker.podman_compose_available") as mock_check:
+            assert ensure_compose_plugin(ContainerRuntime.DOCKER) is True
+            mock_check.assert_not_called()
+
+    def test_podman_plugin_present(self) -> None:
+        with patch("aegra_cli.utils.docker.podman_compose_available", return_value=True):
+            assert ensure_compose_plugin(ContainerRuntime.PODMAN) is True
+
+    def test_podman_plugin_missing_names_podman_compose(self) -> None:
+        with (
+            patch("aegra_cli.utils.docker.podman_compose_available", return_value=False),
+            console.capture() as captured,
+        ):
+            assert ensure_compose_plugin(ContainerRuntime.PODMAN) is False
+        message = captured.get()
+        assert "podman compose" in message
+        assert "podman-compose" in message
+
+    def test_missing_binary_message_names_the_runtime(self) -> None:
+        assert "docker is not installed" in missing_binary_message(ContainerRuntime.DOCKER)
+        assert "podman is not installed" in missing_binary_message(ContainerRuntime.PODMAN)
+        assert runtime_label(ContainerRuntime.DOCKER) == "Docker"
+        assert runtime_label(ContainerRuntime.PODMAN) == "Podman"
+
+
+class TestPodmanStart:
+    """Start attempts and hints for Podman."""
+
+    def test_instructions_for_each_platform(self) -> None:
+        expectations = {
+            "Darwin": "podman machine start",
+            "Linux": "systemctl --user start podman.socket",
+            "Windows": "podman machine start",
+            "FreeBSD": "start Podman manually",
+        }
+        for system, snippet in expectations.items():
+            with patch("aegra_cli.utils.docker.platform.system", return_value=system):
+                instructions = get_podman_start_instructions()
+                assert snippet in instructions
+
+    def test_runtime_instructions_delegate(self) -> None:
+        with patch("aegra_cli.utils.docker.platform.system", return_value="Linux"):
+            assert "systemctl start docker" in get_runtime_start_instructions(
+                ContainerRuntime.DOCKER
+            )
+            assert "podman.socket" in get_runtime_start_instructions(ContainerRuntime.PODMAN)
+
+    def test_darwin_machine_start_success(self) -> None:
+        with (
+            patch("aegra_cli.utils.docker.platform.system", return_value="Darwin"),
+            patch(
+                "aegra_cli.utils.docker.subprocess.run",
+                return_value=_completed(0),
+            ) as mock_run,
+            patch("aegra_cli.utils.docker._wait_for_podman_ready", return_value=True),
+        ):
+            assert try_start_podman() is True
+            assert mock_run.call_args_list[0].args[0] == ["podman", "machine", "start"]
+
+    def test_darwin_falls_back_to_podman_desktop(self) -> None:
+        with (
+            patch("aegra_cli.utils.docker.platform.system", return_value="Darwin"),
+            patch(
+                "aegra_cli.utils.docker.subprocess.run",
+                side_effect=[_completed(1), _completed(0)],
+            ) as mock_run,
+            patch("aegra_cli.utils.docker._wait_for_podman_ready", return_value=True) as mock_wait,
+        ):
+            assert try_start_podman() is True
+            assert mock_run.call_args_list[1].args[0] == ["open", "-a", "Podman Desktop"]
+            mock_wait.assert_called_once_with()
+
+    def test_darwin_returns_false_when_desktop_open_fails(self) -> None:
+        with (
+            patch("aegra_cli.utils.docker.platform.system", return_value="Darwin"),
+            patch(
+                "aegra_cli.utils.docker.subprocess.run",
+                side_effect=[_completed(1), _completed(1)],
+            ),
+            patch("aegra_cli.utils.docker._wait_for_podman_ready", return_value=True) as mock_wait,
+        ):
+            assert try_start_podman() is False
+            mock_wait.assert_not_called()
+
+    def test_linux_starts_user_socket(self) -> None:
+        with (
+            patch("aegra_cli.utils.docker.platform.system", return_value="Linux"),
+            patch(
+                "aegra_cli.utils.docker.subprocess.run",
+                return_value=_completed(0),
+            ) as mock_run,
+            patch("aegra_cli.utils.docker._wait_for_podman_ready", return_value=True),
+        ):
+            assert try_start_podman() is True
+            assert mock_run.call_args.args[0] == [
+                "systemctl",
+                "--user",
+                "start",
+                "podman.socket",
+            ]
+
+    def test_linux_returns_false_when_systemctl_fails(self) -> None:
+        with (
+            patch("aegra_cli.utils.docker.platform.system", return_value="Linux"),
+            patch("aegra_cli.utils.docker.subprocess.run", return_value=_completed(1)),
+            patch("aegra_cli.utils.docker._wait_for_podman_ready") as mock_wait,
+        ):
+            assert try_start_podman() is False
+            mock_wait.assert_not_called()
+
+    def test_windows_starts_podman_machine(self) -> None:
+        with (
+            patch("aegra_cli.utils.docker.platform.system", return_value="Windows"),
+            patch(
+                "aegra_cli.utils.docker.subprocess.run",
+                return_value=_completed(0),
+            ) as mock_run,
+            patch("aegra_cli.utils.docker._wait_for_podman_ready", return_value=True),
+        ):
+            assert try_start_podman() is True
+            assert mock_run.call_args.args[0] == ["podman", "machine", "start"]
+
+    def test_windows_returns_false_when_machine_start_fails(self) -> None:
+        with (
+            patch("aegra_cli.utils.docker.platform.system", return_value="Windows"),
+            patch("aegra_cli.utils.docker.subprocess.run", return_value=_completed(1)),
+        ):
+            assert try_start_podman() is False
+
+    def test_unknown_platform_returns_false(self) -> None:
+        with (
+            patch("aegra_cli.utils.docker.platform.system", return_value="FreeBSD"),
+            patch("aegra_cli.utils.docker.subprocess.run") as mock_run,
+        ):
+            assert try_start_podman() is False
+            mock_run.assert_not_called()
+
+    def test_returns_false_when_start_command_times_out(self) -> None:
+        with (
+            patch("aegra_cli.utils.docker.platform.system", return_value="Darwin"),
+            patch(
+                "aegra_cli.utils.docker.subprocess.run",
+                side_effect=subprocess.TimeoutExpired("podman", 60),
+            ),
+        ):
+            assert try_start_podman() is False
+
+    def test_try_start_runtime_delegates(self) -> None:
+        with (
+            patch("aegra_cli.utils.docker.try_start_docker", return_value=True) as mock_docker,
+            patch("aegra_cli.utils.docker.try_start_podman", return_value=False) as mock_podman,
+        ):
+            assert try_start_runtime(ContainerRuntime.DOCKER) is True
+            assert try_start_runtime(ContainerRuntime.PODMAN) is False
+            mock_docker.assert_called_once_with()
+            mock_podman.assert_called_once_with()
+
+    def test_wait_returns_true_when_podman_is_ready(self) -> None:
+        with (
+            patch("aegra_cli.utils.docker.is_podman_running", return_value=True),
+            patch("aegra_cli.utils.docker.time.sleep"),
+            console.capture() as captured,
+        ):
+            assert _wait_for_podman_ready(timeout_seconds=1) is True
+        assert "Podman is ready" in captured.get()
+
+    def test_wait_times_out(self) -> None:
+        ticks = iter((0, 0, 0, 30))
+
+        def fake_time() -> int:
+            return next(ticks)
+
+        with (
+            patch("aegra_cli.utils.docker.is_podman_running", return_value=False),
+            patch("aegra_cli.utils.docker.time.time", side_effect=fake_time),
+            patch("aegra_cli.utils.docker.time.sleep"),
+            console.capture() as captured,
+        ):
+            assert _wait_for_podman_ready(timeout_seconds=1) is False
+        assert "Timed out" in captured.get()
+
+
+class TestEnsureRuntimeReady:
+    """Runtime health gate used by dev, up, and down."""
+
+    def test_returns_true_when_already_running(self) -> None:
+        with (
+            patch("aegra_cli.utils.docker.is_runtime_running", return_value=True),
+            patch("aegra_cli.utils.docker.try_start_runtime") as mock_start,
+        ):
+            assert ensure_runtime_ready(ContainerRuntime.DOCKER) is True
+            mock_start.assert_not_called()
+
+    def test_returns_true_after_start(self) -> None:
+        with (
+            patch("aegra_cli.utils.docker.is_runtime_running", return_value=False),
+            patch("aegra_cli.utils.docker.try_start_runtime", return_value=True),
+            console.capture() as captured,
+        ):
+            assert ensure_runtime_ready(ContainerRuntime.PODMAN) is True
+        assert "Podman started successfully" in captured.get()
+
+    def test_returns_false_when_start_fails(self) -> None:
+        with (
+            patch("aegra_cli.utils.docker.is_runtime_running", return_value=False),
+            patch("aegra_cli.utils.docker.try_start_runtime", return_value=False),
+            patch("aegra_cli.utils.docker.platform.system", return_value="Linux"),
+            console.capture() as captured,
+        ):
+            assert ensure_runtime_ready(ContainerRuntime.PODMAN) is False
+        message = captured.get()
+        assert "Podman is not running" in message
+        assert "podman.socket" in message
+
+
+class TestPostgresCompose:
+    """Postgres lifecycle commands follow the selected runtime."""
+
+    def test_podman_ps_command(self) -> None:
+        with patch(
+            "aegra_cli.utils.docker.subprocess.run",
+            return_value=_completed(0, "postgres\n"),
+        ) as mock_run:
+            assert is_postgres_container_running(runtime=ContainerRuntime.PODMAN) is True
+            assert mock_run.call_args.args[0][:2] == ["podman", "compose"]
+
+    def test_ps_timeout_returns_false(self) -> None:
+        with patch(
+            "aegra_cli.utils.docker.subprocess.run",
+            side_effect=subprocess.TimeoutExpired("docker", 10),
+        ):
+            assert is_postgres_container_running(runtime=ContainerRuntime.DOCKER) is False
+
+    def test_ps_missing_binary_returns_false(self) -> None:
+        with patch(
+            "aegra_cli.utils.docker.subprocess.run",
+            side_effect=FileNotFoundError("docker"),
+        ):
+            assert is_postgres_container_running(runtime=ContainerRuntime.DOCKER) is False
+
+    def test_ps_returns_false_when_no_runtime_is_installed(self) -> None:
+        with (
+            patch("aegra_cli.utils.docker.is_docker_installed", return_value=False),
+            patch("aegra_cli.utils.docker.is_podman_installed", return_value=False),
+        ):
+            assert is_postgres_container_running() is False
+
+    def test_start_uses_podman_compose(self, tmp_path: Path) -> None:
+        compose_file = tmp_path / "docker-compose.yml"
+        compose_file.write_text("services: {}\n")
+        with (
+            patch("aegra_cli.utils.docker.ensure_compose_plugin", return_value=True),
+            patch(
+                "aegra_cli.utils.docker.subprocess.run",
+                return_value=_completed(0),
+            ) as mock_run,
+        ):
+            assert start_postgres_container(compose_file, runtime=ContainerRuntime.PODMAN) is True
+        command = mock_run.call_args.args[0]
+        assert command[:2] == ["podman", "compose"]
+        assert str(compose_file) in command
+        assert command[-4:] == ["up", "-d", "--wait", "postgres"]
+
+    def test_start_resolves_explicit_podman(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        monkeypatch.setenv("AEGRA_CONTAINER_RUNTIME", "podman")
+        compose_file = tmp_path / "docker-compose.yml"
+        compose_file.write_text("services: {}\n")
+        with (
+            patch("aegra_cli.utils.docker.is_podman_installed", return_value=True),
+            patch("aegra_cli.utils.docker.ensure_compose_plugin", return_value=True),
+            patch(
+                "aegra_cli.utils.docker.subprocess.run",
+                return_value=_completed(0),
+            ) as mock_run,
+        ):
+            assert start_postgres_container(compose_file) is True
+        assert mock_run.call_args.args[0][0] == "podman"
+
+    def test_start_returns_false_on_nonzero_exit(self) -> None:
+        with (
+            patch("aegra_cli.utils.docker.ensure_compose_plugin", return_value=True),
+            patch("aegra_cli.utils.docker.subprocess.run", return_value=_completed(2)),
+        ):
+            assert start_postgres_container(runtime=ContainerRuntime.DOCKER) is False
+
+    def test_start_returns_false_on_timeout(self) -> None:
+        with (
+            patch("aegra_cli.utils.docker.ensure_compose_plugin", return_value=True),
+            patch(
+                "aegra_cli.utils.docker.subprocess.run",
+                side_effect=subprocess.TimeoutExpired("docker", 120),
+            ),
+        ):
+            assert start_postgres_container(runtime=ContainerRuntime.DOCKER) is False
+
+    def test_start_reports_missing_podman_binary(self) -> None:
+        with (
+            patch("aegra_cli.utils.docker.ensure_compose_plugin", return_value=True),
+            patch(
+                "aegra_cli.utils.docker.subprocess.run",
+                side_effect=FileNotFoundError("podman"),
+            ),
+            console.capture() as captured,
+        ):
+            assert start_postgres_container(runtime=ContainerRuntime.PODMAN) is False
+        assert "podman command not found" in captured.get()
+
+    def test_start_stops_when_plugin_is_missing(self) -> None:
+        with patch("aegra_cli.utils.docker.ensure_compose_plugin", return_value=False):
+            assert start_postgres_container(runtime=ContainerRuntime.PODMAN) is False
+
+    def test_start_returns_false_when_no_runtime_is_installed(self) -> None:
+        with (
+            patch("aegra_cli.utils.docker.is_docker_installed", return_value=False),
+            patch("aegra_cli.utils.docker.is_podman_installed", return_value=False),
+        ):
+            assert start_postgres_container() is False
+
+
+class TestEnsurePostgresRunning:
+    """dev's database check uses the resolved runtime."""
+
+    def test_reports_when_neither_runtime_is_installed(self) -> None:
+        with (
+            patch("aegra_cli.utils.docker.is_docker_installed", return_value=False),
+            patch("aegra_cli.utils.docker.is_podman_installed", return_value=False),
+            console.capture() as captured,
+        ):
+            assert ensure_postgres_running() is False
+        assert "Neither Docker nor Podman" in captured.get()
+
+    def test_returns_false_when_runtime_does_not_start(self, tmp_path: Path) -> None:
+        compose_file = tmp_path / "docker-compose.yml"
+        compose_file.write_text("services: {}\n")
+        with (
+            patch("aegra_cli.utils.docker.is_docker_installed", return_value=True),
+            patch("aegra_cli.utils.docker.is_docker_running", return_value=False),
+            patch("aegra_cli.utils.docker.is_podman_installed", return_value=False),
+            patch("aegra_cli.utils.docker.try_start_docker", return_value=False),
+        ):
+            assert ensure_postgres_running(compose_file) is False
+
+    def test_returns_false_when_podman_compose_plugin_is_missing(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        monkeypatch.setenv("AEGRA_CONTAINER_RUNTIME", "podman")
+        compose_file = tmp_path / "docker-compose.yml"
+        compose_file.write_text("services: {}\n")
+        with (
+            patch("aegra_cli.utils.docker.is_podman_installed", return_value=True),
+            patch("aegra_cli.utils.docker.is_podman_running", return_value=True),
+            patch("aegra_cli.utils.docker.podman_compose_available", return_value=False),
+            console.capture() as captured,
+        ):
+            assert ensure_postgres_running(compose_file) is False
+        assert "podman-compose" in captured.get()
+
+    def test_returns_false_when_compose_file_is_missing(self) -> None:
+        with (
+            patch("aegra_cli.utils.docker.is_docker_installed", return_value=True),
+            patch("aegra_cli.utils.docker.is_docker_running", return_value=True),
+            patch("aegra_cli.utils.docker.find_compose_file", return_value=None),
+            console.capture() as captured,
+        ):
+            assert ensure_postgres_running() is False
+        assert "No docker-compose.yml found" in captured.get()
+
+    def test_returns_true_when_postgres_is_already_running(self, tmp_path: Path) -> None:
+        compose_file = tmp_path / "docker-compose.yml"
+        compose_file.write_text("services: {}\n")
+        with (
+            patch("aegra_cli.utils.docker.is_docker_installed", return_value=True),
+            patch("aegra_cli.utils.docker.is_docker_running", return_value=True),
+            patch("aegra_cli.utils.docker.is_postgres_container_running", return_value=True),
+            patch("aegra_cli.utils.docker.start_postgres_container") as mock_start,
+        ):
+            assert ensure_postgres_running(compose_file) is True
+            mock_start.assert_not_called()
+
+    def test_starts_postgres_with_the_selected_runtime(self, tmp_path: Path) -> None:
+        compose_file = tmp_path / "docker-compose.yml"
+        compose_file.write_text("services: {}\n")
+        with (
+            patch("aegra_cli.utils.docker.is_docker_installed", return_value=False),
+            patch("aegra_cli.utils.docker.is_podman_installed", return_value=True),
+            patch("aegra_cli.utils.docker.is_podman_running", return_value=True),
+            patch("aegra_cli.utils.docker.podman_compose_available", return_value=True),
+            patch("aegra_cli.utils.docker.is_postgres_container_running", return_value=False),
+            patch(
+                "aegra_cli.utils.docker.start_postgres_container",
+                return_value=True,
+            ) as mock_start,
+        ):
+            assert ensure_postgres_running(compose_file) is True
+        assert mock_start.call_args.kwargs["runtime"] is ContainerRuntime.PODMAN

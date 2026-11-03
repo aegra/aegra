@@ -3,7 +3,7 @@ title: "CLI reference"
 description: "Complete reference for all Aegra CLI commands."
 ---
 
-The Aegra CLI manages project creation, development servers, and Docker deployments.
+The Aegra CLI manages project creation, development servers, and Compose deployments. Docker is the default container runtime. Set `AEGRA_CONTAINER_RUNTIME=podman` to use Podman (`podman compose`) for `aegra dev`, `aegra up`, and `aegra down`.
 
 ## Install
 
@@ -43,7 +43,7 @@ aegra dev
 ```
 
 What it does:
-1. Starts a PostgreSQL container via Docker Compose
+1. Starts a PostgreSQL container via Docker Compose, or Podman Compose when `AEGRA_CONTAINER_RUNTIME=podman`
 2. Loads your `.env` file
 3. Applies database migrations automatically
 4. Runs uvicorn with `--reload` by default
@@ -93,7 +93,7 @@ Use `aegra serve` for:
 
 ### `aegra up`
 
-Build and start all Docker services (PostgreSQL + app).
+Build and start all Compose services (PostgreSQL + app). Uses Docker unless `AEGRA_CONTAINER_RUNTIME=podman`.
 
 ```bash
 aegra up
@@ -109,7 +109,7 @@ aegra up
 
 ### `aegra down`
 
-Stop Docker services.
+Stop Compose services. Uses the same runtime as `aegra up`.
 
 ```bash
 aegra down              # Stop containers

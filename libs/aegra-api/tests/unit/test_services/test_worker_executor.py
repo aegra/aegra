@@ -13,16 +13,15 @@ from aegra_api.core.orm import Run as RunORM
 from aegra_api.models.auth import User
 from aegra_api.models.run_job import RunBehavior, RunExecution, RunIdentity, RunJob
 from aegra_api.services.run_executor import _shutdown_cancellations, _timeout_cancellations
-from aegra_api.services.webhook_delivery import RunOutcome
 from aegra_api.services.worker_executor import (
     WorkerExecutor,
     _acquire_and_load,
     _heartbeat_loop,
     _is_run_terminal,
     _is_valid_run_id,
+    _load_webhook_job,
     _LoadedRun,
     _release_lease,
-    _report_finalized_run,
     _requeue_drained_runs,
     _restore_trace_context,
 )
@@ -643,7 +642,8 @@ class TestExecuteAndRelease:
             ),
             patch(f"{MODULE}.finalize_run", new_callable=AsyncMock, return_value=True) as mock_finalize,
             patch(f"{MODULE}._release_lease") as mock_release,
-            patch(f"{MODULE}._report_finalized_run", new_callable=AsyncMock) as mock_report,
+            patch(f"{MODULE}._load_webhook_job", new_callable=AsyncMock) as mock_load,
+            patch(f"{MODULE}.notify_run_finished") as mock_notify,
         ):
             mock_settings.worker.BG_JOB_TIMEOUT_SECS = 0.01  # Very short timeout
             mock_release.return_value = None
@@ -651,8 +651,9 @@ class TestExecuteAndRelease:
             await executor._execute_and_release(run_id, "worker-0", semaphore)
 
         # execute_run never finalized the run, so this timeout is its only report.
-        reported_run_id, outcome = mock_report.await_args.args
-        assert reported_run_id == run_id
+        mock_load.assert_awaited_once_with(run_id)
+        job, outcome = mock_notify.call_args.args
+        assert job is mock_load.return_value
         assert outcome.status == "error"
         assert outcome.error == {"error": "TimeoutError", "message": "Job exceeded maximum execution time"}
 
@@ -689,12 +690,46 @@ class TestExecuteAndRelease:
             patch(f"{MODULE}._get_run_identity", new_callable=AsyncMock, return_value=("thread-1", "user-1")),
             patch(f"{MODULE}.finalize_run", new_callable=AsyncMock, return_value=False),
             patch(f"{MODULE}._release_lease", new_callable=AsyncMock),
-            patch(f"{MODULE}._report_finalized_run", new_callable=AsyncMock) as mock_report,
+            patch(f"{MODULE}._load_webhook_job", new_callable=AsyncMock),
+            patch(f"{MODULE}.notify_run_finished") as mock_notify,
         ):
             mock_settings.worker.BG_JOB_TIMEOUT_SECS = 0.01
             await executor._execute_and_release(run_id, "worker-0", semaphore)
 
-        mock_report.assert_not_awaited()
+        mock_notify.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_explicit_cancel_reads_the_job_before_its_finalize_lets_cleanup_delete_the_row(self) -> None:
+        # Stateless cleanup may delete the run as soon as it is terminal, so the job must be read first.
+        run_id = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+        semaphore = asyncio.Semaphore(1)
+        await semaphore.acquire()
+        executor = WorkerExecutor()
+        executor._execute_with_lease = AsyncMock(side_effect=asyncio.CancelledError)  # type: ignore[method-assign]
+        explicit_run_cancellations.add(run_id)
+        calls: list[str] = []
+
+        async def _load(rid: str) -> object:
+            calls.append("load")
+            return "job"
+
+        async def _finalize(*_args: object, **_kwargs: object) -> bool:
+            calls.append("finalize")
+            return True
+
+        with (
+            patch(f"{MODULE}.settings") as mock_settings,
+            patch(f"{MODULE}._get_run_identity", new_callable=AsyncMock, return_value=("thread-1", "user-1")),
+            patch(f"{MODULE}._load_webhook_job", new_callable=AsyncMock, side_effect=_load),
+            patch(f"{MODULE}.finalize_run", new_callable=AsyncMock, side_effect=_finalize),
+            patch(f"{MODULE}.notify_run_finished") as mock_notify,
+        ):
+            mock_settings.worker.BG_JOB_TIMEOUT_SECS = 60
+            with pytest.raises(asyncio.CancelledError):
+                await executor._execute_and_release(run_id, "worker-0", semaphore)
+
+        assert calls == ["load", "finalize"]
+        assert mock_notify.call_args.args[0] == "job"
 
     @pytest.mark.asyncio
     async def test_explicit_cancel_before_execution_reconciles_database(self) -> None:
@@ -714,15 +749,16 @@ class TestExecuteAndRelease:
                 return_value=(thread_id, "user-1"),
             ),
             patch(f"{MODULE}.finalize_run", new_callable=AsyncMock, return_value=True) as mock_finalize,
-            patch(f"{MODULE}._report_finalized_run", new_callable=AsyncMock) as mock_report,
+            patch(f"{MODULE}._load_webhook_job", new_callable=AsyncMock) as mock_load,
+            patch(f"{MODULE}.notify_run_finished") as mock_notify,
         ):
             mock_settings.worker.BG_JOB_TIMEOUT_SECS = 60
             with pytest.raises(asyncio.CancelledError):
                 await executor._execute_and_release(run_id, "worker-0", semaphore)
 
         # execute_run never ran, so this cancel is the only report of the run.
-        reported_run_id, outcome = mock_report.await_args.args
-        assert reported_run_id == run_id
+        job, outcome = mock_notify.call_args.args
+        assert job is mock_load.return_value
         assert outcome.status == "interrupted"
 
         mock_finalize.assert_awaited_once_with(
@@ -816,7 +852,8 @@ class TestExecuteAndRelease:
                 new_callable=AsyncMock,
                 side_effect=delayed_finalize,
             ) as mock_finalize,
-            patch(f"{MODULE}._report_finalized_run", new_callable=AsyncMock),
+            patch(f"{MODULE}._load_webhook_job", new_callable=AsyncMock),
+            patch(f"{MODULE}.notify_run_finished"),
         ):
             mock_settings.worker.BG_JOB_TIMEOUT_SECS = 60
             task = asyncio.create_task(executor._execute_and_release(run_id, "worker-0", semaphore))
@@ -1208,33 +1245,21 @@ def _stored_run(webhook: str | None) -> RunORM:
     )
 
 
-class TestReportFinalizedRun:
+class TestLoadWebhookJob:
     @pytest.mark.asyncio
-    async def test_sends_the_stored_runs_webhook(self) -> None:
-        outcome = RunOutcome(status="interrupted")
-
-        with (
-            patch(
-                f"{MODULE}._get_session_maker",
-                return_value=_session_maker_returning(_stored_run("https://h.example/x")),
-            ),
-            patch(f"{MODULE}.notify_run_finished") as mock_notify,
+    async def test_rebuilds_the_stored_runs_job(self) -> None:
+        with patch(
+            f"{MODULE}._get_session_maker", return_value=_session_maker_returning(_stored_run("https://h.example/x"))
         ):
-            await _report_finalized_run("run-1", outcome)
+            job = await _load_webhook_job("run-1")
 
-        job, sent_outcome = mock_notify.call_args.args
+        assert job is not None
         assert job.identity.run_id == "run-1"
         assert job.identity.assistant_id == "asst-1"
         assert job.behavior.webhook == "https://h.example/x"
-        assert sent_outcome is outcome
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("run", [None, _stored_run(None)], ids=["row deleted", "no webhook"])
-    async def test_sends_nothing_without_a_stored_webhook(self, run: RunORM | None) -> None:
-        with (
-            patch(f"{MODULE}._get_session_maker", return_value=_session_maker_returning(run)),
-            patch(f"{MODULE}.notify_run_finished") as mock_notify,
-        ):
-            await _report_finalized_run("run-1", RunOutcome(status="interrupted"))
-
-        mock_notify.assert_not_called()
+    async def test_returns_none_without_a_stored_webhook(self, run: RunORM | None) -> None:
+        with patch(f"{MODULE}._get_session_maker", return_value=_session_maker_returning(run)):
+            assert await _load_webhook_job("run-1") is None

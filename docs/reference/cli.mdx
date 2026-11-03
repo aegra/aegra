@@ -93,7 +93,7 @@ Use `aegra serve` for:
 
 ### `aegra up`
 
-Build and start all Compose services (PostgreSQL + app). Uses Docker unless `AEGRA_CONTAINER_RUNTIME=podman`.
+Build and start all Compose services (PostgreSQL + app). When `AEGRA_CONTAINER_RUNTIME` is unset, this uses a running Docker daemon, then Podman if it is installed, then Docker if it is installed but stopped. Set the variable to `docker` or `podman` to choose directly.
 
 ```bash
 aegra up
@@ -109,7 +109,7 @@ aegra up
 
 ### `aegra down`
 
-Stop Compose services. Uses the same runtime as `aegra up`.
+Stop Compose services. When `AEGRA_CONTAINER_RUNTIME` is unset, this stops every runtime that still has containers for the Compose file. If none do, it uses the same auto-detect order as `aegra up`. An explicit `docker` or `podman` value overrides that.
 
 ```bash
 aegra down              # Stop containers

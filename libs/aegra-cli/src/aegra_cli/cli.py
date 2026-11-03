@@ -25,6 +25,7 @@ from aegra_cli.templates import (
     slugify,
 )
 from aegra_cli.utils.docker import (
+    ENV_CONTAINER_RUNTIME,
     ContainerRuntime,
     RuntimeSelectionError,
     compose_argv,
@@ -33,6 +34,7 @@ from aegra_cli.utils.docker import (
     ensure_runtime_ready,
     missing_binary_message,
     resolve_container_runtime,
+    runtimes_owning_project,
 )
 
 console = Console()
@@ -655,6 +657,26 @@ def _select_runtime() -> ContainerRuntime | None:
     return runtime
 
 
+def _down_targets(compose_file: Path) -> list[ContainerRuntime] | None:
+    # An explicit runtime wins. Otherwise stop whichever runtime still has the project.
+    load_env_file(None)
+    if os.environ.get(ENV_CONTAINER_RUNTIME, "").strip():
+        runtime = _select_runtime()
+        if runtime is None:
+            return None
+        return [runtime]
+    owners = runtimes_owning_project(compose_file)
+    if not owners:
+        runtime = _select_runtime()
+        if runtime is None:
+            return None
+        return [runtime]
+    for runtime in owners:
+        if not ensure_compose_plugin(runtime):
+            return None
+    return owners
+
+
 @cli.command()
 @click.option(
     "--file",
@@ -763,7 +785,8 @@ def up(compose_file: Path | None, build: bool, services: tuple[str, ...]) -> Non
 def down(compose_file: Path | None, volumes: bool) -> None:
     """Stop services with Docker Compose or Podman Compose.
 
-    Runs 'docker compose down' or 'podman compose down'. Docker is the default.
+    Runs compose down for the runtime that still has this project's containers.
+    AEGRA_CONTAINER_RUNTIME selects docker or podman directly.
 
     Examples:
 
@@ -799,28 +822,29 @@ def down(compose_file: Path | None, volumes: bool) -> None:
 
     console.print(f"\n[cyan]Stopping:[/cyan] {target_compose}")
 
-    runtime = _select_runtime()
-    if runtime is None:
+    targets = _down_targets(target_compose)
+    if targets is None:
         sys.exit(1)
 
-    cmd = compose_argv(runtime, target_compose, "down")
-
-    if volumes:
-        cmd.append("-v")
-
-    console.print(f"[dim]Running: {' '.join(cmd)}[/dim]")
-
-    try:
-        result = subprocess.run(cmd, check=False)
-        if result.returncode == 0:
-            console.print("\n[bold green]Services stopped successfully![/bold green]")
-            sys.exit(0)
-        else:
-            console.print("\n[bold red]Some services failed to stop.[/bold red]")
-            sys.exit(1)
-    except FileNotFoundError:
-        console.print(missing_binary_message(runtime))
+    failed = False
+    for runtime in targets:
+        cmd = compose_argv(runtime, target_compose, "down")
+        if volumes:
+            cmd.append("-v")
+        console.print(f"[dim]Running: {' '.join(cmd)}[/dim]")
+        try:
+            result = subprocess.run(cmd, check=False)
+        except FileNotFoundError:
+            console.print(missing_binary_message(runtime))
+            failed = True
+            continue
+        if result.returncode != 0:
+            failed = True
+    if failed:
+        console.print("\n[bold red]Some services failed to stop.[/bold red]")
         sys.exit(1)
+    console.print("\n[bold green]Services stopped successfully![/bold green]")
+    sys.exit(0)
 
 
 # Register command groups and commands from the commands package

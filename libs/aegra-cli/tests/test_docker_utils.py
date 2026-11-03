@@ -29,8 +29,10 @@ from aegra_cli.utils.docker import (
     is_runtime_running,
     missing_binary_message,
     podman_compose_available,
+    project_service_names,
     resolve_container_runtime,
     runtime_label,
+    runtimes_owning_project,
     start_postgres_container,
     try_start_podman,
     try_start_runtime,
@@ -176,7 +178,9 @@ class TestIsPostgresContainerRunning:
             mock_run.return_value.stdout = "postgres\n"
 
             compose_file = Path("/path/to/docker-compose.yml")
-            result = is_postgres_container_running(compose_file, runtime=ContainerRuntime.DOCKER)
+            assert (
+                is_postgres_container_running(compose_file, runtime=ContainerRuntime.DOCKER) is True
+            )
 
             call_args = mock_run.call_args[0][0]
             assert "-f" in call_args
@@ -313,7 +317,9 @@ def _completed(returncode: int, stdout: str = "") -> MagicMock:
 
 @pytest.fixture(autouse=True)
 def clear_container_runtime_env(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.delenv("AEGRA_CONTAINER_RUNTIME", raising=False)
+    # setenv records the original value so a later os.environ write is undone.
+    monkeypatch.setenv("AEGRA_CONTAINER_RUNTIME", "")
+    monkeypatch.delenv("AEGRA_CONTAINER_RUNTIME")
 
 
 @pytest.fixture
@@ -757,8 +763,10 @@ class TestPostgresCompose:
         with (
             patch("aegra_cli.utils.docker.is_docker_installed", return_value=False),
             patch("aegra_cli.utils.docker.is_podman_installed", return_value=False),
+            console.capture() as captured,
         ):
             assert is_postgres_container_running() is False
+        assert "Neither Docker nor Podman" in captured.get()
 
     def test_start_uses_podman_compose(self, tmp_path: Path) -> None:
         compose_file = tmp_path / "docker-compose.yml"
@@ -830,8 +838,10 @@ class TestPostgresCompose:
         with (
             patch("aegra_cli.utils.docker.is_docker_installed", return_value=False),
             patch("aegra_cli.utils.docker.is_podman_installed", return_value=False),
+            console.capture() as captured,
         ):
             assert start_postgres_container() is False
+        assert "Neither Docker nor Podman" in captured.get()
 
 
 class TestEnsurePostgresRunning:
@@ -910,3 +920,86 @@ class TestEnsurePostgresRunning:
         ):
             assert ensure_postgres_running(compose_file) is True
         assert mock_start.call_args.kwargs["runtime"] is ContainerRuntime.PODMAN
+
+
+class TestProjectOwnership:
+    """down follows the runtime that still has this Compose project."""
+
+    def test_lists_services_from_compose_ps(self, tmp_path: Path) -> None:
+        compose_file = tmp_path / "docker-compose.yml"
+        with (
+            patch("aegra_cli.utils.docker._runtime_installed", return_value=True),
+            patch("aegra_cli.utils.docker.is_runtime_running", return_value=True),
+            patch(
+                "aegra_cli.utils.docker.subprocess.run",
+                return_value=_completed(0, "postgres\nredis\n"),
+            ) as mock_run,
+        ):
+            names = project_service_names(ContainerRuntime.PODMAN, compose_file)
+        assert names == ["postgres", "redis"]
+        command = mock_run.call_args.args[0]
+        assert command[:2] == ["podman", "compose"]
+        assert command[-4:] == ["ps", "--services", "--filter", "status=running"]
+
+    def test_empty_when_runtime_is_not_installed(self, tmp_path: Path) -> None:
+        with patch("aegra_cli.utils.docker._runtime_installed", return_value=False):
+            assert project_service_names(ContainerRuntime.DOCKER, tmp_path / "c.yml") == []
+
+    def test_empty_when_runtime_is_not_running(self, tmp_path: Path) -> None:
+        with (
+            patch("aegra_cli.utils.docker._runtime_installed", return_value=True),
+            patch("aegra_cli.utils.docker.is_runtime_running", return_value=False),
+        ):
+            assert project_service_names(ContainerRuntime.DOCKER, tmp_path / "c.yml") == []
+
+    def test_empty_when_ps_fails(self, tmp_path: Path) -> None:
+        with (
+            patch("aegra_cli.utils.docker._runtime_installed", return_value=True),
+            patch("aegra_cli.utils.docker.is_runtime_running", return_value=True),
+            patch("aegra_cli.utils.docker.subprocess.run", return_value=_completed(1, "postgres")),
+        ):
+            assert project_service_names(ContainerRuntime.DOCKER, tmp_path / "c.yml") == []
+
+    def test_empty_when_ps_times_out(self, tmp_path: Path) -> None:
+        with (
+            patch("aegra_cli.utils.docker._runtime_installed", return_value=True),
+            patch("aegra_cli.utils.docker.is_runtime_running", return_value=True),
+            patch(
+                "aegra_cli.utils.docker.subprocess.run",
+                side_effect=subprocess.TimeoutExpired("docker", 10),
+            ),
+        ):
+            assert project_service_names(ContainerRuntime.DOCKER, tmp_path / "c.yml") == []
+
+    def test_empty_when_binary_disappears(self, tmp_path: Path) -> None:
+        with (
+            patch("aegra_cli.utils.docker._runtime_installed", return_value=True),
+            patch("aegra_cli.utils.docker.is_runtime_running", return_value=True),
+            patch(
+                "aegra_cli.utils.docker.subprocess.run",
+                side_effect=FileNotFoundError("docker"),
+            ),
+        ):
+            assert project_service_names(ContainerRuntime.DOCKER, tmp_path / "c.yml") == []
+
+    def test_owners_are_runtimes_with_services(self, tmp_path: Path) -> None:
+        compose_file = tmp_path / "docker-compose.yml"
+
+        def services(runtime: ContainerRuntime, _compose_file: Path) -> list[str]:
+            if runtime is ContainerRuntime.PODMAN:
+                return ["postgres"]
+            return []
+
+        with patch("aegra_cli.utils.docker.project_service_names", side_effect=services):
+            assert runtimes_owning_project(compose_file) == [ContainerRuntime.PODMAN]
+
+    def test_owners_include_both_runtimes(self, tmp_path: Path) -> None:
+        compose_file = tmp_path / "docker-compose.yml"
+        with patch(
+            "aegra_cli.utils.docker.project_service_names",
+            return_value=["postgres"],
+        ):
+            assert runtimes_owning_project(compose_file) == [
+                ContainerRuntime.DOCKER,
+                ContainerRuntime.PODMAN,
+            ]

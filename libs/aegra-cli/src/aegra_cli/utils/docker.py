@@ -52,12 +52,10 @@ def is_docker_running() -> bool:
 
 
 def is_podman_installed() -> bool:
-    """Check if the Podman CLI is installed and available in PATH."""
     return shutil.which("podman") is not None
 
 
 def is_podman_running() -> bool:
-    """Check if Podman answers `podman info`."""
     if not is_podman_installed():
         return False
 
@@ -73,14 +71,12 @@ def is_podman_running() -> bool:
 
 
 def is_runtime_running(runtime: ContainerRuntime) -> bool:
-    """Return whether the selected runtime responds to its info command."""
     if runtime is ContainerRuntime.DOCKER:
         return is_docker_running()
     return is_podman_running()
 
 
 def runtime_label(runtime: ContainerRuntime) -> str:
-    """Human-readable runtime name for CLI messages."""
     if runtime is ContainerRuntime.DOCKER:
         return "Docker"
     return "Podman"
@@ -131,7 +127,6 @@ def compose_argv(
     compose_file: Path | None,
     *args: str,
 ) -> list[str]:
-    """Build a `docker compose` or `podman compose` argument list."""
     command = [runtime.value, "compose"]
     if compose_file is not None:
         command.extend(["-f", str(compose_file)])
@@ -140,7 +135,6 @@ def compose_argv(
 
 
 def podman_compose_available() -> bool:
-    """Return True when `podman compose version` succeeds."""
     try:
         result = subprocess.run(
             ["podman", "compose", "version"],
@@ -167,7 +161,6 @@ def ensure_compose_plugin(runtime: ContainerRuntime) -> bool:
 
 
 def missing_binary_message(runtime: ContainerRuntime) -> str:
-    """Error text when the selected CLI binary cannot be executed."""
     if runtime is ContainerRuntime.DOCKER:
         return (
             "[bold red]Error:[/bold red] docker is not installed or not in PATH.\n"
@@ -327,7 +320,6 @@ def _wait_for_docker_ready(timeout_seconds: int = 60) -> bool:
 
 
 def get_podman_start_instructions() -> str:
-    """Platform-specific instructions for starting Podman."""
     system = platform.system().lower()
     if system == "darwin":
         return (
@@ -349,7 +341,6 @@ def get_podman_start_instructions() -> str:
 
 
 def get_runtime_start_instructions(runtime: ContainerRuntime) -> str:
-    """Start hints for the selected runtime."""
     if runtime is ContainerRuntime.DOCKER:
         return get_docker_start_instructions()
     return get_podman_start_instructions()
@@ -422,7 +413,6 @@ def try_start_podman() -> bool:
 
 
 def try_start_runtime(runtime: ContainerRuntime) -> bool:
-    """Attempt to start the selected runtime."""
     if runtime is ContainerRuntime.DOCKER:
         return try_start_docker()
     return try_start_podman()
@@ -450,7 +440,8 @@ def _selected_runtime(runtime: ContainerRuntime | None) -> ContainerRuntime | No
         return runtime
     try:
         return resolve_container_runtime()
-    except RuntimeSelectionError:
+    except RuntimeSelectionError as exc:
+        console.print(f"\n[bold red]{exc}[/bold red]")
         return None
 
 
@@ -459,7 +450,6 @@ def is_postgres_container_running(
     *,
     runtime: ContainerRuntime | None = None,
 ) -> bool:
-    """Check if the PostgreSQL Compose service is running."""
     selected = _selected_runtime(runtime)
     if selected is None:
         return False
@@ -493,7 +483,6 @@ def start_postgres_container(
     *,
     runtime: ContainerRuntime | None = None,
 ) -> bool:
-    """Start the PostgreSQL service with docker compose or podman compose."""
     selected = _selected_runtime(runtime)
     if selected is None:
         return False
@@ -521,6 +510,41 @@ def start_postgres_container(
         f"[red]Failed to start PostgreSQL container (exit code {result.returncode})[/red]"
     )
     return False
+
+
+def project_service_names(runtime: ContainerRuntime, compose_file: Path) -> list[str]:
+    """Running services in this Compose project."""
+    if not _runtime_installed(runtime) or not is_runtime_running(runtime):
+        return []
+    command = compose_argv(
+        runtime,
+        compose_file,
+        "ps",
+        "--services",
+        "--filter",
+        "status=running",
+    )
+    try:
+        result = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        return []
+    if result.returncode != 0:
+        return []
+    return [line.strip() for line in result.stdout.splitlines() if line.strip()]
+
+
+def runtimes_owning_project(compose_file: Path) -> list[ContainerRuntime]:
+    """Runtimes that still have containers for this Compose file."""
+    return [
+        runtime
+        for runtime in (ContainerRuntime.DOCKER, ContainerRuntime.PODMAN)
+        if project_service_names(runtime, compose_file)
+    ]
 
 
 def find_compose_file() -> Path | None:

@@ -546,7 +546,8 @@ def project_container_ids(runtime: ContainerRuntime, compose_file: Path) -> list
     listed = _compose_ps_quiet(runtime, compose_file, include_stopped=True)
     if listed is None:
         return None
-    if listed.returncode != 0:
+    saw_stopped = listed.returncode == 0
+    if not saw_stopped:
         # Some Compose builds reject --all. Running containers are still visible.
         listed = _compose_ps_quiet(runtime, compose_file, include_stopped=False)
         if listed is None:
@@ -557,7 +558,14 @@ def project_container_ids(runtime: ContainerRuntime, compose_file: Path) -> list
                 f"(exit {listed.returncode}).[/yellow]"
             )
             return None
-    return [line.strip() for line in listed.stdout.splitlines() if line.strip()]
+    found = [line.strip() for line in listed.stdout.splitlines() if line.strip()]
+    if not found and not saw_stopped:
+        # Stopped containers are invisible here, so empty does not mean none exist.
+        console.print(
+            f"[yellow]Could not list stopped {runtime.value} Compose containers.[/yellow]"
+        )
+        return None
+    return found
 
 
 def runtimes_owning_project(compose_file: Path) -> ProjectOwnership:

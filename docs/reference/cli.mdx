@@ -109,7 +109,7 @@ aegra up
 
 ### `aegra down`
 
-Stop Compose services. When `AEGRA_CONTAINER_RUNTIME` is unset, this stops every running runtime that still has containers for the Compose file. Stopped containers are included when that runtime is up and `compose ps --all` succeeds. If none are found, it uses the same auto-detect order as `aegra up`. An explicit `docker` or `podman` value overrides that. A runtime that is not running cannot be listed, so its containers stay until that runtime is started and `aegra down` is run again.
+Stop Compose services. When `AEGRA_CONTAINER_RUNTIME` is unset, this stops every running runtime that still has containers for the Compose file. Stopped containers are included when that runtime is up and `compose ps --all` succeeds. If every listing succeeds and none are found, it uses the same auto-detect order as `aegra up`. If a running runtime cannot be fully listed, `aegra down` stops what it did find and exits non-zero. If it found nothing to stop, it stops nothing, so set the variable to choose a runtime. An explicit `docker` or `podman` value overrides all of this. A runtime that is not running cannot be listed, so its containers stay until that runtime is started and `aegra down` is run again.
 
 ```bash
 aegra down              # Stop containers

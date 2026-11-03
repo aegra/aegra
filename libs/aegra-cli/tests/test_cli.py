@@ -1888,6 +1888,8 @@ class TestContainerRuntimeCli:
 
         assert result.exit_code == 1
         mock_run.assert_not_called()
+        assert "Nothing was stopped" in result.output
+        assert "AEGRA_CONTAINER_RUNTIME" in result.output
 
     def test_down_stops_known_owners_when_another_listing_fails(
         self, cli_runner: CliRunner, tmp_path: Path

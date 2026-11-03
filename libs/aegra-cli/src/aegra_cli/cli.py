@@ -670,6 +670,10 @@ def _down_targets(compose_file: Path) -> ProjectOwnership | None:
     found = runtimes_owning_project(compose_file)
     if not found.runtimes:
         if found.listing_failed:
+            console.print(
+                "\n[bold red]Nothing was stopped: a runtime could not be checked.[/bold red]\n"
+                f"Set {ENV_CONTAINER_RUNTIME} to docker or podman to choose one directly."
+            )
             return None
         runtime = _select_runtime()
         if runtime is None:

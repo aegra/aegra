@@ -955,6 +955,42 @@ class TestProjectOwnership:
         assert mock_run.call_args_list[0].args[0][-3:] == ["ps", "--all", "-q"]
         assert mock_run.call_args_list[1].args[0][-2:] == ["ps", "-q"]
 
+    def test_empty_when_all_listing_finds_nothing(self, tmp_path: Path) -> None:
+        with (
+            patch("aegra_cli.utils.docker._runtime_installed", return_value=True),
+            patch("aegra_cli.utils.docker.is_runtime_running", return_value=True),
+            patch("aegra_cli.utils.docker.subprocess.run", return_value=_completed(0, "")),
+        ):
+            assert project_container_ids(ContainerRuntime.DOCKER, tmp_path / "c.yml") == []
+
+    def test_none_when_fallback_finds_no_running_containers(self, tmp_path: Path) -> None:
+        with (
+            patch("aegra_cli.utils.docker._runtime_installed", return_value=True),
+            patch("aegra_cli.utils.docker.is_runtime_running", return_value=True),
+            patch(
+                "aegra_cli.utils.docker.subprocess.run",
+                side_effect=[_completed(1, ""), _completed(0, "")],
+            ),
+            console.capture() as captured,
+        ):
+            assert project_container_ids(ContainerRuntime.DOCKER, tmp_path / "c.yml") is None
+        assert "Could not list stopped docker Compose containers" in captured.get()
+
+    def test_empty_fallback_flags_listing_failure_and_keeps_other_owners(
+        self, tmp_path: Path
+    ) -> None:
+        with (
+            patch("aegra_cli.utils.docker._runtime_installed", return_value=True),
+            patch("aegra_cli.utils.docker.is_runtime_running", return_value=True),
+            patch(
+                "aegra_cli.utils.docker.subprocess.run",
+                side_effect=[_completed(1, ""), _completed(0, ""), _completed(0, "abc\n")],
+            ),
+        ):
+            owners = runtimes_owning_project(tmp_path / "c.yml")
+
+        assert owners == ProjectOwnership([ContainerRuntime.PODMAN], True)
+
     def test_empty_when_runtime_is_not_installed(self, tmp_path: Path) -> None:
         with patch("aegra_cli.utils.docker._runtime_installed", return_value=False):
             assert project_container_ids(ContainerRuntime.DOCKER, tmp_path / "c.yml") == []

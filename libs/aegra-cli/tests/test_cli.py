@@ -1913,6 +1913,36 @@ class TestContainerRuntimeCli:
         assert mock_run.call_args.args[0][0] == "docker"
         assert "Another runtime" in result.output
 
+    def test_down_stops_other_owners_when_one_compose_check_fails(
+        self, cli_runner: CliRunner, tmp_path: Path
+    ) -> None:
+        """A hung Podman Compose check must not leave Docker's confirmed containers running."""
+        commands: list[list[str]] = []
+
+        def fake_run(command: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+            """Both runtimes own the project, then `podman compose version` hangs."""
+            commands.append(command)
+            if command[:3] == ["podman", "compose", "version"]:
+                raise subprocess.TimeoutExpired(command, 10)
+            return subprocess.CompletedProcess(command, 0, stdout="abc\n", stderr="")
+
+        with cli_runner.isolated_filesystem(temp_dir=tmp_path):
+            Path("docker-compose.yml").write_text("services: {}\n")
+            with (
+                patch("aegra_cli.cli.runtimes_owning_project", runtimes_owning_project),
+                patch("aegra_cli.cli.ensure_compose_plugin", ensure_compose_plugin),
+                patch("aegra_cli.utils.docker.shutil.which", return_value="/usr/bin/runtime"),
+                patch("aegra_cli.cli.subprocess.run", side_effect=fake_run),
+            ):
+                result = cli_runner.invoke(cli, ["down"])
+
+        stopped = [command[0] for command in commands if command[-1] == "down"]
+        assert result.exit_code == 1
+        assert stopped == ["docker"]
+        assert "Podman Compose is not available" in result.output
+        assert "Another runtime" in result.output
+        assert "Services stopped successfully" not in result.output
+
     def test_down_exits_nonzero_when_a_runtime_check_hangs(
         self, cli_runner: CliRunner, tmp_path: Path
     ) -> None:

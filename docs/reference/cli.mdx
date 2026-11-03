@@ -109,7 +109,16 @@ aegra up
 
 ### `aegra down`
 
-Stop Compose services. When `AEGRA_CONTAINER_RUNTIME` is unset, this stops every running runtime that still has containers for the Compose file. Stopped containers are included when that runtime is up and `compose ps --all` succeeds. If every listing succeeds and none are found, it uses the same auto-detect order as `aegra up`. If a runtime's status check fails or times out, or a running runtime cannot be fully listed, `aegra down` stops what it did find and exits non-zero. If it found nothing to stop, it stops nothing, so set the variable to choose a runtime. An explicit `docker` or `podman` value overrides all of this. A runtime that reports it is not running is skipped, so its containers stay until that runtime is started and `aegra down` is run again.
+Stop Compose services.
+
+With `AEGRA_CONTAINER_RUNTIME` set to `docker` or `podman`, this uses only that runtime. If it is not running, `aegra down` tries to start it before running `compose down`, and exits non-zero if it cannot.
+
+With the variable unset, this checks each installed runtime for containers from the Compose file, then runs `compose down` on every runtime that has them:
+
+- A runtime that reports it is not running is skipped, so its containers stay until that runtime is started and `aegra down` is run again.
+- Stopped containers are included when `compose ps --all` succeeds. If it fails, the check falls back to `compose ps`, which only sees running containers. A runtime with running containers still counts as an owner, so `aegra down` can exit successfully. A runtime with none counts as a failed check.
+- If a runtime's status check, container listing, or Podman Compose check fails or times out, `aegra down` stops the owners it can and exits non-zero. If it has no owner it can stop, it stops nothing. When the failure was a status check or listing, set the variable to choose a runtime.
+- If every check succeeds and no containers are found, it uses the same auto-detect order as `aegra up`.
 
 ```bash
 aegra down              # Stop containers

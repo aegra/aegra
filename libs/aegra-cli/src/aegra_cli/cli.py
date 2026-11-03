@@ -681,10 +681,17 @@ def _down_targets(compose_file: Path) -> ProjectOwnership | None:
         if runtime is None:
             return None
         return ProjectOwnership([runtime], False)
+    usable: list[ContainerRuntime] = []
+    listing_failed = found.listing_failed
     for runtime in found.runtimes:
-        if not ensure_compose_plugin(runtime):
-            return None
-    return found
+        if ensure_compose_plugin(runtime):
+            usable.append(runtime)
+        else:
+            # Same outcome as a failed listing: stop the other owners, then exit non-zero.
+            listing_failed = True
+    if not usable:
+        return None
+    return ProjectOwnership(usable, listing_failed)
 
 
 @cli.command()
@@ -856,8 +863,8 @@ def down(compose_file: Path | None, volumes: bool) -> None:
         sys.exit(1)
     if planned.listing_failed:
         console.print(
-            "\n[yellow]Stopped the containers that could be listed. "
-            "Another runtime could not be checked.[/yellow]"
+            "\n[yellow]Stopped the containers it could reach. "
+            "Another runtime could not be checked or used.[/yellow]"
         )
         sys.exit(1)
     console.print("\n[bold green]Services stopped successfully![/bold green]")

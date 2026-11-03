@@ -29,12 +29,14 @@ from aegra_api.models.run_job import RunJob
 from aegra_api.observability.span_enrichment import merge_run_metadata, set_trace_context
 from aegra_api.services.base_executor import BaseExecutor
 from aegra_api.services.run_executor import (
+    _TIMEOUT_ERROR,
     _lease_loss_cancellations,
     _shutdown_cancellations,
     _timeout_cancellations,
     execute_run,
 )
 from aegra_api.services.run_status import finalize_run
+from aegra_api.services.webhook_delivery import RunOutcome, job_for_webhook, notify_run_finished
 from aegra_api.settings import settings
 
 logger = structlog.getLogger(__name__)
@@ -64,14 +66,15 @@ async def _cleanup_cancelled_execution(run_id: str, execution_task: asyncio.Task
             return
 
         thread_id, user_id = identity
-        await finalize_run(
+        if await finalize_run(
             run_id,
             thread_id,
             user_id=user_id,
             status="interrupted",
             thread_status="idle",
             output={},
-        )
+        ):
+            await _report_finalized_run(run_id, RunOutcome(status="interrupted"))
     except Exception:
         logger.exception("Failed to persist explicit run cancellation", run_id=run_id)
 
@@ -292,14 +295,16 @@ class WorkerExecutor(BaseExecutor):
                 identity = await _get_run_identity(run_id)
                 if identity is not None:
                     thread_id, user_id = identity
-                    await finalize_run(
+                    if await finalize_run(
                         run_id,
                         thread_id,
                         user_id=user_id,
                         status="error",
                         thread_status="error",
-                        error="Job exceeded maximum execution time",
-                    )
+                        error=_TIMEOUT_ERROR,
+                    ):
+                        outcome = RunOutcome(status="error", error={"error": "TimeoutError", "message": _TIMEOUT_ERROR})
+                        await _report_finalized_run(run_id, outcome)
                 await _release_lease(run_id, worker_name)
         except asyncio.CancelledError:
             logger.info("Job task cancelled", worker=worker_name, run_id=run_id)
@@ -401,6 +406,27 @@ class WorkerExecutor(BaseExecutor):
 # ------------------------------------------------------------------
 # Helpers
 # ------------------------------------------------------------------
+
+
+async def _report_finalized_run(run_id: str, outcome: RunOutcome) -> None:
+    """Send the webhook for a run this wrapper made terminal.
+
+    Its finalize only wins when execute_run never finalized the run, so nothing else reported it.
+    """
+    maker = _get_session_maker()
+    async with maker() as session:
+        run = await session.scalar(select(RunORM).where(RunORM.run_id == run_id))
+    if run is None:
+        return
+    job = job_for_webhook(
+        run.execution_params,
+        run_id=run_id,
+        thread_id=run.thread_id,
+        assistant_id=run.assistant_id,
+        created_at=run.created_at,
+    )
+    if job is not None:
+        notify_run_finished(job, outcome)
 
 
 async def _get_run_identity(run_id: str) -> tuple[str, str] | None:

@@ -78,7 +78,7 @@ uv sync
 uv run aegra dev
 ```
 
-This starts PostgreSQL with Docker Compose (or Podman Compose when `AEGRA_CONTAINER_RUNTIME=podman`), runs migrations, and launches the server with hot reload. You should see:
+This starts PostgreSQL with Compose, runs migrations, and launches the server with hot reload. With `AEGRA_CONTAINER_RUNTIME` unset, Compose uses a running Docker daemon, then Podman if it is installed, then Docker if it is installed but stopped. You should see:
 
 ```
 INFO:     Application startup complete.

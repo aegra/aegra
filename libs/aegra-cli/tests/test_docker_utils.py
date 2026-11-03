@@ -29,7 +29,7 @@ from aegra_cli.utils.docker import (
     is_runtime_running,
     missing_binary_message,
     podman_compose_available,
-    project_service_names,
+    project_container_ids,
     resolve_container_runtime,
     runtime_label,
     runtimes_owning_project,
@@ -925,42 +925,70 @@ class TestEnsurePostgresRunning:
 class TestProjectOwnership:
     """down follows the runtime that still has this Compose project."""
 
-    def test_lists_services_from_compose_ps(self, tmp_path: Path) -> None:
+    def test_lists_stopped_containers(self, tmp_path: Path) -> None:
         compose_file = tmp_path / "docker-compose.yml"
         with (
             patch("aegra_cli.utils.docker._runtime_installed", return_value=True),
             patch("aegra_cli.utils.docker.is_runtime_running", return_value=True),
             patch(
                 "aegra_cli.utils.docker.subprocess.run",
-                return_value=_completed(0, "postgres\nredis\n"),
+                return_value=_completed(0, "abc\ndef\n"),
             ) as mock_run,
         ):
-            names = project_service_names(ContainerRuntime.PODMAN, compose_file)
-        assert names == ["postgres", "redis"]
+            assert project_container_ids(ContainerRuntime.PODMAN, compose_file) == ["abc", "def"]
         command = mock_run.call_args.args[0]
         assert command[:2] == ["podman", "compose"]
-        assert command[-4:] == ["ps", "--services", "--filter", "status=running"]
+        assert command[-3:] == ["ps", "--all", "-q"]
+
+    def test_falls_back_when_all_flag_is_rejected(self, tmp_path: Path) -> None:
+        compose_file = tmp_path / "docker-compose.yml"
+        with (
+            patch("aegra_cli.utils.docker._runtime_installed", return_value=True),
+            patch("aegra_cli.utils.docker.is_runtime_running", return_value=True),
+            patch(
+                "aegra_cli.utils.docker.subprocess.run",
+                side_effect=[_completed(1, ""), _completed(0, "abc\n")],
+            ) as mock_run,
+        ):
+            assert project_container_ids(ContainerRuntime.DOCKER, compose_file) == ["abc"]
+        assert mock_run.call_args_list[0].args[0][-3:] == ["ps", "--all", "-q"]
+        assert mock_run.call_args_list[1].args[0][-2:] == ["ps", "-q"]
 
     def test_empty_when_runtime_is_not_installed(self, tmp_path: Path) -> None:
         with patch("aegra_cli.utils.docker._runtime_installed", return_value=False):
-            assert project_service_names(ContainerRuntime.DOCKER, tmp_path / "c.yml") == []
+            assert project_container_ids(ContainerRuntime.DOCKER, tmp_path / "c.yml") == []
 
     def test_empty_when_runtime_is_not_running(self, tmp_path: Path) -> None:
         with (
             patch("aegra_cli.utils.docker._runtime_installed", return_value=True),
             patch("aegra_cli.utils.docker.is_runtime_running", return_value=False),
         ):
-            assert project_service_names(ContainerRuntime.DOCKER, tmp_path / "c.yml") == []
+            assert project_container_ids(ContainerRuntime.DOCKER, tmp_path / "c.yml") == []
 
-    def test_empty_when_ps_fails(self, tmp_path: Path) -> None:
+    def test_none_when_fallback_listing_times_out(self, tmp_path: Path) -> None:
         with (
             patch("aegra_cli.utils.docker._runtime_installed", return_value=True),
             patch("aegra_cli.utils.docker.is_runtime_running", return_value=True),
-            patch("aegra_cli.utils.docker.subprocess.run", return_value=_completed(1, "postgres")),
+            patch(
+                "aegra_cli.utils.docker.subprocess.run",
+                side_effect=[_completed(1, ""), subprocess.TimeoutExpired("docker", 10)],
+            ),
+            console.capture() as captured,
         ):
-            assert project_service_names(ContainerRuntime.DOCKER, tmp_path / "c.yml") == []
+            assert project_container_ids(ContainerRuntime.DOCKER, tmp_path / "c.yml") is None
+        assert "Could not list docker Compose containers" in captured.get()
 
-    def test_empty_when_ps_times_out(self, tmp_path: Path) -> None:
+    def test_none_when_ps_fails(self, tmp_path: Path) -> None:
+        with (
+            patch("aegra_cli.utils.docker._runtime_installed", return_value=True),
+            patch("aegra_cli.utils.docker.is_runtime_running", return_value=True),
+            patch("aegra_cli.utils.docker.subprocess.run", return_value=_completed(1, "")),
+            console.capture() as captured,
+        ):
+            assert project_container_ids(ContainerRuntime.DOCKER, tmp_path / "c.yml") is None
+        assert "Could not list docker Compose containers" in captured.get()
+
+    def test_none_when_ps_times_out(self, tmp_path: Path) -> None:
         with (
             patch("aegra_cli.utils.docker._runtime_installed", return_value=True),
             patch("aegra_cli.utils.docker.is_runtime_running", return_value=True),
@@ -968,10 +996,12 @@ class TestProjectOwnership:
                 "aegra_cli.utils.docker.subprocess.run",
                 side_effect=subprocess.TimeoutExpired("docker", 10),
             ),
+            console.capture() as captured,
         ):
-            assert project_service_names(ContainerRuntime.DOCKER, tmp_path / "c.yml") == []
+            assert project_container_ids(ContainerRuntime.DOCKER, tmp_path / "c.yml") is None
+        assert "Could not list docker Compose containers" in captured.get()
 
-    def test_empty_when_binary_disappears(self, tmp_path: Path) -> None:
+    def test_none_when_binary_disappears(self, tmp_path: Path) -> None:
         with (
             patch("aegra_cli.utils.docker._runtime_installed", return_value=True),
             patch("aegra_cli.utils.docker.is_runtime_running", return_value=True),
@@ -979,27 +1009,40 @@ class TestProjectOwnership:
                 "aegra_cli.utils.docker.subprocess.run",
                 side_effect=FileNotFoundError("docker"),
             ),
+            console.capture() as captured,
         ):
-            assert project_service_names(ContainerRuntime.DOCKER, tmp_path / "c.yml") == []
+            assert project_container_ids(ContainerRuntime.DOCKER, tmp_path / "c.yml") is None
+        assert "Could not list docker Compose containers" in captured.get()
 
-    def test_owners_are_runtimes_with_services(self, tmp_path: Path) -> None:
+    def test_owners_are_runtimes_with_containers(self, tmp_path: Path) -> None:
         compose_file = tmp_path / "docker-compose.yml"
 
-        def services(runtime: ContainerRuntime, _compose_file: Path) -> list[str]:
+        def containers(runtime: ContainerRuntime, _compose_file: Path) -> list[str] | None:
             if runtime is ContainerRuntime.PODMAN:
-                return ["postgres"]
+                return ["abc"]
             return []
 
-        with patch("aegra_cli.utils.docker.project_service_names", side_effect=services):
+        with patch("aegra_cli.utils.docker.project_container_ids", side_effect=containers):
             assert runtimes_owning_project(compose_file) == [ContainerRuntime.PODMAN]
 
     def test_owners_include_both_runtimes(self, tmp_path: Path) -> None:
         compose_file = tmp_path / "docker-compose.yml"
         with patch(
-            "aegra_cli.utils.docker.project_service_names",
-            return_value=["postgres"],
+            "aegra_cli.utils.docker.project_container_ids",
+            return_value=["abc"],
         ):
             assert runtimes_owning_project(compose_file) == [
                 ContainerRuntime.DOCKER,
                 ContainerRuntime.PODMAN,
             ]
+
+    def test_owners_none_when_a_listing_fails(self, tmp_path: Path) -> None:
+        compose_file = tmp_path / "docker-compose.yml"
+
+        def containers(runtime: ContainerRuntime, _compose_file: Path) -> list[str] | None:
+            if runtime is ContainerRuntime.DOCKER:
+                return None
+            return ["abc"]
+
+        with patch("aegra_cli.utils.docker.project_container_ids", side_effect=containers):
+            assert runtimes_owning_project(compose_file) is None

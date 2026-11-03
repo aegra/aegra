@@ -512,39 +512,58 @@ def start_postgres_container(
     return False
 
 
-def project_service_names(runtime: ContainerRuntime, compose_file: Path) -> list[str]:
-    """Running services in this Compose project."""
-    if not _runtime_installed(runtime) or not is_runtime_running(runtime):
-        return []
-    command = compose_argv(
-        runtime,
-        compose_file,
-        "ps",
-        "--services",
-        "--filter",
-        "status=running",
-    )
+def _compose_ps_quiet(
+    runtime: ContainerRuntime,
+    compose_file: Path,
+    *,
+    include_stopped: bool,
+) -> subprocess.CompletedProcess[str] | None:
+    command = compose_argv(runtime, compose_file, "ps", "-q")
+    if include_stopped:
+        command = compose_argv(runtime, compose_file, "ps", "--all", "-q")
     try:
-        result = subprocess.run(
+        return subprocess.run(
             command,
             capture_output=True,
             text=True,
             timeout=10,
         )
-    except (subprocess.TimeoutExpired, FileNotFoundError):
-        return []
-    if result.returncode != 0:
-        return []
-    return [line.strip() for line in result.stdout.splitlines() if line.strip()]
+    except (subprocess.TimeoutExpired, FileNotFoundError) as exc:
+        console.print(f"[yellow]Could not list {runtime.value} Compose containers: {exc}[/yellow]")
+        return None
 
 
-def runtimes_owning_project(compose_file: Path) -> list[ContainerRuntime]:
-    """Runtimes that still have containers for this Compose file."""
-    return [
-        runtime
-        for runtime in (ContainerRuntime.DOCKER, ContainerRuntime.PODMAN)
-        if project_service_names(runtime, compose_file)
-    ]
+def project_container_ids(runtime: ContainerRuntime, compose_file: Path) -> list[str] | None:
+    """Container ids for this file, including stopped ones. None means the listing failed."""
+    if not _runtime_installed(runtime) or not is_runtime_running(runtime):
+        return []
+    listed = _compose_ps_quiet(runtime, compose_file, include_stopped=True)
+    if listed is None:
+        return None
+    if listed.returncode != 0:
+        # Some Compose builds reject --all. Running containers are still visible.
+        listed = _compose_ps_quiet(runtime, compose_file, include_stopped=False)
+        if listed is None:
+            return None
+        if listed.returncode != 0:
+            console.print(
+                f"[yellow]Could not list {runtime.value} Compose containers "
+                f"(exit {listed.returncode}).[/yellow]"
+            )
+            return None
+    return [line.strip() for line in listed.stdout.splitlines() if line.strip()]
+
+
+def runtimes_owning_project(compose_file: Path) -> list[ContainerRuntime] | None:
+    """Runtimes that still have containers for this file. None if a listing failed."""
+    owners: list[ContainerRuntime] = []
+    for runtime in (ContainerRuntime.DOCKER, ContainerRuntime.PODMAN):
+        found = project_container_ids(runtime, compose_file)
+        if found is None:
+            return None
+        if found:
+            owners.append(runtime)
+    return owners
 
 
 def find_compose_file() -> Path | None:

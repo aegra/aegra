@@ -666,6 +666,8 @@ def _down_targets(compose_file: Path) -> list[ContainerRuntime] | None:
             return None
         return [runtime]
     owners = runtimes_owning_project(compose_file)
+    if owners is None:
+        return None
     if not owners:
         runtime = _select_runtime()
         if runtime is None:

@@ -57,7 +57,7 @@ Aegra requires Python 3.12+ for both the API server and the CLI.
 
 Aegra uses PostgreSQL with the pgvector extension for persistence and vector search. The recommended image is `pgvector/pgvector:pg18`.
 
-When you use `aegra dev` or `aegra up`, PostgreSQL is started automatically via Docker Compose, or via `podman compose` when `AEGRA_CONTAINER_RUNTIME=podman`. For `aegra serve`, you provide your own database via `DATABASE_URL` or `POSTGRES_*` environment variables.
+When you use `aegra dev` or `aegra up`, PostgreSQL starts through Compose. With `AEGRA_CONTAINER_RUNTIME` unset, that is a running Docker daemon, then Podman if it is installed, then Docker if it is installed but stopped. Set the variable to `docker` or `podman` to choose directly. For `aegra serve`, you provide your own database via `DATABASE_URL` or `POSTGRES_*` environment variables.
 
 ### Docker
 

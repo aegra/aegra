@@ -1853,3 +1853,17 @@ class TestContainerRuntimeCli:
         assert result.exit_code == 1
         assert "podman-compose" in result.output
         mock_run.assert_not_called()
+
+    def test_down_stops_when_ownership_cannot_be_listed(
+        self, cli_runner: CliRunner, tmp_path: Path
+    ) -> None:
+        with cli_runner.isolated_filesystem(temp_dir=tmp_path):
+            Path("docker-compose.yml").write_text("services: {}\n")
+            with (
+                patch("aegra_cli.cli.runtimes_owning_project", return_value=None),
+                patch("aegra_cli.cli.subprocess.run") as mock_run,
+            ):
+                result = cli_runner.invoke(cli, ["down"])
+
+        assert result.exit_code == 1
+        mock_run.assert_not_called()

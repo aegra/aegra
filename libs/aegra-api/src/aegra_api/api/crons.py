@@ -153,6 +153,9 @@ async def update_cron(
     """
     ctx = build_auth_context(user, "crons", "update")
     value = {"cron_id": cron_id, **request.model_dump(exclude_none=True)}
+    # An explicit null removes the webhook, so a handler guarding webhook must see it.
+    if "webhook" in request.model_fields_set:
+        value["webhook"] = request.webhook
     await handle_event(ctx, value)
 
     return await service.update_cron(cron_id, request, user.identity)

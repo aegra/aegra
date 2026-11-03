@@ -177,7 +177,17 @@ updated = await client.crons.update(
 )
 ```
 
-Supported update fields: `schedule`, `enabled`, `input`, `config`, `metadata`, `timezone`, `durability`.
+Supported update fields: `schedule`, `enabled`, `input`, `config`, `metadata`, `timezone`, `durability`, `end_time`.
+
+`end_time` stops the cron after a given timestamp. On update, an explicit `null` clears it so the cron runs until it is disabled or deleted; omitting `end_time` leaves the stored value unchanged:
+
+```python
+# Clear the end time (SDK sends {"end_time": null})
+await client.crons.update(cron_id="<cron_id>", end_time=None)
+
+# Leave end_time alone while changing something else
+await client.crons.update(cron_id="<cron_id>", enabled=False)
+```
 
 ## Disabling and re-enabling
 

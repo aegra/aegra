@@ -10,6 +10,7 @@ import pytest
 
 from aegra_cli.utils.docker import (
     ContainerRuntime,
+    ProjectOwnership,
     RuntimeSelectionError,
     _wait_for_podman_ready,
     compose_argv,
@@ -1023,7 +1024,10 @@ class TestProjectOwnership:
             return []
 
         with patch("aegra_cli.utils.docker.project_container_ids", side_effect=containers):
-            assert runtimes_owning_project(compose_file) == [ContainerRuntime.PODMAN]
+            assert runtimes_owning_project(compose_file) == ProjectOwnership(
+                [ContainerRuntime.PODMAN],
+                False,
+            )
 
     def test_owners_include_both_runtimes(self, tmp_path: Path) -> None:
         compose_file = tmp_path / "docker-compose.yml"
@@ -1031,10 +1035,10 @@ class TestProjectOwnership:
             "aegra_cli.utils.docker.project_container_ids",
             return_value=["abc"],
         ):
-            assert runtimes_owning_project(compose_file) == [
-                ContainerRuntime.DOCKER,
-                ContainerRuntime.PODMAN,
-            ]
+            assert runtimes_owning_project(compose_file) == ProjectOwnership(
+                [ContainerRuntime.DOCKER, ContainerRuntime.PODMAN],
+                False,
+            )
 
     def test_owners_none_when_a_listing_fails(self, tmp_path: Path) -> None:
         compose_file = tmp_path / "docker-compose.yml"
@@ -1045,4 +1049,7 @@ class TestProjectOwnership:
             return ["abc"]
 
         with patch("aegra_cli.utils.docker.project_container_ids", side_effect=containers):
-            assert runtimes_owning_project(compose_file) is None
+            assert runtimes_owning_project(compose_file) == ProjectOwnership(
+                [ContainerRuntime.PODMAN],
+                True,
+            )

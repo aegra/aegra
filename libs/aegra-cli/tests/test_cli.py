@@ -20,6 +20,7 @@ from aegra_cli.cli import (
 from aegra_cli.env import load_env_file
 from aegra_cli.utils.docker import (
     ContainerRuntime,
+    ProjectOwnership,
     RuntimeSelectionError,
     ensure_compose_plugin,
     resolve_container_runtime,
@@ -34,8 +35,8 @@ def _runtime_gate_passes(_runtime: ContainerRuntime) -> bool:
     return True
 
 
-def _no_project_owners(_compose_file: Path) -> list[ContainerRuntime]:
-    return []
+def _no_project_owners(_compose_file: Path) -> ProjectOwnership:
+    return ProjectOwnership([], False)
 
 
 def _completed_process(returncode: int) -> MagicMock:
@@ -1741,7 +1742,7 @@ class TestContainerRuntimeCli:
             with (
                 patch(
                     "aegra_cli.cli.runtimes_owning_project",
-                    return_value=[ContainerRuntime.PODMAN],
+                    return_value=ProjectOwnership([ContainerRuntime.PODMAN], False),
                 ),
                 patch(
                     "aegra_cli.cli.resolve_container_runtime",
@@ -1765,7 +1766,7 @@ class TestContainerRuntimeCli:
             with (
                 patch(
                     "aegra_cli.cli.runtimes_owning_project",
-                    return_value=[ContainerRuntime.DOCKER],
+                    return_value=ProjectOwnership([ContainerRuntime.DOCKER], False),
                 ) as mock_owners,
                 patch(
                     "aegra_cli.cli.resolve_container_runtime",
@@ -1804,7 +1805,10 @@ class TestContainerRuntimeCli:
             with (
                 patch(
                     "aegra_cli.cli.runtimes_owning_project",
-                    return_value=[ContainerRuntime.DOCKER, ContainerRuntime.PODMAN],
+                    return_value=ProjectOwnership(
+                        [ContainerRuntime.DOCKER, ContainerRuntime.PODMAN],
+                        False,
+                    ),
                 ),
                 patch("aegra_cli.cli.subprocess.run") as mock_run,
             ):
@@ -1823,7 +1827,10 @@ class TestContainerRuntimeCli:
             with (
                 patch(
                     "aegra_cli.cli.runtimes_owning_project",
-                    return_value=[ContainerRuntime.DOCKER, ContainerRuntime.PODMAN],
+                    return_value=ProjectOwnership(
+                        [ContainerRuntime.DOCKER, ContainerRuntime.PODMAN],
+                        False,
+                    ),
                 ),
                 patch("aegra_cli.cli.subprocess.run") as mock_run,
             ):
@@ -1842,7 +1849,7 @@ class TestContainerRuntimeCli:
             with (
                 patch(
                     "aegra_cli.cli.runtimes_owning_project",
-                    return_value=[ContainerRuntime.PODMAN],
+                    return_value=ProjectOwnership([ContainerRuntime.PODMAN], False),
                 ),
                 patch("aegra_cli.cli.ensure_compose_plugin", ensure_compose_plugin),
                 patch("aegra_cli.utils.docker.podman_compose_available", return_value=False),
@@ -1860,10 +1867,32 @@ class TestContainerRuntimeCli:
         with cli_runner.isolated_filesystem(temp_dir=tmp_path):
             Path("docker-compose.yml").write_text("services: {}\n")
             with (
-                patch("aegra_cli.cli.runtimes_owning_project", return_value=None),
+                patch(
+                    "aegra_cli.cli.runtimes_owning_project",
+                    return_value=ProjectOwnership([], True),
+                ),
                 patch("aegra_cli.cli.subprocess.run") as mock_run,
             ):
                 result = cli_runner.invoke(cli, ["down"])
 
         assert result.exit_code == 1
         mock_run.assert_not_called()
+
+    def test_down_stops_known_owners_when_another_listing_fails(
+        self, cli_runner: CliRunner, tmp_path: Path
+    ) -> None:
+        with cli_runner.isolated_filesystem(temp_dir=tmp_path):
+            Path("docker-compose.yml").write_text("services: {}\n")
+            with (
+                patch(
+                    "aegra_cli.cli.runtimes_owning_project",
+                    return_value=ProjectOwnership([ContainerRuntime.DOCKER], True),
+                ),
+                patch("aegra_cli.cli.subprocess.run") as mock_run,
+            ):
+                mock_run.return_value.returncode = 0
+                result = cli_runner.invoke(cli, ["down"])
+
+        assert result.exit_code == 1
+        assert mock_run.call_args.args[0][0] == "docker"
+        assert "Another runtime" in result.output

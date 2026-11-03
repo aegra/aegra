@@ -27,6 +27,7 @@ from aegra_cli.templates import (
 from aegra_cli.utils.docker import (
     ENV_CONTAINER_RUNTIME,
     ContainerRuntime,
+    ProjectOwnership,
     RuntimeSelectionError,
     compose_argv,
     ensure_compose_plugin,
@@ -657,26 +658,26 @@ def _select_runtime() -> ContainerRuntime | None:
     return runtime
 
 
-def _down_targets(compose_file: Path) -> list[ContainerRuntime] | None:
+def _down_targets(compose_file: Path) -> ProjectOwnership | None:
     # An explicit runtime wins. Otherwise stop whichever runtime still has the project.
     load_env_file(None)
     if os.environ.get(ENV_CONTAINER_RUNTIME, "").strip():
         runtime = _select_runtime()
         if runtime is None:
             return None
-        return [runtime]
-    owners = runtimes_owning_project(compose_file)
-    if owners is None:
-        return None
-    if not owners:
+        return ProjectOwnership([runtime], False)
+    found = runtimes_owning_project(compose_file)
+    if not found.runtimes:
+        if found.listing_failed:
+            return None
         runtime = _select_runtime()
         if runtime is None:
             return None
-        return [runtime]
-    for runtime in owners:
+        return ProjectOwnership([runtime], False)
+    for runtime in found.runtimes:
         if not ensure_compose_plugin(runtime):
             return None
-    return owners
+    return found
 
 
 @cli.command()
@@ -824,12 +825,12 @@ def down(compose_file: Path | None, volumes: bool) -> None:
 
     console.print(f"\n[cyan]Stopping:[/cyan] {target_compose}")
 
-    targets = _down_targets(target_compose)
-    if targets is None:
+    planned = _down_targets(target_compose)
+    if planned is None:
         sys.exit(1)
 
     failed = False
-    for runtime in targets:
+    for runtime in planned.runtimes:
         cmd = compose_argv(runtime, target_compose, "down")
         if volumes:
             cmd.append("-v")
@@ -844,6 +845,12 @@ def down(compose_file: Path | None, volumes: bool) -> None:
             failed = True
     if failed:
         console.print("\n[bold red]Some services failed to stop.[/bold red]")
+        sys.exit(1)
+    if planned.listing_failed:
+        console.print(
+            "\n[yellow]Stopped the containers that could be listed. "
+            "Another runtime could not be checked.[/yellow]"
+        )
         sys.exit(1)
     console.print("\n[bold green]Services stopped successfully![/bold green]")
     sys.exit(0)

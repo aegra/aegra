@@ -7,6 +7,7 @@ import subprocess
 import time
 from enum import StrEnum
 from pathlib import Path
+from typing import NamedTuple
 
 from rich.console import Console
 from rich.progress import Progress, SpinnerColumn, TextColumn
@@ -25,6 +26,11 @@ class ContainerRuntime(StrEnum):
 
 class RuntimeSelectionError(Exception):
     """Raised when no usable Docker or Podman runtime can be selected."""
+
+
+class ProjectOwnership(NamedTuple):
+    runtimes: list[ContainerRuntime]
+    listing_failed: bool
 
 
 def is_docker_installed() -> bool:
@@ -554,16 +560,18 @@ def project_container_ids(runtime: ContainerRuntime, compose_file: Path) -> list
     return [line.strip() for line in listed.stdout.splitlines() if line.strip()]
 
 
-def runtimes_owning_project(compose_file: Path) -> list[ContainerRuntime] | None:
-    """Runtimes that still have containers for this file. None if a listing failed."""
+def runtimes_owning_project(compose_file: Path) -> ProjectOwnership:
+    """Runtimes that still have containers. A failed listing does not drop the others."""
     owners: list[ContainerRuntime] = []
+    listing_failed = False
     for runtime in (ContainerRuntime.DOCKER, ContainerRuntime.PODMAN):
         found = project_container_ids(runtime, compose_file)
         if found is None:
-            return None
+            listing_failed = True
+            continue
         if found:
             owners.append(runtime)
-    return owners
+    return ProjectOwnership(owners, listing_failed)
 
 
 def find_compose_file() -> Path | None:

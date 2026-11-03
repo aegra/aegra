@@ -2,7 +2,7 @@
 
 Aegra CLI - Command-line interface for managing self-hosted agent deployments.
 
-Aegra is an open-source, self-hosted alternative to LangSmith Deployments. Use this CLI to initialize projects, run development servers, and manage Compose services. Docker is the default runtime. Set `AEGRA_CONTAINER_RUNTIME=podman` to use Podman.
+Aegra is an open-source, self-hosted alternative to LangSmith Deployments. Use this CLI to initialize projects, run development servers, and manage Compose services. With `AEGRA_CONTAINER_RUNTIME` unset, it uses a running Docker daemon, then Podman if it is installed, then Docker if it is installed but stopped. Set the variable to `docker` or `podman` to choose directly.
 
 ## Installation
 
@@ -188,7 +188,7 @@ aegra serve --config ./aegra.json
 
 ### `aegra up`
 
-Start services with Docker Compose or Podman Compose. Docker is the default. Set `AEGRA_CONTAINER_RUNTIME=podman` to run `podman compose`.
+Start services with Docker Compose or Podman Compose. With `AEGRA_CONTAINER_RUNTIME` unset, this uses a running Docker daemon, then Podman if it is installed, then Docker if it is installed but stopped. Set the variable to `docker` or `podman` to choose directly.
 
 ```bash
 aegra up [SERVICES...] [OPTIONS]
@@ -277,7 +277,7 @@ PORT=2026
 AEGRA_CONFIG=aegra.json
 
 # Container runtime for aegra dev/up/down: docker or podman.
-# Unset prefers a running Docker daemon, then Podman.
+# Unset prefers a running Docker daemon, then installed Podman, then installed Docker.
 # AEGRA_CONTAINER_RUNTIME=docker
 ```
 

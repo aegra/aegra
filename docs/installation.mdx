@@ -63,7 +63,7 @@ When you use `aegra dev` or `aegra up`, PostgreSQL starts through Compose. With 
 
 Docker is the default for local development (`aegra dev` starts a PostgreSQL container). For production, you can either run everything in Docker (`aegra up`) or provide an external database and run with `aegra serve`.
 
-Podman is an optional local runtime. Set `AEGRA_CONTAINER_RUNTIME=podman` and Aegra uses `podman compose` with the same Compose file. If that subcommand is missing, the CLI tells you to install the Podman Compose plugin. It does not call `podman-compose`.
+Podman is an optional local runtime. Aegra uses `podman compose` with the same Compose file when you set `AEGRA_CONTAINER_RUNTIME=podman`, or when the variable is unset, Docker is not running, and Podman is installed. If that subcommand is missing, the CLI tells you to install the Podman Compose plugin. It does not call `podman-compose`.
 
 ### Windows
 

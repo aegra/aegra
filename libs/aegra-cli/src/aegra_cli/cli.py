@@ -304,7 +304,8 @@ def dev(
     should run 'aegra dev' from your project root.
 
     By default, Aegra checks Docker or Podman and starts PostgreSQL if needed.
-    Docker is the default. Set AEGRA_CONTAINER_RUNTIME=podman to use Podman.
+    With AEGRA_CONTAINER_RUNTIME unset, it uses a running Docker daemon, then
+    installed Podman, then installed Docker. Set it to docker or podman to choose.
     Use --no-db-check to skip this behavior.
 
     Examples:
@@ -699,8 +700,9 @@ def up(compose_file: Path | None, build: bool, services: tuple[str, ...]) -> Non
     """Start services with Docker Compose or Podman Compose.
 
     Uses docker-compose.yml which contains both postgres and the API service.
-    Auto-generates Docker files if they don't exist. Docker is the default.
-    Set AEGRA_CONTAINER_RUNTIME=podman to use `podman compose`.
+    Auto-generates Docker files if they don't exist.
+    With AEGRA_CONTAINER_RUNTIME unset, it uses a running Docker daemon, then
+    installed Podman, then installed Docker. Set it to docker or podman to choose.
 
     Examples:
 

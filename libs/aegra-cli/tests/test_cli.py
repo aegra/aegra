@@ -1517,6 +1517,17 @@ class TestContainerRuntimeCli:
         assert "AEGRA_CONTAINER_RUNTIME" in dev_help.output
         assert "AEGRA_CONTAINER_RUNTIME" in up_help.output
 
+    @pytest.mark.parametrize("command", ["dev", "up"])
+    def test_help_describes_automatic_runtime_order(
+        self, cli_runner: CliRunner, command: str
+    ) -> None:
+        result = cli_runner.invoke(cli, [command, "--help"])
+
+        # Click rewraps help to the terminal width, so compare with whitespace collapsed.
+        help_text = " ".join(result.output.split())
+        assert result.exit_code == 0
+        assert "a running Docker daemon, then installed Podman, then installed Docker" in help_text
+
     def test_up_uses_podman_compose(self, cli_runner: CliRunner, tmp_path: Path) -> None:
         with cli_runner.isolated_filesystem(temp_dir=tmp_path):
             with (

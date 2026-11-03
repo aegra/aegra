@@ -3,7 +3,7 @@ title: "CLI reference"
 description: "Complete reference for all Aegra CLI commands."
 ---
 
-The Aegra CLI manages project creation, development servers, and Compose deployments. Docker is the default container runtime. Set `AEGRA_CONTAINER_RUNTIME=podman` to use Podman (`podman compose`) for `aegra dev`, `aegra up`, and `aegra down`.
+The Aegra CLI manages project creation, development servers, and Compose deployments. `aegra dev`, `aegra up`, and `aegra down` run `docker compose` or `podman compose`. With `AEGRA_CONTAINER_RUNTIME` unset, each command picks the runtime as described below. Set the variable to `docker` or `podman` to choose directly.
 
 ## Install
 

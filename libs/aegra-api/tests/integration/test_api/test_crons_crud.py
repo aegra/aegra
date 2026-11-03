@@ -539,6 +539,26 @@ class TestUpdateCronExtended:
         assert resp.status_code == 200
         assert resp.json()["metadata"] == {"new_key": "new_val"}
 
+    def test_explicit_null_end_time_reaches_service(self, client, mock_cron_service: AsyncMock) -> None:
+        mock_cron_service.update_cron.return_value = _cron_response(end_time=None)
+
+        resp = client.patch("/runs/crons/cron-001", json={"end_time": None})
+        assert resp.status_code == 200
+        assert resp.json()["end_time"] is None
+
+        request = mock_cron_service.update_cron.call_args.args[1]
+        assert "end_time" in request.model_fields_set
+        assert request.end_time is None
+
+    def test_omitted_end_time_not_in_fields_set(self, client, mock_cron_service: AsyncMock) -> None:
+        mock_cron_service.update_cron.return_value = _cron_response()
+
+        resp = client.patch("/runs/crons/cron-001", json={"enabled": False})
+        assert resp.status_code == 200
+
+        request = mock_cron_service.update_cron.call_args.args[1]
+        assert "end_time" not in request.model_fields_set
+
 
 # ---------------------------------------------------------------------------
 # DELETE /runs/crons/{cron_id} — extended

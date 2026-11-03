@@ -870,6 +870,39 @@ class TestUpdateCronExtended:
 
         resp = await cron_service.update_cron("cron-001", CronUpdate(end_time=end), "test-user")
         assert resp.end_time == end
+        execute_params = mock_session.execute.await_args_list[0].args[0].compile().params
+        assert execute_params["end_time"] == end
+
+    @pytest.mark.asyncio
+    async def test_clears_end_time_when_explicit_null(
+        self,
+        cron_service: CronService,
+        mock_session: AsyncMock,
+    ) -> None:
+        existing = _make_cron_orm(end_time=datetime.now(UTC) + timedelta(days=7))
+        updated = _make_cron_orm(end_time=None)
+        updated.end_time = None
+        mock_session.scalar.side_effect = [existing, updated]
+
+        resp = await cron_service.update_cron("cron-001", CronUpdate(end_time=None), "test-user")
+        assert resp.end_time is None
+        execute_params = mock_session.execute.await_args_list[0].args[0].compile().params
+        assert execute_params["end_time"] is None
+
+    @pytest.mark.asyncio
+    async def test_omitted_end_time_leaves_stored_value_unchanged(
+        self,
+        cron_service: CronService,
+        mock_session: AsyncMock,
+    ) -> None:
+        existing_end = datetime.now(UTC) + timedelta(days=7)
+        existing = _make_cron_orm(end_time=existing_end)
+        updated = _make_cron_orm(end_time=existing_end)
+        mock_session.scalar.side_effect = [existing, updated]
+
+        await cron_service.update_cron("cron-001", CronUpdate(enabled=False), "test-user")
+        execute_params = mock_session.execute.await_args_list[0].args[0].compile().params
+        assert "end_time" not in execute_params
 
     @pytest.mark.asyncio
     async def test_updates_on_run_completed(

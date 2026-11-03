@@ -10,6 +10,7 @@ real scheduler when fast cron settings are enabled.
 """
 
 import asyncio
+from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import uuid4
 
@@ -383,6 +384,46 @@ async def test_cron_update() -> None:
         assert updated["cron_id"] == cron_id
         assert updated["schedule"] == "0 8 * * *"
         assert updated["enabled"] is False
+    finally:
+        await client.crons.delete(cron_id)
+
+
+@pytest.mark.e2e
+@pytest.mark.asyncio
+async def test_cron_update_clears_end_time() -> None:
+    client = get_e2e_client()
+    marker = f"cron-clear-end-{uuid4()}"
+
+    assistant = await client.assistants.create(
+        graph_id="agent",
+        config={"tags": ["e2e-cron-clear-end"]},
+        if_exists="do_nothing",
+    )
+    assistant_id = assistant["assistant_id"]
+
+    end = datetime.now(UTC) + timedelta(days=7)
+    cron_run = await client.crons.create(
+        assistant_id,
+        schedule="0 4 * * *",
+        input={"messages": [{"role": "user", "content": marker}]},
+        end_time=end,
+        enabled=False,
+    )
+    assert "run_id" in cron_run
+    cron_id = await _find_cron_id_by_message(client=client, assistant_id=assistant_id, message=marker)
+    created = next(c for c in await client.crons.search(assistant_id=assistant_id) if c["cron_id"] == cron_id)
+    assert created["end_time"] is not None
+
+    try:
+        updated = await client.crons.update(cron_id, end_time=None)
+        assert updated["end_time"] is None
+
+        still_cleared = await client.crons.update(cron_id, enabled=False)
+        assert still_cleared["end_time"] is None
+
+        future = datetime.now(UTC) + timedelta(days=14)
+        reset = await client.crons.update(cron_id, end_time=future)
+        assert reset["end_time"] is not None
     finally:
         await client.crons.delete(cron_id)
 

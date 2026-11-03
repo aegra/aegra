@@ -1813,6 +1813,7 @@ class TestContainerRuntimeCli:
     def test_down_stops_every_runtime_that_owns_the_project(
         self, cli_runner: CliRunner, tmp_path: Path
     ) -> None:
+        """A project can end up on both runtimes, and stopping one would leave containers behind."""
         with cli_runner.isolated_filesystem(temp_dir=tmp_path):
             Path("docker-compose.yml").write_text("services: {}\n")
             with (
@@ -1915,9 +1916,11 @@ class TestContainerRuntimeCli:
     def test_down_exits_nonzero_when_a_runtime_check_hangs(
         self, cli_runner: CliRunner, tmp_path: Path
     ) -> None:
+        """A hung check does not prove a runtime is stopped, so reporting success would be wrong."""
         commands: list[list[str]] = []
 
         def fake_run(command: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+            """Docker answers every command and Podman hangs."""
             commands.append(command)
             if command[0] == "podman":
                 raise subprocess.TimeoutExpired(command, 10)
@@ -1942,9 +1945,11 @@ class TestContainerRuntimeCli:
     def test_down_stops_nothing_when_every_runtime_check_hangs(
         self, cli_runner: CliRunner, tmp_path: Path
     ) -> None:
+        """With no confirmed owner, stopping a guessed runtime could miss the real containers."""
         commands: list[list[str]] = []
 
         def fake_run(command: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+            """Every command hangs."""
             commands.append(command)
             raise subprocess.TimeoutExpired(command, 10)
 
@@ -1964,7 +1969,10 @@ class TestContainerRuntimeCli:
     def test_down_succeeds_when_the_other_runtime_reports_stopped(
         self, cli_runner: CliRunner, tmp_path: Path
     ) -> None:
+        """Unlike a hung check, a stopped runtime is a known state and must not fail the command."""
+
         def fake_run(command: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+            """Docker answers every command and Podman reports it is stopped."""
             if command[0] == "podman":
                 return subprocess.CompletedProcess(command, 1, stdout="", stderr="")
             return subprocess.CompletedProcess(command, 0, stdout="abc\n", stderr="")

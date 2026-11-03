@@ -645,6 +645,7 @@ def serve(ctx: click.Context, host: str, port: int, app: str, config_file: Path 
 
 
 def _select_runtime() -> ContainerRuntime | None:
+    """Pick a runtime and start it if needed. None means it is unusable, after printing why."""
     # up/down ignore .env unless we load it. Existing shell variables still win.
     load_env_file(None)
     try:
@@ -660,6 +661,7 @@ def _select_runtime() -> ContainerRuntime | None:
 
 
 def _down_targets(compose_file: Path) -> ProjectOwnership | None:
+    """Runtimes for `down` to stop. None means nothing can be stopped, after printing why."""
     # An explicit runtime wins. Otherwise stop whichever runtime still has the project.
     load_env_file(None)
     if os.environ.get(ENV_CONTAINER_RUNTIME, "").strip():

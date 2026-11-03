@@ -68,6 +68,7 @@ def is_podman_installed() -> bool:
 
 
 def is_podman_running() -> bool:
+    """True when `podman info` succeeds. A failed or hung check counts as not running."""
     if not is_podman_installed():
         return False
 
@@ -75,18 +76,21 @@ def is_podman_running() -> bool:
 
 
 def is_runtime_running(runtime: ContainerRuntime) -> bool:
+    """Dispatch to the Docker or Podman check. _probe_runtime tells stopped from unknown."""
     if runtime is ContainerRuntime.DOCKER:
         return is_docker_running()
     return is_podman_running()
 
 
 def runtime_label(runtime: ContainerRuntime) -> str:
+    """Human-readable name for messages. Commands use the enum value instead."""
     if runtime is ContainerRuntime.DOCKER:
         return "Docker"
     return "Podman"
 
 
 def _runtime_installed(runtime: ContainerRuntime) -> bool:
+    """Whether the CLI is on PATH. Says nothing about whether its daemon or machine is up."""
     if runtime is ContainerRuntime.DOCKER:
         return is_docker_installed()
     return is_podman_installed()
@@ -131,6 +135,7 @@ def compose_argv(
     compose_file: Path | None,
     *args: str,
 ) -> list[str]:
+    """Build a Compose command. Without compose_file, the CLI searches the working directory."""
     command = [runtime.value, "compose"]
     if compose_file is not None:
         command.extend(["-f", str(compose_file)])
@@ -139,6 +144,7 @@ def compose_argv(
 
 
 def podman_compose_available() -> bool:
+    """Whether `podman compose` runs. It relies on a provider installed separately from Podman."""
     try:
         result = subprocess.run(
             ["podman", "compose", "version"],
@@ -166,6 +172,7 @@ def ensure_compose_plugin(runtime: ContainerRuntime) -> bool:
 
 
 def missing_binary_message(runtime: ContainerRuntime) -> str:
+    """Rich-markup error for a CLI that vanished after the runtime was selected."""
     if runtime is ContainerRuntime.DOCKER:
         return (
             "[bold red]Error:[/bold red] docker is not installed or not in PATH.\n"
@@ -325,6 +332,7 @@ def _wait_for_docker_ready(timeout_seconds: int = 60) -> bool:
 
 
 def get_podman_start_instructions() -> str:
+    """Rich-markup steps for starting Podman by hand on this platform."""
     system = platform.system().lower()
     if system == "darwin":
         return (
@@ -346,6 +354,7 @@ def get_podman_start_instructions() -> str:
 
 
 def get_runtime_start_instructions(runtime: ContainerRuntime) -> str:
+    """Rich-markup steps for starting the given runtime by hand on this platform."""
     if runtime is ContainerRuntime.DOCKER:
         return get_docker_start_instructions()
     return get_podman_start_instructions()
@@ -419,6 +428,7 @@ def try_start_podman() -> bool:
 
 
 def try_start_runtime(runtime: ContainerRuntime) -> bool:
+    """Try to start the given runtime. True only once it responds."""
     if runtime is ContainerRuntime.DOCKER:
         return try_start_docker()
     return try_start_podman()
@@ -442,6 +452,7 @@ def ensure_runtime_ready(runtime: ContainerRuntime) -> bool:
 
 
 def _selected_runtime(runtime: ContainerRuntime | None) -> ContainerRuntime | None:
+    """Use the given runtime or resolve one. None means none is usable, after printing why."""
     if runtime is not None:
         return runtime
     try:
@@ -456,6 +467,7 @@ def is_postgres_container_running(
     *,
     runtime: ContainerRuntime | None = None,
 ) -> bool:
+    """Whether Compose lists postgres as running. Any failed check counts as not running."""
     selected = _selected_runtime(runtime)
     if selected is None:
         return False
@@ -490,6 +502,7 @@ def start_postgres_container(
     *,
     runtime: ContainerRuntime | None = None,
 ) -> bool:
+    """Start postgres with `up --wait`. False means it did not start, after printing why."""
     selected = _selected_runtime(runtime)
     if selected is None:
         return False
@@ -525,6 +538,7 @@ def _compose_ps_quiet(
     *,
     include_stopped: bool,
 ) -> subprocess.CompletedProcess[str] | None:
+    """Run `compose ps -q`. None means it never finished; a non-zero exit is left to the caller."""
     command = compose_argv(runtime, compose_file, "ps", "-q")
     if include_stopped:
         command = compose_argv(runtime, compose_file, "ps", "--all", "-q")

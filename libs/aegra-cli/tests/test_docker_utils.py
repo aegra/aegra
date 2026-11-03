@@ -624,6 +624,7 @@ class TestPodmanStart:
     """Start attempts and hints for Podman."""
 
     def test_instructions_for_each_platform(self) -> None:
+        """Each platform names its own start command, with a generic hint for unknown systems."""
         expectations = {
             "Darwin": "podman machine start",
             "Linux": "systemctl --user start podman.socket",
@@ -1190,9 +1191,11 @@ class TestProjectOwnership:
         assert "Could not list docker Compose containers" in captured.get()
 
     def test_owners_are_runtimes_with_containers(self, tmp_path: Path) -> None:
+        """A runtime with an empty listing is not an owner."""
         compose_file = tmp_path / "docker-compose.yml"
 
         def containers(runtime: ContainerRuntime, _compose_file: Path) -> list[str] | None:
+            """Podman has a container and Docker has none."""
             if runtime is ContainerRuntime.PODMAN:
                 return ["abc"]
             return []
@@ -1215,9 +1218,11 @@ class TestProjectOwnership:
             )
 
     def test_owners_none_when_a_listing_fails(self, tmp_path: Path) -> None:
+        """A failed listing is flagged without dropping the runtime that was listed."""
         compose_file = tmp_path / "docker-compose.yml"
 
         def containers(runtime: ContainerRuntime, _compose_file: Path) -> list[str] | None:
+            """Docker's listing fails and Podman has a container."""
             if runtime is ContainerRuntime.DOCKER:
                 return None
             return ["abc"]

@@ -177,7 +177,13 @@ updated = await client.crons.update(
 )
 ```
 
-Supported update fields: `schedule`, `enabled`, `input`, `config`, `metadata`, `timezone`, `durability`.
+Supported update fields: `schedule`, `enabled`, `input`, `config`, `metadata`, `timezone`, `durability`, `end_time`.
+
+A cron with an `end_time` is disabled once that time passes. Pass `end_time=None` to remove it, so the cron runs until you disable or delete it; leaving the argument out keeps the current end time:
+
+```python
+await client.crons.update(cron_id="<cron_id>", end_time=None)
+```
 
 ## Disabling and re-enabling
 

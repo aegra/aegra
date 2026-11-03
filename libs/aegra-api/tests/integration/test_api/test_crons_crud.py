@@ -185,6 +185,28 @@ class TestUpdateCron:
         )
         assert resp.status_code == 404
 
+    def test_null_end_time_reaches_the_service_as_an_explicit_clear(
+        self, client: TestClient, mock_cron_service: AsyncMock
+    ) -> None:
+        # What the SDK sends for crons.update(cron_id, end_time=None).
+        mock_cron_service.update_cron.return_value = _cron_response(end_time=None)
+
+        resp = client.patch("/runs/crons/cron-001", json={"end_time": None})
+
+        assert resp.status_code == 200
+        assert resp.json()["end_time"] is None
+        request = mock_cron_service.update_cron.await_args.args[1]
+        assert "end_time" in request.model_fields_set
+        assert request.end_time is None
+
+    def test_body_without_end_time_does_not_touch_it(self, client: TestClient, mock_cron_service: AsyncMock) -> None:
+        mock_cron_service.update_cron.return_value = _cron_response()
+
+        resp = client.patch("/runs/crons/cron-001", json={"enabled": False})
+
+        assert resp.status_code == 200
+        assert "end_time" not in mock_cron_service.update_cron.await_args.args[1].model_fields_set
+
 
 # ---------------------------------------------------------------------------
 # DELETE /runs/crons/{cron_id}  →  204

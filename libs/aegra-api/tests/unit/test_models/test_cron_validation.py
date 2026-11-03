@@ -70,6 +70,17 @@ class TestEndTimeMustBeFuture:
         with pytest.raises(ValidationError, match="future"):
             CronUpdate(end_time=datetime.now(UTC) - timedelta(days=365))
 
+    def test_update_accepts_null_end_time_and_marks_it_set(self) -> None:
+        req = CronUpdate.model_validate({"end_time": None})
+
+        assert req.end_time is None
+        assert "end_time" in req.model_fields_set
+
+    def test_update_leaves_an_omitted_end_time_unset(self) -> None:
+        req = CronUpdate.model_validate({"enabled": False})
+
+        assert "end_time" not in req.model_fields_set
+
 
 class TestPayloadSizeCap:
     def test_rejects_oversized_input(self, monkeypatch: pytest.MonkeyPatch) -> None:

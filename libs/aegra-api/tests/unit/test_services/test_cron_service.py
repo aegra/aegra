@@ -873,6 +873,38 @@ class TestUpdateCronExtended:
         assert resp.end_time == end
 
     @pytest.mark.asyncio
+    async def test_explicit_null_end_time_clears_it(
+        self,
+        cron_service: CronService,
+        mock_session: AsyncMock,
+    ) -> None:
+        # The SDK sends end_time: null for crons.update(cron_id, end_time=None).
+        existing = _make_cron_orm(end_time=datetime.now(UTC) + timedelta(days=7))
+        mock_session.scalar.side_effect = [existing, _make_cron_orm(end_time=None)]
+
+        resp = await cron_service.update_cron("cron-001", CronUpdate.model_validate({"end_time": None}), "test-user")
+
+        execute_params = mock_session.execute.await_args_list[0].args[0].compile().params
+        assert "end_time" in execute_params
+        assert execute_params["end_time"] is None
+        assert resp.end_time is None
+
+    @pytest.mark.asyncio
+    async def test_omitted_end_time_leaves_it_in_place(
+        self,
+        cron_service: CronService,
+        mock_session: AsyncMock,
+    ) -> None:
+        end = datetime.now(UTC) + timedelta(days=7)
+        existing = _make_cron_orm(end_time=end)
+        mock_session.scalar.side_effect = [existing, existing]
+
+        await cron_service.update_cron("cron-001", CronUpdate(enabled=False), "test-user")
+
+        execute_params = mock_session.execute.await_args_list[0].args[0].compile().params
+        assert "end_time" not in execute_params
+
+    @pytest.mark.asyncio
     async def test_updates_on_run_completed(
         self,
         cron_service: CronService,

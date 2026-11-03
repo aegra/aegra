@@ -28,7 +28,7 @@ dependencies = [
     "anyio>=4.14.2",
 
     # LangGraph
-    "langgraph>=1.0.3",
+    "langgraph>=1.2.16",
     "langgraph-sdk>=0.3.5",
     "langgraph-checkpoint-postgres>=3.2.0",
 
@@ -40,7 +40,7 @@ dependencies = [
     "alembic>=1.16.4",
 
     # Observability (OpenTelemetry)
-    "opentelemetry-api>=1.39.1",
+    "opentelemetry-api>=1.45.1",
     "opentelemetry-sdk>=1.39.1",
     "opentelemetry-exporter-otlp>=1.39.1",
     "openinference-instrumentation-langchain>=0.1.58",

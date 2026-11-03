@@ -334,7 +334,8 @@ class CronService:
             values["schedule"] = request.schedule
 
         # Simple scalar fields
-        if request.end_time is not None:
+        # The SDK sends an explicit null for end_time=None to clear the end time; omitting it keeps it.
+        if "end_time" in request.model_fields_set:
             values["end_time"] = request.end_time
         if request.on_run_completed is not None:
             values["on_run_completed"] = request.on_run_completed

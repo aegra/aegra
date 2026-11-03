@@ -187,6 +187,32 @@ class TestIsPostgresContainerRunning:
             assert "-f" in call_args
             assert str(compose_file) in call_args
 
+    def test_reports_timeout_when_compose_ps_times_out(self) -> None:
+        with (
+            patch(
+                "aegra_cli.utils.docker.subprocess.run",
+                side_effect=subprocess.TimeoutExpired(["podman", "compose", "ps"], 10),
+            ),
+            console.capture() as captured,
+        ):
+            assert is_postgres_container_running(runtime=ContainerRuntime.PODMAN) is False
+        output = " ".join(captured.get().split())
+        assert "Could not check PostgreSQL with podman" in output
+        assert "timed out" in output
+
+    def test_reports_missing_binary_when_compose_ps_cannot_run(self) -> None:
+        with (
+            patch(
+                "aegra_cli.utils.docker.subprocess.run",
+                side_effect=FileNotFoundError(2, "No such file or directory", "podman"),
+            ),
+            console.capture() as captured,
+        ):
+            assert is_postgres_container_running(runtime=ContainerRuntime.PODMAN) is False
+        output = " ".join(captured.get().split())
+        assert "Could not check PostgreSQL with podman" in output
+        assert "[Errno 2] No such file or directory" in output
+
 
 class TestFindComposeFile:
     """Tests for find_compose_file function."""
@@ -360,25 +386,34 @@ class TestPodmanDetection:
         ):
             assert is_podman_running() is False
 
-    def test_not_running_on_timeout(self) -> None:
+    def test_not_running_reports_timeout(self) -> None:
         with (
             patch("aegra_cli.utils.docker.is_podman_installed", return_value=True),
             patch(
                 "aegra_cli.utils.docker.subprocess.run",
-                side_effect=subprocess.TimeoutExpired("podman", 10),
+                side_effect=subprocess.TimeoutExpired(["podman", "info"], 10),
             ),
+            console.capture() as captured,
         ):
             assert is_podman_running() is False
+        output = " ".join(captured.get().split())
+        assert "Could not check Podman" in output
+        assert "['podman', 'info']" in output
+        assert "timed out" in output
 
-    def test_not_running_when_binary_disappears(self) -> None:
+    def test_not_running_reports_missing_binary(self) -> None:
         with (
             patch("aegra_cli.utils.docker.is_podman_installed", return_value=True),
             patch(
                 "aegra_cli.utils.docker.subprocess.run",
-                side_effect=FileNotFoundError("podman"),
+                side_effect=FileNotFoundError(2, "No such file or directory", "podman"),
             ),
+            console.capture() as captured,
         ):
             assert is_podman_running() is False
+        output = " ".join(captured.get().split())
+        assert "Could not check Podman" in output
+        assert "[Errno 2] No such file or directory" in output
 
     def test_runtime_running_follows_each_cli(self) -> None:
         with (
@@ -505,19 +540,31 @@ class TestComposeCommand:
         with patch("aegra_cli.utils.docker.subprocess.run", return_value=_completed(1)):
             assert podman_compose_available() is False
 
-    def test_podman_compose_version_timeout(self) -> None:
-        with patch(
-            "aegra_cli.utils.docker.subprocess.run",
-            side_effect=subprocess.TimeoutExpired("podman", 10),
+    def test_podman_compose_version_reports_timeout(self) -> None:
+        with (
+            patch(
+                "aegra_cli.utils.docker.subprocess.run",
+                side_effect=subprocess.TimeoutExpired(["podman", "compose", "version"], 10),
+            ),
+            console.capture() as captured,
         ):
             assert podman_compose_available() is False
+        output = " ".join(captured.get().split())
+        assert "Could not check Podman Compose" in output
+        assert "timed out" in output
 
-    def test_podman_compose_version_missing_binary(self) -> None:
-        with patch(
-            "aegra_cli.utils.docker.subprocess.run",
-            side_effect=FileNotFoundError("podman"),
+    def test_podman_compose_version_reports_missing_binary(self) -> None:
+        with (
+            patch(
+                "aegra_cli.utils.docker.subprocess.run",
+                side_effect=FileNotFoundError(2, "No such file or directory", "podman"),
+            ),
+            console.capture() as captured,
         ):
             assert podman_compose_available() is False
+        output = " ".join(captured.get().split())
+        assert "Could not check Podman Compose" in output
+        assert "[Errno 2] No such file or directory" in output
 
     def test_docker_skips_podman_plugin_check(self) -> None:
         with patch("aegra_cli.utils.docker.podman_compose_available") as mock_check:
@@ -657,15 +704,33 @@ class TestPodmanStart:
             assert try_start_podman() is False
             mock_run.assert_not_called()
 
-    def test_returns_false_when_start_command_times_out(self) -> None:
+    def test_reports_timeout_when_start_command_times_out(self) -> None:
         with (
             patch("aegra_cli.utils.docker.platform.system", return_value="Darwin"),
             patch(
                 "aegra_cli.utils.docker.subprocess.run",
-                side_effect=subprocess.TimeoutExpired("podman", 60),
+                side_effect=subprocess.TimeoutExpired(["podman", "machine", "start"], 60),
             ),
+            console.capture() as captured,
         ):
             assert try_start_podman() is False
+        output = " ".join(captured.get().split())
+        assert "Could not start Podman" in output
+        assert "timed out" in output
+
+    def test_reports_denial_when_start_command_is_not_permitted(self) -> None:
+        with (
+            patch("aegra_cli.utils.docker.platform.system", return_value="Linux"),
+            patch(
+                "aegra_cli.utils.docker.subprocess.run",
+                side_effect=PermissionError(13, "Permission denied", "systemctl"),
+            ),
+            console.capture() as captured,
+        ):
+            assert try_start_podman() is False
+        output = " ".join(captured.get().split())
+        assert "Could not start Podman" in output
+        assert "[Errno 13] Permission denied" in output
 
     def test_try_start_runtime_delegates(self) -> None:
         with (

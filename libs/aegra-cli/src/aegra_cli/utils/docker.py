@@ -72,7 +72,8 @@ def is_podman_running() -> bool:
             timeout=10,
         )
         return result.returncode == 0
-    except (subprocess.TimeoutExpired, FileNotFoundError):
+    except (subprocess.TimeoutExpired, FileNotFoundError) as exc:
+        console.print(f"[yellow]Could not check Podman: {exc}[/yellow]")
         return False
 
 
@@ -147,7 +148,8 @@ def podman_compose_available() -> bool:
             capture_output=True,
             timeout=10,
         )
-    except (subprocess.TimeoutExpired, FileNotFoundError):
+    except (subprocess.TimeoutExpired, FileNotFoundError) as exc:
+        console.print(f"[yellow]Could not check Podman Compose: {exc}[/yellow]")
         return False
     return result.returncode == 0
 
@@ -413,7 +415,8 @@ def try_start_podman() -> bool:
             )
             if started.returncode == 0:
                 return _wait_for_podman_ready()
-    except (subprocess.TimeoutExpired, FileNotFoundError, PermissionError):
+    except (subprocess.TimeoutExpired, FileNotFoundError, PermissionError) as exc:
+        console.print(f"[yellow]Could not start Podman: {exc}[/yellow]")
         return False
     return False
 
@@ -476,7 +479,8 @@ def is_postgres_container_running(
             text=True,
             timeout=10,
         )
-    except (subprocess.TimeoutExpired, FileNotFoundError):
+    except (subprocess.TimeoutExpired, FileNotFoundError) as exc:
+        console.print(f"[yellow]Could not check PostgreSQL with {selected.value}: {exc}[/yellow]")
         return False
     if result.returncode != 0:
         return False

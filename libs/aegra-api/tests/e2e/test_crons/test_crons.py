@@ -402,19 +402,19 @@ async def test_cron_update_clears_end_time() -> None:
     assistant_id = assistant["assistant_id"]
 
     end = datetime.now(UTC) + timedelta(days=7)
-    cron_run = await client.crons.create(
-        assistant_id,
-        schedule="0 4 * * *",
-        input={"messages": [{"role": "user", "content": marker}]},
-        end_time=end,
-        enabled=False,
-    )
-    assert "run_id" in cron_run
-    cron_id = await _find_cron_id_by_message(client=client, assistant_id=assistant_id, message=marker)
-    created = next(c for c in await client.crons.search(assistant_id=assistant_id) if c["cron_id"] == cron_id)
-    assert created["end_time"] is not None
-
+    cron_id: str | None = None
     try:
+        created = await client.crons.create(
+            assistant_id,
+            schedule="0 4 * * *",
+            input={"messages": [{"role": "user", "content": marker}]},
+            end_time=end,
+            enabled=False,
+        )
+        assert "cron_id" in created
+        cron_id = created["cron_id"]
+        assert created["end_time"] is not None
+
         updated = await client.crons.update(cron_id, end_time=None)
         assert updated["end_time"] is None
 
@@ -425,7 +425,8 @@ async def test_cron_update_clears_end_time() -> None:
         reset = await client.crons.update(cron_id, end_time=future)
         assert reset["end_time"] is not None
     finally:
-        await client.crons.delete(cron_id)
+        if cron_id is not None:
+            await client.crons.delete(cron_id)
 
 
 @pytest.mark.e2e

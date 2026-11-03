@@ -20,6 +20,7 @@ from aegra_cli.cli import (
 from aegra_cli.env import load_env_file
 from aegra_cli.utils.docker import (
     ContainerRuntime,
+    RuntimeSelectionError,
     ensure_compose_plugin,
     resolve_container_runtime,
 )
@@ -1779,6 +1780,21 @@ class TestContainerRuntimeCli:
         assert result.exit_code == 0, result.output
         assert mock_run.call_args.args[0][0] == "podman"
         mock_owners.assert_not_called()
+
+    def test_down_stops_when_explicit_runtime_cannot_be_selected(
+        self, cli_runner: CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("AEGRA_CONTAINER_RUNTIME", "podman")
+        with cli_runner.isolated_filesystem(temp_dir=tmp_path):
+            Path("docker-compose.yml").write_text("services: {}\n")
+            with patch(
+                "aegra_cli.cli.resolve_container_runtime",
+                side_effect=RuntimeSelectionError("Podman is not installed"),
+            ):
+                result = cli_runner.invoke(cli, ["down"])
+
+        assert result.exit_code == 1
+        assert "Podman is not installed" in result.output
 
     def test_down_stops_every_runtime_that_owns_the_project(
         self, cli_runner: CliRunner, tmp_path: Path

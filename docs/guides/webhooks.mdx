@@ -47,6 +47,12 @@ Each run schedules one webhook delivery, after its final status is saved:
 
 Whoever saves the final status schedules the delivery, so two processes never both report the same run. Delivery itself is [best effort](#delivery): it can be dropped, and a retry after a timeout can reach a receiver that already handled the first attempt, so deduplicate by `run_id`. A run that a worker hands back (lease loss, shutdown drain) fires when it finishes on the worker that completes it. A run cancelled while it executes reports the state it reached and its `run_started_at`. A run cancelled before it started, or whose worker stopped renewing its lease, fires `interrupted` from the cancel request with `values` and `run_started_at` set to `null`.
 
+Deleting a thread, or a run with `force=1`, cancels its active runs first, so each of them fires `interrupted` before its row is removed. When the run executes in another server process, that webhook comes from the delete request with `values` and `run_started_at` set to `null`.
+
+<Note>
+Deleting an assistant removes its runs without cancelling them, so an assistant's runs that are still active when it is deleted send no webhook. Cancel them first if you need their results.
+</Note>
+
 ## Payload
 
 The body is the run in LangGraph's webhook format:

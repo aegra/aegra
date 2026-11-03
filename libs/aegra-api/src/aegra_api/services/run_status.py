@@ -18,6 +18,7 @@ from aegra_api.core.orm import Run as RunORM
 from aegra_api.core.orm import Thread as ThreadORM
 from aegra_api.core.orm import _get_session_maker
 from aegra_api.core.serializers import GeneralSerializer
+from aegra_api.services.webhook_delivery import report_cancelled_run
 from aegra_api.utils.status_compat import validate_run_status, validate_thread_status
 
 logger = structlog.getLogger(__name__)
@@ -203,6 +204,23 @@ async def finalize_run(
 
     logger.info("Finalized run", run_id=run_id, status=validated_run, thread_status=validated_thread)
     return True
+
+
+async def interrupt_run_before_delete(run: RunORM) -> None:
+    """Commit the cancel of an active run whose row is about to be deleted, and report it.
+
+    A worker in another process would find the row gone and could neither finalize nor report the run.
+    """
+    if await finalize_run(
+        run.run_id, run.thread_id, user_id=run.user_id, status="interrupted", thread_status="idle", output={}
+    ):
+        report_cancelled_run(
+            run.execution_params,
+            run_id=run.run_id,
+            thread_id=run.thread_id,
+            assistant_id=run.assistant_id,
+            created_at=run.created_at,
+        )
 
 
 def _safe_serialize(output: Any, run_id: str) -> Any:

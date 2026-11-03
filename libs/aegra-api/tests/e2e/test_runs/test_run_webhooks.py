@@ -233,6 +233,34 @@ async def test_run_cancelled_mid_execution_reports_its_progress(receiver: _Recei
 
 @pytest.mark.e2e
 @pytest.mark.asyncio
+@pytest.mark.parametrize("deleted", ["thread", "run"])
+async def test_deleting_a_running_run_still_reports_it_once(receiver: _Receiver, deleted: str) -> None:
+    client = get_e2e_client()
+    assistant = await client.assistants.create(graph_id="stress_test", if_exists="do_nothing")
+    thread = await client.threads.create()
+
+    run = await _create_run(
+        client,
+        thread["thread_id"],
+        assistant["assistant_id"],
+        input=_stress_input(delay=1, steps=10),
+        webhook=receiver.url,
+    )
+    await _wait_for_checkpointed_steps(client, thread["thread_id"], 1)
+    if deleted == "thread":
+        await client.threads.delete(thread["thread_id"])
+    else:
+        await client.http.delete(f"/threads/{thread['thread_id']}/runs/{run['run_id']}", params={"force": 1})
+    payload, _headers = await receiver.wait_for(run["run_id"])
+    # The delete and the run's executor can both see it end; only the one that commits it reports.
+    await asyncio.sleep(2)
+
+    assert payload["status"] == "interrupted"
+    assert len(receiver.deliveries(run["run_id"])) == 1
+
+
+@pytest.mark.e2e
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("webhook", "reason"),
     [

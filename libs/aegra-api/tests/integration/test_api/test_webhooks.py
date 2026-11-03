@@ -8,6 +8,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from aegra_api.api import crons as crons_module
+from aegra_api.api import threads as threads_module
 from aegra_api.core.orm import Run as RunORM
 from aegra_api.core.orm import get_session
 from aegra_api.models.auth import User
@@ -15,7 +16,7 @@ from aegra_api.models.run_job import RunBehavior, RunIdentity, RunJob
 from aegra_api.services import webhook_policy
 from aegra_api.services.cron_service import CronService, get_cron_service
 from tests.fixtures.clients import create_test_app, make_client
-from tests.fixtures.database import DummySessionBase
+from tests.fixtures.database import DummyScalarResult, DummySessionBase
 from tests.fixtures.session_fixtures import override_session_dependency
 from tests.fixtures.test_helpers import DummyRun, DummyThread
 
@@ -185,13 +186,16 @@ class TestCancelledRunWebhook:
         with (
             patch("aegra_api.api.runs.streaming_service") as mock_streaming,
             patch("aegra_api.api.runs.interrupt_unowned_run", new_callable=AsyncMock, return_value=reconciled),
-            patch("aegra_api.api.runs.notify_run_finished") as mock_notify,
+            patch("aegra_api.services.webhook_delivery.notify_run_finished") as mock_notify,
             patch.dict(
                 "aegra_api.api.runs.active_runs",
                 {"test-run-123": MagicMock()} if executing_here or listed_in_active_runs else {},
             ),
-            patch("aegra_api.api.runs.executing_runs", {"test-run-123"} if executing_here else set()),
-            patch("aegra_api.api.runs.reconciled_run_cancellations", handed_over if handed_over is not None else set()),
+            patch("aegra_api.services.webhook_delivery.executing_runs", {"test-run-123"} if executing_here else set()),
+            patch(
+                "aegra_api.services.webhook_delivery.reconciled_run_cancellations",
+                handed_over if handed_over is not None else set(),
+            ),
         ):
             mock_streaming.cancel_run = AsyncMock()
             mock_streaming.interrupt_run = AsyncMock()
@@ -244,6 +248,99 @@ class TestCancelledRunWebhook:
 
         mock_notify.assert_called_once()
         assert handed_over == set()
+
+
+class TestDeletedRunWebhook:
+    """A delete that removes an active run's row commits its cancel first, so the run is still reported."""
+
+    @staticmethod
+    def _recorders(events: list[str]) -> tuple[AsyncMock, AsyncMock]:
+        async def _interrupt(run: Any) -> None:
+            events.append(f"interrupt {run.run_id}")
+
+        async def _cancel(run_id: str) -> bool:
+            events.append(f"cancel {run_id}")
+            return True
+
+        return AsyncMock(side_effect=_interrupt), AsyncMock(side_effect=_cancel)
+
+    def test_thread_delete_commits_each_active_runs_cancel_before_deleting(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # In prod the worker may live in another process; once the row is gone it can neither finalize nor report.
+        app = create_test_app(include_runs=False, include_threads=True)
+        thread = DummyThread(status="busy")
+        thread.metadata_json = {}
+        run = DummyRun(status="running")
+        events: list[str] = []
+
+        class Session(DummySessionBase):
+            async def scalar(self, _stmt: Any) -> Any:
+                return thread
+
+            async def scalars(self, _stmt: Any = None) -> DummyScalarResult:
+                return DummyScalarResult([run])
+
+            async def delete(self, _obj: Any) -> None:
+                events.append("delete thread")
+
+        db = MagicMock()
+        db.get_checkpointer.return_value = AsyncMock()
+        monkeypatch.setattr(threads_module, "db_manager", db)
+        override_session_dependency(app, Session)
+        client = make_client(app)
+        mock_interrupt, mock_cancel = self._recorders(events)
+
+        with (
+            patch("aegra_api.api.threads.interrupt_run_before_delete", mock_interrupt),
+            patch("aegra_api.api.threads.streaming_service.cancel_run", mock_cancel),
+        ):
+            resp = client.delete("/threads/test-thread-123")
+
+        assert resp.status_code == 200
+        mock_interrupt.assert_awaited_once_with(run)
+        assert events == ["interrupt test-run-123", "cancel test-run-123", "delete thread"]
+
+    @staticmethod
+    def _delete_run(status: str, events: list[str]) -> tuple[int, AsyncMock, DummyRun]:
+        app = create_test_app(include_runs=True, include_threads=False)
+        run = DummyRun(status=status)
+
+        class Session(DummySessionBase):
+            async def scalar(self, _stmt: Any) -> Any:
+                return run
+
+            async def execute(self, _stmt: Any) -> None:
+                events.append("delete run")
+
+        override_session_dependency(app, Session)
+        client = make_client(app)
+        mock_interrupt, mock_cancel = TestDeletedRunWebhook._recorders(events)
+
+        with (
+            patch("aegra_api.api.runs.interrupt_run_before_delete", mock_interrupt),
+            patch("aegra_api.api.runs.streaming_service.cancel_run", mock_cancel),
+        ):
+            resp = client.delete("/threads/test-thread-123/runs/test-run-123?force=1")
+        return resp.status_code, mock_interrupt, run
+
+    def test_forced_delete_of_an_active_run_commits_its_cancel_before_deleting(self) -> None:
+        events: list[str] = []
+
+        status_code, mock_interrupt, run = self._delete_run("running", events)
+
+        assert status_code == 204
+        mock_interrupt.assert_awaited_once_with(run)
+        assert events == ["interrupt test-run-123", "cancel test-run-123", "delete run"]
+
+    def test_deleting_a_finished_run_reports_nothing(self) -> None:
+        events: list[str] = []
+
+        status_code, mock_interrupt, _run = self._delete_run("success", events)
+
+        assert status_code == 204
+        mock_interrupt.assert_not_awaited()
+        assert events == ["delete run"]
 
 
 class TestStatelessRunWebhook:

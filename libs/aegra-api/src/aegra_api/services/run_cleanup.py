@@ -18,6 +18,7 @@ from aegra_api.core.orm import Run as RunORM
 from aegra_api.core.orm import Thread as ThreadORM
 from aegra_api.core.orm import _get_session_maker
 from aegra_api.services.executor import executor
+from aegra_api.services.run_status import interrupt_run_before_delete
 from aegra_api.services.streaming_service import streaming_service
 
 logger = structlog.getLogger(__name__)
@@ -47,6 +48,7 @@ async def delete_thread_by_id(thread_id: str, user_id: str) -> None:
 
         for run in active_runs_list:
             run_id = run.run_id
+            await interrupt_run_before_delete(run)
             await streaming_service.cancel_run(run_id)
             task = active_runs.pop(run_id, None)
             if task and not task.done():

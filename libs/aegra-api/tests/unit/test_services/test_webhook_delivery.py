@@ -22,6 +22,7 @@ from aegra_api.services.webhook_delivery import (
     build_run_payload,
     notify_run_finished,
     redact_webhook_url,
+    report_cancelled_run,
 )
 from aegra_api.services.webhook_policy import WebhookDNSError, WebhookUrlError, get_webhook_settings, webhooks_enabled
 
@@ -619,3 +620,47 @@ class TestNotifyRunFinished:
             notify_run_finished(_job(), _outcome())
 
         dispatcher.submit.assert_called_once()
+
+
+class TestReportCancelledRun:
+    @staticmethod
+    def _report(*, executing: set[str], handed_over: set[str], webhook: str | None = _WEBHOOK) -> MagicMock:
+        with (
+            patch.object(webhook_delivery, "executing_runs", executing),
+            patch.object(webhook_delivery, "reconciled_run_cancellations", handed_over),
+            patch.object(webhook_delivery, "notify_run_finished") as mock_notify,
+        ):
+            report_cancelled_run(
+                _job(webhook=webhook).to_execution_params(),
+                run_id="run-1",
+                thread_id="thread-1",
+                assistant_id="assistant-1",
+                created_at=_CREATED_AT,
+            )
+        return mock_notify
+
+    def test_run_executing_here_is_handed_to_its_executor(self) -> None:
+        handed_over: set[str] = set()
+
+        mock_notify = self._report(executing={"run-1"}, handed_over=handed_over)
+
+        mock_notify.assert_not_called()
+        assert handed_over == {"run-1"}
+
+    def test_run_not_executing_here_is_reported_now_as_interrupted(self) -> None:
+        handed_over: set[str] = set()
+
+        mock_notify = self._report(executing=set(), handed_over=handed_over)
+
+        job, outcome = mock_notify.call_args.args
+        assert job.identity.run_id == "run-1"
+        assert job.identity.created_at == _CREATED_AT
+        assert outcome.status == "interrupted"
+        assert outcome.values is None
+        assert outcome.run_started_at is None
+        assert handed_over == set()
+
+    def test_run_without_a_webhook_reports_nothing(self) -> None:
+        mock_notify = self._report(executing=set(), handed_over=set(), webhook=None)
+
+        mock_notify.assert_not_called()

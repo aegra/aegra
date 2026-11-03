@@ -19,6 +19,7 @@ import httpx
 import structlog
 from pydantic import ValidationError
 
+from aegra_api.core.active_runs import executing_runs, reconciled_run_cancellations
 from aegra_api.core.serializers import GeneralSerializer
 from aegra_api.models.run_job import RunJob
 from aegra_api.services.webhook_policy import (
@@ -303,3 +304,21 @@ def notify_run_finished(job: RunJob, outcome: RunOutcome) -> None:
         webhook_dispatcher.submit(job, outcome)
     except RuntimeError:
         logger.exception("Could not schedule run webhook", run_id=job.identity.run_id)
+
+
+def report_cancelled_run(
+    params: dict[str, Any] | None,
+    *,
+    run_id: str,
+    thread_id: str,
+    assistant_id: str | None,
+    created_at: datetime | None,
+) -> None:
+    """Report a run that a cancel or delete request made terminal."""
+    if run_id in executing_runs:
+        # Still executing here: its executor reports it, with the values and start time it has.
+        reconciled_run_cancellations.add(run_id)
+        return
+    job = job_for_webhook(params, run_id=run_id, thread_id=thread_id, assistant_id=assistant_id, created_at=created_at)
+    if job is not None:
+        notify_run_finished(job, RunOutcome(status="interrupted"))

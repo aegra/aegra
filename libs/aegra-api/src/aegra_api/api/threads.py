@@ -42,6 +42,7 @@ from aegra_api.models import (
 )
 from aegra_api.models.errors import CONFLICT, NOT_FOUND, AgentProtocolError
 from aegra_api.models.search_limit import effective_search_limit
+from aegra_api.services.run_status import interrupt_run_before_delete
 from aegra_api.services.streaming_service import streaming_service
 from aegra_api.services.thread_state_service import ThreadStateService
 from aegra_api.services.thread_ttl import get_thread_ttl_config, prune_expired_threads_for_user, prune_threads_by_id
@@ -903,6 +904,7 @@ async def delete_thread(
         logger.info(f"Cancelling {len(active_runs_list)} active runs for thread {thread_id}")
         for run in active_runs_list:
             run_id = run.run_id
+            await interrupt_run_before_delete(run)
             await streaming_service.cancel_run(run_id)
             task = active_runs.pop(run_id, None)
             if task and not task.done():

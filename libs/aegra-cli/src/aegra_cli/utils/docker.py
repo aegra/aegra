@@ -33,6 +33,20 @@ class ProjectOwnership(NamedTuple):
     listing_failed: bool
 
 
+def _probe_runtime(runtime: ContainerRuntime) -> bool | None:
+    """Whether `<runtime> info` succeeds. None means the check itself could not finish."""
+    try:
+        result = subprocess.run(
+            [runtime.value, "info"],
+            capture_output=True,
+            timeout=10,
+        )
+    except (subprocess.TimeoutExpired, FileNotFoundError) as exc:
+        console.print(f"[yellow]Could not check {runtime_label(runtime)}: {exc}[/yellow]")
+        return None
+    return result.returncode == 0
+
+
 def is_docker_installed() -> bool:
     """Check if Docker CLI is installed and available in PATH."""
     return shutil.which("docker") is not None
@@ -46,15 +60,7 @@ def is_docker_running() -> bool:
     if not is_docker_installed():
         return False
 
-    try:
-        result = subprocess.run(
-            ["docker", "info"],
-            capture_output=True,
-            timeout=10,
-        )
-        return result.returncode == 0
-    except (subprocess.TimeoutExpired, FileNotFoundError):
-        return False
+    return _probe_runtime(ContainerRuntime.DOCKER) is True
 
 
 def is_podman_installed() -> bool:
@@ -65,16 +71,7 @@ def is_podman_running() -> bool:
     if not is_podman_installed():
         return False
 
-    try:
-        result = subprocess.run(
-            ["podman", "info"],
-            capture_output=True,
-            timeout=10,
-        )
-        return result.returncode == 0
-    except (subprocess.TimeoutExpired, FileNotFoundError) as exc:
-        console.print(f"[yellow]Could not check Podman: {exc}[/yellow]")
-        return False
+    return _probe_runtime(ContainerRuntime.PODMAN) is True
 
 
 def is_runtime_running(runtime: ContainerRuntime) -> bool:
@@ -545,7 +542,12 @@ def _compose_ps_quiet(
 
 def project_container_ids(runtime: ContainerRuntime, compose_file: Path) -> list[str] | None:
     """Container ids for this file, including stopped ones. None means the listing failed."""
-    if not _runtime_installed(runtime) or not is_runtime_running(runtime):
+    if not _runtime_installed(runtime):
+        return []
+    running = _probe_runtime(runtime)
+    if running is None:
+        return None
+    if not running:
         return []
     listed = _compose_ps_quiet(runtime, compose_file, include_stopped=True)
     if listed is None:

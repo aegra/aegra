@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import subprocess
 import sys
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -24,6 +25,7 @@ from aegra_cli.utils.docker import (
     RuntimeSelectionError,
     ensure_compose_plugin,
     resolve_container_runtime,
+    runtimes_owning_project,
 )
 
 
@@ -1909,3 +1911,72 @@ class TestContainerRuntimeCli:
         assert result.exit_code == 1
         assert mock_run.call_args.args[0][0] == "docker"
         assert "Another runtime" in result.output
+
+    def test_down_exits_nonzero_when_a_runtime_check_hangs(
+        self, cli_runner: CliRunner, tmp_path: Path
+    ) -> None:
+        commands: list[list[str]] = []
+
+        def fake_run(command: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+            commands.append(command)
+            if command[0] == "podman":
+                raise subprocess.TimeoutExpired(command, 10)
+            return subprocess.CompletedProcess(command, 0, stdout="abc\n", stderr="")
+
+        with cli_runner.isolated_filesystem(temp_dir=tmp_path):
+            Path("docker-compose.yml").write_text("services: {}\n")
+            with (
+                patch("aegra_cli.cli.runtimes_owning_project", runtimes_owning_project),
+                patch("aegra_cli.utils.docker.shutil.which", return_value="/usr/bin/runtime"),
+                patch("aegra_cli.cli.subprocess.run", side_effect=fake_run),
+            ):
+                result = cli_runner.invoke(cli, ["down"])
+
+        assert result.exit_code == 1
+        assert commands[-1][:2] == ["docker", "compose"]
+        assert commands[-1][-1] == "down"
+        assert "Could not check Podman" in result.output
+        assert "Another runtime" in result.output
+        assert "Services stopped successfully" not in result.output
+
+    def test_down_stops_nothing_when_every_runtime_check_hangs(
+        self, cli_runner: CliRunner, tmp_path: Path
+    ) -> None:
+        commands: list[list[str]] = []
+
+        def fake_run(command: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+            commands.append(command)
+            raise subprocess.TimeoutExpired(command, 10)
+
+        with cli_runner.isolated_filesystem(temp_dir=tmp_path):
+            Path("docker-compose.yml").write_text("services: {}\n")
+            with (
+                patch("aegra_cli.cli.runtimes_owning_project", runtimes_owning_project),
+                patch("aegra_cli.utils.docker.shutil.which", return_value="/usr/bin/runtime"),
+                patch("aegra_cli.cli.subprocess.run", side_effect=fake_run),
+            ):
+                result = cli_runner.invoke(cli, ["down"])
+
+        assert result.exit_code == 1
+        assert commands == [["docker", "info"], ["podman", "info"]]
+        assert "Nothing was stopped" in result.output
+
+    def test_down_succeeds_when_the_other_runtime_reports_stopped(
+        self, cli_runner: CliRunner, tmp_path: Path
+    ) -> None:
+        def fake_run(command: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+            if command[0] == "podman":
+                return subprocess.CompletedProcess(command, 1, stdout="", stderr="")
+            return subprocess.CompletedProcess(command, 0, stdout="abc\n", stderr="")
+
+        with cli_runner.isolated_filesystem(temp_dir=tmp_path):
+            Path("docker-compose.yml").write_text("services: {}\n")
+            with (
+                patch("aegra_cli.cli.runtimes_owning_project", runtimes_owning_project),
+                patch("aegra_cli.utils.docker.shutil.which", return_value="/usr/bin/runtime"),
+                patch("aegra_cli.cli.subprocess.run", side_effect=fake_run),
+            ):
+                result = cli_runner.invoke(cli, ["down"])
+
+        assert result.exit_code == 0
+        assert "Services stopped successfully" in result.output

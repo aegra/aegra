@@ -106,6 +106,34 @@ class TestIsDockerRunning:
 
             assert is_docker_running() is False
 
+    def test_reports_why_when_docker_info_times_out(self) -> None:
+        with (
+            patch("aegra_cli.utils.docker.is_docker_installed", return_value=True),
+            patch(
+                "aegra_cli.utils.docker.subprocess.run",
+                side_effect=subprocess.TimeoutExpired(["docker", "info"], 10),
+            ),
+            console.capture() as captured,
+        ):
+            assert is_docker_running() is False
+        output = " ".join(captured.get().split())
+        assert "Could not check Docker" in output
+        assert "timed out" in output
+
+    def test_reports_why_when_docker_binary_disappears(self) -> None:
+        with (
+            patch("aegra_cli.utils.docker.is_docker_installed", return_value=True),
+            patch(
+                "aegra_cli.utils.docker.subprocess.run",
+                side_effect=FileNotFoundError(2, "No such file or directory", "docker"),
+            ),
+            console.capture() as captured,
+        ):
+            assert is_docker_running() is False
+        output = " ".join(captured.get().split())
+        assert "Could not check Docker" in output
+        assert "[Errno 2] No such file or directory" in output
+
 
 class TestGetDockerStartInstructions:
     """Tests for get_docker_start_instructions function."""
@@ -995,7 +1023,7 @@ class TestProjectOwnership:
         compose_file = tmp_path / "docker-compose.yml"
         with (
             patch("aegra_cli.utils.docker._runtime_installed", return_value=True),
-            patch("aegra_cli.utils.docker.is_runtime_running", return_value=True),
+            patch("aegra_cli.utils.docker._probe_runtime", return_value=True),
             patch(
                 "aegra_cli.utils.docker.subprocess.run",
                 return_value=_completed(0, "abc\ndef\n"),
@@ -1010,7 +1038,7 @@ class TestProjectOwnership:
         compose_file = tmp_path / "docker-compose.yml"
         with (
             patch("aegra_cli.utils.docker._runtime_installed", return_value=True),
-            patch("aegra_cli.utils.docker.is_runtime_running", return_value=True),
+            patch("aegra_cli.utils.docker._probe_runtime", return_value=True),
             patch(
                 "aegra_cli.utils.docker.subprocess.run",
                 side_effect=[_completed(1, ""), _completed(0, "abc\n")],
@@ -1023,7 +1051,7 @@ class TestProjectOwnership:
     def test_empty_when_all_listing_finds_nothing(self, tmp_path: Path) -> None:
         with (
             patch("aegra_cli.utils.docker._runtime_installed", return_value=True),
-            patch("aegra_cli.utils.docker.is_runtime_running", return_value=True),
+            patch("aegra_cli.utils.docker._probe_runtime", return_value=True),
             patch("aegra_cli.utils.docker.subprocess.run", return_value=_completed(0, "")),
         ):
             assert project_container_ids(ContainerRuntime.DOCKER, tmp_path / "c.yml") == []
@@ -1031,7 +1059,7 @@ class TestProjectOwnership:
     def test_none_when_fallback_finds_no_running_containers(self, tmp_path: Path) -> None:
         with (
             patch("aegra_cli.utils.docker._runtime_installed", return_value=True),
-            patch("aegra_cli.utils.docker.is_runtime_running", return_value=True),
+            patch("aegra_cli.utils.docker._probe_runtime", return_value=True),
             patch(
                 "aegra_cli.utils.docker.subprocess.run",
                 side_effect=[_completed(1, ""), _completed(0, "")],
@@ -1046,7 +1074,7 @@ class TestProjectOwnership:
     ) -> None:
         with (
             patch("aegra_cli.utils.docker._runtime_installed", return_value=True),
-            patch("aegra_cli.utils.docker.is_runtime_running", return_value=True),
+            patch("aegra_cli.utils.docker._probe_runtime", return_value=True),
             patch(
                 "aegra_cli.utils.docker.subprocess.run",
                 side_effect=[_completed(1, ""), _completed(0, ""), _completed(0, "abc\n")],
@@ -1060,17 +1088,62 @@ class TestProjectOwnership:
         with patch("aegra_cli.utils.docker._runtime_installed", return_value=False):
             assert project_container_ids(ContainerRuntime.DOCKER, tmp_path / "c.yml") == []
 
-    def test_empty_when_runtime_is_not_running(self, tmp_path: Path) -> None:
+    def test_empty_when_runtime_reports_stopped(self, tmp_path: Path) -> None:
         with (
             patch("aegra_cli.utils.docker._runtime_installed", return_value=True),
-            patch("aegra_cli.utils.docker.is_runtime_running", return_value=False),
+            patch("aegra_cli.utils.docker.subprocess.run", return_value=_completed(1)) as mock_run,
         ):
             assert project_container_ids(ContainerRuntime.DOCKER, tmp_path / "c.yml") == []
+        mock_run.assert_called_once()
+        assert mock_run.call_args.args[0] == ["docker", "info"]
+
+    def test_none_when_runtime_check_times_out(self, tmp_path: Path) -> None:
+        with (
+            patch("aegra_cli.utils.docker._runtime_installed", return_value=True),
+            patch(
+                "aegra_cli.utils.docker.subprocess.run",
+                side_effect=subprocess.TimeoutExpired(["podman", "info"], 10),
+            ) as mock_run,
+            console.capture() as captured,
+        ):
+            assert project_container_ids(ContainerRuntime.PODMAN, tmp_path / "c.yml") is None
+        mock_run.assert_called_once()
+        assert "Could not check Podman" in captured.get()
+
+    def test_none_when_runtime_check_cannot_run(self, tmp_path: Path) -> None:
+        with (
+            patch("aegra_cli.utils.docker._runtime_installed", return_value=True),
+            patch(
+                "aegra_cli.utils.docker.subprocess.run",
+                side_effect=FileNotFoundError(2, "No such file or directory", "docker"),
+            ),
+            console.capture() as captured,
+        ):
+            assert project_container_ids(ContainerRuntime.DOCKER, tmp_path / "c.yml") is None
+        assert "Could not check Docker" in captured.get()
+
+    def test_hung_runtime_flags_listing_failure_and_keeps_other_owners(
+        self, tmp_path: Path
+    ) -> None:
+        with (
+            patch("aegra_cli.utils.docker._runtime_installed", return_value=True),
+            patch(
+                "aegra_cli.utils.docker.subprocess.run",
+                side_effect=[
+                    _completed(0),
+                    _completed(0, "abc\n"),
+                    subprocess.TimeoutExpired(["podman", "info"], 10),
+                ],
+            ),
+        ):
+            owners = runtimes_owning_project(tmp_path / "c.yml")
+
+        assert owners == ProjectOwnership([ContainerRuntime.DOCKER], True)
 
     def test_none_when_fallback_listing_times_out(self, tmp_path: Path) -> None:
         with (
             patch("aegra_cli.utils.docker._runtime_installed", return_value=True),
-            patch("aegra_cli.utils.docker.is_runtime_running", return_value=True),
+            patch("aegra_cli.utils.docker._probe_runtime", return_value=True),
             patch(
                 "aegra_cli.utils.docker.subprocess.run",
                 side_effect=[_completed(1, ""), subprocess.TimeoutExpired("docker", 10)],
@@ -1083,7 +1156,7 @@ class TestProjectOwnership:
     def test_none_when_ps_fails(self, tmp_path: Path) -> None:
         with (
             patch("aegra_cli.utils.docker._runtime_installed", return_value=True),
-            patch("aegra_cli.utils.docker.is_runtime_running", return_value=True),
+            patch("aegra_cli.utils.docker._probe_runtime", return_value=True),
             patch("aegra_cli.utils.docker.subprocess.run", return_value=_completed(1, "")),
             console.capture() as captured,
         ):
@@ -1093,7 +1166,7 @@ class TestProjectOwnership:
     def test_none_when_ps_times_out(self, tmp_path: Path) -> None:
         with (
             patch("aegra_cli.utils.docker._runtime_installed", return_value=True),
-            patch("aegra_cli.utils.docker.is_runtime_running", return_value=True),
+            patch("aegra_cli.utils.docker._probe_runtime", return_value=True),
             patch(
                 "aegra_cli.utils.docker.subprocess.run",
                 side_effect=subprocess.TimeoutExpired("docker", 10),
@@ -1106,7 +1179,7 @@ class TestProjectOwnership:
     def test_none_when_binary_disappears(self, tmp_path: Path) -> None:
         with (
             patch("aegra_cli.utils.docker._runtime_installed", return_value=True),
-            patch("aegra_cli.utils.docker.is_runtime_running", return_value=True),
+            patch("aegra_cli.utils.docker._probe_runtime", return_value=True),
             patch(
                 "aegra_cli.utils.docker.subprocess.run",
                 side_effect=FileNotFoundError("docker"),

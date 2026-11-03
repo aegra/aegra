@@ -33,7 +33,7 @@ async def main() -> None:
 
     # Schedule the agent to run every minute, bound to the thread.
     # Use POST /threads/{thread_id}/runs/crons so every tick reuses the same thread.
-    # The response is a Run (the first immediate run), not a Cron record.
+    # The response is the Cron record; the first tick fires on schedule.
     async with httpx.AsyncClient() as http:
         resp = await http.post(
             f"http://localhost:2026/threads/{thread_id}/runs/crons",
@@ -44,10 +44,11 @@ async def main() -> None:
             },
         )
         resp.raise_for_status()
-        first_run = resp.json()
+        cron = resp.json()
 
     print("Cron created  schedule=* * * * *")
-    print(f"First run:    {first_run['run_id']}")
+    print(f"Cron ID:      {cron['cron_id']}")
+    print(f"First run at: {cron['next_run_date']}")
     print()
     print("The agent will tick every minute and append a message to the thread.")
     print(f"Check history: GET /threads/{thread_id}/history")

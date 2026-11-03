@@ -42,15 +42,17 @@ from langgraph_sdk import get_client
 async def main():
     client = get_client(url="http://localhost:2026")
 
-    run = await client.crons.create(
+    cron = await client.crons.create(
         assistant_id="agent",
         schedule="0 9 * * *",   # every day at 09:00 UTC
         input={"messages": [{"role": "user", "content": "Good morning report"}]},
     )
-    print(f"Cron ID: {run['cron_id']}")
+    print(f"Cron ID: {cron['cron_id']}, first run at {cron['next_run_date']}")
 
 asyncio.run(main())
 ```
+
+Both create endpoints return the persisted `Cron`, as LangSmith Deployments does. No run starts at creation: the first run fires at `next_run_date`, the schedule's first occurrence.
 
 Aegra accepts the graph ID directly in `assistant_id` for cron creation and resolves it to the default assistant for that graph at request time.
 
@@ -58,7 +60,7 @@ Aegra accepts the graph ID directly in `assistant_id` for cron creation and reso
 
 Pass `durability` (or the deprecated `checkpoint_during`) to control when every fired run writes checkpoints. For example, `durability="exit"` writes one checkpoint per run. See [checkpoint durability](/guides/threads-and-state#checkpoint-durability).
 
-By default, each stateless cron run deletes its ephemeral thread after the run completes, including the immediate first run that is triggered when the cron is created.
+By default, each stateless cron run deletes its ephemeral thread after the run completes.
 
 <Note>
   The snippets below assume you are inside an `async def` function with an initialized `client`.
@@ -72,14 +74,14 @@ Stateless crons create a fresh thread for every execution. Control what happens 
 - `"keep"` preserves the thread so you can inspect its state or runs later.
 
 ```python
-run = await client.crons.create(
+cron = await client.crons.create(
         assistant_id="agent",
         schedule="0 9 * * *",
         on_run_completed="keep",
         input={"messages": [{"role": "user", "content": "Daily report"}]},
 )
 
-print(run["cron_id"])
+print(cron["cron_id"])
 ```
 
 When you keep stateless cron threads, you are responsible for cleaning them up. For long-lived deployments, use [thread TTL policies](/guides/threads-and-state#thread-ttl) or a separate cleanup job if you do not want preserved threads to accumulate.
@@ -91,13 +93,13 @@ Bind a cron to a specific thread so every firing continues the same conversation
 ```python
 thread = await client.threads.create()
 
-run = await client.crons.create_for_thread(
+cron = await client.crons.create_for_thread(
     thread_id=thread["thread_id"],
     assistant_id="agent",
     schedule="0 8 * * 1",   # every Monday at 08:00 UTC
     input={"messages": [{"role": "user", "content": "Weekly digest"}]},
 )
-print(f"Cron ID: {run['cron_id']}")
+print(f"Cron ID: {cron['cron_id']}")
 ```
 
 ## Cron expression format
@@ -191,7 +193,7 @@ await client.crons.update(cron_id="<cron_id>", enabled=True)
 
 Disabled crons are ignored by the scheduler but remain in the database.
 
-You can also create a cron in a paused state by passing `enabled=False` at creation. In that case the immediate first run is skipped and the response is the persisted `Cron` instead of a `Run`.
+You can also create a cron in a paused state by passing `enabled=False` at creation. It does not fire until you enable it.
 
 ## Deleting a cron
 

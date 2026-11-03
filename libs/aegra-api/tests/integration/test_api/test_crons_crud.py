@@ -14,7 +14,6 @@ from fastapi.testclient import TestClient
 from aegra_api.models.crons import CronResponse
 from aegra_api.services.cron_service import get_cron_service
 from tests.fixtures.clients import create_test_app, make_client
-from tests.fixtures.test_helpers import make_run
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -42,6 +41,14 @@ def _cron_response(**overrides: Any) -> CronResponse:
     }
     defaults.update(overrides)
     return CronResponse(**defaults)
+
+
+def _cron_row(**overrides: Any) -> Mock:
+    """Build an ORM-shaped cron row as returned by ``CronService.create_cron``."""
+    response = _cron_response(**overrides)
+    row = Mock(**response.model_dump(exclude={"metadata"}))
+    row.metadata_dict = response.metadata
+    return row
 
 
 # ---------------------------------------------------------------------------
@@ -78,25 +85,21 @@ def client(mock_cron_service: AsyncMock) -> Iterator[TestClient]:
 
     app.dependency_overrides[get_session] = _mock_session
 
-    with (
-        patch("aegra_api.api.crons.handle_event", new_callable=AsyncMock) as mock_handle,
-        patch("aegra_api.api.crons._trigger_first_run", new_callable=AsyncMock) as mock_trigger,
-    ):
+    with patch("aegra_api.api.crons.handle_event", new_callable=AsyncMock) as mock_handle:
         mock_handle.return_value = None
-        mock_trigger.return_value = make_run()
         yield make_client(app)
 
 
 # ---------------------------------------------------------------------------
-# POST /runs/crons  →  Run
+# POST /runs/crons  →  CronResponse
 # ---------------------------------------------------------------------------
 
 
 class TestCreateCron:
     """Test POST /runs/crons (stateless create)."""
 
-    def test_creates_cron_and_returns_run(self, client, mock_cron_service: AsyncMock) -> None:
-        mock_cron_service.create_cron.return_value = AsyncMock()
+    def test_creates_cron_and_returns_cron(self, client: TestClient, mock_cron_service: AsyncMock) -> None:
+        mock_cron_service.create_cron.return_value = _cron_row()
 
         resp = client.post(
             "/runs/crons",
@@ -109,11 +112,13 @@ class TestCreateCron:
 
         assert resp.status_code == 200
         data = resp.json()
-        assert "run_id" in data
+        assert data["cron_id"] == "cron-001"
+        assert data["next_run_date"] is not None
+        assert "run_id" not in data
         mock_cron_service.create_cron.assert_called_once()
 
-    def test_passes_metadata(self, client, mock_cron_service: AsyncMock) -> None:
-        mock_cron_service.create_cron.return_value = AsyncMock()
+    def test_passes_metadata(self, client: TestClient, mock_cron_service: AsyncMock) -> None:
+        mock_cron_service.create_cron.return_value = _cron_row()
 
         resp = client.post(
             "/runs/crons",
@@ -128,15 +133,15 @@ class TestCreateCron:
 
 
 # ---------------------------------------------------------------------------
-# POST /threads/{thread_id}/runs/crons  →  Run
+# POST /threads/{thread_id}/runs/crons  →  CronResponse
 # ---------------------------------------------------------------------------
 
 
 class TestCreateCronForThread:
     """Test POST /threads/{thread_id}/runs/crons."""
 
-    def test_creates_cron_for_thread(self, client, mock_cron_service: AsyncMock) -> None:
-        mock_cron_service.create_cron.return_value = AsyncMock()
+    def test_creates_cron_for_thread(self, client: TestClient, mock_cron_service: AsyncMock) -> None:
+        mock_cron_service.create_cron.return_value = _cron_row(thread_id="thread-001")
 
         resp = client.post(
             "/threads/thread-001/runs/crons",
@@ -149,7 +154,9 @@ class TestCreateCronForThread:
 
         assert resp.status_code == 200
         data = resp.json()
-        assert "run_id" in data
+        assert data["cron_id"] == "cron-001"
+        assert data["thread_id"] == "thread-001"
+        assert "run_id" not in data
         # Verify thread_id kwarg was passed
         call_kwargs = mock_cron_service.create_cron.call_args
         assert call_kwargs.kwargs.get("thread_id") == "thread-001"
@@ -163,7 +170,7 @@ class TestCreateCronForThread:
 class TestUpdateCron:
     """Test PATCH /runs/crons/{cron_id}."""
 
-    def test_updates_cron(self, client, mock_cron_service: AsyncMock) -> None:
+    def test_updates_cron(self, client: TestClient, mock_cron_service: AsyncMock) -> None:
         mock_cron_service.update_cron.return_value = _cron_response(schedule="*/10 * * * *")
 
         resp = client.patch(
@@ -176,7 +183,7 @@ class TestUpdateCron:
         assert data["cron_id"] == "cron-001"
         assert data["schedule"] == "*/10 * * * *"
 
-    def test_returns_404_when_not_found(self, client, mock_cron_service: AsyncMock) -> None:
+    def test_returns_404_when_not_found(self, client: TestClient, mock_cron_service: AsyncMock) -> None:
         mock_cron_service.update_cron.side_effect = HTTPException(404, "Cron 'missing' not found")
 
         resp = client.patch(
@@ -194,13 +201,13 @@ class TestUpdateCron:
 class TestDeleteCron:
     """Test DELETE /runs/crons/{cron_id}."""
 
-    def test_deletes_cron(self, client, mock_cron_service: AsyncMock) -> None:
+    def test_deletes_cron(self, client: TestClient, mock_cron_service: AsyncMock) -> None:
         mock_cron_service.delete_cron.return_value = None
 
         resp = client.delete("/runs/crons/cron-001")
         assert resp.status_code == 204
 
-    def test_returns_404_when_not_found(self, client, mock_cron_service: AsyncMock) -> None:
+    def test_returns_404_when_not_found(self, client: TestClient, mock_cron_service: AsyncMock) -> None:
         mock_cron_service.delete_cron.side_effect = HTTPException(404, "Cron 'missing' not found")
 
         resp = client.delete("/runs/crons/missing")
@@ -215,7 +222,7 @@ class TestDeleteCron:
 class TestSearchCrons:
     """Test POST /runs/crons/search."""
 
-    def test_returns_list(self, client, mock_cron_service: AsyncMock) -> None:
+    def test_returns_list(self, client: TestClient, mock_cron_service: AsyncMock) -> None:
         mock_cron_service.search_crons.return_value = [
             _cron_response(cron_id="c1"),
             _cron_response(cron_id="c2"),
@@ -229,7 +236,7 @@ class TestSearchCrons:
         assert data[0]["cron_id"] == "c1"
         assert data[1]["cron_id"] == "c2"
 
-    def test_returns_empty_list(self, client, mock_cron_service: AsyncMock) -> None:
+    def test_returns_empty_list(self, client: TestClient, mock_cron_service: AsyncMock) -> None:
         mock_cron_service.search_crons.return_value = []
 
         resp = client.post("/runs/crons/search", json={})
@@ -237,7 +244,7 @@ class TestSearchCrons:
         assert resp.status_code == 200
         assert resp.json() == []
 
-    def test_filters_by_assistant_id(self, client, mock_cron_service: AsyncMock) -> None:
+    def test_filters_by_assistant_id(self, client: TestClient, mock_cron_service: AsyncMock) -> None:
         mock_cron_service.search_crons.return_value = []
 
         resp = client.post(
@@ -265,7 +272,7 @@ class TestSearchCrons:
 class TestCountCrons:
     """Test POST /runs/crons/count."""
 
-    def test_returns_count(self, client, mock_cron_service: AsyncMock) -> None:
+    def test_returns_count(self, client: TestClient, mock_cron_service: AsyncMock) -> None:
         mock_cron_service.count_crons.return_value = 7
 
         resp = client.post("/runs/crons/count", json={})
@@ -273,7 +280,7 @@ class TestCountCrons:
         assert resp.status_code == 200
         assert resp.json() == 7
 
-    def test_returns_zero(self, client, mock_cron_service: AsyncMock) -> None:
+    def test_returns_zero(self, client: TestClient, mock_cron_service: AsyncMock) -> None:
         mock_cron_service.count_crons.return_value = 0
 
         resp = client.post("/runs/crons/count", json={})
@@ -281,7 +288,7 @@ class TestCountCrons:
         assert resp.status_code == 200
         assert resp.json() == 0
 
-    def test_filters_by_assistant_id(self, client, mock_cron_service: AsyncMock) -> None:
+    def test_filters_by_assistant_id(self, client: TestClient, mock_cron_service: AsyncMock) -> None:
         mock_cron_service.count_crons.return_value = 3
 
         resp = client.post("/runs/crons/count", json={"assistant_id": "asst-001"})
@@ -297,7 +304,7 @@ class TestCountCrons:
         request = mock_cron_service.count_crons.call_args.args[0]
         assert request.metadata == {"team": "research"}
 
-    def test_filters_by_thread_id(self, client, mock_cron_service: AsyncMock) -> None:
+    def test_filters_by_thread_id(self, client: TestClient, mock_cron_service: AsyncMock) -> None:
         mock_cron_service.count_crons.return_value = 1
 
         resp = client.post("/runs/crons/count", json={"thread_id": "t-001"})
@@ -313,9 +320,7 @@ class TestCountCrons:
 class TestCreateCronExtended:
     """Extended tests for POST /runs/crons."""
 
-    def test_with_all_fields(self, client, mock_cron_service: AsyncMock) -> None:
-        # enabled=False means the API skips the first run and returns a Cron
-        # response instead of a Run, so we feed a real ORM-shaped mock through.
+    def test_with_all_fields(self, client: TestClient, mock_cron_service: AsyncMock) -> None:
         cron_orm = Mock()
         cron_orm.cron_id = "cron-x"
         cron_orm.assistant_id = "asst-001"
@@ -353,14 +358,14 @@ class TestCreateCronExtended:
         assert body["cron_id"] == "cron-x"
         assert body["enabled"] is False
 
-    def test_missing_assistant_id_returns_422(self, client, mock_cron_service: AsyncMock) -> None:
+    def test_missing_assistant_id_returns_422(self, client: TestClient, mock_cron_service: AsyncMock) -> None:
         resp = client.post(
             "/runs/crons",
             json={"input": {"q": 1}, "schedule": "*/5 * * * *"},
         )
         assert resp.status_code == 422
 
-    def test_missing_schedule_returns_422(self, client, mock_cron_service: AsyncMock) -> None:
+    def test_missing_schedule_returns_422(self, client: TestClient, mock_cron_service: AsyncMock) -> None:
         resp = client.post(
             "/runs/crons",
             json={"assistant_id": "asst-001"},
@@ -377,7 +382,25 @@ class TestCreateCronExtended:
         assert resp.status_code == 422
         assert "input" in resp.text
 
-    def test_service_422_propagates(self, client, mock_cron_service: AsyncMock) -> None:
+    @pytest.mark.parametrize("path", ["/runs/crons", "/threads/thread-001/runs/crons"])
+    def test_non_mapping_configurable_returns_422(
+        self, client: TestClient, mock_cron_service: AsyncMock, path: str
+    ) -> None:
+        """No first run validates the payload any more, so create must reject it."""
+        resp = client.post(
+            path,
+            json={
+                "assistant_id": "asst-001",
+                "schedule": "*/5 * * * *",
+                "input": {},
+                "config": {"configurable": []},
+            },
+        )
+        assert resp.status_code == 422
+        assert "configurable" in resp.text
+        mock_cron_service.create_cron.assert_not_called()
+
+    def test_service_422_propagates(self, client: TestClient, mock_cron_service: AsyncMock) -> None:
         mock_cron_service.create_cron.side_effect = HTTPException(422, "Invalid cron schedule: bad")
 
         resp = client.post(
@@ -386,7 +409,7 @@ class TestCreateCronExtended:
         )
         assert resp.status_code == 422
 
-    def test_service_404_propagates(self, client, mock_cron_service: AsyncMock) -> None:
+    def test_service_404_propagates(self, client: TestClient, mock_cron_service: AsyncMock) -> None:
         mock_cron_service.create_cron.side_effect = HTTPException(404, "Assistant 'missing' not found")
 
         resp = client.post(
@@ -426,10 +449,7 @@ class TestCreateCronForThreadOwnership:
 
         app.dependency_overrides[get_session] = _mock_session
 
-        with (
-            patch("aegra_api.api.crons.handle_event", new_callable=AsyncMock),
-            patch("aegra_api.api.crons._trigger_first_run", new_callable=AsyncMock),
-        ):
+        with patch("aegra_api.api.crons.handle_event", new_callable=AsyncMock):
             test_client = make_client(app)
             resp = test_client.post(
                 "/threads/victim-thread/runs/crons",
@@ -441,7 +461,7 @@ class TestCreateCronForThreadOwnership:
 
     def test_returns_404_when_thread_missing(self, mock_cron_service: AsyncMock) -> None:
         # A thread-bound cron names an existing thread; a missing row must 404 at
-        # entry instead of letting _prepare_run silently create a ghost thread.
+        # entry instead of binding the cron to a thread that does not exist.
         app = create_test_app(include_runs=False, include_threads=False)
 
         from aegra_api.api import crons as crons_module
@@ -457,10 +477,7 @@ class TestCreateCronForThreadOwnership:
 
         app.dependency_overrides[get_session] = _mock_session
 
-        with (
-            patch("aegra_api.api.crons.handle_event", new_callable=AsyncMock),
-            patch("aegra_api.api.crons._trigger_first_run", new_callable=AsyncMock),
-        ):
+        with patch("aegra_api.api.crons.handle_event", new_callable=AsyncMock):
             test_client = make_client(app)
             resp = test_client.post(
                 "/threads/ghost-thread/runs/crons",
@@ -475,7 +492,7 @@ class TestCreateCronForThreadExtended:
     """Extended tests for POST /threads/{thread_id}/runs/crons."""
 
     def test_with_metadata(self, client: TestClient, mock_cron_service: AsyncMock) -> None:
-        mock_cron_service.create_cron.return_value = AsyncMock()
+        mock_cron_service.create_cron.return_value = _cron_row()
 
         resp = client.post(
             "/threads/t-001/runs/crons",
@@ -488,7 +505,7 @@ class TestCreateCronForThreadExtended:
         )
         assert resp.status_code == 200
 
-    def test_missing_body_returns_422(self, client, mock_cron_service: AsyncMock) -> None:
+    def test_missing_body_returns_422(self, client: TestClient, mock_cron_service: AsyncMock) -> None:
         resp = client.post("/threads/t-001/runs/crons", json={})
         assert resp.status_code == 422
 
@@ -501,7 +518,7 @@ class TestCreateCronForThreadExtended:
 class TestUpdateCronExtended:
     """Extended tests for PATCH /runs/crons/{cron_id}."""
 
-    def test_updates_multiple_fields(self, client, mock_cron_service: AsyncMock) -> None:
+    def test_updates_multiple_fields(self, client: TestClient, mock_cron_service: AsyncMock) -> None:
         mock_cron_service.update_cron.return_value = _cron_response(
             schedule="0 12 * * *",
             enabled=False,
@@ -523,13 +540,13 @@ class TestUpdateCronExtended:
         assert data["enabled"] is False
         assert data["on_run_completed"] == "keep"
 
-    def test_empty_update_body(self, client, mock_cron_service: AsyncMock) -> None:
+    def test_empty_update_body(self, client: TestClient, mock_cron_service: AsyncMock) -> None:
         mock_cron_service.update_cron.return_value = _cron_response()
 
         resp = client.patch("/runs/crons/cron-001", json={})
         assert resp.status_code == 200
 
-    def test_update_metadata(self, client, mock_cron_service: AsyncMock) -> None:
+    def test_update_metadata(self, client: TestClient, mock_cron_service: AsyncMock) -> None:
         mock_cron_service.update_cron.return_value = _cron_response(metadata={"new_key": "new_val"})
 
         resp = client.patch(
@@ -548,7 +565,7 @@ class TestUpdateCronExtended:
 class TestDeleteCronExtended:
     """Extended tests for DELETE /runs/crons/{cron_id}."""
 
-    def test_response_has_no_body(self, client, mock_cron_service: AsyncMock) -> None:
+    def test_response_has_no_body(self, client: TestClient, mock_cron_service: AsyncMock) -> None:
         mock_cron_service.delete_cron.return_value = None
 
         resp = client.delete("/runs/crons/cron-001")
@@ -564,7 +581,7 @@ class TestDeleteCronExtended:
 class TestSearchCronsExtended:
     """Extended tests for POST /runs/crons/search."""
 
-    def test_filters_by_thread_id(self, client, mock_cron_service: AsyncMock) -> None:
+    def test_filters_by_thread_id(self, client: TestClient, mock_cron_service: AsyncMock) -> None:
         mock_cron_service.search_crons.return_value = [
             _cron_response(thread_id="t-1"),
         ]
@@ -573,7 +590,7 @@ class TestSearchCronsExtended:
         assert resp.status_code == 200
         assert resp.json()[0]["thread_id"] == "t-1"
 
-    def test_filters_by_enabled(self, client, mock_cron_service: AsyncMock) -> None:
+    def test_filters_by_enabled(self, client: TestClient, mock_cron_service: AsyncMock) -> None:
         mock_cron_service.search_crons.return_value = [
             _cron_response(enabled=False),
         ]
@@ -582,7 +599,7 @@ class TestSearchCronsExtended:
         assert resp.status_code == 200
         assert resp.json()[0]["enabled"] is False
 
-    def test_pagination_params(self, client, mock_cron_service: AsyncMock) -> None:
+    def test_pagination_params(self, client: TestClient, mock_cron_service: AsyncMock) -> None:
         mock_cron_service.search_crons.return_value = []
 
         resp = client.post(
@@ -591,7 +608,7 @@ class TestSearchCronsExtended:
         )
         assert resp.status_code == 200
 
-    def test_sort_params(self, client, mock_cron_service: AsyncMock) -> None:
+    def test_sort_params(self, client: TestClient, mock_cron_service: AsyncMock) -> None:
         mock_cron_service.search_crons.return_value = []
 
         resp = client.post(
@@ -600,7 +617,7 @@ class TestSearchCronsExtended:
         )
         assert resp.status_code == 200
 
-    def test_response_includes_all_fields(self, client, mock_cron_service: AsyncMock) -> None:
+    def test_response_includes_all_fields(self, client: TestClient, mock_cron_service: AsyncMock) -> None:
         mock_cron_service.search_crons.return_value = [
             _cron_response(
                 cron_id="c-full",
@@ -633,8 +650,8 @@ class TestSearchCronsExtended:
 class TestTimezoneField:
     """Integration tests for the timezone field on create/update endpoints."""
 
-    def test_create_accepts_timezone(self, client, mock_cron_service: AsyncMock) -> None:
-        mock_cron_service.create_cron.return_value = AsyncMock()
+    def test_create_accepts_timezone(self, client: TestClient, mock_cron_service: AsyncMock) -> None:
+        mock_cron_service.create_cron.return_value = _cron_row()
 
         resp = client.post(
             "/runs/crons",
@@ -651,8 +668,8 @@ class TestTimezoneField:
         request_obj = call_args.args[0]
         assert request_obj.timezone == "America/New_York"
 
-    def test_create_for_thread_accepts_timezone(self, client, mock_cron_service: AsyncMock) -> None:
-        mock_cron_service.create_cron.return_value = AsyncMock()
+    def test_create_for_thread_accepts_timezone(self, client: TestClient, mock_cron_service: AsyncMock) -> None:
+        mock_cron_service.create_cron.return_value = _cron_row()
 
         resp = client.post(
             "/threads/t-001/runs/crons",
@@ -669,7 +686,7 @@ class TestTimezoneField:
         request_obj = call_args.args[0]
         assert request_obj.timezone == "Europe/London"
 
-    def test_update_accepts_timezone(self, client, mock_cron_service: AsyncMock) -> None:
+    def test_update_accepts_timezone(self, client: TestClient, mock_cron_service: AsyncMock) -> None:
         mock_cron_service.update_cron.return_value = _cron_response(payload={"timezone": "Asia/Tokyo"})
 
         resp = client.patch(
@@ -682,8 +699,8 @@ class TestTimezoneField:
         request_obj = call_args.args[1]
         assert request_obj.timezone == "Asia/Tokyo"
 
-    def test_create_without_timezone_is_valid(self, client, mock_cron_service: AsyncMock) -> None:
-        mock_cron_service.create_cron.return_value = AsyncMock()
+    def test_create_without_timezone_is_valid(self, client: TestClient, mock_cron_service: AsyncMock) -> None:
+        mock_cron_service.create_cron.return_value = _cron_row()
 
         resp = client.post(
             "/runs/crons",
@@ -700,7 +717,7 @@ class TestCronDurability:
     """Cron create/update declare the SDK's durability fields instead of dropping them."""
 
     def test_create_passes_durability_fields_to_service(self, client: TestClient, mock_cron_service: AsyncMock) -> None:
-        mock_cron_service.create_cron.return_value = AsyncMock()
+        mock_cron_service.create_cron.return_value = _cron_row()
 
         resp = client.post(
             "/runs/crons",

@@ -162,6 +162,8 @@ Only variables that start with `webhooks.env_prefix` (default `LG_WEBHOOK_`) can
 
 These targets are always blocked: link-local addresses and cloud metadata endpoints (`169.254.0.0/16`, `100.100.100.200`, `fd00:ec2::254`, `metadata.google.internal`), unspecified, multicast and reserved ranges, and host names ending in `.svc.cluster.local`.
 
+An IPv6 address that carries an IPv4 address (IPv4-mapped `::ffff:0:0/96`, NAT64 `64:ff9b::/96`, 6to4 `2002::/16`, or either Teredo endpoint in `2001::/32`) is checked as that IPv4 address, so `2002:7f00:1::1` counts as loopback.
+
 The last check is by name only. A short service name such as `billing` or `billing.default` resolves through the cluster's search domains to a private address, so only `disable_private_ips: true` keeps webhooks away from services inside your network.
 
 Aegra resolves the host, checks every address it resolves to, and connects only to addresses it checked. DNS cannot send the call somewhere else between the check and the connection.

@@ -290,6 +290,11 @@ class TestResolveWebhookAddresses:
             ("100.100.100.200", "cloud metadata endpoint"),
             ("fd00:ec2::254", "cloud metadata endpoint"),
             ("64:ff9b::a9fe:a9fe", "cloud metadata endpoint"),
+            ("2002:7f00:1::1", "loopback IP range"),
+            ("2002:a9fe:a9fe::1", "cloud metadata endpoint"),
+            ("2001:0:4136:e378:8000:63bf:80ff:fffe", "loopback IP range"),
+            ("2001:0:4136:e378:8000:63bf:5601:5601", "cloud metadata endpoint"),
+            ("2001:0:a9fe:a9fe:8000:63bf:f7f7:f7f7", "cloud metadata endpoint"),
             ("169.254.10.10", "blocked IP range"),
             ("0.0.0.0", "blocked IP range"),
             ("224.0.0.1", "blocked IP range"),
@@ -301,11 +306,22 @@ class TestResolveWebhookAddresses:
         with pytest.raises(WebhookUrlError, match=f"Webhook host blocked: {reason}"):
             await resolve_webhook_addresses(host, 443, WebhookUrlPolicy())
 
-    @pytest.mark.parametrize("host", ["10.0.0.5", "172.16.0.1", "192.168.1.10", "fc00::1", "8.8.8.8"])
+    @pytest.mark.parametrize(
+        "host",
+        [
+            "10.0.0.5",
+            "172.16.0.1",
+            "192.168.1.10",
+            "fc00::1",
+            "8.8.8.8",
+            "2002:808:808::1",
+            "2001:0:4136:e378:8000:63bf:f7f7:f7f7",
+        ],
+    )
     async def test_private_and_public_literals_pass_by_default(self, host: str) -> None:
         assert await resolve_webhook_addresses(host, 443, WebhookUrlPolicy()) is None
 
-    @pytest.mark.parametrize("host", ["10.0.0.5", "100.64.0.1", "fc00::1"])
+    @pytest.mark.parametrize("host", ["10.0.0.5", "100.64.0.1", "fc00::1", "2002:a00:5::1"])
     async def test_disable_private_ips_blocks_private_ranges(self, host: str) -> None:
         with pytest.raises(WebhookUrlError, match="private IP range"):
             await resolve_webhook_addresses(host, 443, WebhookUrlPolicy(disable_private_ips=True))

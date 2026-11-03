@@ -263,19 +263,26 @@ def check_webhook_url(url: str, policy: WebhookUrlPolicy) -> httpx.URL:
     return parsed
 
 
-def _nat64_ipv4(address: ipaddress.IPv6Address) -> ipaddress.IPv4Address | None:
-    """The IPv4 address embedded in a NAT64 well-known-prefix address."""
-    if address not in _NAT64_NETWORK:
-        return None
-    return ipaddress.IPv4Address(address.packed[-4:])
+def _embedded_ipv4(address: ipaddress.IPv6Address) -> tuple[ipaddress.IPv4Address, ...]:
+    """IPv4 addresses an IPv6 address carries: IPv4-mapped, NAT64, 6to4, or both Teredo endpoints."""
+    if address.ipv4_mapped is not None:
+        return (address.ipv4_mapped,)
+    if address in _NAT64_NETWORK:
+        return (ipaddress.IPv4Address(address.packed[-4:]),)
+    if address.sixtofour is not None:
+        return (address.sixtofour,)
+    if address.teredo is not None:
+        return address.teredo
+    return ()
 
 
 def _blocked_reason(address: IPAddress, policy: WebhookUrlPolicy) -> str | None:
     """Why *policy* forbids connecting to *address*, or None when it allows it."""
     if isinstance(address, ipaddress.IPv6Address):
-        embedded = address.ipv4_mapped or _nat64_ipv4(address)
-        if embedded is not None:
-            return _blocked_reason(embedded, policy)
+        embedded = _embedded_ipv4(address)
+        if embedded:
+            reasons = (_blocked_reason(ipv4, policy) for ipv4 in embedded)
+            return next((reason for reason in reasons if reason is not None), None)
     if any(address in net for net in _LOOPBACK_NETWORKS):
         return "loopback IP range" if policy.disable_loopback else None
     if address in _METADATA_ADDRESSES:

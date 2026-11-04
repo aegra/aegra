@@ -15,7 +15,7 @@ import pytest
 from aegra_api.api.runs import join_run
 from aegra_api.core.orm import Run as RunORM
 from aegra_api.models import User
-from aegra_api.services.run_waiters import heartbeat_wait_body, read_run_result
+from aegra_api.services.run_waiters import heartbeat_wait_body, read_run_result, run_result_body
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -143,6 +143,12 @@ class TestReadRunResult:
             result = await read_run_result("run-1", "thread-1", "test-user")
 
         assert result == {"__interrupt__": [{"value": "approve?"}]}
+
+    def test_parked_run_reports_pending_not_the_internal_queued(self) -> None:
+        body = run_result_body(_make_run_orm(status="queued", output={}), "run-1")
+
+        assert body["__error__"]["error"] == "IncompleteRun"
+        assert "status: pending" in body["__error__"]["message"]
 
     @pytest.mark.asyncio
     async def test_non_terminal_run_reports_incomplete(self) -> None:

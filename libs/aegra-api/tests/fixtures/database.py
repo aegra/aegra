@@ -80,6 +80,10 @@ class DummySessionBase:
     async def refresh(self, _obj):
         return None
 
+    def expire_all(self) -> None:
+        """AsyncSession.expire_all is sync in SQLAlchemy"""
+        return None
+
     async def scalar(self, _stmt):
         return None
 

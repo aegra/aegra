@@ -170,10 +170,12 @@ In production mode (`REDIS_BROKER_ENABLED=true`), the [lease reaper](/guides/wor
 | `aegra_reaper_recovered_runs_total` | `outcome="crashed_retried"` | Runs whose worker lease expired; reset to pending and re-enqueued |
 | | `outcome="crashed_exhausted"` | Crashed runs that exceeded `BG_JOB_MAX_RETRIES`; marked permanently failed |
 | | `outcome="stuck_pending"` | Pending runs missing from the job queue; re-enqueued without charging retry budget. Runs still waiting in the queue are not counted |
+| | `outcome="crashed_preempted"` | Crashed runs a double-text had pre-empted; ended `interrupted` without charging retry budget |
+| | `outcome="preempt_timeout"` | Pre-empted runs whose task ignored the cancel past `MULTITASK_PREEMPT_TIMEOUT_SECONDS`; ended `interrupted` |
 
-The counter increments only for confirmed operations: a successful Redis push for `crashed_retried`/`stuck_pending`, a successful DB update for `crashed_exhausted`. If Redis is down during recovery, workers still pick the runs up via the Postgres poll fallback, but those recoveries are not counted (the metric never overcounts, though it can undercount during a Redis outage).
+The counter increments only for confirmed operations: a successful Redis push for `crashed_retried`/`stuck_pending`, a successful DB update for `crashed_exhausted`, `crashed_preempted` and `preempt_timeout`. If Redis is down during recovery, workers still pick the runs up via the Postgres poll fallback, but those recoveries are not counted (the metric never overcounts, though it can undercount during a Redis outage).
 
-All three series are exported as `0` from startup, so `rate()` queries and alerts work before the first recovery. A sustained non-zero rate of `crashed_retried` means workers are dying mid-run (check memory limits and crash loops); any growth in `crashed_exhausted` means runs are being lost permanently and is worth alerting on. In dev mode (`aegra dev`) the reaper does not run and these counters stay at zero.
+All five series are exported as `0` from startup, so `rate()` queries and alerts work before the first recovery. A sustained non-zero rate of `crashed_retried` means workers are dying mid-run (check memory limits and crash loops); any growth in `crashed_exhausted` means runs are being lost permanently and is worth alerting on. In dev mode (`aegra dev`) the reaper does not run and these counters stay at zero.
 
 The `/metrics` endpoint is **not** protected by Aegra's authentication middleware. This is intentional — Prometheus scrapers typically do not support application-level auth. If you need to restrict access, use network-level controls (firewall rules, internal load-balancer listeners, etc.).
 

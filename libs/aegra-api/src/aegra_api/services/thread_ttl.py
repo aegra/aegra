@@ -7,7 +7,7 @@ per-thread override). A background sweep claims expired rows with
 - ``delete``  — remove checkpoints then the thread row (cascades runs/crons).
 - ``keep_latest`` — prune checkpoint history, keep the latest state, re-arm.
 
-The sweep never cancels runs: threads with pending/running runs are skipped
+The sweep never cancels runs: threads with pending, running or queued runs are skipped
 and picked up on a later tick once their runs settle.
 """
 
@@ -33,6 +33,7 @@ from aegra_api.core.orm import ThreadTTL as ThreadTTLORM
 from aegra_api.core.orm import _get_session_maker
 from aegra_api.models.threads import MAX_TTL_MINUTES
 from aegra_api.observability.metrics import THREAD_TTL_SWEPT
+from aegra_api.services.run_status import ACTIVE_RUN_STATES, QUEUED_RUN_STATE
 from aegra_api.settings import settings
 
 logger = structlog.getLogger(__name__)
@@ -135,7 +136,7 @@ def _expired_claim_stmt(
         select(RunORM.run_id)
         .where(
             RunORM.thread_id == ThreadTTLORM.thread_id,
-            RunORM.status.in_(("pending", "running")),
+            RunORM.status.in_((*ACTIVE_RUN_STATES, QUEUED_RUN_STATE)),
         )
         .exists()
     )
@@ -244,7 +245,7 @@ async def prune_threads_by_id(
     """
     active_runs_exist = (
         select(RunORM.run_id)
-        .where(RunORM.thread_id == ThreadORM.thread_id, RunORM.status.in_(("pending", "running")))
+        .where(RunORM.thread_id == ThreadORM.thread_id, RunORM.status.in_((*ACTIVE_RUN_STATES, QUEUED_RUN_STATE)))
         .exists()
     )
     stmt = select(ThreadORM.thread_id).where(

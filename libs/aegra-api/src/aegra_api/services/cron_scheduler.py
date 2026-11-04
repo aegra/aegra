@@ -25,6 +25,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from aegra_api.core.orm import Cron as CronORM
 from aegra_api.core.orm import _get_session_maker
 from aegra_api.models import RunCreate, User
+from aegra_api.models.enums import MULTITASK_STRATEGIES
 from aegra_api.services.cron_service import (
     CronService,
     should_delete_stateless_thread,
@@ -51,6 +52,11 @@ def _build_run_create(cron: CronORM) -> RunCreate:
     two code paths can never drift.
     """
     payload = cron.payload or {}
+    # Coerce a legacy/invalid stored strategy to None (-> default) so building the
+    # RunCreate can never raise mid-fire and wedge the cron in a claim/expire loop.
+    strategy = payload.get("multitask_strategy")
+    if strategy not in MULTITASK_STRATEGIES:
+        strategy = None
     return RunCreate(
         assistant_id=cron.assistant_id,
         input=payload.get("input"),
@@ -61,7 +67,7 @@ def _build_run_create(cron: CronORM) -> RunCreate:
         interrupt_after=payload.get("interrupt_after"),
         stream_subgraphs=payload.get("stream_subgraphs"),
         stream_mode=payload.get("stream_mode"),
-        multitask_strategy=payload.get("multitask_strategy"),
+        multitask_strategy=strategy,
         durability=payload.get("durability"),
         checkpoint_during=payload.get("checkpoint_during"),
         # Cron metadata_dict is stored on the cron record for search/filter, not
@@ -170,6 +176,7 @@ class CronScheduler:
         now = datetime.now(UTC)
         should_delete_thread = should_delete_stateless_thread(cron)
         run_created = False
+        skipped = False
 
         # Liveness check: refuse to forge a User for a deleted/revoked identity.
         if not await _validate_cron_user(cron.user_id):
@@ -207,20 +214,35 @@ class CronScheduler:
             if should_delete_thread:
                 schedule_background_cleanup(_run_id, thread_id, cron.user_id)
         except HTTPException as exc:
-            logger.error(
-                "Cron run creation failed",
-                cron_id=cron.cron_id,
-                status_code=exc.status_code,
-                detail=exc.detail,
-            )
+            # Drop the thread writes _prepare_run made before the gate refused the run; the
+            # claim/advance commit below must not carry them along.
+            await session.rollback()
+            if exc.status_code == 409:
+                # Busy thread under `reject`, or a HITL pause: that is this occurrence's answer.
+                # Re-firing every tick until the thread frees would be `enqueue` in disguise.
+                skipped = True
+                logger.info(
+                    "Cron occurrence skipped: thread busy",
+                    cron_id=cron.cron_id,
+                    thread_id=thread_id,
+                    detail=exc.detail,
+                )
+            else:
+                logger.error(
+                    "Cron run creation failed",
+                    cron_id=cron.cron_id,
+                    status_code=exc.status_code,
+                    detail=exc.detail,
+                )
             if should_delete_thread:
                 await CronScheduler._cleanup_failed_stateless_thread(thread_id, cron)
         except Exception:
+            await session.rollback()
             logger.exception("Cron run creation failed unexpectedly", cron_id=cron.cron_id)
             if should_delete_thread:
                 await CronScheduler._cleanup_failed_stateless_thread(thread_id, cron)
 
-        if run_created:
+        if run_created or skipped:
             # Delegate advance/disable to CronService so the rule lives in one place.
             await CronService(session).advance_next_run(cron)
         else:

@@ -224,5 +224,13 @@ if state["interrupts"]:
 
 - Interrupts work transparently across subgraph boundaries
 - The thread status changes to `"interrupted"` when paused and `"idle"` when completed
+- **Fresh input on a paused thread discards the pause.** By default (as on LangGraph
+  Platform) creating a run with plain `input` on a thread whose status is
+  `"interrupted"` is admitted: the graph starts from `__start__` and the pending
+  interrupt is dropped, so only send `command={"resume": ...}` when you mean to
+  answer it. Approval flows can set `MULTITASK_PAUSED_THREAD_POLICY=reject` to have
+  such runs refused with `409 Conflict` (under any
+  [`multitask_strategy`](/guides/double-texting)) until a resume clears the pause;
+  runs enqueued before the pause then stay parked until it does.
 - You can inspect the interrupt payload in thread state to show the user what the agent wants to do
 - Multiple sequential interrupts are supported in a single run

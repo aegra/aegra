@@ -52,7 +52,11 @@ class TestDeclaredKeysCoverSpec:
 class TestEverySpecKeyChangesTheRun:
     """A spec key must either land on the RunCreate or be an explicit no-op."""
 
-    async def test_run_start_forwards_all_spec_keys(self, prepared_run: AsyncMock) -> None:
+    async def test_run_start_forwards_all_spec_keys(
+        self, prepared_run: AsyncMock, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # A fresh thread: nothing paused or in flight, so `input` stays a fresh turn.
+        monkeypatch.setattr(cmd, "_thread_interrupted_with_settle", AsyncMock(return_value=False))
         params: dict[str, Any] = {
             "assistant_id": "agent",
             "input": {"messages": [1]},

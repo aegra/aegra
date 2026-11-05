@@ -322,6 +322,11 @@ class LangGraphService:
                     .returning(AssistantORM.assistant_id)
                 )
                 if (await session.scalars(insert_stmt)).first() is None:
+                    # No conflict target: naming assistant_id lets the race surface on the other
+                    # unique indexes. So check that the row we skipped for is really this one.
+                    winner = select(AssistantORM.assistant_id).where(AssistantORM.assistant_id == assistant_id)
+                    if await session.scalar(winner) is None:
+                        raise RuntimeError(f"Another system assistant already uses graph '{graph_id}'")
                     continue
                 session.add(
                     AssistantVersionORM(

@@ -188,11 +188,27 @@ async def test_leaves_the_version_to_the_replica_that_created_the_assistant(sess
     service = LangGraphService()
     service.config = {"graphs": {"agent": "./agent.py:graph"}}
     service._load_graph_registry()
-    session.scalar.return_value = None
+    assistant_id = str(uuid5(ASSISTANT_NAMESPACE_UUID, "agent"))
+    session.scalar.side_effect = [None, assistant_id]
     session.scalars.return_value = MagicMock(first=MagicMock(return_value=None))
 
     await service._ensure_default_assistants()
 
-    assert "ON CONFLICT" in str(session.scalars.await_args.args[0].compile(dialect=postgresql.dialect()))
+    # A conflict target would let the race fail on the other unique indexes.
+    assert "ON CONFLICT DO NOTHING" in str(session.scalars.await_args.args[0].compile(dialect=postgresql.dialect()))
     session.add.assert_not_called()
     session.commit.assert_awaited_once()
+
+
+async def test_refuses_to_start_when_another_system_assistant_holds_the_graph(session: MagicMock) -> None:
+    service = LangGraphService()
+    service.config = {"graphs": {"agent": "./agent.py:graph"}}
+    service._load_graph_registry()
+    session.scalar.side_effect = [None, None]
+    session.scalars.return_value = MagicMock(first=MagicMock(return_value=None))
+
+    with pytest.raises(RuntimeError, match="graph 'agent'"):
+        await service._ensure_default_assistants()
+
+    session.commit.assert_not_awaited()
+    session.close.assert_awaited_once()

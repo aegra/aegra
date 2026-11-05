@@ -55,8 +55,8 @@ export POSTGRES_PASSWORD=aegra_secret
 export POSTGRES_HOST=localhost
 export POSTGRES_DB=aegra
 
-# Run migrations
-alembic upgrade head
+# Run migrations (session lock in alembic/env.py; prefer this helper)
+python -c "from aegra_api.core.migrations import run_migrations; run_migrations()"
 
 # Start server
 uvicorn aegra_api.main:app --port 2026 --reload

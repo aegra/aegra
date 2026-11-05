@@ -1,11 +1,19 @@
+import asyncio
 import os
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from psycopg import IsolationLevel
 
 # Adjust the import path to match your project structure
 from aegra_api.core.database import DatabaseManager
 from aegra_api.settings import settings
+
+
+def _record(events: list[str], name: str, result: Any = None) -> Any:
+    events.append(name)
+    return result
 
 
 class TestDatabaseManager:
@@ -41,6 +49,8 @@ class TestDatabaseManager:
             patch("aegra_api.core.database.AsyncPostgresSaver") as mock_saver_cls,
             patch("aegra_api.core.database.AsyncPostgresStore") as mock_store_cls,
             patch("aegra_api.core.database.load_store_config") as mock_load_store_config,
+            patch("aegra_api.core.database.AsyncConnection") as mock_connection_cls,
+            patch("aegra_api.core.database.asyncio.sleep", new=AsyncMock()) as mock_sleep,
         ):
             # 1. Setup SQLAlchemy Engine Mock
             mock_engine = AsyncMock()
@@ -62,6 +72,13 @@ class TestDatabaseManager:
             # 4. Default: no store config
             mock_load_store_config.return_value = None
 
+            # 5. Setup lock connection: the first attempt gets the lock
+            mock_lock_conn = AsyncMock()
+            mock_lock_cursor = AsyncMock()
+            mock_lock_cursor.fetchone.return_value = (True, "0")
+            mock_lock_conn.execute.return_value = mock_lock_cursor
+            mock_connection_cls.connect = AsyncMock(return_value=mock_lock_conn)
+
             # Yield a dictionary so tests can access specific mocks for assertions
             yield {
                 "create_engine": mock_create_engine,
@@ -73,6 +90,10 @@ class TestDatabaseManager:
                 "store_cls": mock_store_cls,
                 "store_instance": mock_store_instance,
                 "load_store_config": mock_load_store_config,
+                "connection_cls": mock_connection_cls,
+                "lock_conn": mock_lock_conn,
+                "lock_cursor": mock_lock_cursor,
+                "sleep": mock_sleep,
             }
 
     async def test_initialize_success(self, db_manager, mock_db_deps):
@@ -226,3 +247,70 @@ class TestDatabaseManager:
         # Store should be initialized with index=None
         mock_db_deps["store_cls"].assert_called_with(conn=mock_db_deps["pool_instance"], index=None)
         mock_db_deps["store_instance"].setup.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_setup_runs_while_the_lock_is_held(self, db_manager, mock_db_deps):
+        events: list[str] = []
+        mock_db_deps["lock_conn"].execute.side_effect = lambda *_: _record(events, "lock", mock_db_deps["lock_cursor"])
+        mock_db_deps["saver_instance"].setup.side_effect = lambda: _record(events, "checkpointer")
+        mock_db_deps["store_instance"].setup.side_effect = lambda: _record(events, "store")
+        mock_db_deps["lock_conn"].close.side_effect = lambda: _record(events, "release")
+
+        await db_manager.initialize()
+
+        assert events == ["lock", "checkpointer", "store", "release"]
+
+    @pytest.mark.asyncio
+    async def test_setup_lock_uses_the_libpq_url_without_prepared_statements(self, db_manager, mock_db_deps):
+        await db_manager.initialize()
+
+        mock_db_deps["connection_cls"].connect.assert_awaited_once_with(
+            settings.db.database_url_sync, prepare_threshold=None
+        )
+
+    @pytest.mark.asyncio
+    async def test_setup_lock_sends_no_bound_parameters(self, db_manager, mock_db_deps):
+        await db_manager.initialize()
+
+        (query,) = mock_db_deps["lock_conn"].execute.await_args.args
+        assert "pg_try_advisory_xact_lock" in query
+
+    @pytest.mark.asyncio
+    async def test_setup_lock_survives_database_session_defaults(self, db_manager, mock_db_deps):
+        await db_manager.initialize()
+
+        mock_db_deps["lock_conn"].set_isolation_level.assert_awaited_once_with(IsolationLevel.READ_COMMITTED)
+        (query,) = mock_db_deps["lock_conn"].execute.await_args.args
+        assert "set_config('idle_in_transaction_session_timeout', '0', true)" in query
+
+    @pytest.mark.asyncio
+    async def test_waits_for_the_lock_without_keeping_a_transaction_open(self, db_manager, mock_db_deps):
+        mock_db_deps["lock_cursor"].fetchone.side_effect = [(False, "0"), (False, "0"), (True, "0")]
+
+        await db_manager.initialize()
+
+        assert mock_db_deps["lock_conn"].execute.await_count == 3
+        assert mock_db_deps["lock_conn"].rollback.await_count == 2
+        assert mock_db_deps["sleep"].await_count == 2
+        mock_db_deps["saver_instance"].setup.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_releases_the_lock_when_setup_fails(self, db_manager, mock_db_deps):
+        mock_db_deps["saver_instance"].setup.side_effect = RuntimeError("setup failed")
+
+        with pytest.raises(RuntimeError, match="setup failed"):
+            await db_manager.initialize()
+
+        mock_db_deps["lock_conn"].close.assert_awaited_once()
+        mock_db_deps["store_instance"].setup.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_releases_the_lock_when_cancelled_while_waiting(self, db_manager, mock_db_deps):
+        mock_db_deps["lock_cursor"].fetchone.return_value = (False, "0")
+        mock_db_deps["sleep"].side_effect = asyncio.CancelledError
+
+        with pytest.raises(asyncio.CancelledError):
+            await db_manager.initialize()
+
+        mock_db_deps["lock_conn"].close.assert_awaited_once()
+        mock_db_deps["saver_instance"].setup.assert_not_awaited()

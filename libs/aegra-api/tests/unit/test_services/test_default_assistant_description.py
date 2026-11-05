@@ -4,6 +4,7 @@ from unittest.mock import MagicMock
 from uuid import uuid5
 
 import pytest
+from sqlalchemy.dialects import postgresql
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from aegra_api.constants import ASSISTANT_NAMESPACE_UUID
@@ -40,14 +41,15 @@ async def test_creates_default_assistant_and_version_with_description(
     service.config = {"graphs": {"agent": entry}}
     service._load_graph_registry()
     session.scalar.return_value = None
+    session.scalars.return_value = MagicMock(first=MagicMock(return_value="created"))
 
     await service._ensure_default_assistants()
 
-    assistant, version = [call.args[0] for call in session.add.call_args_list]
-    assert isinstance(assistant, Assistant)
+    params = session.scalars.await_args.args[0].compile(dialect=postgresql.dialect()).params
+    (version,) = [call.args[0] for call in session.add.call_args_list]
     assert isinstance(version, AssistantVersion)
-    assert assistant.assistant_id == version.assistant_id == str(uuid5(ASSISTANT_NAMESPACE_UUID, "agent"))
-    assert assistant.description == version.description == expected
+    assert params["assistant_id"] == version.assistant_id == str(uuid5(ASSISTANT_NAMESPACE_UUID, "agent"))
+    assert params["description"] == version.description == expected
     session.commit.assert_awaited_once()
     session.close.assert_awaited_once()
 
@@ -180,3 +182,17 @@ async def test_closes_session_when_commit_fails(session: MagicMock) -> None:
         await service._ensure_default_assistants()
 
     session.close.assert_awaited_once()
+
+
+async def test_leaves_the_version_to_the_replica_that_created_the_assistant(session: MagicMock) -> None:
+    service = LangGraphService()
+    service.config = {"graphs": {"agent": "./agent.py:graph"}}
+    service._load_graph_registry()
+    session.scalar.return_value = None
+    session.scalars.return_value = MagicMock(first=MagicMock(return_value=None))
+
+    await service._ensure_default_assistants()
+
+    assert "ON CONFLICT" in str(session.scalars.await_args.args[0].compile(dialect=postgresql.dialect()))
+    session.add.assert_not_called()
+    session.commit.assert_awaited_once()

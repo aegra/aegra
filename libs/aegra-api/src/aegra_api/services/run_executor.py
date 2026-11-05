@@ -10,6 +10,7 @@ import asyncio
 from typing import Any
 
 import structlog
+from sqlalchemy.exc import SQLAlchemyError
 
 from aegra_api.core.active_runs import active_runs
 from aegra_api.core.auth_ctx import with_auth_ctx
@@ -19,6 +20,7 @@ from aegra_api.observability.otel import flush_otel_spans
 from aegra_api.services.broker import broker_manager
 from aegra_api.services.event_streaming.native_stream import stream_native_v3_events
 from aegra_api.services.graph_streaming import stream_graph_events
+from aegra_api.services.injected_input import INJECTED_INPUT_KEY, InjectedInput, mark_delivered
 from aegra_api.services.langgraph_service import create_run_config, get_langgraph_service
 from aegra_api.services.run_status import finalize_run, start_run
 from aegra_api.services.streaming_service import streaming_service
@@ -206,7 +208,21 @@ async def _stream_graph(job: RunJob) -> _GraphResult:
         else:
             await _stream_legacy(job, graph, execution_input, run_config, stream_modes, result)
 
+    # A node paused at interrupt() re-runs on resume, so a paused graph leaves its messages to that run.
+    if not result.has_interrupt:
+        await _settle_injected_input(job)
     return result
+
+
+async def _settle_injected_input(job: RunJob) -> None:
+    try:
+        await mark_delivered(run_id=job.identity.run_id, thread_id=job.identity.thread_id, user_id=job.user.identity)
+    except SQLAlchemyError:
+        logger.warning(
+            "Could not settle injected input; the thread's next run may receive it again",
+            run_id=job.identity.run_id,
+            exc_info=True,
+        )
 
 
 async def _stream_legacy(
@@ -281,6 +297,10 @@ def _build_run_config(job: RunJob) -> dict[str, Any]:
         job.user,
         additional_config=job.execution.config,
         checkpoint=job.execution.checkpoint,
+    )
+    # Server-pinned like thread_id/run_id: a client value under the key never reaches the graph.
+    config["configurable"][INJECTED_INPUT_KEY] = InjectedInput(
+        run_id=job.identity.run_id, thread_id=job.identity.thread_id, user_id=job.user.identity
     )
     if job.behavior.interrupt_before is not None:
         items = job.behavior.interrupt_before

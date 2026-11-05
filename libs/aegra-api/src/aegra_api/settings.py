@@ -483,6 +483,9 @@ class EventStreamingSettings(EnvBase):
     """
 
     FF_V2_EVENT_STREAMING: bool = True
+    # How long an input.inject message waits to be taken, counted from when it was sent;
+    # an untaken message carries to the thread's next run until then.
+    INPUT_INJECT_TTL_SECONDS: int = Field(default=3600, gt=0)
 
 
 class Settings:

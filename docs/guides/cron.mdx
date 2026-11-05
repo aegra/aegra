@@ -208,8 +208,45 @@ await client.crons.delete(cron_id="<cron_id>")
 
 Deletion is permanent. When a cron is bound to a thread and that thread is deleted, the cron is removed atomically as well (`ON DELETE CASCADE`).
 
+## The user a scheduled firing runs as
+
+A run you start with a request runs as you, with every field your `@auth.authenticate` handler returned. A scheduled firing has no request to authenticate, so by default it runs under the cron owner's `identity` with `display_name` set to `cron-scheduler` and none of your handler's other fields: `permissions` is empty, and custom fields such as `role` or `tenant_id` are missing.
+
+To give firings the owner's current fields, name an async function in `auth.cron_user`:
+
+```json
+{
+  "auth": {
+    "path": "./my_auth.py:auth",
+    "cron_user": "./my_auth.py:cron_user"
+  }
+}
+```
+
+```python
+async def cron_user(identity: str) -> dict | None:
+    account = await accounts.get(identity)  # your user store
+    if account is None or account.disabled:
+        return None  # disables the cron
+    return {
+        "identity": identity,
+        "display_name": account.name,
+        "permissions": account.permissions,
+        "tenant_id": account.tenant_id,
+    }
+```
+
+Before every firing, Aegra calls the function with the cron owner's identity and runs the firing as the user it returns, in the shape `@auth.authenticate` returns. Graphs then read those fields from `config["configurable"]["langgraph_auth_user"]` and `runtime.user` as on any other run. Add a field of your own, such as `"scheduled": True`, if a graph needs to tell a firing from a request.
+
+- The returned `identity` must be the owner's; any other identity fails the firing.
+- Returning `None` disables the cron.
+- If the function raises, the firing is skipped and retried once the claim expires (`CRON_CLAIM_DURATION_SECONDS`).
+- A path that does not load stops the server at startup while the scheduler is enabled.
+
+The path takes the same forms as `auth.path`, and a file named in both is imported once, so the two functions share its module state.
+
 ## Limitations
 
-- **Scheduled runs skip per-request auth handlers.** Creating a cron runs the full auth chain (`crons.create` → `assistants.read` → `threads.read`/`search`), but each *scheduled firing* executes as a background daemon under the cron owner's identity and does not re-dispatch `@auth.on(...)` handlers. Put per-run authorization logic in the graph itself if it must apply to scheduled runs.
+- **Scheduled runs skip per-request auth handlers.** Creating a cron runs the full auth chain (`crons.create` → `assistants.read` → `threads.read`/`search`), but each *scheduled firing* executes as a background daemon under the cron owner's identity and does not re-dispatch `@auth.on(...)` handlers. Put per-run authorization logic in the graph itself if it must apply to scheduled runs, and use [`auth.cron_user`](#the-user-a-scheduled-firing-runs-as) to give firings the fields it checks.
 - **Cron metadata is not copied onto fired runs.** `metadata` set on a cron is stored on the cron record for search and filtering, but is not propagated to the runs the cron creates.
 - **Delivery is at-least-once.** Under a crash between firing and advancing the schedule, a run can fire more than once for a single occurrence. Make scheduled work idempotent.

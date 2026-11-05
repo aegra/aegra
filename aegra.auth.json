@@ -1,10 +1,12 @@
 {
   "dependencies": ["./examples"],
   "graphs": {
-    "agent": "./examples/react_agent/graph.py:graph"
+    "agent": "./examples/react_agent/graph.py:graph",
+    "cron_example": "./examples/cron_example/graph.py:graph"
   },
   "auth": {
-    "path": "./examples/jwt_mock_auth_example.py:auth"
+    "path": "./examples/jwt_mock_auth_example.py:auth",
+    "cron_user": "./examples/jwt_mock_auth_example.py:cron_user"
   },
   "http": {
     "app": "./examples/custom_routes_example.py:app",

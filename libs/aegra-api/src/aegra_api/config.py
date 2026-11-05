@@ -103,6 +103,10 @@ class AuthConfig(TypedDict, total=False):
     """
     disable_studio_auth: bool
     """Disable authentication for LangGraph Studio connections"""
+    cron_user: str
+    """Import path, in the format of ``path``, for an async function that returns the user
+    a scheduled cron firing runs as, given the cron owner's identity; None disables the cron.
+    """
 
 
 def _resolve_config_path() -> Path | None:

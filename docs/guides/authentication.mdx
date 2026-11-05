@@ -401,6 +401,10 @@ Convenience shortcuts are also available directly on `config["configurable"]`:
 - `config["configurable"]["user_id"]` -- the user's identity
 - `config["configurable"]["user_display_name"]` -- the user's display name
 
+<Note>
+A scheduled cron firing has no request, so it runs under the cron owner's `identity` with none of your handler's other fields, unless `auth.cron_user` names a function that returns the full user. See [the user a scheduled firing runs as](/guides/cron#the-user-a-scheduled-firing-runs-as).
+</Note>
+
 ## Provider examples
 
 <Tabs>
@@ -531,6 +535,7 @@ This is the default for local development and testing. Every caller shares the `
 |--------|------|---------|-------------|
 | `auth.path` | `string` | — | Import path to your auth handler (`./file.py:variable`) |
 | `auth.disable_studio_auth` | `bool` | `false` | Disable auth for LangGraph Studio connections |
+| `auth.cron_user` | `string` | — | Import path to an async function that returns the user a scheduled cron firing runs as. See [the cron guide](/guides/cron#the-user-a-scheduled-firing-runs-as) |
 
 ## Non-interruptive design
 

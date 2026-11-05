@@ -90,15 +90,24 @@ Define your LangGraph agents.
 {
   "graphs": {
     "agent": "./src/react_agent/graph.py:graph",
-    "custom_agent": "./src/custom/graph.py:my_graph"
+    "custom_agent": {
+      "path": "./src/custom/graph.py:my_graph",
+      "description": "Handles custom workflows"
+    }
   }
 }
 ```
 
+Each value can be a string import path or an object with a required `path` and optional `description`. The string form remains supported for backwards compatibility.
+
 | Field | Type | Description |
 |-------|------|-------------|
 | Key | `string` | Graph ID (used in API calls to identify the graph) |
-| Value | `string` | Import path in format `./path/to/file.py:variable` |
+| Value | `string \| object` | String import path or graph configuration object |
+| `path` | `string` | Required in object form; import path in format `./path/to/file.py:variable` |
+| `description` | `string \| null` | Optional. Used as the description of the graph's default assistant. |
+
+The default assistant's description is synchronized on startup when this value changes. Only system-owned assistants are synchronized; a user-created assistant with the same ID is left unchanged. If omitted or `null`, it falls back to `Default assistant for graph '<graph_id>'`. An empty string is preserved as an explicit description.
 
 The variable can be:
 
@@ -308,7 +317,7 @@ a background sweep deletes or compacts expired threads.
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `ttl.strategy` | `string` | `delete` | `delete` removes the thread, its runs/crons, and all checkpoint data. `keep_latest` prunes checkpoint history but keeps the thread and its latest state, then re-arms the TTL (periodic compaction). |
+| `ttl.strategy` | `string` | `delete` | `delete` removes the thread, its runs/crons, and all checkpoint data. `keep_latest` prunes checkpoint history but keeps the thread and its latest state, then re-arms the TTL (periodic compaction). Threads using a `DeltaChannel` are skipped, since their state needs the older checkpoints. |
 | `ttl.default_ttl` | `number` | `43200` | Default thread TTL in minutes (43200 = 30 days), applied to threads created after TTL is enabled. |
 | `ttl.sweep_interval_minutes` | `number` | `5` | How often the background sweep runs. |
 | `ttl.sweep_limit` | `integer` | `10000` | Max threads processed per sweep iteration. |
@@ -317,7 +326,7 @@ Notes:
 
 - Threads with pending or running runs are skipped and swept once their runs settle.
 - Deleting an expired thread cascades to its runs and thread-bound crons.
-- Individual threads can override the default via the `ttl` field on `POST /threads`; expired threads can be cleaned immediately with `POST /threads/prune`. See the [threads guide](/guides/threads-and-state#thread-ttl).
+- Individual threads can override the default via the `ttl` field on `POST /threads`; expired threads can be cleaned immediately with `POST /threads/prune`, and `client.threads.prune(thread_ids, strategy=...)` prunes the listed threads on demand. See the [threads guide](/guides/threads-and-state#thread-ttl).
 - The `AEGRA_THREAD_TTL` environment variable replaces this block entirely when set — see [environment variables](/reference/environment-variables#thread-ttl).
 
 If neither `checkpointer.ttl` nor `AEGRA_THREAD_TTL` is configured, threads never expire.

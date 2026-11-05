@@ -79,11 +79,22 @@ class ThreadUpdate(BaseModel):
     metadata: dict[str, Any] | None = Field(None, description="Thread metadata to update")
 
 
+class ThreadPruneRequest(BaseModel):
+    """Request body for POST /threads/prune"""
+
+    thread_ids: list[str] = Field(..., description="Threads to prune. Ids the caller cannot see are skipped.")
+    strategy: Literal["delete", "keep_latest"] = Field(
+        "delete",
+        description="'delete' removes the threads entirely; 'keep_latest' keeps each thread and its latest state.",
+    )
+
+
 class ThreadPruneResponse(BaseModel):
     """Response model for POST /threads/prune"""
 
-    deleted: int = Field(0, description="Expired threads fully deleted (strategy 'delete')")
-    pruned: int = Field(0, description="Expired threads whose history was pruned (strategy 'keep_latest')")
+    pruned_count: int = Field(0, description="Threads deleted or pruned by this request")
+    deleted: int = Field(0, description="Threads fully deleted (strategy 'delete')")
+    pruned: int = Field(0, description="Threads whose history was pruned (strategy 'keep_latest')")
 
 
 class Thread(BaseModel):
@@ -122,6 +133,11 @@ class ThreadSearchRequest(BaseModel):
 
     metadata: dict[str, Any] | None = Field(None, description="Metadata filters")
     status: str | None = Field(None, description="Thread status filter (idle, busy, interrupted, error)")
+    select: list[str] | None = Field(
+        None,
+        exclude=True,
+        description="Response projection fields. Currently unsupported; non-null values return 422.",
+    )
     # None default + validate_default so omitted and JSON null share one resolver.
     limit: int | None = Field(
         default=None,
@@ -157,6 +173,13 @@ class ThreadSearchRequest(BaseModel):
         if v is not None:
             return validate_thread_status(v)
         return v
+
+    @field_validator("select")
+    @classmethod
+    def reject_unsupported_select(cls: type["ThreadSearchRequest"], v: list[str] | None) -> None:
+        if v is not None:
+            raise ValueError("select projection is not supported")
+        return None
 
 
 class ThreadSearchResponse(BaseModel):

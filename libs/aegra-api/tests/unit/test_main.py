@@ -5,6 +5,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+import aegra_api.main as main_module
 from aegra_api.observability.base import get_observability_manager
 from aegra_api.services import run_preparation
 
@@ -257,3 +258,149 @@ async def test_lifespan_fails_before_any_db_work_on_invalid_durability_default(
             mock_db_manager.initialize.assert_not_called()
     finally:
         run_preparation.get_default_durability.cache_clear()
+
+
+def _recording(events: list[str], label: str, error: Exception | None = None) -> AsyncMock:
+    """An awaitable that appends ``label`` to ``events`` when awaited, then raises ``error`` if given."""
+
+    async def record() -> None:
+        events.append(label)
+        if error is not None:
+            raise error
+
+    return AsyncMock(side_effect=record)
+
+
+@pytest.fixture
+def lifespan_events(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """Replace every lifespan component with a stub that logs its start/stop calls, in call order."""
+    events: list[str] = []
+    components = {
+        "db_manager": ("db", "initialize", "close"),
+        "redis_manager": ("redis", "initialize", "close"),
+        "broker_manager": ("broker", "start", "stop"),
+        "executor": ("executor", "start", "stop"),
+        "lease_reaper": ("reaper", "start", "stop"),
+        "cron_scheduler": ("cron", "start", "stop"),
+        "thread_ttl_sweeper": ("ttl", "start", "stop"),
+    }
+    for attr, (label, start_name, stop_name) in components.items():
+        stub = MagicMock()
+        setattr(stub, start_name, _recording(events, f"{label}.{start_name}"))
+        setattr(stub, stop_name, _recording(events, f"{label}.{stop_name}"))
+        monkeypatch.setattr(main_module, attr, stub)
+
+    graph_service = MagicMock()
+    graph_service.initialize = _recording(events, "graphs.initialize")
+    monkeypatch.setattr(main_module, "get_langgraph_service", lambda: graph_service)
+    monkeypatch.setattr(main_module, "setup_observability", lambda: None)
+    monkeypatch.setattr(main_module, "get_thread_ttl_config", MagicMock)
+    # Patch the module's own settings reference: an earlier test in this file reloads aegra_api.settings.
+    monkeypatch.setattr(main_module.settings.app, "RUN_MIGRATIONS_ON_STARTUP", False)
+    monkeypatch.setattr(main_module.settings.redis, "REDIS_BROKER_ENABLED", True)
+    monkeypatch.setattr(main_module.settings.cron, "CRON_ENABLED", True)
+    return events
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_closes_db_manager_when_graph_load_fails(
+    monkeypatch: pytest.MonkeyPatch, lifespan_events: list[str]
+) -> None:
+    """A graph that fails to import must still close the DB pools, or the process hangs on exit (#683)."""
+    graph_service = MagicMock()
+    graph_service.initialize = _recording(lifespan_events, "graphs.initialize", error=ImportError("broken graph"))
+    monkeypatch.setattr(main_module, "get_langgraph_service", lambda: graph_service)
+
+    with pytest.raises(ImportError, match="broken graph"):
+        async with main_module.lifespan(MagicMock()):
+            pass
+
+    assert lifespan_events == ["db.initialize", "graphs.initialize", "db.close"]
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_stops_components_in_reverse_start_order_on_shutdown(lifespan_events: list[str]) -> None:
+    """Shutdown must drain the executor before closing the broker, Redis and DB it depends on."""
+    async with main_module.lifespan(MagicMock()):
+        pass
+
+    assert lifespan_events == [
+        "db.initialize",
+        "graphs.initialize",
+        "redis.initialize",
+        "broker.start",
+        "executor.start",
+        "reaper.start",
+        "cron.start",
+        "ttl.start",
+        "ttl.stop",
+        "cron.stop",
+        "reaper.stop",
+        "executor.stop",
+        "broker.stop",
+        "redis.close",
+        "db.close",
+    ]
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_unwinds_started_components_when_executor_start_fails(
+    monkeypatch: pytest.MonkeyPatch, lifespan_events: list[str]
+) -> None:
+    """A failed executor start stops what already started, but not the executor or the steps after it."""
+    failing_executor = MagicMock()
+    failing_executor.start = _recording(lifespan_events, "executor.start", error=RuntimeError("no workers"))
+    failing_executor.stop = _recording(lifespan_events, "executor.stop")
+    monkeypatch.setattr(main_module, "executor", failing_executor)
+
+    with pytest.raises(RuntimeError, match="no workers"):
+        async with main_module.lifespan(MagicMock()):
+            pass
+
+    assert lifespan_events == [
+        "db.initialize",
+        "graphs.initialize",
+        "redis.initialize",
+        "broker.start",
+        "executor.start",
+        "broker.stop",
+        "redis.close",
+        "db.close",
+    ]
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_keeps_stopping_remaining_components_when_one_stop_fails(
+    monkeypatch: pytest.MonkeyPatch, lifespan_events: list[str]
+) -> None:
+    """A failing cleanup must not skip later cleanups, so the DB pools still close."""
+    failing_executor = MagicMock()
+    failing_executor.start = _recording(lifespan_events, "executor.start")
+    failing_executor.stop = _recording(lifespan_events, "executor.stop", error=RuntimeError("stop failed"))
+    monkeypatch.setattr(main_module, "executor", failing_executor)
+
+    with pytest.raises(RuntimeError, match="stop failed"):
+        async with main_module.lifespan(MagicMock()):
+            pass
+
+    assert lifespan_events == [
+        "db.initialize",
+        "graphs.initialize",
+        "redis.initialize",
+        "broker.start",
+        "executor.start",
+        "reaper.start",
+        "cron.start",
+        "ttl.start",
+        "ttl.stop",
+        "cron.stop",
+        "reaper.stop",
+        "executor.stop",
+        "broker.stop",
+        "redis.close",
+        "db.close",
+    ]

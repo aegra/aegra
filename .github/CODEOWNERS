@@ -1,0 +1,8 @@
+# Paths that can expose secrets, publish releases, change dependencies or weaken auth.
+/.github/                                      @ibbybuilds
+/scripts/                                      @ibbybuilds
+/pyproject.toml                                @ibbybuilds
+/libs/*/pyproject.toml                         @ibbybuilds
+/uv.lock                                       @ibbybuilds
+/libs/aegra-api/src/aegra_api/core/auth_*.py   @ibbybuilds
+/libs/aegra-api/alembic/                       @ibbybuilds

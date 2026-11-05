@@ -159,7 +159,7 @@ The server automatically restarts when code changes are detected.
 
 ### `aegra serve`
 
-Run the production server (no hot reload).
+Run the production server (no hot reload). On Linux and macOS the command replaces itself with uvicorn, so the server receives the container's stop signal directly; on Windows uvicorn runs as a child process.
 
 ```bash
 aegra serve [OPTIONS]

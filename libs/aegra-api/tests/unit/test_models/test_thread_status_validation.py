@@ -83,3 +83,28 @@ class TestThreadSearchRequestStatusValidation:
         """Test that ThreadSearchRequest rejects invalid status values."""
         with pytest.raises(ValueError, match="Invalid thread status"):
             ThreadSearchRequest(status="invalid_status")
+
+
+class TestThreadSearchRequestSelectValidation:
+    """Tests for unsupported thread search response projection."""
+
+    def test_thread_search_request_allows_omitted_select(self: "TestThreadSearchRequestSelectValidation") -> None:
+        request = ThreadSearchRequest()
+        assert request.select is None
+
+    def test_thread_search_request_allows_null_select(self: "TestThreadSearchRequestSelectValidation") -> None:
+        request = ThreadSearchRequest(select=None)
+        assert request.select is None
+
+    def test_thread_search_request_omits_select_from_auth_payload(
+        self: "TestThreadSearchRequestSelectValidation",
+    ) -> None:
+        request = ThreadSearchRequest()
+        assert "select" not in request.model_dump()
+
+    @pytest.mark.parametrize("select", [[], ["thread_id"], ["interrupts"]])
+    def test_thread_search_request_rejects_non_null_select(
+        self: "TestThreadSearchRequestSelectValidation", select: list[str]
+    ) -> None:
+        with pytest.raises(ValueError, match="select projection is not supported"):
+            ThreadSearchRequest(select=select)

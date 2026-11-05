@@ -73,7 +73,7 @@ aegra serve
 
 What it does:
 1. Loads your `.env` file
-2. Runs uvicorn in production mode (no reload)
+2. Replaces itself with uvicorn in production mode (no reload), so as a container's PID 1 the server receives `SIGTERM` directly and drains in-flight runs; on Windows, which has no exec, uvicorn runs as a child process
 3. Applies database migrations automatically
 4. Connects to the database configured via `DATABASE_URL` or `POSTGRES_*` variables
 

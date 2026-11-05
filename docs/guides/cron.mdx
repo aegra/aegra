@@ -202,7 +202,14 @@ updated = await client.crons.update(
 )
 ```
 
-Supported update fields: `schedule`, `enabled`, `input`, `config`, `metadata`, `timezone`, `durability`.
+Supported update fields: `schedule`, `enabled`, `input`, `config`, `metadata`, `timezone`, `durability`, `end_time`.
+
+The scheduler checks `end_time` after each firing and disables the cron once that time has passed, so a cron can still fire once after its `end_time`. Pass `end_time=None` to remove it, so the cron runs until you disable or delete it; leaving the argument out keeps the current end time. A cron already disabled by its end time stays disabled, so pass `enabled=True` as well to resume it:
+
+```python
+await client.crons.update(cron_id="<cron_id>", end_time=None)
+await client.crons.update(cron_id="<cron_id>", end_time=None, enabled=True)  # resume an expired cron
+```
 
 ## Disabling and re-enabling
 

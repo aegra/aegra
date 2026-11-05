@@ -90,7 +90,7 @@ def reload_main_module() -> types.ModuleType:
 
 @pytest.mark.unit
 @pytest.mark.asyncio
-async def test_default_cors_includes_expose_headers(isolated_module_reload):
+async def test_default_cors_includes_expose_headers(isolated_module_reload: Path) -> None:
     """Test that default CORS config includes Content-Location and Location in expose_headers.
 
     This is critical for LangGraph SDK stream reconnection (reconnectOnMount) to work,
@@ -117,6 +117,7 @@ async def test_default_cors_includes_expose_headers(isolated_module_reload):
     expose_headers = cors_middleware.kwargs.get("expose_headers", [])
     assert "Content-Location" in expose_headers, "Content-Location should be in expose_headers by default"
     assert "Location" in expose_headers, "Location should be in expose_headers by default"
+    assert "WWW-Authenticate" in expose_headers
 
 
 @pytest.mark.unit
@@ -170,7 +171,7 @@ async def test_cors_config_without_custom_app_applies_settings(isolated_module_r
 
 @pytest.mark.unit
 @pytest.mark.asyncio
-async def test_cors_expose_headers_defaults_when_not_specified(isolated_module_reload):
+async def test_cors_expose_headers_defaults_when_not_specified(isolated_module_reload: Path) -> None:
     """Test that expose_headers defaults to Content-Location and Location when not specified in config."""
     tmp_path = isolated_module_reload
 
@@ -200,6 +201,7 @@ async def test_cors_expose_headers_defaults_when_not_specified(isolated_module_r
     expose_headers = cors_middleware.kwargs.get("expose_headers", [])
     assert "Content-Location" in expose_headers, "Content-Location should default when not specified in cors config"
     assert "Location" in expose_headers, "Location should default when not specified in cors config"
+    assert "WWW-Authenticate" in expose_headers
 
 
 @pytest.mark.unit

@@ -62,7 +62,7 @@ setup_logging()
 logger = structlog.getLogger(__name__)
 
 # Default CORS headers required for LangGraph SDK stream reconnection
-DEFAULT_EXPOSE_HEADERS = ["Content-Location", "Location"]
+DEFAULT_EXPOSE_HEADERS = ["Content-Location", "Location", "WWW-Authenticate"]
 
 
 def _log_connection_help(error: Exception) -> None:
@@ -175,6 +175,7 @@ async def agent_protocol_exception_handler(_request: Request, exc: HTTPException
             message=exc.detail,
             details=getattr(exc, "details", None),
         ).model_dump(),
+        headers=exc.headers,
     )
 
 

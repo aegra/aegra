@@ -35,11 +35,11 @@ def get_auth_headers(token: str | None = None) -> dict[str, str]:
 class TestCoreRoutesAuth:
     """Test that core routes require authentication"""
 
-    def test_core_routes_reject_without_auth(self):
+    def test_core_routes_reject_without_auth(self) -> None:
         """Test that core API routes return 401 without auth token"""
         url = f"{get_server_url()}/assistants"
 
-        response = httpx.get(url, timeout=10.0)
+        response = httpx.get(url, headers={"Origin": "https://client.example.com"}, timeout=10.0)
 
         # Should return 401 (unauthorized) without token
         assert response.status_code == 401, f"Expected 401, got {response.status_code}: {response.text}"
@@ -48,6 +48,12 @@ class TestCoreRoutesAuth:
         error_data = response.json()
         assert "error" in error_data
         assert error_data["error"] == "unauthorized"
+        assert response.headers["www-authenticate"] == "Bearer"
+        assert response.headers["access-control-allow-origin"] == "*"
+        exposed_headers = {
+            header.strip().lower() for header in response.headers["access-control-expose-headers"].split(",")
+        }
+        assert "www-authenticate" in exposed_headers
 
         elog("Core route without auth", {"url": url, "status": response.status_code})
 
@@ -85,6 +91,30 @@ class TestCoreRoutesAuth:
             "Core route with invalid token",
             {"url": url, "status": response.status_code},
         )
+
+    def test_disabled_account_returns_403(self) -> None:
+        """Handler HTTPException(403) must not be rewritten as 401."""
+        url = f"{get_server_url()}/assistants"
+        headers = get_auth_headers("mock-jwt-disabled-user-team123")
+
+        response = httpx.get(url, headers=headers, timeout=10.0)
+
+        assert response.status_code == 403, f"Expected 403, got {response.status_code}: {response.text}"
+        assert "account disabled" in response.text
+
+        elog("Disabled account", {"url": url, "status": response.status_code})
+
+    def test_rate_limited_identity_returns_429(self) -> None:
+        """Handler HTTPException(429) must not be rewritten as 401."""
+        url = f"{get_server_url()}/assistants"
+        headers = get_auth_headers("mock-jwt-ratelimited-user-team123")
+
+        response = httpx.get(url, headers=headers, timeout=10.0)
+
+        assert response.status_code == 429, f"Expected 429, got {response.status_code}: {response.text}"
+        assert "too many attempts" in response.text
+
+        elog("Rate limited identity", {"url": url, "status": response.status_code})
 
 
 @pytest.mark.e2e

@@ -23,7 +23,7 @@ from aegra_api.core.orm import Run as RunORM
 from aegra_api.core.orm import Thread as ThreadORM
 from aegra_api.core.orm import _get_session_maker
 from aegra_api.models import Run, RunCreate, User
-from aegra_api.models.run_job import RunBehavior, RunExecution, RunIdentity, RunJob
+from aegra_api.models.run_job import CronTrigger, RunBehavior, RunExecution, RunIdentity, RunJob
 from aegra_api.models.runs import Durability
 from aegra_api.services.executor import executor
 from aegra_api.services.langgraph_service import get_langgraph_service
@@ -246,6 +246,13 @@ def _resolve_durability(request: RunCreate) -> Durability | None:
     return get_default_durability()
 
 
+def _resolve_run_metadata(request: RunCreate, trigger: CronTrigger | None) -> dict[str, Any]:
+    """Cron metadata first, then the request's; the trigger's own keys are server-owned and win."""
+    if trigger is None:
+        return request.metadata or {}
+    return {**trigger.cron_metadata, **(request.metadata or {}), **trigger.pinned_keys()}
+
+
 async def _prepare_run(
     session: AsyncSession,
     thread_id: str,
@@ -254,12 +261,14 @@ async def _prepare_run(
     *,
     initial_status: str,
     event_streaming_v2: bool = False,
+    trigger: CronTrigger | None = None,
 ) -> tuple[str, Run, RunJob]:
     """Shared run-creation logic used by create, stream, and wait endpoints.
 
     Validates inputs, resolves the assistant, persists the RunORM record,
     builds a RunJob, submits it to the executor, and returns the triple
-    ``(run_id, run_model, job)``.
+    ``(run_id, run_model, job)``. ``trigger`` names the cron firing a
+    scheduled run serves; it reaches the graph as pinned config keys.
     """
     await _validate_resume_command(session, thread_id, request.command)
 
@@ -330,7 +339,8 @@ async def _prepare_run(
             multitask_strategy=request.multitask_strategy,
             subgraphs=request.stream_subgraphs or False,
         ),
-        run_metadata=request.metadata or {},
+        run_metadata=_resolve_run_metadata(request, trigger),
+        trigger=trigger,
     )
 
     # Persist run record with trace metadata for worker observability.

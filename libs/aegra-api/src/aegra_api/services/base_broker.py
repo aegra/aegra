@@ -1,7 +1,7 @@
 """Abstract base classes for the broker system"""
 
 from abc import ABC, abstractmethod
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator
 from typing import Any
 
 from aegra_api.models.enums import RunCancellationAction
@@ -28,8 +28,8 @@ class BaseRunBroker(ABC):
         """
 
     @abstractmethod
-    def aiter(self) -> AsyncIterator[tuple[str, Any]]:
-        """Async iterator yielding (event_id, payload) pairs."""
+    def aiter(self) -> AsyncGenerator[tuple[str, Any], None]:
+        """Closeable async generator yielding (event_id, payload) pairs."""
         ...
 
     @abstractmethod
@@ -61,8 +61,8 @@ class BaseBrokerManager(ABC):
         """Get or create a broker for a run"""
 
     @abstractmethod
-    def get_broker(self, run_id: str) -> BaseRunBroker | None:
-        """Get an existing broker or None"""
+    def get_broker(self, run_id: str, *, for_replay: bool = False) -> BaseRunBroker | None:
+        """Get an existing broker, or an uncached handle to remote replay data."""
 
     @abstractmethod
     def cleanup_broker(self, run_id: str) -> None:

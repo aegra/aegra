@@ -1,6 +1,9 @@
 """Unit tests for streaming_service module"""
 
+import asyncio
+import json
 from collections.abc import AsyncGenerator
+from contextlib import aclosing
 from datetime import UTC, datetime
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -8,7 +11,35 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from aegra_api.models import Run
+from aegra_api.services.broker import BrokerManager
+from aegra_api.services.redis_broker import RedisBrokerManager
 from aegra_api.services.streaming_service import StreamingService
+
+
+def _run(*, run_id: str = "run-123", status: str = "success") -> Run:
+    now = datetime.now(UTC)
+    return Run(
+        run_id=run_id,
+        status=status,
+        user_id="user-1",
+        thread_id="thread-1",
+        assistant_id="agent",
+        input={"message": "hello"},
+        created_at=now,
+        updated_at=now,
+    )
+
+
+async def _drain(
+    service: StreamingService,
+    run: Run,
+    *,
+    last_event_id: str | None = None,
+) -> list[str]:
+    events: list[str] = []
+    async for event in service.stream_run_execution(run, last_event_id):
+        events.append(event)
+    return events
 
 
 @pytest.mark.asyncio
@@ -387,6 +418,255 @@ class TestStreamingService:
         with patch("aegra_api.services.streaming_service.broker_manager") as mock_manager:
             await service.cleanup_run(run_id)
             mock_manager.cleanup_broker.assert_called_with(run_id)
+
+    async def test_rejoin_finished_run_without_broker_emits_end(self) -> None:
+        """Finished run + Last-Event-ID must emit end when the broker is gone.
+
+        Regression for #472: get_or_create_broker after restart yields an empty
+        unfinished broker, and aiter() waits forever instead of closing.
+        """
+        service = StreamingService()
+        run = _run(status="success")
+        manager = BrokerManager()
+
+        with patch("aegra_api.services.streaming_service.broker_manager", manager):
+            events = await asyncio.wait_for(
+                _drain(service, run, last_event_id="-1"),
+                timeout=1.0,
+            )
+
+        body = "".join(events)
+        assert "event: end" in body
+        assert '{"status":"success"}' in body
+        assert manager.get_broker(run.run_id) is None
+
+    async def test_terminal_rejoin_waits_for_pending_error_details(self) -> None:
+        service = StreamingService()
+        run = _run(status="error")
+        manager = BrokerManager()
+        broker = manager.get_or_create_broker(run.run_id)
+
+        async def publish_error() -> None:
+            await asyncio.sleep(0)
+            await broker.put("run-123_event_1", ("error", {"error": "ValueError", "message": "invalid input"}))
+            await broker.put("run-123_event_2", ("end", {"status": "error"}))
+
+        with patch("aegra_api.services.streaming_service.broker_manager", manager):
+            async with asyncio.TaskGroup() as tasks:
+                tasks.create_task(publish_error())
+                events = await asyncio.wait_for(_drain(service, run, last_event_id="-1"), timeout=2.0)
+
+        body = "".join(events)
+        assert body.count("event: error") == 1
+        assert '"error":"ValueError"' in body
+        assert '"message":"invalid input"' in body
+        assert body.count("event: end") == 1
+
+    async def test_terminal_rejoin_bounds_abandoned_broker_and_closes_subscription(self) -> None:
+        service = StreamingService()
+        run = _run(status="error")
+        manager = BrokerManager()
+        broker = manager.get_or_create_broker(run.run_id)
+
+        with (
+            patch("aegra_api.services.streaming_service.broker_manager", manager),
+            patch("aegra_api.services.streaming_service._TERMINAL_EVENT_GRACE_SECONDS", 0.01),
+        ):
+            events = await asyncio.wait_for(_drain(service, run, last_event_id="-1"), timeout=0.5)
+
+        assert len(events) == 1
+        assert events[0].startswith("event: end")
+        assert broker._subscribers == set()
+
+    async def test_terminal_grace_does_not_cancel_a_slow_consumer(self) -> None:
+        service = StreamingService()
+        run = _run(status="error")
+        manager = BrokerManager()
+        broker = manager.get_or_create_broker(run.run_id)
+
+        async def publish_error() -> None:
+            await asyncio.sleep(0)
+            await broker.put("run-123_event_1", ("error", {"message": "invalid input"}))
+
+        with (
+            patch("aegra_api.services.streaming_service.broker_manager", manager),
+            patch("aegra_api.services.streaming_service._TERMINAL_EVENT_GRACE_SECONDS", 0.01),
+        ):
+            async with (
+                asyncio.TaskGroup() as tasks,
+                aclosing(service.stream_run_execution(run, "-1")) as events,
+            ):
+                tasks.create_task(publish_error())
+                first = await anext(events)
+                await asyncio.sleep(0.03)
+                remaining = [event async for event in events]
+
+        assert first.startswith("event: error")
+        assert len(remaining) == 1
+        assert remaining[0].startswith("event: end")
+        assert broker._subscribers == set()
+
+    async def test_terminal_rejoin_replays_error_published_during_subscription_handoff(self) -> None:
+        service = StreamingService()
+        run = _run(status="error")
+        broker = MagicMock()
+        broker.replay = AsyncMock(
+            side_effect=[
+                [],
+                [],
+                [
+                    ("run-123_event_1", ("error", {"error": "ValueError", "message": "invalid input"})),
+                    ("run-123_event_2", ("end", {"status": "error"})),
+                ],
+            ]
+        )
+        broker.is_finished.return_value = False
+
+        async def missed_publication() -> AsyncGenerator[tuple[str, Any], None]:
+            for event in []:
+                yield event
+
+        broker.aiter = missed_publication
+        with patch("aegra_api.services.streaming_service.broker_manager") as manager:
+            manager.get_broker.return_value = broker
+            events = await asyncio.wait_for(_drain(service, run, last_event_id="-1"), timeout=1.0)
+            manager.get_or_create_broker.assert_not_called()
+
+        body = "".join(events)
+        assert body.count("event: error") == 1
+        assert '"message":"invalid input"' in body
+        assert body.count("event: end") == 1
+
+    async def test_repeated_rejoin_after_sweep_does_not_recreate_brokers(self) -> None:
+        """Rejoining removed runs must leave the broker registry empty."""
+        service = StreamingService()
+        manager = BrokerManager()
+
+        with patch("aegra_api.services.streaming_service.broker_manager", manager):
+            for index in range(5):
+                run = _run(run_id=f"run-{index}")
+                broker = manager.get_or_create_broker(run.run_id)
+                await broker.put(f"{run.run_id}_event_1", ("end", {"status": "success"}))
+                manager.remove_broker(run.run_id)
+
+                for _ in range(2):
+                    events = await asyncio.wait_for(_drain(service, run, last_event_id="-1"), timeout=1.0)
+                    assert len(events) == 1
+                    assert events[0].startswith("event: end")
+                    assert manager.get_broker(run.run_id) is None
+
+            assert manager._brokers == {}
+
+    async def test_rejoin_after_acknowledging_end_emits_one_end(self) -> None:
+        """An acknowledged buffered end still closes a fresh SSE connection."""
+        service = StreamingService()
+        run = _run()
+        manager = BrokerManager()
+        broker = manager.get_or_create_broker(run.run_id)
+        await broker.put("run-123_event_1", ("values", {"a": 1}))
+        await broker.put("run-123_event_2", ("end", {"status": "success"}))
+
+        with patch("aegra_api.services.streaming_service.broker_manager", manager):
+            events = await asyncio.wait_for(_drain(service, run, last_event_id="run-123_event_2"), timeout=1.0)
+
+        assert len(events) == 1
+        assert events[0].startswith("event: end")
+        assert '{"status":"success"}' in events[0]
+
+    @pytest.mark.parametrize("had_local_broker", [False, True])
+    @pytest.mark.parametrize("last_event_id", ["-1", "run-123_event_2"])
+    @pytest.mark.parametrize("buffer_expired", [False, True])
+    async def test_terminal_redis_rejoin_replays_without_caching_broker(
+        self, had_local_broker: bool, last_event_id: str, buffer_expired: bool
+    ) -> None:
+        """Redis replay survives local cleanup and works on another instance."""
+        service = StreamingService()
+        run = _run()
+        manager = RedisBrokerManager()
+        if had_local_broker:
+            manager.get_or_create_broker(run.run_id)
+            manager.cleanup_broker(run.run_id)
+        messages = [
+            json.dumps({"event_id": "run-123_event_1", "payload": ["values", {"a": 1}]}),
+            json.dumps({"event_id": "run-123_event_2", "payload": ["end", {"status": "success"}]}),
+        ]
+        client = MagicMock()
+        client.lrange = AsyncMock(return_value=[] if buffer_expired else messages)
+        pubsub = client.pubsub.return_value
+        pubsub.subscribe = AsyncMock()
+        pubsub.unsubscribe = AsyncMock()
+        pubsub.aclose = AsyncMock()
+
+        async def wait_for_publication(**_kwargs: Any) -> None:
+            await asyncio.sleep(0.01)
+
+        pubsub.get_message = wait_for_publication
+
+        with (
+            patch("aegra_api.services.streaming_service.broker_manager", manager),
+            patch("aegra_api.services.redis_broker.redis_manager.get_client", return_value=client),
+            patch("aegra_api.services.streaming_service._TERMINAL_EVENT_GRACE_SECONDS", 0.02),
+        ):
+            events = await asyncio.wait_for(_drain(service, run, last_event_id=last_event_id), timeout=1.0)
+            assert service.is_run_streaming(run.run_id) is False
+
+        assert len([event for event in events if event.startswith("event: end")]) == 1
+        if not buffer_expired and last_event_id == "-1":
+            assert len(events) == 2
+            assert events[0].startswith("event: values")
+            assert "id: run-123_event_2" in events[1]
+        else:
+            assert len(events) == 1
+        assert manager.get_broker(run.run_id) is None
+        assert manager._brokers == {}
+        client.lrange.assert_awaited()
+
+    async def test_rejoin_finished_run_does_not_duplicate_replayed_end(self) -> None:
+        """If replay already includes end, do not emit a second terminal event."""
+        service = StreamingService()
+        run = _run(status="success")
+        manager = BrokerManager()
+        broker = manager.get_or_create_broker(run.run_id)
+        await broker.put("run-123_event_1", ("values", {"a": 1}))
+        await broker.put("run-123_event_2", ("end", {"status": "success"}))
+
+        with patch("aegra_api.services.streaming_service.broker_manager", manager):
+            events = await asyncio.wait_for(
+                _drain(service, run, last_event_id="-1"),
+                timeout=1.0,
+            )
+
+        end_events = [event for event in events if event.startswith("event: end")]
+        assert len(end_events) == 1
+        assert '{"status":"success"}' in end_events[0]
+
+    @pytest.mark.parametrize(
+        ("run_status", "end_status"),
+        [
+            ("success", "success"),
+            ("error", "error"),
+            ("interrupted", "interrupted"),
+        ],
+    )
+    async def test_rejoin_finished_run_end_status_matches_run(
+        self,
+        run_status: str,
+        end_status: str,
+    ) -> None:
+        """Synthesized end status must match the header-free terminal path."""
+        service = StreamingService()
+        run = _run(status=run_status)
+        manager = BrokerManager()
+
+        with patch("aegra_api.services.streaming_service.broker_manager", manager):
+            events = await asyncio.wait_for(
+                _drain(service, run, last_event_id="-1"),
+                timeout=1.0,
+            )
+
+        body = "".join(events)
+        assert "event: end" in body
+        assert f'{{"status":"{end_status}"}}' in body
 
     async def test_cleanup_run_drops_the_event_counter(self) -> None:
         """The counter dict is global and unbounded; a finished run must leave no entry."""

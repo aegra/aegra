@@ -70,6 +70,59 @@ class TestRedisRunBroker:
         )
 
     @pytest.mark.asyncio
+    async def test_closing_live_iterator_releases_pubsub_immediately(self) -> None:
+        broker = self._make_broker()
+        client = MagicMock()
+        client.lrange = AsyncMock(return_value=[])
+        pubsub = client.pubsub.return_value
+        pubsub.subscribe = AsyncMock()
+        pubsub.unsubscribe = AsyncMock()
+        pubsub.aclose = AsyncMock()
+        pubsub.get_message = AsyncMock(
+            return_value={
+                "type": "message",
+                "data": json.dumps({"event_id": "run-123_event_1", "payload": ["error", {"message": "failed"}]}),
+            }
+        )
+
+        with patch("aegra_api.services.redis_broker.redis_manager.get_client", return_value=client):
+            events = broker.aiter()
+            event_id, _payload = await anext(events)
+            await events.aclose()
+
+        assert event_id == "run-123_event_1"
+        pubsub.unsubscribe.assert_awaited_once_with("aegra:run:run-123")
+        pubsub.aclose.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("stage", ["subscribe", "buffer_check"])
+    async def test_setup_timeout_releases_pubsub(self, stage: str) -> None:
+        broker = self._make_broker()
+        client = MagicMock()
+        client.lrange = AsyncMock(return_value=[])
+        pubsub = client.pubsub.return_value
+        pubsub.subscribe = AsyncMock()
+        pubsub.unsubscribe = AsyncMock()
+        pubsub.aclose = AsyncMock()
+
+        async def stalled_setup(*_args: object) -> None:
+            await asyncio.Event().wait()
+
+        if stage == "subscribe":
+            pubsub.subscribe = stalled_setup
+        else:
+            client.lrange = stalled_setup
+
+        with (
+            patch("aegra_api.services.redis_broker.redis_manager.get_client", return_value=client),
+            pytest.raises(TimeoutError),
+        ):
+            async with asyncio.timeout(0.01):
+                await anext(broker.aiter())
+
+        pubsub.aclose.assert_awaited_once()
+
+    @pytest.mark.asyncio
     async def test_put_publishes_and_caches(self) -> None:
         """Test that put() publishes to channel and stores in cache list via pipeline"""
         broker = self._make_broker()

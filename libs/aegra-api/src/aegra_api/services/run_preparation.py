@@ -14,6 +14,8 @@ import structlog
 from asgi_correlation_id import correlation_id
 from fastapi import HTTPException
 from pydantic import TypeAdapter, ValidationError
+from redis import ConnectionError as RedisConnectionError
+from redis import TimeoutError as RedisTimeoutError
 from sqlalchemy import ColumnElement, case, func, literal_column, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -365,8 +367,17 @@ async def _prepare_run(
 
     run = Run.model_validate(run_orm)
 
-    # Submit to executor
-    await executor.submit(job)
-    logger.info("Submitted run to executor", run_id=run_id)
+    # The row is already committed as pending, and the lease reaper dispatches
+    # pending runs missing from the queue; failing here would invite a duplicate retry.
+    try:
+        await executor.submit(job)
+    except (RedisConnectionError, RedisTimeoutError, OSError):
+        logger.warning(
+            "Run saved but not dispatched; the lease reaper will dispatch it",
+            run_id=run_id,
+            exc_info=True,
+        )
+    else:
+        logger.info("Submitted run to executor", run_id=run_id)
 
     return run_id, run, job

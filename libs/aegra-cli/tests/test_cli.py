@@ -19,7 +19,7 @@ from aegra_cli.cli import (
     get_project_slug,
 )
 from aegra_cli.env import load_env_file
-from aegra_cli.utils.docker import (
+from aegra_cli.utils.container_runtime import (
     ContainerRuntime,
     ProjectOwnership,
     RuntimeSelectionError,
@@ -1585,8 +1585,8 @@ class TestContainerRuntimeCli:
         monkeypatch.setattr("aegra_cli.cli.resolve_container_runtime", resolve_container_runtime)
         with cli_runner.isolated_filesystem(temp_dir=tmp_path):
             with (
-                patch("aegra_cli.utils.docker.is_docker_installed", return_value=False),
-                patch("aegra_cli.utils.docker.is_podman_installed", return_value=False),
+                patch("aegra_cli.utils.container_runtime.is_docker_installed", return_value=False),
+                patch("aegra_cli.utils.container_runtime.is_podman_installed", return_value=False),
             ):
                 result = cli_runner.invoke(cli, ["up"])
 
@@ -1600,8 +1600,8 @@ class TestContainerRuntimeCli:
         with cli_runner.isolated_filesystem(temp_dir=tmp_path):
             Path("docker-compose.yml").write_text("services: {}\n")
             with (
-                patch("aegra_cli.utils.docker.is_docker_installed", return_value=False),
-                patch("aegra_cli.utils.docker.is_podman_installed", return_value=False),
+                patch("aegra_cli.utils.container_runtime.is_docker_installed", return_value=False),
+                patch("aegra_cli.utils.container_runtime.is_podman_installed", return_value=False),
             ):
                 result = cli_runner.invoke(cli, ["down"])
 
@@ -1631,7 +1631,9 @@ class TestContainerRuntimeCli:
                     return_value=ContainerRuntime.PODMAN,
                 ),
                 patch("aegra_cli.cli.ensure_compose_plugin", ensure_compose_plugin),
-                patch("aegra_cli.utils.docker.podman_compose_available", return_value=False),
+                patch(
+                    "aegra_cli.utils.container_runtime.podman_compose_available", return_value=False
+                ),
                 patch("aegra_cli.cli.subprocess.run") as mock_run,
             ):
                 result = cli_runner.invoke(cli, ["up"])
@@ -1647,7 +1649,7 @@ class TestContainerRuntimeCli:
         with cli_runner.isolated_filesystem(temp_dir=tmp_path):
             Path(".env").write_text("AEGRA_CONTAINER_RUNTIME=podman\n")
             with (
-                patch("aegra_cli.utils.docker.is_podman_installed", return_value=True),
+                patch("aegra_cli.utils.container_runtime.is_podman_installed", return_value=True),
                 patch("aegra_cli.cli.subprocess.run") as mock_run,
             ):
                 mock_run.return_value.returncode = 0
@@ -1664,7 +1666,7 @@ class TestContainerRuntimeCli:
         with cli_runner.isolated_filesystem(temp_dir=tmp_path):
             Path(".env").write_text("AEGRA_CONTAINER_RUNTIME=podman\n")
             with (
-                patch("aegra_cli.utils.docker.is_docker_installed", return_value=True),
+                patch("aegra_cli.utils.container_runtime.is_docker_installed", return_value=True),
                 patch("aegra_cli.cli.subprocess.run") as mock_run,
             ):
                 mock_run.return_value.returncode = 0
@@ -1729,14 +1731,16 @@ class TestContainerRuntimeCli:
             Path("docker-compose.yml").write_text("services: {}\n")
             Path(".env").write_text("AEGRA_CONTAINER_RUNTIME=podman\n")
             with (
-                patch("aegra_cli.utils.docker.is_podman_installed", return_value=True),
-                patch("aegra_cli.utils.docker.is_podman_running", return_value=True),
-                patch("aegra_cli.utils.docker.podman_compose_available", return_value=True),
+                patch("aegra_cli.utils.container_runtime.is_podman_installed", return_value=True),
+                patch("aegra_cli.utils.container_runtime.is_podman_running", return_value=True),
                 patch(
-                    "aegra_cli.utils.docker.is_postgres_container_running",
+                    "aegra_cli.utils.container_runtime.podman_compose_available", return_value=True
+                ),
+                patch(
+                    "aegra_cli.utils.container_runtime.is_postgres_container_running",
                     return_value=False,
                 ),
-                patch("aegra_cli.utils.docker.subprocess.run") as mock_run,
+                patch("aegra_cli.utils.container_runtime.subprocess.run") as mock_run,
                 patch("aegra_cli.cli.subprocess.Popen") as mock_popen,
             ):
                 mock_run.return_value.returncode = 0
@@ -1785,7 +1789,7 @@ class TestContainerRuntimeCli:
                     "aegra_cli.cli.resolve_container_runtime",
                     return_value=ContainerRuntime.PODMAN,
                 ),
-                patch("aegra_cli.utils.docker.is_podman_installed", return_value=True),
+                patch("aegra_cli.utils.container_runtime.is_podman_installed", return_value=True),
                 patch("aegra_cli.cli.subprocess.run") as mock_run,
             ):
                 mock_run.return_value.returncode = 0
@@ -1866,7 +1870,9 @@ class TestContainerRuntimeCli:
                     return_value=ProjectOwnership([ContainerRuntime.PODMAN], False),
                 ),
                 patch("aegra_cli.cli.ensure_compose_plugin", ensure_compose_plugin),
-                patch("aegra_cli.utils.docker.podman_compose_available", return_value=False),
+                patch(
+                    "aegra_cli.utils.container_runtime.podman_compose_available", return_value=False
+                ),
                 patch("aegra_cli.cli.subprocess.run") as mock_run,
             ):
                 result = cli_runner.invoke(cli, ["down"])
@@ -1931,7 +1937,10 @@ class TestContainerRuntimeCli:
             with (
                 patch("aegra_cli.cli.runtimes_owning_project", runtimes_owning_project),
                 patch("aegra_cli.cli.ensure_compose_plugin", ensure_compose_plugin),
-                patch("aegra_cli.utils.docker.shutil.which", return_value="/usr/bin/runtime"),
+                patch(
+                    "aegra_cli.utils.container_runtime.shutil.which",
+                    return_value="/usr/bin/runtime",
+                ),
                 patch("aegra_cli.cli.subprocess.run", side_effect=fake_run),
             ):
                 result = cli_runner.invoke(cli, ["down"])
@@ -1960,7 +1969,10 @@ class TestContainerRuntimeCli:
             Path("docker-compose.yml").write_text("services: {}\n")
             with (
                 patch("aegra_cli.cli.runtimes_owning_project", runtimes_owning_project),
-                patch("aegra_cli.utils.docker.shutil.which", return_value="/usr/bin/runtime"),
+                patch(
+                    "aegra_cli.utils.container_runtime.shutil.which",
+                    return_value="/usr/bin/runtime",
+                ),
                 patch("aegra_cli.cli.subprocess.run", side_effect=fake_run),
             ):
                 result = cli_runner.invoke(cli, ["down"])
@@ -1987,7 +1999,10 @@ class TestContainerRuntimeCli:
             Path("docker-compose.yml").write_text("services: {}\n")
             with (
                 patch("aegra_cli.cli.runtimes_owning_project", runtimes_owning_project),
-                patch("aegra_cli.utils.docker.shutil.which", return_value="/usr/bin/runtime"),
+                patch(
+                    "aegra_cli.utils.container_runtime.shutil.which",
+                    return_value="/usr/bin/runtime",
+                ),
                 patch("aegra_cli.cli.subprocess.run", side_effect=fake_run),
             ):
                 result = cli_runner.invoke(cli, ["down"])
@@ -2011,7 +2026,10 @@ class TestContainerRuntimeCli:
             Path("docker-compose.yml").write_text("services: {}\n")
             with (
                 patch("aegra_cli.cli.runtimes_owning_project", runtimes_owning_project),
-                patch("aegra_cli.utils.docker.shutil.which", return_value="/usr/bin/runtime"),
+                patch(
+                    "aegra_cli.utils.container_runtime.shutil.which",
+                    return_value="/usr/bin/runtime",
+                ),
                 patch("aegra_cli.cli.subprocess.run", side_effect=fake_run),
             ):
                 result = cli_runner.invoke(cli, ["down"])

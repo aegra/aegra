@@ -1,4 +1,4 @@
-"""Tests for Docker utility functions."""
+"""Tests for the Docker and Podman runtime helpers."""
 
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from aegra_cli.utils.docker import (
+from aegra_cli.utils.container_runtime import (
     ContainerRuntime,
     ProjectOwnership,
     RuntimeSelectionError,
@@ -45,14 +45,14 @@ class TestIsDockerInstalled:
 
     def test_returns_true_when_docker_found(self) -> None:
         """Test that function returns True when docker is in PATH."""
-        with patch("aegra_cli.utils.docker.shutil.which") as mock_which:
+        with patch("aegra_cli.utils.container_runtime.shutil.which") as mock_which:
             mock_which.return_value = "/usr/bin/docker"
             assert is_docker_installed() is True
             mock_which.assert_called_once_with("docker")
 
     def test_returns_false_when_docker_not_found(self) -> None:
         """Test that function returns False when docker is not in PATH."""
-        with patch("aegra_cli.utils.docker.shutil.which") as mock_which:
+        with patch("aegra_cli.utils.container_runtime.shutil.which") as mock_which:
             mock_which.return_value = None
             assert is_docker_installed() is False
 
@@ -63,8 +63,8 @@ class TestIsDockerRunning:
     def test_returns_true_when_docker_daemon_responds(self) -> None:
         """Test that function returns True when docker info succeeds."""
         with (
-            patch("aegra_cli.utils.docker.is_docker_installed") as mock_installed,
-            patch("aegra_cli.utils.docker.subprocess.run") as mock_run,
+            patch("aegra_cli.utils.container_runtime.is_docker_installed") as mock_installed,
+            patch("aegra_cli.utils.container_runtime.subprocess.run") as mock_run,
         ):
             mock_installed.return_value = True
             mock_run.return_value.returncode = 0
@@ -78,15 +78,15 @@ class TestIsDockerRunning:
 
     def test_returns_false_when_docker_not_installed(self) -> None:
         """Test that function returns False when docker is not installed."""
-        with patch("aegra_cli.utils.docker.is_docker_installed") as mock_installed:
+        with patch("aegra_cli.utils.container_runtime.is_docker_installed") as mock_installed:
             mock_installed.return_value = False
             assert is_docker_running() is False
 
     def test_returns_false_when_docker_daemon_not_running(self) -> None:
         """Test that function returns False when docker info fails."""
         with (
-            patch("aegra_cli.utils.docker.is_docker_installed") as mock_installed,
-            patch("aegra_cli.utils.docker.subprocess.run") as mock_run,
+            patch("aegra_cli.utils.container_runtime.is_docker_installed") as mock_installed,
+            patch("aegra_cli.utils.container_runtime.subprocess.run") as mock_run,
         ):
             mock_installed.return_value = True
             mock_run.return_value.returncode = 1
@@ -98,8 +98,8 @@ class TestIsDockerRunning:
         import subprocess
 
         with (
-            patch("aegra_cli.utils.docker.is_docker_installed") as mock_installed,
-            patch("aegra_cli.utils.docker.subprocess.run") as mock_run,
+            patch("aegra_cli.utils.container_runtime.is_docker_installed") as mock_installed,
+            patch("aegra_cli.utils.container_runtime.subprocess.run") as mock_run,
         ):
             mock_installed.return_value = True
             mock_run.side_effect = subprocess.TimeoutExpired("docker", 10)
@@ -108,9 +108,9 @@ class TestIsDockerRunning:
 
     def test_reports_why_when_docker_info_times_out(self) -> None:
         with (
-            patch("aegra_cli.utils.docker.is_docker_installed", return_value=True),
+            patch("aegra_cli.utils.container_runtime.is_docker_installed", return_value=True),
             patch(
-                "aegra_cli.utils.docker.subprocess.run",
+                "aegra_cli.utils.container_runtime.subprocess.run",
                 side_effect=subprocess.TimeoutExpired(["docker", "info"], 10),
             ),
             console.capture() as captured,
@@ -122,9 +122,9 @@ class TestIsDockerRunning:
 
     def test_reports_why_when_docker_binary_disappears(self) -> None:
         with (
-            patch("aegra_cli.utils.docker.is_docker_installed", return_value=True),
+            patch("aegra_cli.utils.container_runtime.is_docker_installed", return_value=True),
             patch(
-                "aegra_cli.utils.docker.subprocess.run",
+                "aegra_cli.utils.container_runtime.subprocess.run",
                 side_effect=FileNotFoundError(2, "No such file or directory", "docker"),
             ),
             console.capture() as captured,
@@ -140,7 +140,7 @@ class TestGetDockerStartInstructions:
 
     def test_returns_macos_instructions_on_darwin(self) -> None:
         """Test that function returns macOS instructions on Darwin."""
-        with patch("aegra_cli.utils.docker.platform.system") as mock_system:
+        with patch("aegra_cli.utils.container_runtime.platform.system") as mock_system:
             mock_system.return_value = "Darwin"
             instructions = get_docker_start_instructions()
 
@@ -149,7 +149,7 @@ class TestGetDockerStartInstructions:
 
     def test_returns_linux_instructions_on_linux(self) -> None:
         """Test that function returns Linux instructions on Linux."""
-        with patch("aegra_cli.utils.docker.platform.system") as mock_system:
+        with patch("aegra_cli.utils.container_runtime.platform.system") as mock_system:
             mock_system.return_value = "Linux"
             instructions = get_docker_start_instructions()
 
@@ -158,7 +158,7 @@ class TestGetDockerStartInstructions:
 
     def test_returns_windows_instructions_on_windows(self) -> None:
         """Test that function returns Windows instructions on Windows."""
-        with patch("aegra_cli.utils.docker.platform.system") as mock_system:
+        with patch("aegra_cli.utils.container_runtime.platform.system") as mock_system:
             mock_system.return_value = "Windows"
             instructions = get_docker_start_instructions()
 
@@ -171,7 +171,7 @@ class TestIsPostgresContainerRunning:
 
     def test_returns_true_when_postgres_in_running_services(self) -> None:
         """Test that function returns True when postgres is running."""
-        with patch("aegra_cli.utils.docker.subprocess.run") as mock_run:
+        with patch("aegra_cli.utils.container_runtime.subprocess.run") as mock_run:
             mock_run.return_value.returncode = 0
             mock_run.return_value.stdout = "postgres\nredis\n"
 
@@ -179,7 +179,7 @@ class TestIsPostgresContainerRunning:
 
     def test_returns_false_when_postgres_not_running(self) -> None:
         """Test that function returns False when postgres is not in running services."""
-        with patch("aegra_cli.utils.docker.subprocess.run") as mock_run:
+        with patch("aegra_cli.utils.container_runtime.subprocess.run") as mock_run:
             mock_run.return_value.returncode = 0
             mock_run.return_value.stdout = "redis\n"
 
@@ -187,7 +187,7 @@ class TestIsPostgresContainerRunning:
 
     def test_returns_false_when_no_services_running(self) -> None:
         """Test that function returns False when no services are running."""
-        with patch("aegra_cli.utils.docker.subprocess.run") as mock_run:
+        with patch("aegra_cli.utils.container_runtime.subprocess.run") as mock_run:
             mock_run.return_value.returncode = 0
             mock_run.return_value.stdout = ""
 
@@ -195,14 +195,14 @@ class TestIsPostgresContainerRunning:
 
     def test_returns_false_on_docker_compose_failure(self) -> None:
         """Test that function returns False when docker compose fails."""
-        with patch("aegra_cli.utils.docker.subprocess.run") as mock_run:
+        with patch("aegra_cli.utils.container_runtime.subprocess.run") as mock_run:
             mock_run.return_value.returncode = 1
 
             assert is_postgres_container_running(runtime=ContainerRuntime.DOCKER) is False
 
     def test_uses_compose_file_when_provided(self) -> None:
         """Test that function uses compose file when provided."""
-        with patch("aegra_cli.utils.docker.subprocess.run") as mock_run:
+        with patch("aegra_cli.utils.container_runtime.subprocess.run") as mock_run:
             mock_run.return_value.returncode = 0
             mock_run.return_value.stdout = "postgres\n"
 
@@ -218,7 +218,7 @@ class TestIsPostgresContainerRunning:
     def test_reports_timeout_when_compose_ps_times_out(self) -> None:
         with (
             patch(
-                "aegra_cli.utils.docker.subprocess.run",
+                "aegra_cli.utils.container_runtime.subprocess.run",
                 side_effect=subprocess.TimeoutExpired(["podman", "compose", "ps"], 10),
             ),
             console.capture() as captured,
@@ -231,7 +231,7 @@ class TestIsPostgresContainerRunning:
     def test_reports_missing_binary_when_compose_ps_cannot_run(self) -> None:
         with (
             patch(
-                "aegra_cli.utils.docker.subprocess.run",
+                "aegra_cli.utils.container_runtime.subprocess.run",
                 side_effect=FileNotFoundError(2, "No such file or directory", "podman"),
             ),
             console.capture() as captured,
@@ -250,7 +250,7 @@ class TestFindComposeFile:
         compose_file = tmp_path / "docker-compose.yml"
         compose_file.write_text("version: '3'\n")
 
-        with patch("aegra_cli.utils.docker.Path.cwd") as mock_cwd:
+        with patch("aegra_cli.utils.container_runtime.Path.cwd") as mock_cwd:
             mock_cwd.return_value = tmp_path
             result = find_compose_file()
 
@@ -261,7 +261,7 @@ class TestFindComposeFile:
         compose_file = tmp_path / "docker-compose.yaml"
         compose_file.write_text("version: '3'\n")
 
-        with patch("aegra_cli.utils.docker.Path.cwd") as mock_cwd:
+        with patch("aegra_cli.utils.container_runtime.Path.cwd") as mock_cwd:
             mock_cwd.return_value = tmp_path
             result = find_compose_file()
 
@@ -275,7 +275,7 @@ class TestFindComposeFile:
         subdir = tmp_path / "subdir"
         subdir.mkdir()
 
-        with patch("aegra_cli.utils.docker.Path.cwd") as mock_cwd:
+        with patch("aegra_cli.utils.container_runtime.Path.cwd") as mock_cwd:
             mock_cwd.return_value = subdir
             result = find_compose_file()
 
@@ -283,7 +283,7 @@ class TestFindComposeFile:
 
     def test_returns_none_when_no_compose_file_found(self, tmp_path: Path) -> None:
         """Test that function returns None when no compose file exists."""
-        with patch("aegra_cli.utils.docker.Path.cwd") as mock_cwd:
+        with patch("aegra_cli.utils.container_runtime.Path.cwd") as mock_cwd:
             mock_cwd.return_value = tmp_path
             result = find_compose_file()
 
@@ -297,7 +297,7 @@ class TestFindComposeFile:
         yaml_file = tmp_path / "docker-compose.yaml"
         yaml_file.write_text("version: '3'\n")
 
-        with patch("aegra_cli.utils.docker.Path.cwd") as mock_cwd:
+        with patch("aegra_cli.utils.container_runtime.Path.cwd") as mock_cwd:
             mock_cwd.return_value = tmp_path
             result = find_compose_file()
 
@@ -334,8 +334,8 @@ class TestDevCommandWithDockerCheck:
             Path("aegra.json").write_text('{"graphs": {}}')
 
             with (
-                patch("aegra_cli.utils.docker.is_docker_installed", return_value=False),
-                patch("aegra_cli.utils.docker.is_podman_installed", return_value=False),
+                patch("aegra_cli.utils.container_runtime.is_docker_installed", return_value=False),
+                patch("aegra_cli.utils.container_runtime.is_podman_installed", return_value=False),
             ):
                 result = cli_runner.invoke(cli, ["dev"])
 
@@ -352,10 +352,10 @@ class TestDevCommandWithDockerCheck:
             Path("aegra.json").write_text('{"graphs": {}}')
 
             with (
-                patch("aegra_cli.utils.docker.is_docker_installed", return_value=True),
-                patch("aegra_cli.utils.docker.is_docker_running", return_value=False),
-                patch("aegra_cli.utils.docker.is_podman_installed", return_value=False),
-                patch("aegra_cli.utils.docker.try_start_docker", return_value=False),
+                patch("aegra_cli.utils.container_runtime.is_docker_installed", return_value=True),
+                patch("aegra_cli.utils.container_runtime.is_docker_running", return_value=False),
+                patch("aegra_cli.utils.container_runtime.is_podman_installed", return_value=False),
+                patch("aegra_cli.utils.container_runtime.try_start_docker", return_value=False),
             ):
                 result = cli_runner.invoke(cli, ["dev"])
 
@@ -389,36 +389,38 @@ class TestPodmanDetection:
     """Podman install and health checks."""
 
     def test_installed_when_binary_is_on_path(self) -> None:
-        with patch("aegra_cli.utils.docker.shutil.which", return_value="/usr/bin/podman"):
+        with patch(
+            "aegra_cli.utils.container_runtime.shutil.which", return_value="/usr/bin/podman"
+        ):
             assert is_podman_installed() is True
 
     def test_not_installed_when_binary_is_missing(self) -> None:
-        with patch("aegra_cli.utils.docker.shutil.which", return_value=None):
+        with patch("aegra_cli.utils.container_runtime.shutil.which", return_value=None):
             assert is_podman_installed() is False
 
     def test_running_when_info_succeeds(self) -> None:
         with (
-            patch("aegra_cli.utils.docker.is_podman_installed", return_value=True),
-            patch("aegra_cli.utils.docker.subprocess.run", return_value=_completed(0)),
+            patch("aegra_cli.utils.container_runtime.is_podman_installed", return_value=True),
+            patch("aegra_cli.utils.container_runtime.subprocess.run", return_value=_completed(0)),
         ):
             assert is_podman_running() is True
 
     def test_not_running_when_not_installed(self) -> None:
-        with patch("aegra_cli.utils.docker.is_podman_installed", return_value=False):
+        with patch("aegra_cli.utils.container_runtime.is_podman_installed", return_value=False):
             assert is_podman_running() is False
 
     def test_not_running_when_info_fails(self) -> None:
         with (
-            patch("aegra_cli.utils.docker.is_podman_installed", return_value=True),
-            patch("aegra_cli.utils.docker.subprocess.run", return_value=_completed(1)),
+            patch("aegra_cli.utils.container_runtime.is_podman_installed", return_value=True),
+            patch("aegra_cli.utils.container_runtime.subprocess.run", return_value=_completed(1)),
         ):
             assert is_podman_running() is False
 
     def test_not_running_reports_timeout(self) -> None:
         with (
-            patch("aegra_cli.utils.docker.is_podman_installed", return_value=True),
+            patch("aegra_cli.utils.container_runtime.is_podman_installed", return_value=True),
             patch(
-                "aegra_cli.utils.docker.subprocess.run",
+                "aegra_cli.utils.container_runtime.subprocess.run",
                 side_effect=subprocess.TimeoutExpired(["podman", "info"], 10),
             ),
             console.capture() as captured,
@@ -431,9 +433,9 @@ class TestPodmanDetection:
 
     def test_not_running_reports_missing_binary(self) -> None:
         with (
-            patch("aegra_cli.utils.docker.is_podman_installed", return_value=True),
+            patch("aegra_cli.utils.container_runtime.is_podman_installed", return_value=True),
             patch(
-                "aegra_cli.utils.docker.subprocess.run",
+                "aegra_cli.utils.container_runtime.subprocess.run",
                 side_effect=FileNotFoundError(2, "No such file or directory", "podman"),
             ),
             console.capture() as captured,
@@ -445,8 +447,8 @@ class TestPodmanDetection:
 
     def test_runtime_running_follows_each_cli(self) -> None:
         with (
-            patch("aegra_cli.utils.docker.is_docker_running", return_value=True),
-            patch("aegra_cli.utils.docker.is_podman_running", return_value=False),
+            patch("aegra_cli.utils.container_runtime.is_docker_running", return_value=True),
+            patch("aegra_cli.utils.container_runtime.is_podman_running", return_value=False),
         ):
             assert is_runtime_running(ContainerRuntime.DOCKER) is True
             assert is_runtime_running(ContainerRuntime.PODMAN) is False
@@ -457,18 +459,18 @@ class TestResolveContainerRuntime:
 
     def test_explicit_docker_ignores_case(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv("AEGRA_CONTAINER_RUNTIME", " Docker ")
-        with patch("aegra_cli.utils.docker.is_docker_installed", return_value=True):
+        with patch("aegra_cli.utils.container_runtime.is_docker_installed", return_value=True):
             assert resolve_container_runtime() is ContainerRuntime.DOCKER
 
     def test_explicit_podman(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv("AEGRA_CONTAINER_RUNTIME", "podman")
-        with patch("aegra_cli.utils.docker.is_podman_installed", return_value=True):
+        with patch("aegra_cli.utils.container_runtime.is_podman_installed", return_value=True):
             assert resolve_container_runtime() is ContainerRuntime.PODMAN
 
     def test_explicit_docker_missing(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv("AEGRA_CONTAINER_RUNTIME", "docker")
         with (
-            patch("aegra_cli.utils.docker.is_docker_installed", return_value=False),
+            patch("aegra_cli.utils.container_runtime.is_docker_installed", return_value=False),
             pytest.raises(RuntimeSelectionError, match="Docker is not installed"),
         ):
             resolve_container_runtime()
@@ -476,7 +478,7 @@ class TestResolveContainerRuntime:
     def test_explicit_podman_missing(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv("AEGRA_CONTAINER_RUNTIME", "podman")
         with (
-            patch("aegra_cli.utils.docker.is_podman_installed", return_value=False),
+            patch("aegra_cli.utils.container_runtime.is_podman_installed", return_value=False),
             pytest.raises(RuntimeSelectionError, match="Podman is not installed"),
         ):
             resolve_container_runtime()
@@ -484,46 +486,46 @@ class TestResolveContainerRuntime:
     def test_invalid_value_does_not_auto_detect(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv("AEGRA_CONTAINER_RUNTIME", "containerd")
         with (
-            patch("aegra_cli.utils.docker.is_docker_installed", return_value=True),
+            patch("aegra_cli.utils.container_runtime.is_docker_installed", return_value=True),
             pytest.raises(RuntimeSelectionError, match="Invalid AEGRA_CONTAINER_RUNTIME"),
         ):
             resolve_container_runtime()
 
     def test_auto_prefers_running_docker_over_podman(self) -> None:
         with (
-            patch("aegra_cli.utils.docker.is_docker_installed", return_value=True),
-            patch("aegra_cli.utils.docker.is_docker_running", return_value=True),
-            patch("aegra_cli.utils.docker.is_podman_installed", return_value=True),
+            patch("aegra_cli.utils.container_runtime.is_docker_installed", return_value=True),
+            patch("aegra_cli.utils.container_runtime.is_docker_running", return_value=True),
+            patch("aegra_cli.utils.container_runtime.is_podman_installed", return_value=True),
         ):
             assert resolve_container_runtime() is ContainerRuntime.DOCKER
 
     def test_auto_uses_podman_when_docker_is_stopped(self) -> None:
         with (
-            patch("aegra_cli.utils.docker.is_docker_installed", return_value=True),
-            patch("aegra_cli.utils.docker.is_docker_running", return_value=False),
-            patch("aegra_cli.utils.docker.is_podman_installed", return_value=True),
+            patch("aegra_cli.utils.container_runtime.is_docker_installed", return_value=True),
+            patch("aegra_cli.utils.container_runtime.is_docker_running", return_value=False),
+            patch("aegra_cli.utils.container_runtime.is_podman_installed", return_value=True),
         ):
             assert resolve_container_runtime() is ContainerRuntime.PODMAN
 
     def test_auto_uses_podman_when_only_podman_is_installed(self) -> None:
         with (
-            patch("aegra_cli.utils.docker.is_docker_installed", return_value=False),
-            patch("aegra_cli.utils.docker.is_podman_installed", return_value=True),
+            patch("aegra_cli.utils.container_runtime.is_docker_installed", return_value=False),
+            patch("aegra_cli.utils.container_runtime.is_podman_installed", return_value=True),
         ):
             assert resolve_container_runtime() is ContainerRuntime.PODMAN
 
     def test_auto_uses_stopped_docker_when_podman_is_absent(self) -> None:
         with (
-            patch("aegra_cli.utils.docker.is_docker_installed", return_value=True),
-            patch("aegra_cli.utils.docker.is_docker_running", return_value=False),
-            patch("aegra_cli.utils.docker.is_podman_installed", return_value=False),
+            patch("aegra_cli.utils.container_runtime.is_docker_installed", return_value=True),
+            patch("aegra_cli.utils.container_runtime.is_docker_running", return_value=False),
+            patch("aegra_cli.utils.container_runtime.is_podman_installed", return_value=False),
         ):
             assert resolve_container_runtime() is ContainerRuntime.DOCKER
 
     def test_auto_errors_when_neither_runtime_exists(self) -> None:
         with (
-            patch("aegra_cli.utils.docker.is_docker_installed", return_value=False),
-            patch("aegra_cli.utils.docker.is_podman_installed", return_value=False),
+            patch("aegra_cli.utils.container_runtime.is_docker_installed", return_value=False),
+            patch("aegra_cli.utils.container_runtime.is_podman_installed", return_value=False),
             pytest.raises(RuntimeSelectionError, match="Neither Docker nor Podman"),
         ):
             resolve_container_runtime()
@@ -531,8 +533,8 @@ class TestResolveContainerRuntime:
     def test_blank_env_uses_auto_detect(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv("AEGRA_CONTAINER_RUNTIME", "   ")
         with (
-            patch("aegra_cli.utils.docker.is_docker_installed", return_value=False),
-            patch("aegra_cli.utils.docker.is_podman_installed", return_value=True),
+            patch("aegra_cli.utils.container_runtime.is_docker_installed", return_value=False),
+            patch("aegra_cli.utils.container_runtime.is_podman_installed", return_value=True),
         ):
             assert resolve_container_runtime() is ContainerRuntime.PODMAN
 
@@ -558,20 +560,20 @@ class TestComposeCommand:
 
     def test_podman_compose_version_success(self) -> None:
         with patch(
-            "aegra_cli.utils.docker.subprocess.run",
+            "aegra_cli.utils.container_runtime.subprocess.run",
             return_value=_completed(0),
         ) as mock_run:
             assert podman_compose_available() is True
             assert mock_run.call_args[0][0] == ["podman", "compose", "version"]
 
     def test_podman_compose_version_failure(self) -> None:
-        with patch("aegra_cli.utils.docker.subprocess.run", return_value=_completed(1)):
+        with patch("aegra_cli.utils.container_runtime.subprocess.run", return_value=_completed(1)):
             assert podman_compose_available() is False
 
     def test_podman_compose_version_reports_timeout(self) -> None:
         with (
             patch(
-                "aegra_cli.utils.docker.subprocess.run",
+                "aegra_cli.utils.container_runtime.subprocess.run",
                 side_effect=subprocess.TimeoutExpired(["podman", "compose", "version"], 10),
             ),
             console.capture() as captured,
@@ -584,7 +586,7 @@ class TestComposeCommand:
     def test_podman_compose_version_reports_missing_binary(self) -> None:
         with (
             patch(
-                "aegra_cli.utils.docker.subprocess.run",
+                "aegra_cli.utils.container_runtime.subprocess.run",
                 side_effect=FileNotFoundError(2, "No such file or directory", "podman"),
             ),
             console.capture() as captured,
@@ -595,17 +597,17 @@ class TestComposeCommand:
         assert "[Errno 2] No such file or directory" in output
 
     def test_docker_skips_podman_plugin_check(self) -> None:
-        with patch("aegra_cli.utils.docker.podman_compose_available") as mock_check:
+        with patch("aegra_cli.utils.container_runtime.podman_compose_available") as mock_check:
             assert ensure_compose_plugin(ContainerRuntime.DOCKER) is True
             mock_check.assert_not_called()
 
     def test_podman_plugin_present(self) -> None:
-        with patch("aegra_cli.utils.docker.podman_compose_available", return_value=True):
+        with patch("aegra_cli.utils.container_runtime.podman_compose_available", return_value=True):
             assert ensure_compose_plugin(ContainerRuntime.PODMAN) is True
 
     def test_podman_plugin_missing_names_podman_compose(self) -> None:
         with (
-            patch("aegra_cli.utils.docker.podman_compose_available", return_value=False),
+            patch("aegra_cli.utils.container_runtime.podman_compose_available", return_value=False),
             console.capture() as captured,
         ):
             assert ensure_compose_plugin(ContainerRuntime.PODMAN) is False
@@ -632,12 +634,12 @@ class TestPodmanStart:
             "FreeBSD": "start Podman manually",
         }
         for system, snippet in expectations.items():
-            with patch("aegra_cli.utils.docker.platform.system", return_value=system):
+            with patch("aegra_cli.utils.container_runtime.platform.system", return_value=system):
                 instructions = get_podman_start_instructions()
                 assert snippet in instructions
 
     def test_runtime_instructions_delegate(self) -> None:
-        with patch("aegra_cli.utils.docker.platform.system", return_value="Linux"):
+        with patch("aegra_cli.utils.container_runtime.platform.system", return_value="Linux"):
             assert "systemctl start docker" in get_runtime_start_instructions(
                 ContainerRuntime.DOCKER
             )
@@ -645,24 +647,26 @@ class TestPodmanStart:
 
     def test_darwin_machine_start_success(self) -> None:
         with (
-            patch("aegra_cli.utils.docker.platform.system", return_value="Darwin"),
+            patch("aegra_cli.utils.container_runtime.platform.system", return_value="Darwin"),
             patch(
-                "aegra_cli.utils.docker.subprocess.run",
+                "aegra_cli.utils.container_runtime.subprocess.run",
                 return_value=_completed(0),
             ) as mock_run,
-            patch("aegra_cli.utils.docker._wait_for_podman_ready", return_value=True),
+            patch("aegra_cli.utils.container_runtime._wait_for_podman_ready", return_value=True),
         ):
             assert try_start_podman() is True
             assert mock_run.call_args_list[0].args[0] == ["podman", "machine", "start"]
 
     def test_darwin_falls_back_to_podman_desktop(self) -> None:
         with (
-            patch("aegra_cli.utils.docker.platform.system", return_value="Darwin"),
+            patch("aegra_cli.utils.container_runtime.platform.system", return_value="Darwin"),
             patch(
-                "aegra_cli.utils.docker.subprocess.run",
+                "aegra_cli.utils.container_runtime.subprocess.run",
                 side_effect=[_completed(1), _completed(0)],
             ) as mock_run,
-            patch("aegra_cli.utils.docker._wait_for_podman_ready", return_value=True) as mock_wait,
+            patch(
+                "aegra_cli.utils.container_runtime._wait_for_podman_ready", return_value=True
+            ) as mock_wait,
         ):
             assert try_start_podman() is True
             assert mock_run.call_args_list[1].args[0] == ["open", "-a", "Podman Desktop"]
@@ -670,24 +674,26 @@ class TestPodmanStart:
 
     def test_darwin_returns_false_when_desktop_open_fails(self) -> None:
         with (
-            patch("aegra_cli.utils.docker.platform.system", return_value="Darwin"),
+            patch("aegra_cli.utils.container_runtime.platform.system", return_value="Darwin"),
             patch(
-                "aegra_cli.utils.docker.subprocess.run",
+                "aegra_cli.utils.container_runtime.subprocess.run",
                 side_effect=[_completed(1), _completed(1)],
             ),
-            patch("aegra_cli.utils.docker._wait_for_podman_ready", return_value=True) as mock_wait,
+            patch(
+                "aegra_cli.utils.container_runtime._wait_for_podman_ready", return_value=True
+            ) as mock_wait,
         ):
             assert try_start_podman() is False
             mock_wait.assert_not_called()
 
     def test_linux_starts_user_socket(self) -> None:
         with (
-            patch("aegra_cli.utils.docker.platform.system", return_value="Linux"),
+            patch("aegra_cli.utils.container_runtime.platform.system", return_value="Linux"),
             patch(
-                "aegra_cli.utils.docker.subprocess.run",
+                "aegra_cli.utils.container_runtime.subprocess.run",
                 return_value=_completed(0),
             ) as mock_run,
-            patch("aegra_cli.utils.docker._wait_for_podman_ready", return_value=True),
+            patch("aegra_cli.utils.container_runtime._wait_for_podman_ready", return_value=True),
         ):
             assert try_start_podman() is True
             assert mock_run.call_args.args[0] == [
@@ -699,45 +705,45 @@ class TestPodmanStart:
 
     def test_linux_returns_false_when_systemctl_fails(self) -> None:
         with (
-            patch("aegra_cli.utils.docker.platform.system", return_value="Linux"),
-            patch("aegra_cli.utils.docker.subprocess.run", return_value=_completed(1)),
-            patch("aegra_cli.utils.docker._wait_for_podman_ready") as mock_wait,
+            patch("aegra_cli.utils.container_runtime.platform.system", return_value="Linux"),
+            patch("aegra_cli.utils.container_runtime.subprocess.run", return_value=_completed(1)),
+            patch("aegra_cli.utils.container_runtime._wait_for_podman_ready") as mock_wait,
         ):
             assert try_start_podman() is False
             mock_wait.assert_not_called()
 
     def test_windows_starts_podman_machine(self) -> None:
         with (
-            patch("aegra_cli.utils.docker.platform.system", return_value="Windows"),
+            patch("aegra_cli.utils.container_runtime.platform.system", return_value="Windows"),
             patch(
-                "aegra_cli.utils.docker.subprocess.run",
+                "aegra_cli.utils.container_runtime.subprocess.run",
                 return_value=_completed(0),
             ) as mock_run,
-            patch("aegra_cli.utils.docker._wait_for_podman_ready", return_value=True),
+            patch("aegra_cli.utils.container_runtime._wait_for_podman_ready", return_value=True),
         ):
             assert try_start_podman() is True
             assert mock_run.call_args.args[0] == ["podman", "machine", "start"]
 
     def test_windows_returns_false_when_machine_start_fails(self) -> None:
         with (
-            patch("aegra_cli.utils.docker.platform.system", return_value="Windows"),
-            patch("aegra_cli.utils.docker.subprocess.run", return_value=_completed(1)),
+            patch("aegra_cli.utils.container_runtime.platform.system", return_value="Windows"),
+            patch("aegra_cli.utils.container_runtime.subprocess.run", return_value=_completed(1)),
         ):
             assert try_start_podman() is False
 
     def test_unknown_platform_returns_false(self) -> None:
         with (
-            patch("aegra_cli.utils.docker.platform.system", return_value="FreeBSD"),
-            patch("aegra_cli.utils.docker.subprocess.run") as mock_run,
+            patch("aegra_cli.utils.container_runtime.platform.system", return_value="FreeBSD"),
+            patch("aegra_cli.utils.container_runtime.subprocess.run") as mock_run,
         ):
             assert try_start_podman() is False
             mock_run.assert_not_called()
 
     def test_reports_timeout_when_start_command_times_out(self) -> None:
         with (
-            patch("aegra_cli.utils.docker.platform.system", return_value="Darwin"),
+            patch("aegra_cli.utils.container_runtime.platform.system", return_value="Darwin"),
             patch(
-                "aegra_cli.utils.docker.subprocess.run",
+                "aegra_cli.utils.container_runtime.subprocess.run",
                 side_effect=subprocess.TimeoutExpired(["podman", "machine", "start"], 60),
             ),
             console.capture() as captured,
@@ -749,9 +755,9 @@ class TestPodmanStart:
 
     def test_reports_denial_when_start_command_is_not_permitted(self) -> None:
         with (
-            patch("aegra_cli.utils.docker.platform.system", return_value="Linux"),
+            patch("aegra_cli.utils.container_runtime.platform.system", return_value="Linux"),
             patch(
-                "aegra_cli.utils.docker.subprocess.run",
+                "aegra_cli.utils.container_runtime.subprocess.run",
                 side_effect=PermissionError(13, "Permission denied", "systemctl"),
             ),
             console.capture() as captured,
@@ -763,8 +769,12 @@ class TestPodmanStart:
 
     def test_try_start_runtime_delegates(self) -> None:
         with (
-            patch("aegra_cli.utils.docker.try_start_docker", return_value=True) as mock_docker,
-            patch("aegra_cli.utils.docker.try_start_podman", return_value=False) as mock_podman,
+            patch(
+                "aegra_cli.utils.container_runtime.try_start_docker", return_value=True
+            ) as mock_docker,
+            patch(
+                "aegra_cli.utils.container_runtime.try_start_podman", return_value=False
+            ) as mock_podman,
         ):
             assert try_start_runtime(ContainerRuntime.DOCKER) is True
             assert try_start_runtime(ContainerRuntime.PODMAN) is False
@@ -773,8 +783,8 @@ class TestPodmanStart:
 
     def test_wait_returns_true_when_podman_is_ready(self) -> None:
         with (
-            patch("aegra_cli.utils.docker.is_podman_running", return_value=True),
-            patch("aegra_cli.utils.docker.time.sleep"),
+            patch("aegra_cli.utils.container_runtime.is_podman_running", return_value=True),
+            patch("aegra_cli.utils.container_runtime.time.sleep"),
             console.capture() as captured,
         ):
             assert _wait_for_podman_ready(timeout_seconds=1) is True
@@ -787,9 +797,9 @@ class TestPodmanStart:
             return next(ticks)
 
         with (
-            patch("aegra_cli.utils.docker.is_podman_running", return_value=False),
-            patch("aegra_cli.utils.docker.time.time", side_effect=fake_time),
-            patch("aegra_cli.utils.docker.time.sleep"),
+            patch("aegra_cli.utils.container_runtime.is_podman_running", return_value=False),
+            patch("aegra_cli.utils.container_runtime.time.time", side_effect=fake_time),
+            patch("aegra_cli.utils.container_runtime.time.sleep"),
             console.capture() as captured,
         ):
             assert _wait_for_podman_ready(timeout_seconds=1) is False
@@ -801,16 +811,16 @@ class TestEnsureRuntimeReady:
 
     def test_returns_true_when_already_running(self) -> None:
         with (
-            patch("aegra_cli.utils.docker.is_runtime_running", return_value=True),
-            patch("aegra_cli.utils.docker.try_start_runtime") as mock_start,
+            patch("aegra_cli.utils.container_runtime.is_runtime_running", return_value=True),
+            patch("aegra_cli.utils.container_runtime.try_start_runtime") as mock_start,
         ):
             assert ensure_runtime_ready(ContainerRuntime.DOCKER) is True
             mock_start.assert_not_called()
 
     def test_returns_true_after_start(self) -> None:
         with (
-            patch("aegra_cli.utils.docker.is_runtime_running", return_value=False),
-            patch("aegra_cli.utils.docker.try_start_runtime", return_value=True),
+            patch("aegra_cli.utils.container_runtime.is_runtime_running", return_value=False),
+            patch("aegra_cli.utils.container_runtime.try_start_runtime", return_value=True),
             console.capture() as captured,
         ):
             assert ensure_runtime_ready(ContainerRuntime.PODMAN) is True
@@ -818,9 +828,9 @@ class TestEnsureRuntimeReady:
 
     def test_returns_false_when_start_fails(self) -> None:
         with (
-            patch("aegra_cli.utils.docker.is_runtime_running", return_value=False),
-            patch("aegra_cli.utils.docker.try_start_runtime", return_value=False),
-            patch("aegra_cli.utils.docker.platform.system", return_value="Linux"),
+            patch("aegra_cli.utils.container_runtime.is_runtime_running", return_value=False),
+            patch("aegra_cli.utils.container_runtime.try_start_runtime", return_value=False),
+            patch("aegra_cli.utils.container_runtime.platform.system", return_value="Linux"),
             console.capture() as captured,
         ):
             assert ensure_runtime_ready(ContainerRuntime.PODMAN) is False
@@ -834,7 +844,7 @@ class TestPostgresCompose:
 
     def test_podman_ps_command(self) -> None:
         with patch(
-            "aegra_cli.utils.docker.subprocess.run",
+            "aegra_cli.utils.container_runtime.subprocess.run",
             return_value=_completed(0, "postgres\n"),
         ) as mock_run:
             assert is_postgres_container_running(runtime=ContainerRuntime.PODMAN) is True
@@ -842,22 +852,22 @@ class TestPostgresCompose:
 
     def test_ps_timeout_returns_false(self) -> None:
         with patch(
-            "aegra_cli.utils.docker.subprocess.run",
+            "aegra_cli.utils.container_runtime.subprocess.run",
             side_effect=subprocess.TimeoutExpired("docker", 10),
         ):
             assert is_postgres_container_running(runtime=ContainerRuntime.DOCKER) is False
 
     def test_ps_missing_binary_returns_false(self) -> None:
         with patch(
-            "aegra_cli.utils.docker.subprocess.run",
+            "aegra_cli.utils.container_runtime.subprocess.run",
             side_effect=FileNotFoundError("docker"),
         ):
             assert is_postgres_container_running(runtime=ContainerRuntime.DOCKER) is False
 
     def test_ps_returns_false_when_no_runtime_is_installed(self) -> None:
         with (
-            patch("aegra_cli.utils.docker.is_docker_installed", return_value=False),
-            patch("aegra_cli.utils.docker.is_podman_installed", return_value=False),
+            patch("aegra_cli.utils.container_runtime.is_docker_installed", return_value=False),
+            patch("aegra_cli.utils.container_runtime.is_podman_installed", return_value=False),
             console.capture() as captured,
         ):
             assert is_postgres_container_running() is False
@@ -867,9 +877,9 @@ class TestPostgresCompose:
         compose_file = tmp_path / "docker-compose.yml"
         compose_file.write_text("services: {}\n")
         with (
-            patch("aegra_cli.utils.docker.ensure_compose_plugin", return_value=True),
+            patch("aegra_cli.utils.container_runtime.ensure_compose_plugin", return_value=True),
             patch(
-                "aegra_cli.utils.docker.subprocess.run",
+                "aegra_cli.utils.container_runtime.subprocess.run",
                 return_value=_completed(0),
             ) as mock_run,
         ):
@@ -886,10 +896,10 @@ class TestPostgresCompose:
         compose_file = tmp_path / "docker-compose.yml"
         compose_file.write_text("services: {}\n")
         with (
-            patch("aegra_cli.utils.docker.is_podman_installed", return_value=True),
-            patch("aegra_cli.utils.docker.ensure_compose_plugin", return_value=True),
+            patch("aegra_cli.utils.container_runtime.is_podman_installed", return_value=True),
+            patch("aegra_cli.utils.container_runtime.ensure_compose_plugin", return_value=True),
             patch(
-                "aegra_cli.utils.docker.subprocess.run",
+                "aegra_cli.utils.container_runtime.subprocess.run",
                 return_value=_completed(0),
             ) as mock_run,
         ):
@@ -898,16 +908,16 @@ class TestPostgresCompose:
 
     def test_start_returns_false_on_nonzero_exit(self) -> None:
         with (
-            patch("aegra_cli.utils.docker.ensure_compose_plugin", return_value=True),
-            patch("aegra_cli.utils.docker.subprocess.run", return_value=_completed(2)),
+            patch("aegra_cli.utils.container_runtime.ensure_compose_plugin", return_value=True),
+            patch("aegra_cli.utils.container_runtime.subprocess.run", return_value=_completed(2)),
         ):
             assert start_postgres_container(runtime=ContainerRuntime.DOCKER) is False
 
     def test_start_returns_false_on_timeout(self) -> None:
         with (
-            patch("aegra_cli.utils.docker.ensure_compose_plugin", return_value=True),
+            patch("aegra_cli.utils.container_runtime.ensure_compose_plugin", return_value=True),
             patch(
-                "aegra_cli.utils.docker.subprocess.run",
+                "aegra_cli.utils.container_runtime.subprocess.run",
                 side_effect=subprocess.TimeoutExpired("docker", 120),
             ),
         ):
@@ -915,9 +925,9 @@ class TestPostgresCompose:
 
     def test_start_reports_missing_podman_binary(self) -> None:
         with (
-            patch("aegra_cli.utils.docker.ensure_compose_plugin", return_value=True),
+            patch("aegra_cli.utils.container_runtime.ensure_compose_plugin", return_value=True),
             patch(
-                "aegra_cli.utils.docker.subprocess.run",
+                "aegra_cli.utils.container_runtime.subprocess.run",
                 side_effect=FileNotFoundError("podman"),
             ),
             console.capture() as captured,
@@ -926,13 +936,13 @@ class TestPostgresCompose:
         assert "podman command not found" in captured.get()
 
     def test_start_stops_when_plugin_is_missing(self) -> None:
-        with patch("aegra_cli.utils.docker.ensure_compose_plugin", return_value=False):
+        with patch("aegra_cli.utils.container_runtime.ensure_compose_plugin", return_value=False):
             assert start_postgres_container(runtime=ContainerRuntime.PODMAN) is False
 
     def test_start_returns_false_when_no_runtime_is_installed(self) -> None:
         with (
-            patch("aegra_cli.utils.docker.is_docker_installed", return_value=False),
-            patch("aegra_cli.utils.docker.is_podman_installed", return_value=False),
+            patch("aegra_cli.utils.container_runtime.is_docker_installed", return_value=False),
+            patch("aegra_cli.utils.container_runtime.is_podman_installed", return_value=False),
             console.capture() as captured,
         ):
             assert start_postgres_container() is False
@@ -944,8 +954,8 @@ class TestEnsurePostgresRunning:
 
     def test_reports_when_neither_runtime_is_installed(self) -> None:
         with (
-            patch("aegra_cli.utils.docker.is_docker_installed", return_value=False),
-            patch("aegra_cli.utils.docker.is_podman_installed", return_value=False),
+            patch("aegra_cli.utils.container_runtime.is_docker_installed", return_value=False),
+            patch("aegra_cli.utils.container_runtime.is_podman_installed", return_value=False),
             console.capture() as captured,
         ):
             assert ensure_postgres_running() is False
@@ -955,10 +965,10 @@ class TestEnsurePostgresRunning:
         compose_file = tmp_path / "docker-compose.yml"
         compose_file.write_text("services: {}\n")
         with (
-            patch("aegra_cli.utils.docker.is_docker_installed", return_value=True),
-            patch("aegra_cli.utils.docker.is_docker_running", return_value=False),
-            patch("aegra_cli.utils.docker.is_podman_installed", return_value=False),
-            patch("aegra_cli.utils.docker.try_start_docker", return_value=False),
+            patch("aegra_cli.utils.container_runtime.is_docker_installed", return_value=True),
+            patch("aegra_cli.utils.container_runtime.is_docker_running", return_value=False),
+            patch("aegra_cli.utils.container_runtime.is_podman_installed", return_value=False),
+            patch("aegra_cli.utils.container_runtime.try_start_docker", return_value=False),
         ):
             assert ensure_postgres_running(compose_file) is False
 
@@ -969,9 +979,9 @@ class TestEnsurePostgresRunning:
         compose_file = tmp_path / "docker-compose.yml"
         compose_file.write_text("services: {}\n")
         with (
-            patch("aegra_cli.utils.docker.is_podman_installed", return_value=True),
-            patch("aegra_cli.utils.docker.is_podman_running", return_value=True),
-            patch("aegra_cli.utils.docker.podman_compose_available", return_value=False),
+            patch("aegra_cli.utils.container_runtime.is_podman_installed", return_value=True),
+            patch("aegra_cli.utils.container_runtime.is_podman_running", return_value=True),
+            patch("aegra_cli.utils.container_runtime.podman_compose_available", return_value=False),
             console.capture() as captured,
         ):
             assert ensure_postgres_running(compose_file) is False
@@ -979,9 +989,9 @@ class TestEnsurePostgresRunning:
 
     def test_returns_false_when_compose_file_is_missing(self) -> None:
         with (
-            patch("aegra_cli.utils.docker.is_docker_installed", return_value=True),
-            patch("aegra_cli.utils.docker.is_docker_running", return_value=True),
-            patch("aegra_cli.utils.docker.find_compose_file", return_value=None),
+            patch("aegra_cli.utils.container_runtime.is_docker_installed", return_value=True),
+            patch("aegra_cli.utils.container_runtime.is_docker_running", return_value=True),
+            patch("aegra_cli.utils.container_runtime.find_compose_file", return_value=None),
             console.capture() as captured,
         ):
             assert ensure_postgres_running() is False
@@ -991,10 +1001,12 @@ class TestEnsurePostgresRunning:
         compose_file = tmp_path / "docker-compose.yml"
         compose_file.write_text("services: {}\n")
         with (
-            patch("aegra_cli.utils.docker.is_docker_installed", return_value=True),
-            patch("aegra_cli.utils.docker.is_docker_running", return_value=True),
-            patch("aegra_cli.utils.docker.is_postgres_container_running", return_value=True),
-            patch("aegra_cli.utils.docker.start_postgres_container") as mock_start,
+            patch("aegra_cli.utils.container_runtime.is_docker_installed", return_value=True),
+            patch("aegra_cli.utils.container_runtime.is_docker_running", return_value=True),
+            patch(
+                "aegra_cli.utils.container_runtime.is_postgres_container_running", return_value=True
+            ),
+            patch("aegra_cli.utils.container_runtime.start_postgres_container") as mock_start,
         ):
             assert ensure_postgres_running(compose_file) is True
             mock_start.assert_not_called()
@@ -1003,13 +1015,16 @@ class TestEnsurePostgresRunning:
         compose_file = tmp_path / "docker-compose.yml"
         compose_file.write_text("services: {}\n")
         with (
-            patch("aegra_cli.utils.docker.is_docker_installed", return_value=False),
-            patch("aegra_cli.utils.docker.is_podman_installed", return_value=True),
-            patch("aegra_cli.utils.docker.is_podman_running", return_value=True),
-            patch("aegra_cli.utils.docker.podman_compose_available", return_value=True),
-            patch("aegra_cli.utils.docker.is_postgres_container_running", return_value=False),
+            patch("aegra_cli.utils.container_runtime.is_docker_installed", return_value=False),
+            patch("aegra_cli.utils.container_runtime.is_podman_installed", return_value=True),
+            patch("aegra_cli.utils.container_runtime.is_podman_running", return_value=True),
+            patch("aegra_cli.utils.container_runtime.podman_compose_available", return_value=True),
             patch(
-                "aegra_cli.utils.docker.start_postgres_container",
+                "aegra_cli.utils.container_runtime.is_postgres_container_running",
+                return_value=False,
+            ),
+            patch(
+                "aegra_cli.utils.container_runtime.start_postgres_container",
                 return_value=True,
             ) as mock_start,
         ):
@@ -1023,10 +1038,10 @@ class TestProjectOwnership:
     def test_lists_stopped_containers(self, tmp_path: Path) -> None:
         compose_file = tmp_path / "docker-compose.yml"
         with (
-            patch("aegra_cli.utils.docker._runtime_installed", return_value=True),
-            patch("aegra_cli.utils.docker._probe_runtime", return_value=True),
+            patch("aegra_cli.utils.container_runtime._runtime_installed", return_value=True),
+            patch("aegra_cli.utils.container_runtime._probe_runtime", return_value=True),
             patch(
-                "aegra_cli.utils.docker.subprocess.run",
+                "aegra_cli.utils.container_runtime.subprocess.run",
                 return_value=_completed(0, "abc\ndef\n"),
             ) as mock_run,
         ):
@@ -1038,10 +1053,10 @@ class TestProjectOwnership:
     def test_falls_back_when_all_flag_is_rejected(self, tmp_path: Path) -> None:
         compose_file = tmp_path / "docker-compose.yml"
         with (
-            patch("aegra_cli.utils.docker._runtime_installed", return_value=True),
-            patch("aegra_cli.utils.docker._probe_runtime", return_value=True),
+            patch("aegra_cli.utils.container_runtime._runtime_installed", return_value=True),
+            patch("aegra_cli.utils.container_runtime._probe_runtime", return_value=True),
             patch(
-                "aegra_cli.utils.docker.subprocess.run",
+                "aegra_cli.utils.container_runtime.subprocess.run",
                 side_effect=[_completed(1, ""), _completed(0, "abc\n")],
             ) as mock_run,
         ):
@@ -1051,18 +1066,20 @@ class TestProjectOwnership:
 
     def test_empty_when_all_listing_finds_nothing(self, tmp_path: Path) -> None:
         with (
-            patch("aegra_cli.utils.docker._runtime_installed", return_value=True),
-            patch("aegra_cli.utils.docker._probe_runtime", return_value=True),
-            patch("aegra_cli.utils.docker.subprocess.run", return_value=_completed(0, "")),
+            patch("aegra_cli.utils.container_runtime._runtime_installed", return_value=True),
+            patch("aegra_cli.utils.container_runtime._probe_runtime", return_value=True),
+            patch(
+                "aegra_cli.utils.container_runtime.subprocess.run", return_value=_completed(0, "")
+            ),
         ):
             assert project_container_ids(ContainerRuntime.DOCKER, tmp_path / "c.yml") == []
 
     def test_none_when_fallback_finds_no_running_containers(self, tmp_path: Path) -> None:
         with (
-            patch("aegra_cli.utils.docker._runtime_installed", return_value=True),
-            patch("aegra_cli.utils.docker._probe_runtime", return_value=True),
+            patch("aegra_cli.utils.container_runtime._runtime_installed", return_value=True),
+            patch("aegra_cli.utils.container_runtime._probe_runtime", return_value=True),
             patch(
-                "aegra_cli.utils.docker.subprocess.run",
+                "aegra_cli.utils.container_runtime.subprocess.run",
                 side_effect=[_completed(1, ""), _completed(0, "")],
             ),
             console.capture() as captured,
@@ -1074,10 +1091,10 @@ class TestProjectOwnership:
         self, tmp_path: Path
     ) -> None:
         with (
-            patch("aegra_cli.utils.docker._runtime_installed", return_value=True),
-            patch("aegra_cli.utils.docker._probe_runtime", return_value=True),
+            patch("aegra_cli.utils.container_runtime._runtime_installed", return_value=True),
+            patch("aegra_cli.utils.container_runtime._probe_runtime", return_value=True),
             patch(
-                "aegra_cli.utils.docker.subprocess.run",
+                "aegra_cli.utils.container_runtime.subprocess.run",
                 side_effect=[_completed(1, ""), _completed(0, ""), _completed(0, "abc\n")],
             ),
         ):
@@ -1086,13 +1103,15 @@ class TestProjectOwnership:
         assert owners == ProjectOwnership([ContainerRuntime.PODMAN], True)
 
     def test_empty_when_runtime_is_not_installed(self, tmp_path: Path) -> None:
-        with patch("aegra_cli.utils.docker._runtime_installed", return_value=False):
+        with patch("aegra_cli.utils.container_runtime._runtime_installed", return_value=False):
             assert project_container_ids(ContainerRuntime.DOCKER, tmp_path / "c.yml") == []
 
     def test_empty_when_runtime_reports_stopped(self, tmp_path: Path) -> None:
         with (
-            patch("aegra_cli.utils.docker._runtime_installed", return_value=True),
-            patch("aegra_cli.utils.docker.subprocess.run", return_value=_completed(1)) as mock_run,
+            patch("aegra_cli.utils.container_runtime._runtime_installed", return_value=True),
+            patch(
+                "aegra_cli.utils.container_runtime.subprocess.run", return_value=_completed(1)
+            ) as mock_run,
         ):
             assert project_container_ids(ContainerRuntime.DOCKER, tmp_path / "c.yml") == []
         mock_run.assert_called_once()
@@ -1100,9 +1119,9 @@ class TestProjectOwnership:
 
     def test_none_when_runtime_check_times_out(self, tmp_path: Path) -> None:
         with (
-            patch("aegra_cli.utils.docker._runtime_installed", return_value=True),
+            patch("aegra_cli.utils.container_runtime._runtime_installed", return_value=True),
             patch(
-                "aegra_cli.utils.docker.subprocess.run",
+                "aegra_cli.utils.container_runtime.subprocess.run",
                 side_effect=subprocess.TimeoutExpired(["podman", "info"], 10),
             ) as mock_run,
             console.capture() as captured,
@@ -1113,9 +1132,9 @@ class TestProjectOwnership:
 
     def test_none_when_runtime_check_cannot_run(self, tmp_path: Path) -> None:
         with (
-            patch("aegra_cli.utils.docker._runtime_installed", return_value=True),
+            patch("aegra_cli.utils.container_runtime._runtime_installed", return_value=True),
             patch(
-                "aegra_cli.utils.docker.subprocess.run",
+                "aegra_cli.utils.container_runtime.subprocess.run",
                 side_effect=FileNotFoundError(2, "No such file or directory", "docker"),
             ),
             console.capture() as captured,
@@ -1127,9 +1146,9 @@ class TestProjectOwnership:
         self, tmp_path: Path
     ) -> None:
         with (
-            patch("aegra_cli.utils.docker._runtime_installed", return_value=True),
+            patch("aegra_cli.utils.container_runtime._runtime_installed", return_value=True),
             patch(
-                "aegra_cli.utils.docker.subprocess.run",
+                "aegra_cli.utils.container_runtime.subprocess.run",
                 side_effect=[
                     _completed(0),
                     _completed(0, "abc\n"),
@@ -1143,10 +1162,10 @@ class TestProjectOwnership:
 
     def test_none_when_fallback_listing_times_out(self, tmp_path: Path) -> None:
         with (
-            patch("aegra_cli.utils.docker._runtime_installed", return_value=True),
-            patch("aegra_cli.utils.docker._probe_runtime", return_value=True),
+            patch("aegra_cli.utils.container_runtime._runtime_installed", return_value=True),
+            patch("aegra_cli.utils.container_runtime._probe_runtime", return_value=True),
             patch(
-                "aegra_cli.utils.docker.subprocess.run",
+                "aegra_cli.utils.container_runtime.subprocess.run",
                 side_effect=[_completed(1, ""), subprocess.TimeoutExpired("docker", 10)],
             ),
             console.capture() as captured,
@@ -1156,9 +1175,11 @@ class TestProjectOwnership:
 
     def test_none_when_ps_fails(self, tmp_path: Path) -> None:
         with (
-            patch("aegra_cli.utils.docker._runtime_installed", return_value=True),
-            patch("aegra_cli.utils.docker._probe_runtime", return_value=True),
-            patch("aegra_cli.utils.docker.subprocess.run", return_value=_completed(1, "")),
+            patch("aegra_cli.utils.container_runtime._runtime_installed", return_value=True),
+            patch("aegra_cli.utils.container_runtime._probe_runtime", return_value=True),
+            patch(
+                "aegra_cli.utils.container_runtime.subprocess.run", return_value=_completed(1, "")
+            ),
             console.capture() as captured,
         ):
             assert project_container_ids(ContainerRuntime.DOCKER, tmp_path / "c.yml") is None
@@ -1166,10 +1187,10 @@ class TestProjectOwnership:
 
     def test_none_when_ps_times_out(self, tmp_path: Path) -> None:
         with (
-            patch("aegra_cli.utils.docker._runtime_installed", return_value=True),
-            patch("aegra_cli.utils.docker._probe_runtime", return_value=True),
+            patch("aegra_cli.utils.container_runtime._runtime_installed", return_value=True),
+            patch("aegra_cli.utils.container_runtime._probe_runtime", return_value=True),
             patch(
-                "aegra_cli.utils.docker.subprocess.run",
+                "aegra_cli.utils.container_runtime.subprocess.run",
                 side_effect=subprocess.TimeoutExpired("docker", 10),
             ),
             console.capture() as captured,
@@ -1179,10 +1200,10 @@ class TestProjectOwnership:
 
     def test_none_when_binary_disappears(self, tmp_path: Path) -> None:
         with (
-            patch("aegra_cli.utils.docker._runtime_installed", return_value=True),
-            patch("aegra_cli.utils.docker._probe_runtime", return_value=True),
+            patch("aegra_cli.utils.container_runtime._runtime_installed", return_value=True),
+            patch("aegra_cli.utils.container_runtime._probe_runtime", return_value=True),
             patch(
-                "aegra_cli.utils.docker.subprocess.run",
+                "aegra_cli.utils.container_runtime.subprocess.run",
                 side_effect=FileNotFoundError("docker"),
             ),
             console.capture() as captured,
@@ -1200,7 +1221,9 @@ class TestProjectOwnership:
                 return ["abc"]
             return []
 
-        with patch("aegra_cli.utils.docker.project_container_ids", side_effect=containers):
+        with patch(
+            "aegra_cli.utils.container_runtime.project_container_ids", side_effect=containers
+        ):
             assert runtimes_owning_project(compose_file) == ProjectOwnership(
                 [ContainerRuntime.PODMAN],
                 False,
@@ -1209,7 +1232,7 @@ class TestProjectOwnership:
     def test_owners_include_both_runtimes(self, tmp_path: Path) -> None:
         compose_file = tmp_path / "docker-compose.yml"
         with patch(
-            "aegra_cli.utils.docker.project_container_ids",
+            "aegra_cli.utils.container_runtime.project_container_ids",
             return_value=["abc"],
         ):
             assert runtimes_owning_project(compose_file) == ProjectOwnership(
@@ -1227,7 +1250,9 @@ class TestProjectOwnership:
                 return None
             return ["abc"]
 
-        with patch("aegra_cli.utils.docker.project_container_ids", side_effect=containers):
+        with patch(
+            "aegra_cli.utils.container_runtime.project_container_ids", side_effect=containers
+        ):
             assert runtimes_owning_project(compose_file) == ProjectOwnership(
                 [ContainerRuntime.PODMAN],
                 True,

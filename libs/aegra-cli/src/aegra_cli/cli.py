@@ -24,7 +24,7 @@ from aegra_cli.templates import (
     get_dockerfile,
     slugify,
 )
-from aegra_cli.utils.docker import (
+from aegra_cli.utils.container_runtime import (
     ENV_CONTAINER_RUNTIME,
     ContainerRuntime,
     ProjectOwnership,

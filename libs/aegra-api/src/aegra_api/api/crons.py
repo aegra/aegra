@@ -1,9 +1,10 @@
 """Cron job endpoints for Agent Protocol.
 
-Implements the six endpoints consumed by the LangGraph SDK ``CronsClient``:
+Implements the seven cron endpoints in the Agent Protocol:
 
 * ``POST  /runs/crons``                  → create (stateless, returns Run)
 * ``POST  /threads/{thread_id}/runs/crons`` → create for thread (returns Run)
+* ``GET   /runs/crons/{cron_id}``         → get (returns Cron)
 * ``PATCH /runs/crons/{cron_id}``         → update (returns Cron)
 * ``DELETE /runs/crons/{cron_id}``        → delete (204)
 * ``POST  /runs/crons/search``            → search (returns list[Cron])
@@ -18,6 +19,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from aegra_api.core.auth_deps import auth_dependency, get_current_user
+from aegra_api.core.auth_filters import build_metadata_filter
 from aegra_api.core.auth_handlers import build_auth_context, handle_event
 from aegra_api.core.orm import Cron as CronORM
 from aegra_api.core.orm import Thread as ThreadORM
@@ -132,6 +134,34 @@ async def create_cron_for_thread(
 
     await _authorize_cron_create(user, request, thread_id=thread_id)
     return await _create_cron_atomic(request, user, service, session, thread_id=thread_id)
+
+
+# ---------------------------------------------------------------------------
+# Get – GET /runs/crons/{cron_id} → returns Cron
+# ---------------------------------------------------------------------------
+
+
+@router.get("/runs/crons/{cron_id}", response_model=CronResponse, responses={**NOT_FOUND})
+async def get_cron(
+    cron_id: str,
+    response: Response,
+    user: User = Depends(get_current_user),
+    session: AsyncSession = Depends(get_session),
+) -> CronResponse:
+    """Get a cron job by ID."""
+    ctx = build_auth_context(user, "crons", "read")
+    filters = await handle_event(ctx, {"cron_id": cron_id})
+
+    stmt = select(CronORM).where(CronORM.cron_id == cron_id, CronORM.user_id == user.identity)
+    auth_filter = build_metadata_filter(CronORM.metadata_dict, filters)
+    if auth_filter is not None:
+        stmt = stmt.where(auth_filter)
+    cron = await session.scalar(stmt)
+    if cron is None:
+        raise HTTPException(404, f"Cron '{cron_id}' not found")
+
+    response.headers["Cache-Control"] = "no-store"
+    return _cron_to_response(cron)
 
 
 # ---------------------------------------------------------------------------

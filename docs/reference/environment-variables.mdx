@@ -208,9 +208,9 @@ An invalid value stops the server at startup. See [checkpoint durability](/guide
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `ENABLE_PROMETHEUS_METRICS` | `false` | Expose `/metrics` endpoint with HTTP request metrics in Prometheus format |
+| `ENABLE_PROMETHEUS_METRICS` | `false` | Expose `/metrics` with HTTP request metrics. Prometheus text by default; `?format=json` returns the same series as JSON |
 
-When enabled, a `/metrics` endpoint serves standard HTTP request metrics (request count, latency histograms, in-progress requests) using [prometheus-fastapi-instrumentator](https://github.com/trallnag/prometheus-fastapi-instrumentator). Compatible with any Prometheus/Grafana stack.
+When enabled, a `/metrics` endpoint serves standard HTTP request metrics (request count, latency histograms, in-progress requests) using [prometheus-fastapi-instrumentator](https://github.com/trallnag/prometheus-fastapi-instrumentator). The default body is Prometheus exposition text. `GET /metrics?format=json` returns those series as JSON: an object keyed by metric family name, each value `{type, help, samples}`. `format` accepts `prometheus` or `json`; any other value returns 422. When `PROMETHEUS_MULTIPROC_DIR` points at a directory, each scrape aggregates that directory for both formats. Compatible with any Prometheus/Grafana stack.
 
 ## Observability (OpenTelemetry)
 

@@ -2,12 +2,18 @@
 
 Controlled by ``ENABLE_PROMETHEUS_METRICS`` env var (default: false).
 When enabled, exposes a ``/metrics`` endpoint with standard HTTP and
-Python runtime metrics in Prometheus exposition format.
+Python runtime metrics in Prometheus text, or JSON when ``format=json``.
 """
+
+import math
+import os
+from typing import Any, Literal
 
 import prometheus_client
 import structlog
-from fastapi import FastAPI
+from fastapi import FastAPI, Query
+from fastapi.responses import JSONResponse, Response
+from prometheus_client.multiprocess import MultiProcessCollector
 from prometheus_fastapi_instrumentator import Instrumentator
 
 from aegra_api.settings import settings
@@ -41,13 +47,72 @@ for _outcome in ("deleted", "pruned", "error"):
     THREAD_TTL_SWEPT.labels(outcome=_outcome)
 
 
+def _json_sample_value(value: float) -> float | None:
+    # Starlette's JSON encoder rejects NaN and Infinity.
+    if not math.isfinite(value):
+        return None
+    return value
+
+
+def _prometheus_family_name(name: str, metric_type: str) -> str:
+    # prometheus_client stores counters without the _total suffix it writes in text.
+    if metric_type == "counter":
+        return f"{name}_total"
+    if metric_type == "info":
+        return f"{name}_info"
+    return name
+
+
+def registry_to_json(registry: prometheus_client.CollectorRegistry) -> dict[str, Any]:
+    """One object keyed by family name, each value ``{type, help, samples}``."""
+    families: dict[str, Any] = {}
+    for metric in registry.collect():
+        families[_prometheus_family_name(metric.name, metric.type)] = {
+            "type": metric.type,
+            "help": metric.documentation,
+            "samples": [
+                {
+                    "name": sample.name,
+                    "labels": dict(sample.labels),
+                    "value": _json_sample_value(sample.value),
+                }
+                for sample in metric.samples
+            ],
+        }
+    return families
+
+
+def _scrape_registry(registry: prometheus_client.CollectorRegistry) -> prometheus_client.CollectorRegistry:
+    # Multiprocess values live in mmap files, so each scrape needs a fresh collector.
+    if "PROMETHEUS_MULTIPROC_DIR" not in os.environ:
+        return registry
+    ephemeral = prometheus_client.CollectorRegistry()
+    MultiProcessCollector(ephemeral)
+    return ephemeral
+
+
+def _add_metrics_route(app: FastAPI, registry: prometheus_client.CollectorRegistry) -> None:
+    @app.get("/metrics", include_in_schema=False)
+    def metrics(
+        output_format: Literal["prometheus", "json"] = Query(default="prometheus", alias="format"),
+    ) -> Response:
+        scrape_registry = _scrape_registry(registry)
+        if output_format == "json":
+            return JSONResponse(registry_to_json(scrape_registry))
+        return Response(
+            prometheus_client.generate_latest(scrape_registry),
+            media_type=prometheus_client.CONTENT_TYPE_LATEST,
+        )
+
+
 def setup_prometheus_metrics(
     app: FastAPI,
     registry: prometheus_client.CollectorRegistry | None = None,
 ) -> None:
     """Conditionally attach Prometheus instrumentator to the app.
 
-    No-op when ``ENABLE_PROMETHEUS_METRICS`` is false.
+    No-op when ``ENABLE_PROMETHEUS_METRICS`` is false. ``GET /metrics``
+    returns Prometheus text, or the same series as JSON when ``format=json``.
 
     Args:
         app: FastAPI application instance.
@@ -71,5 +136,6 @@ def setup_prometheus_metrics(
         registry=registry,
     )
     instrumentator.instrument(app)
-    instrumentator.expose(app, endpoint="/metrics", include_in_schema=False)
+    target = registry if registry is not None else prometheus_client.REGISTRY
+    _add_metrics_route(app, target)
     logger.info("Prometheus metrics enabled at /metrics")

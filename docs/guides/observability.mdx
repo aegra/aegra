@@ -159,7 +159,7 @@ For infrastructure-level monitoring (request rates, latency, error rates), Aegra
 ENABLE_PROMETHEUS_METRICS=true
 ```
 
-This exposes a `/metrics` endpoint with standard HTTP request metrics in Prometheus exposition format. Scrape it with any Prometheus-compatible collector and visualize with Grafana.
+This exposes a `/metrics` endpoint with standard HTTP request metrics. The default body is Prometheus exposition text. `GET /metrics?format=json` returns the same series as one JSON object keyed by metric family name. Each family is `{type, help, samples}`, and each sample is `{name, labels, value}`. `format` accepts `prometheus` (the default) or `json`. Any other value returns 422. When `PROMETHEUS_MULTIPROC_DIR` points at a directory, each scrape aggregates that directory for both formats. Scrape the default response with any Prometheus-compatible collector and visualize with Grafana.
 
 ### Lease reaper metrics
 

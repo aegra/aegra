@@ -95,6 +95,7 @@ description: "What Aegra supports today, what's coming soon, and what's not yet 
 
 | Feature | Status | Notes |
 |:--|:--|:--|
+| Prometheus `/metrics` | Supported | Prometheus text by default. `?format=json` returns the same series. Requires `ENABLE_PROMETHEUS_METRICS=true`. |
 | OpenTelemetry tracing | Supported | OTLP fan-out to multiple backends simultaneously. |
 | Langfuse integration | Supported | First-class support with environment variable config. |
 | Arize Phoenix integration | Supported | Local debugging and evaluation. |

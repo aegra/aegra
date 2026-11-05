@@ -135,6 +135,12 @@ class BrokerManager(BaseBrokerManager):
     def get_broker(self, run_id: str) -> RunBroker | None:
         return self._brokers.get(run_id)
 
+    def open_replay_broker(self, run_id: str) -> RunBroker:
+        existing = self.get_broker(run_id)
+        if existing is not None:
+            return existing
+        return RunBroker(run_id)
+
     def cleanup_broker(self, run_id: str) -> None:
         if run_id in self._brokers:
             self._brokers[run_id].mark_finished()

@@ -1,12 +1,14 @@
 """Unit tests for standard run endpoints (create, get, list, update, join)."""
 
 from datetime import UTC, datetime
+from typing import cast
 from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
 
 import pytest
 from fastapi import HTTPException
 from redis import RedisError
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from aegra_api.api.runs import (
     _apply_create_run_auth,
@@ -599,3 +601,44 @@ class TestApplyCreateRunAuth:
 
         assert request.config == {"original": "kept", "injected": True}
         assert request.context == {"injected_ctx": 2}
+
+    @pytest.mark.asyncio
+    async def test_metadata_filter_rejects_an_existing_thread_the_handler_hides(self, mock_user: User) -> None:
+        """A create_run metadata filter is applied before the run is created."""
+        request = RunCreate(assistant_id="a", input={}, config={"original": "kept"})
+        seen: list[dict[str, object]] = []
+
+        class _Session:
+            def __init__(self) -> None:
+                self.calls = 0
+
+            async def scalar(self, _stmt: object) -> str | None:
+                self.calls += 1
+                return "t" if self.calls == 1 else None
+
+        async def handler(_ctx: object, value: dict[str, object]) -> dict[str, object]:
+            seen.append(dict(value))
+            return {"metadata": {"team_id": "team-1"}, "config": {"injected": True}}
+
+        with patch("aegra_api.api.runs.handle_event", new=handler), pytest.raises(HTTPException) as exc:
+            await _apply_create_run_auth(mock_user, "t", request, cast(AsyncSession, _Session()))
+
+        assert exc.value.status_code == 404
+        assert request.config == {"original": "kept", "injected": True}
+        assert seen and "run_id" not in seen[0]
+        assert seen[0]["thread_id"] == "t"
+
+    @pytest.mark.asyncio
+    async def test_metadata_filter_skips_a_thread_that_does_not_exist_yet(self, mock_user: User) -> None:
+        """A new thread id is not rejected just because the filter has nothing to match."""
+        request = RunCreate(assistant_id="a", input={})
+
+        class _Session:
+            async def scalar(self, _stmt: object) -> None:
+                return None
+
+        async def handler(_ctx: object, _value: dict[str, object]) -> dict[str, object]:
+            return {"metadata": {"team_id": "team-1"}}
+
+        with patch("aegra_api.api.runs.handle_event", new=handler):
+            await _apply_create_run_auth(mock_user, "t-new", request, cast(AsyncSession, _Session()))

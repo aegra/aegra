@@ -65,6 +65,10 @@ class BaseBrokerManager(ABC):
         """Get an existing broker or None"""
 
     @abstractmethod
+    def open_replay_broker(self, run_id: str) -> BaseRunBroker:
+        """Cached broker if this process has one; otherwise an uncached replay handle."""
+
+    @abstractmethod
     def cleanup_broker(self, run_id: str) -> None:
         """Clean up a broker for a run"""
 

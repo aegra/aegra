@@ -347,6 +347,12 @@ class RedisBrokerManager(BaseBrokerManager):
         """Get an existing broker from the local cache, or None."""
         return self._brokers.get(run_id)
 
+    def open_replay_broker(self, run_id: str) -> RedisRunBroker:
+        existing = self.get_broker(run_id)
+        if existing is not None:
+            return existing
+        return self._make_broker(run_id)
+
     def cleanup_broker(self, run_id: str) -> None:
         broker = self._brokers.pop(run_id, None)
         if broker:

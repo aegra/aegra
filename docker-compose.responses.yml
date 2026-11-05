@@ -1,0 +1,11 @@
+# E2E override — mounts Open Responses. The repo aegra.json leaves the routes off.
+# Usage:
+#   docker compose -f docker-compose.yml -f docker-compose.responses.yml up -d
+#   docker compose -f docker-compose.yml -f docker-compose.dev.yml -f docker-compose.responses.yml up -d
+
+services:
+  aegra:
+    environment:
+      - AEGRA_CONFIG=/app/aegra.responses.json
+    volumes:
+      - ./aegra.responses.json:/app/aegra.responses.json:ro

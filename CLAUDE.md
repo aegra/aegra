@@ -11,6 +11,7 @@ This file provides context for AI coding agents working with this repository.
 - Self-hosted on your own PostgreSQL database
 - Agent Protocol compliant (works with Agent Chat UI, LangGraph Studio, CopilotKit)
 - Python 3.12+ with FastAPI and PostgreSQL
+- Optional Open Responses API (`http.responses`) at `/v1/responses` and `/v1/conversations`, mapped onto threads and runs. Off unless enabled.
 
 ## Quick Start Commands
 

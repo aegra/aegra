@@ -9,7 +9,9 @@ only by being listed exempt.
 Exactly one layer authorizes each event. A route listed in ``SELF_DISPATCHING``
 keeps its in-body call and gets no enforcer, because its ``value`` is the live
 request model and handlers may inject metadata by mutating it in place. Every
-other registered route is dispatched from here.
+other registered route is dispatched from here, and the enforcer keeps what the
+handler allowed on the request so the route body can honor it
+(:func:`authorized_value`).
 """
 
 from __future__ import annotations
@@ -83,10 +85,19 @@ def build_auth_enforcer(resource: str, action: str) -> Callable[..., Awaitable[N
         # resource, so a crafted body must not swap the id a handler authorizes.
         value: dict[str, Any] = {**await _read_json_body(request), **request.path_params}
         ctx = build_auth_context(user, resource, action)
-        await handle_event(ctx, value)
+        filters = await handle_event(ctx, value)
+        request.state.aegra_authorized = filters if filters is not None else value
         mark_dispatched(resource, action)
 
     return enforce
+
+
+def authorized_value(request: Request) -> dict[str, Any] | None:
+    """What the route's handler allowed: the dict it returned, else the value it may have mutated.
+
+    ``None`` when no enforcer ran for the request (a self-dispatching or exempt route).
+    """
+    return getattr(request.state, "aegra_authorized", None)
 
 
 def apply_auth_enforcement(app: Any) -> int:

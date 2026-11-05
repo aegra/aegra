@@ -36,7 +36,8 @@ Add the `store` section to your `aegra.json`:
 | Option | Type | Required | Description |
 |--------|------|----------|-------------|
 | `dims` | `integer` | Yes | Embedding vector dimensions (must match your model) |
-| `embed` | `string` | Yes | Embedding model in format `provider:model-id` |
+| `embed` | `string` | Yes | Embedding model as `provider:model-id`, or a [custom embedding function](#custom-embeddings) as `path/to/file.py:name` |
+| `embed_kwargs` | `object` | No | [Provider options](#provider-options) passed to the embedding model; provider strings only |
 | `fields` | `list[str]` | No | JSON fields to embed (default: `["$"]` for entire document) |
 
 ### Fields configuration
@@ -75,6 +76,56 @@ AWS_SECRET_ACCESS_KEY=...
 # Cohere
 COHERE_API_KEY=...
 ```
+
+### Provider options
+
+`embed_kwargs` passes keyword arguments to the provider's embeddings class, as LangChain's `init_embeddings` takes them. To store shorter vectors from `text-embedding-3-small`:
+
+```json
+"index": {
+  "dims": 512,
+  "embed": "openai:text-embedding-3-small",
+  "embed_kwargs": {"dimensions": 512}
+}
+```
+
+To use an OpenAI-compatible embeddings server through the `openai` provider, point it at the server and send text rather than the token IDs `langchain-openai` sends by default, which many such servers reject:
+
+```json
+"index": {
+  "dims": 1024,
+  "embed": "openai:BAAI/bge-m3",
+  "embed_kwargs": {"base_url": "http://localhost:8000/v1", "check_embedding_ctx_length": false}
+}
+```
+
+Keep API keys out of `aegra.json`: the provider classes read them from the environment (`OPENAI_API_KEY` above).
+
+## Custom embeddings
+
+To embed with a model that has no LangChain provider, a multimodal model, or a service of your own, point `embed` at a function in your project, in the same form LangSmith Deployments uses. A relative path resolves against the directory of `aegra.json`, like graph paths:
+
+```json
+"index": {
+  "dims": 1536,
+  "embed": "./src/embeddings.py:aembed_texts",
+  "fields": ["$"]
+}
+```
+
+```python
+# src/embeddings.py
+from openai import AsyncOpenAI
+
+client = AsyncOpenAI()
+
+
+async def aembed_texts(texts: list[str]) -> list[list[float]]:
+    response = await client.embeddings.create(model="text-embedding-3-small", input=texts)
+    return [item.embedding for item in response.data]
+```
+
+The name can be an async function, a sync function, or a LangChain `Embeddings` instance, and every vector it returns must have `dims` values. Aegra loads the file once at startup; a missing file or name stops startup with an error that names it. `embed_kwargs` does not apply here, so configure the function in its own file.
 
 ## Usage
 
@@ -142,7 +193,10 @@ If no `store.index` configuration is provided, Aegra operates in basic key-value
     Make sure you're using a PostgreSQL image with pgvector installed: `pgvector/pgvector:pg18`.
   </Accordion>
   <Accordion title="Invalid embedding model">
-    Verify the `embed` format is correct (`provider:model-id`) and the corresponding API key is set in your `.env`.
+    Verify the `embed` format is correct (`provider:model-id`) and the corresponding API key is set in your `.env`. A custom function needs the `path/to/file.py:name` form; without the `.py` file part Aegra reads the value as a provider string.
+  </Accordion>
+  <Accordion title="Embedding file not found">
+    A relative `embed` path resolves against the directory of `aegra.json`, not the directory you start the server from. The error shows the resolved path.
   </Accordion>
   <Accordion title="Dimension mismatch">
     The `dims` value must match your embedding model's output dimensions exactly. For example, `text-embedding-3-small` outputs 1536-dimensional vectors.

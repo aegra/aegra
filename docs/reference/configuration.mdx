@@ -286,7 +286,8 @@ Configure semantic store with vector embeddings.
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
 | `index.dims` | `integer` | Yes | Embedding vector dimensions (must match your model) |
-| `index.embed` | `string` | Yes | Embedding model in format `provider:model-id` |
+| `index.embed` | `string` | Yes | Embedding model as `provider:model-id`, or a custom embedding function as `path/to/file.py:name` (relative to the config file) |
+| `index.embed_kwargs` | `object` | No | Keyword arguments for the provider's embeddings class, e.g. `{"dimensions": 512}`; provider strings only |
 | `index.fields` | `list[str]` | No | JSON fields to embed (default: `["$"]` for entire document) |
 
 If `store` is not configured, Aegra operates in basic key-value mode.

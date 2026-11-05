@@ -2,7 +2,7 @@
 
 import json
 from pathlib import Path
-from typing import TypedDict
+from typing import Any, TypedDict
 
 import structlog
 
@@ -44,12 +44,17 @@ class StoreIndexConfig(TypedDict, total=False):
     dims: int
     """Embedding vector dimensions (e.g., 1536 for OpenAI text-embedding-3-small)"""
     embed: str
-    """Embedding model in format '<provider>:<model-id>'
+    """Embedding model as '<provider>:<model-id>', or a custom one as 'path/to/file.py:name'
     Examples:
     - openai:text-embedding-3-small (1536 dims)
     - openai:text-embedding-3-large (3072 dims)
     - bedrock:amazon.titan-embed-text-v2:0 (1024 dims)
     - cohere:embed-english-v3.0 (1024 dims)
+    - ./embeddings.py:embed (an embedding function or Embeddings instance, path relative to the config file)
+    """
+    embed_kwargs: dict[str, Any]
+    """Keyword arguments for the provider's embeddings class, passed to init_embeddings with a provider string.
+    Example: {"dimensions": 512} with openai:text-embedding-3-small
     """
     fields: list[str] | None
     """JSON fields to embed. Defaults to ["$"] (entire document).

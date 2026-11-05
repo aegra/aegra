@@ -1,4 +1,6 @@
 import os
+from pathlib import Path
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -225,4 +227,24 @@ class TestDatabaseManager:
         # --- ASSERTIONS ---
         # Store should be initialized with index=None
         mock_db_deps["store_cls"].assert_called_with(conn=mock_db_deps["pool_instance"], index=None)
+        mock_db_deps["store_instance"].setup.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_initialize_loads_embed_path_relative_to_config_dir(
+        self, db_manager: DatabaseManager, mock_db_deps: dict[str, Any], tmp_path: Path
+    ) -> None:
+        """A path embed is loaded from the config file's directory before the store sees it."""
+        (tmp_path / "embeddings.py").write_text(
+            "async def embed(texts: list[str]) -> list[list[float]]:\n    return [[1.0, 0.0] for _ in texts]\n"
+        )
+        mock_db_deps["load_store_config"].return_value = {"index": {"dims": 2, "embed": "./embeddings.py:embed"}}
+
+        with patch("aegra_api.core.database.get_config_dir", return_value=tmp_path):
+            await db_manager.initialize()
+
+        _, kwargs = mock_db_deps["store_cls"].call_args
+        index = kwargs["index"]
+        assert callable(index["embed"])
+        assert index["embed"].__name__ == "embed"
+        assert index["dims"] == 2
         mock_db_deps["store_instance"].setup.assert_awaited_once()

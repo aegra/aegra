@@ -6,7 +6,7 @@ from typing import Any
 import pytest
 from fastapi import HTTPException
 
-from aegra_api.api.store import _scope_attr_map, apply_namespace_scoping
+from aegra_api.api.store import _scope_attr_map, apply_namespace_scoping, namespace_label
 from aegra_api.models import User
 
 
@@ -201,6 +201,51 @@ class TestMultiAttributeScopes:
         user = _user("user-123", tenant_id=7, region=0)
         result = apply_namespace_scoping(["tenants", "x"], user, scopes=scopes)
         assert result == ["tenants", "7", "0", "tenants", "x"]
+
+
+class TestNamespaceLabelEncoding:
+    """Verify scope values containing periods (e.g. email identities) become valid labels."""
+
+    def test_plain_value_is_unchanged(self) -> None:
+        """Values without '.' or '%' keep their existing labels, so stored data stays addressable."""
+        assert namespace_label("user-123") == "user-123"
+
+    def test_periods_are_encoded(self) -> None:
+        """LangGraph rejects labels with periods, so they are percent-encoded."""
+        assert namespace_label("alice.smith@example.com") == "alice%2Esmith@example%2Ecom"
+
+    def test_encoding_is_injective(self) -> None:
+        """A literal '%2E' in a value must not collide with an encoded period."""
+        assert namespace_label("a%2Eb") != namespace_label("a.b")
+
+    def test_email_identity_is_encoded_in_user_scope(self) -> None:
+        """An email identity produces a namespace with no period in any label."""
+        result = apply_namespace_scoping(["design", "templates"], _user("alice.smith@example.com"))
+        assert result == ["users", "alice%2Esmith@example%2Ecom", "design", "templates"]
+        assert not any("." in label for label in result)
+
+    def test_encoded_own_namespace_passes_through(self) -> None:
+        """A namespace returned by the API (encoded head) round-trips unchanged."""
+        ns = ["users", "alice%2Esmith@example%2Ecom", "docs"]
+        assert apply_namespace_scoping(ns, _user("alice.smith@example.com")) == ns
+
+    def test_raw_own_namespace_is_buried(self) -> None:
+        """A namespace qualified with the raw identity is not the caller's head, so it is buried."""
+        ns = ["users", "alice.smith@example.com", "docs"]
+        result = apply_namespace_scoping(ns, _user("alice.smith@example.com"))
+        assert result == ["users", "alice%2Esmith@example%2Ecom", *ns]
+
+    def test_encoded_label_of_other_user_is_buried(self) -> None:
+        """Identity "a%2Eb" cannot pass through as identity "a.b", whose encoded label it equals."""
+        result = apply_namespace_scoping(["users", "a%2Eb", "secrets"], _user("a%2Eb"))
+        assert result == ["users", "a%252Eb", "users", "a%2Eb", "secrets"]
+
+    def test_configured_scope_values_are_encoded(self) -> None:
+        """Configured scope attribute values with periods are encoded too."""
+        scopes = {"orgs": ["org_id"]}
+        user = _user("user-123", org_id="acme.com")
+        result = apply_namespace_scoping(["orgs", "kb"], user, scopes=scopes)
+        assert result == ["orgs", "acme%2Ecom", "orgs", "kb"]
 
 
 class TestScopeAttrMap:

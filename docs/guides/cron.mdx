@@ -107,7 +107,7 @@ Every run a cron creates knows which cron fired it and which occurrence of the s
 - `cron_id`: the cron that created the run.
 - `cron_scheduled_time`: the occurrence the firing serves, as an ISO 8601 timestamp in UTC. This is the cron's `next_run_date` at the moment the scheduler claimed it, so a duplicate firing of the same occurrence carries the same value.
 
-Both keys are server-pinned, like `thread_id` and `run_id`: a value sent in the cron's `config`, in a run request, or in a checkpoint is dropped, and runs created any other way carry neither key. That makes `(cron_id, cron_scheduled_time)` a safe idempotency key for scheduled work:
+Both keys are server-pinned in the graph's `config["configurable"]`, like `thread_id` and `run_id`: a value sent in the cron's `config`, in a run request, or in a checkpoint never reaches it, and a run created any other way has neither key there. The run's `context` and its stored `config` carry what the request sent, so read the keys from `config["configurable"]`. That makes `(cron_id, cron_scheduled_time)` a safe idempotency key for scheduled work:
 
 ```python
 from langchain_core.runnables import RunnableConfig

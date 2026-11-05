@@ -229,6 +229,8 @@ as their parent, so one rule covers a whole family of endpoints:
 There is no `runs` resource: the Agent Protocol authorizes run operations under
 the thread that owns them, and the SDK's `@auth.on` has no `runs` attribute.
 
+On `/threads/{id}/commands` the handler's `value` is the command body plus the `thread_id` from the URL. For `input.inject`, the handler's result shapes the message the run receives, as it shapes `config` and `context` on run creation: a returned dict wins over an edited `value`, and its `params.message` fields merge over the client's message. Returning `False` refuses the inject with 403.
+
 Stateless runs create an ephemeral thread, so they authorize as
 `threads.create_run`. Omitting the `thread_id` does not bypass your thread rules.
 

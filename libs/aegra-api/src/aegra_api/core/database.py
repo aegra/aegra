@@ -31,6 +31,21 @@ class DatabaseManager:
         if self.engine:
             return
 
+        try:
+            await self._initialize_components()
+        except BaseException:
+            # BaseException so a cancelled startup also releases its pools before propagating.
+            await self._release_after_failed_init()
+            raise
+
+    async def _release_after_failed_init(self) -> None:
+        """Close whatever a failed initialize() opened, without masking the original error."""
+        try:
+            await self.close()
+        except Exception:
+            logger.exception("Cleanup after failed database initialization also failed")
+
+    async def _initialize_components(self) -> None:
         # 1. SQLAlchemy Engine (app metadata, uses asyncpg)
         # We strictly limit this pool because the main load
         # is handled by LangGraph components.
@@ -87,17 +102,19 @@ class DatabaseManager:
 
     async def close(self) -> None:
         """Close database connections"""
-        # Close SQLAlchemy engine
-        if self.engine:
-            await self.engine.dispose()
-            self.engine = None
+        engine, pool = self.engine, self.lg_pool
+        # Cleared up front so a failed close cannot leave initialize() short-circuiting on a stale engine.
+        self.engine = None
+        self.lg_pool = None
+        self._checkpointer = None
+        self._store = None
 
-        # Close shared LangGraph pool
-        if self.lg_pool:
-            await self.lg_pool.close()
-            self.lg_pool = None
-            self._checkpointer = None
-            self._store = None
+        try:
+            if engine:
+                await engine.dispose()
+        finally:
+            if pool:
+                await pool.close()
 
         logger.info("✅ Database connections closed")
 

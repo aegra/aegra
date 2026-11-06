@@ -6,7 +6,7 @@ foreign key that removes a thread's messages with it, and a node LangGraph
 retries. They skip when no database is reachable.
 """
 
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
 from datetime import timedelta
 from typing import Any
 from uuid import uuid4
@@ -345,6 +345,26 @@ class TestClaims:
         assert await _pending_ids(second) == ["m1"]
 
 
+def _model_failing_once(prompts: list[list[str]]) -> Callable[..., Awaitable[dict[str, Any]]]:
+    """The streaming guide's snippet as a node, with a model that fails once with a retryable error."""
+
+    async def call_model(state: MessagesState, config: RunnableConfig) -> dict[str, Any]:
+        reader = config["configurable"].get(INJECTED_INPUT_KEY)
+        injected = []
+        if reader is not None:
+            await reader.accept()
+            pending = await reader.pending()
+            taken = set(await reader.take([item.message_id for item in pending]))
+            held = {message.id for message in state["messages"]}
+            injected = [item.message for item in pending if item.message_id in taken and item.message_id not in held]
+        prompts.append([str(message.text) for message in state["messages"]] + [item["content"] for item in injected])
+        if len(prompts) == 1:
+            raise ConnectionError("model provider unavailable")
+        return {"messages": [*injected, AIMessage(content="ok")]}
+
+    return call_model
+
+
 class TestNodeRetries:
     async def test_a_node_langgraph_retries_reads_again_what_its_failed_try_took(
         self, sessions: SessionFactory
@@ -353,30 +373,46 @@ class TestNodeRetries:
         run_id = await _run(sessions, thread_id)
         await _store(sessions, thread_id, "m1", "also check the tests")
         prompts: list[list[str]] = []
-
-        async def call_model(state: MessagesState, config: RunnableConfig) -> dict[str, Any]:
-            """The streaming guide's snippet, with a model that fails once with a retryable error."""
-            reader = config["configurable"].get(INJECTED_INPUT_KEY)
-            injected = []
-            if reader is not None:
-                await reader.accept()
-                pending = await reader.pending()
-                taken = set(await reader.take([item.message_id for item in pending]))
-                held = {message.id for message in state["messages"]}
-                injected = [
-                    item.message for item in pending if item.message_id in taken and item.message_id not in held
-                ]
-            prompts.append(
-                [str(message.text) for message in state["messages"]] + [item["content"] for item in injected]
-            )
-            if len(prompts) == 1:
-                raise ConnectionError("model provider unavailable")
-            return {"messages": [*injected, AIMessage(content="ok")]}
-
         graph = (
             StateGraph(MessagesState)
-            .add_node("call_model", call_model, retry_policy=RetryPolicy(max_attempts=3, initial_interval=0.01))
+            .add_node(
+                "call_model",
+                _model_failing_once(prompts),
+                retry_policy=RetryPolicy(max_attempts=3, initial_interval=0.01),
+            )
             .add_edge(START, "call_model")
+            .compile(checkpointer=InMemorySaver())
+        )
+        config: RunnableConfig = {
+            "configurable": {"thread_id": thread_id, INJECTED_INPUT_KEY: _reader(thread_id, run_id)}
+        }
+
+        result = await graph.ainvoke({"messages": [HumanMessage(content="start", id="h1")]}, config)
+        await mark_delivered(run_id=run_id, thread_id=thread_id, user_id=_USER_ID)
+        await _set_status(sessions, run_id, "success")
+
+        assert prompts == [["start", "also check the tests"], ["start", "also check the tests"]]
+        assert [message.content for message in result["messages"]] == ["start", "also check the tests", "ok"]
+        assert await _pending_ids(_reader(thread_id, await _run(sessions, thread_id))) == []
+
+    async def test_a_subgraph_node_langgraph_retries_reads_again_what_its_failed_try_took(
+        self, sessions: SessionFactory
+    ) -> None:
+        thread_id = await _thread(sessions)
+        run_id = await _run(sessions, thread_id)
+        await _store(sessions, thread_id, "m1", "also check the tests")
+        prompts: list[list[str]] = []
+        # LangGraph re-runs a retried subgraph under a new namespace, so its inner node gets new task ids.
+        agent = (
+            StateGraph(MessagesState)
+            .add_node("call_model", _model_failing_once(prompts))
+            .add_edge(START, "call_model")
+            .compile()
+        )
+        graph = (
+            StateGraph(MessagesState)
+            .add_node("agent", agent, retry_policy=RetryPolicy(max_attempts=3, initial_interval=0.01))
+            .add_edge(START, "agent")
             .compile(checkpointer=InMemorySaver())
         )
         config: RunnableConfig = {

@@ -12,8 +12,8 @@ The command stores each message in ``run_inputs``; the graph reads them through 
 
 A claim holds while the run is pending or running, so a run requeued after a
 worker drain or crash sees again what its earlier attempt took, and a node
-LangGraph retries sees again what its failed try took. When the graph runs to
-its end, its claims become delivered. A run that pauses at an interrupt,
+LangGraph retries, a compiled subgraph included, sees again what its failed try
+took. When the graph runs to its end, its claims become delivered. A run that pauses at an interrupt,
 fails, or is cancelled leaves them to the thread's next run, the resume included,
 which may therefore see a message a node before the pause already added to the
 state: the graph takes it again, so it settles, and skips it, because adding it
@@ -66,12 +66,22 @@ def _expired() -> ColumnElement[bool]:
 
 
 def _current_task() -> str | None:
-    """The LangGraph task calling the reader, which a node's retries share; None outside a graph node."""
+    """The node calling the reader, keyed as every try of it is; None outside a graph node.
+
+    LangGraph re-runs a retried node under its own ``checkpoint_ns`` (``node:task_id``
+    segments joined by ``|``), but re-runs a retried subgraph node under a numeric counter
+    segment with new inner task ids, so the key keeps the top-level task as it is and
+    names the nodes below it without their ids.
+    """
     try:
         config = get_config()
     except RuntimeError:
         return None
-    return config.get("configurable", {}).get("checkpoint_ns")
+    checkpoint_ns = config.get("configurable", {}).get("checkpoint_ns")
+    if not checkpoint_ns:
+        return checkpoint_ns
+    top, *inner = (part for part in checkpoint_ns.split("|") if not part.isdigit())
+    return "|".join([top, *(part.split(":")[0] for part in inner)])
 
 
 def _available_to(run_id: str, attempt: str, task: str | None) -> ColumnElement[bool]:

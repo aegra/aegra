@@ -354,3 +354,61 @@ class TestExpiry:
         await mark_delivered(run_id=run_id, thread_id=thread_id, user_id=_USER_ID)
 
         assert await _ids_in_table(sessions, thread_id) == ["new"]
+
+    async def test_a_requeued_run_sees_again_an_aged_message_it_took(self, sessions: SessionFactory) -> None:
+        thread_id = await _thread(sessions)
+        run_id = await _run(sessions, thread_id)
+        await _store(sessions, thread_id, "m1")
+        await _reader(thread_id, run_id).take(["m1"])
+        await _age(sessions, thread_id, "m1")
+
+        await _set_status(sessions, run_id, "pending")
+
+        assert await _pending_ids(_reader(thread_id, run_id)) == ["m1"]
+
+    async def test_an_aged_message_a_failed_run_took_carries_to_the_next_run(self, sessions: SessionFactory) -> None:
+        thread_id = await _thread(sessions)
+        first_run = await _run(sessions, thread_id)
+        await _store(sessions, thread_id, "m1")
+        await _reader(thread_id, first_run).take(["m1"])
+        await _age(sessions, thread_id, "m1")
+
+        await _set_status(sessions, first_run, "error")
+        second = _reader(thread_id, await _run(sessions, thread_id))
+
+        assert await _pending_ids(second) == ["m1"]
+
+    async def test_the_next_inject_keeps_an_aged_message_a_run_took(self, sessions: SessionFactory) -> None:
+        thread_id = await _thread(sessions)
+        run_id = await _run(sessions, thread_id)
+        await _store(sessions, thread_id, "m1")
+        await _reader(thread_id, run_id).take(["m1"])
+        await _age(sessions, thread_id, "m1")
+
+        await _store(sessions, thread_id, "m2")
+
+        assert await _ids_in_table(sessions, thread_id) == ["m1", "m2"]
+
+    async def test_a_run_end_keeps_an_aged_message_another_run_took(self, sessions: SessionFactory) -> None:
+        thread_id = await _thread(sessions)
+        failed_run = await _run(sessions, thread_id)
+        await _store(sessions, thread_id, "m1")
+        await _reader(thread_id, failed_run).take(["m1"])
+        await _age(sessions, thread_id, "m1")
+        await _set_status(sessions, failed_run, "error")
+
+        await mark_delivered(run_id=await _run(sessions, thread_id), thread_id=thread_id, user_id=_USER_ID)
+
+        assert await _ids_in_table(sessions, thread_id) == ["m1"]
+
+    async def test_the_next_inject_removes_an_aged_delivered_message(self, sessions: SessionFactory) -> None:
+        thread_id = await _thread(sessions)
+        run_id = await _run(sessions, thread_id)
+        await _store(sessions, thread_id, "m1")
+        await _reader(thread_id, run_id).take(["m1"])
+        await mark_delivered(run_id=run_id, thread_id=thread_id, user_id=_USER_ID)
+        await _age(sessions, thread_id, "m1")
+
+        await _store(sessions, thread_id, "m2")
+
+        assert await _ids_in_table(sessions, thread_id) == ["m2"]

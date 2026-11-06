@@ -16,8 +16,9 @@ fails, or is cancelled leaves them to the thread's next run, the resume included
 which may therefore see a message a node before the pause already added to the
 state: the graph takes it again, so it settles, and skips it, because adding it
 under the same id would only replace it in the state while a model called with
-it would read it twice. Messages expire ``INPUT_INJECT_TTL_SECONDS`` after they
-were sent, taken or not.
+it would read it twice. A message no run took expires ``INPUT_INJECT_TTL_SECONDS``
+after it was sent; one a run took stays until a run delivers it, and a delivered
+one is kept as long after it was sent, so a repeat of its id is still stored once.
 """
 
 from __future__ import annotations
@@ -52,9 +53,13 @@ class InjectedMessage:
     message: dict[str, Any]
 
 
-def _unexpired() -> ColumnElement[bool]:
+def _expired() -> ColumnElement[bool]:
+    """Sent longer than the TTL ago and held by no run: never taken, or already delivered."""
     ttl = timedelta(seconds=settings.event_streaming.INPUT_INJECT_TTL_SECONDS)
-    return RunInputORM.created_at > func.now() - ttl
+    return and_(
+        RunInputORM.created_at <= func.now() - ttl,
+        or_(RunInputORM.taken_by_run.is_(None), RunInputORM.delivered.is_(True)),
+    )
 
 
 def _available_to(run_id: str, attempt: str) -> ColumnElement[bool]:
@@ -65,7 +70,7 @@ def _available_to(run_id: str, attempt: str) -> ColumnElement[bool]:
     )
     return and_(
         RunInputORM.delivered.is_(False),
-        _unexpired(),
+        ~_expired(),
         or_(
             RunInputORM.taken_by_run.is_(None),
             and_(RunInputORM.taken_by_run == run_id, RunInputORM.taken_by_attempt != attempt),
@@ -150,11 +155,11 @@ async def store_message(
 ) -> bool:
     """Store a message for the thread's runs; commits.
 
-    An identical repeat of a message still waiting is stored once and returns True.
+    An identical repeat of a message the thread still holds is stored once and returns True.
     Returns False when the id already names a different message.
     """
     owned = (RunInputORM.thread_id == thread_id, RunInputORM.user_id == user_id)
-    await session.execute(delete(RunInputORM).where(*owned, ~_unexpired()))
+    await session.execute(delete(RunInputORM).where(*owned, _expired()))
     inserted = await session.scalar(
         insert(RunInputORM)
         .values(thread_id=thread_id, message_id=message_id, message=message, user_id=user_id)
@@ -176,5 +181,5 @@ async def mark_delivered(*, run_id: str, thread_id: str, user_id: str) -> None:
         await session.execute(
             update(RunInputORM).where(*owned, RunInputORM.taken_by_run == run_id).values(delivered=True)
         )
-        await session.execute(delete(RunInputORM).where(*owned, ~_unexpired()))
+        await session.execute(delete(RunInputORM).where(*owned, _expired()))
         await session.commit()

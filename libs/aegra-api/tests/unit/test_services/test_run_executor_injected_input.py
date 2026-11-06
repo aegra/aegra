@@ -114,3 +114,17 @@ class TestTakenMessagesSettle:
 
         assert result.has_interrupt is False
         warning.assert_called_once()
+
+    async def test_a_refused_connection_while_settling_does_not_fail_the_run(
+        self, graph_service: MagicMock, delivered: AsyncMock, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(run_executor_module, "_stream_legacy", AsyncMock())
+        # asyncpg raises connect-time failures as OSError, which SQLAlchemy does not wrap.
+        delivered.side_effect = ConnectionRefusedError(111, "Connect call failed")
+        warning = MagicMock()
+        monkeypatch.setattr(run_executor_module.logger, "warning", warning)
+
+        result = await _stream_graph(_job())
+
+        assert result.has_interrupt is False
+        warning.assert_called_once()

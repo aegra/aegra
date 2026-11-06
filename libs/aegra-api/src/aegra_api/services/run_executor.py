@@ -215,9 +215,10 @@ async def _stream_graph(job: RunJob) -> _GraphResult:
 
 
 async def _settle_injected_input(job: RunJob) -> None:
+    # OSError too: asyncpg raises a failed connect as OSError, which SQLAlchemy does not wrap.
     try:
         await mark_delivered(run_id=job.identity.run_id, thread_id=job.identity.thread_id, user_id=job.user.identity)
-    except SQLAlchemyError:
+    except (SQLAlchemyError, OSError):
         logger.warning(
             "Could not settle injected input; the thread's next run may receive it again",
             run_id=job.identity.run_id,

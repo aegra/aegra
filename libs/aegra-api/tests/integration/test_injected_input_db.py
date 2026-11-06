@@ -34,6 +34,7 @@ async def sessions(monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[SessionFact
     """Sessions on the test database, also used by the reader; skip without a database."""
     engine = create_async_engine(settings.db.database_url)
     try:
+        table = None
         try:
             async with engine.begin() as conn:
                 table = await conn.scalar(text("SELECT to_regclass('public.run_inputs')"))

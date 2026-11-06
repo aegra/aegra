@@ -78,7 +78,8 @@ def _handler_message_fields(authorized: dict[str, Any] | None) -> dict[str, Any]
 
 
 def _message_error(raw: dict[str, Any]) -> str | None:
-    if raw.get("role") not in _ROLES:
+    role = raw.get("role")
+    if not isinstance(role, str) or role not in _ROLES:
         return "message.role must be 'user' or 'system'."
     content = raw.get("content")
     if not isinstance(content, str) or not content:

@@ -13,11 +13,13 @@ The command stores each message in ``run_inputs``; the graph reads them through 
 A claim belongs to the LangGraph task that made it, so every parallel branch and
 every repeated node, inside a compiled subgraph too, is a node of its own. A claim
 holds while the run is pending or running, so a run requeued after a worker drain
-or crash sees again what its earlier attempt took. A task that fails releases what
-it and the tasks below it took, so a node LangGraph retries, a compiled subgraph
-included, takes them again. When the graph runs to its end, its claims become
-delivered. A run that pauses at an interrupt, fails, or is cancelled leaves them to
-the thread's next run, the resume included, which may therefore see a message a
+or crash sees again what its earlier attempt took. A task that fails gives back what
+it and the tasks below it took: the run keeps holding them, any of its tasks may take
+them again, and a node LangGraph retries, a compiled subgraph included, does. When
+the graph runs to its end, the messages its tasks hold become delivered; one given
+back that no task took again goes to the thread's next run. A run that pauses at an
+interrupt, fails, or is cancelled leaves its claims to the thread's next run, the
+resume included, which may therefore see a message a
 node before the pause already added to the state: the graph takes it again, so it
 settles, and skips it, because adding it under the same id would only replace it in
 the state while a model called with it would read it twice. A message no run took
@@ -29,7 +31,7 @@ of its id is still stored once.
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Sequence
+from collections.abc import Collection, Sequence
 from dataclasses import dataclass, field
 from datetime import timedelta
 from typing import Any, Final, Literal
@@ -85,7 +87,11 @@ def _current_task() -> str | None:
 
 
 def _available_to(run_id: str, attempt: str, task: str | None) -> ColumnElement[bool]:
-    """Undelivered and unexpired; unclaimed, held by an ended run, or by ``run_id`` in another attempt or this task."""
+    """Undelivered and unexpired; unclaimed, held by an ended run, or by ``run_id`` outside this attempt's other tasks.
+
+    ``run_id`` may take what its own tasks of another attempt took, what a failed task gave back
+    (``taken_by_attempt`` is NULL), and what ``task`` itself took.
+    """
     claimant_active = exists().where(
         RunORM.run_id == RunInputORM.taken_by_run,
         RunORM.status.in_(_ACTIVE_RUN_STATES),
@@ -97,7 +103,10 @@ def _available_to(run_id: str, attempt: str, task: str | None) -> ColumnElement[
             RunInputORM.taken_by_run.is_(None),
             and_(
                 RunInputORM.taken_by_run == run_id,
-                or_(RunInputORM.taken_by_attempt != attempt, RunInputORM.taken_by_task.is_not_distinct_from(task)),
+                or_(
+                    RunInputORM.taken_by_attempt.is_distinct_from(attempt),
+                    RunInputORM.taken_by_task.is_not_distinct_from(task),
+                ),
             ),
             ~claimant_active,
         ),
@@ -161,9 +170,10 @@ class InjectedInput:
             await session.commit()
         return [message_id for message_id in message_ids if message_id in taken]
 
-    async def release(self, task: str) -> None:
-        """Unclaim what ``task`` and the tasks below it took in this attempt, so the task's retry takes it again."""
-        below = RunInputORM.taken_by_task.startswith(f"{task}|", autoescape=True)
+    async def release(self, tasks: Collection[str]) -> None:
+        """Give back what ``tasks`` took in this attempt: the run keeps holding it and any of its tasks may take it."""
+        if not tasks:
+            return
         maker = _get_session_maker()
         async with maker() as session:
             await session.execute(
@@ -171,15 +181,15 @@ class InjectedInput:
                 .where(
                     *self._scope(),
                     RunInputORM.taken_by_attempt == self.attempt,
-                    or_(RunInputORM.taken_by_task == task, below),
+                    RunInputORM.taken_by_task.in_(tasks),
                 )
-                .values(taken_by_run=None, taken_by_attempt=None, taken_by_task=None)
+                .values(taken_by_attempt=None, taken_by_task=None)
             )
             await session.commit()
 
 
 class ReleaseOnFailure(AsyncCallbackHandler):
-    """Releases what a LangGraph task took when the task fails, so the task's retry takes it again."""
+    """Gives back what a LangGraph task and the tasks below it took when the task fails, so its retry takes it again."""
 
     # A release that cannot reach the database fails the task rather than leave its retry without the messages.
     raise_error = True
@@ -187,6 +197,8 @@ class ReleaseOnFailure(AsyncCallbackHandler):
     def __init__(self, reader: InjectedInput) -> None:
         self.reader = reader
         self._namespaces: dict[UUID, str] = {}
+        # The task namespaces that ran below each run still running, their own included once they ended.
+        self._below: dict[UUID, set[str]] = {}
 
     async def on_chain_start(
         self,
@@ -213,8 +225,8 @@ class ReleaseOnFailure(AsyncCallbackHandler):
         tags: list[str] | None = None,
         **kwargs: Any,
     ) -> None:
-        """Forget a run that finished."""
-        self._namespaces.pop(run_id, None)
+        """Forget a run that finished; what ran below it now counts as below its parent."""
+        self._ended(run_id, parent_run_id)
 
     async def on_chain_error(
         self,
@@ -225,14 +237,24 @@ class ReleaseOnFailure(AsyncCallbackHandler):
         tags: list[str] | None = None,
         **kwargs: Any,
     ) -> None:
-        """Release the claims of a task that failed; an interrupt or a cancel keeps them."""
-        namespace = self._namespaces.pop(run_id, None)
-        if namespace is None or isinstance(error, GraphBubbleUp | asyncio.CancelledError):
-            return
+        """Give back the claims of a task that failed and of the tasks below it; an interrupt or a cancel keeps them."""
+        namespace = self._namespaces.get(run_id)
         # A run nested in a task shares its namespace, and the task may still recover from its error.
-        if parent_run_id is not None and self._namespaces.get(parent_run_id) == namespace:
+        nested = parent_run_id is not None and self._namespaces.get(parent_run_id) == namespace
+        tasks = self._ended(run_id, parent_run_id)
+        if namespace is None or nested or isinstance(error, GraphBubbleUp | asyncio.CancelledError):
             return
-        await self.reader.release(namespace)
+        await self.reader.release(tasks)
+
+    def _ended(self, run_id: UUID, parent_run_id: UUID | None) -> set[str]:
+        """Forget a run; returns its namespace with those below it, which now count as below its parent."""
+        tasks = self._below.pop(run_id, set())
+        namespace = self._namespaces.pop(run_id, None)
+        if namespace is not None:
+            tasks.add(namespace)
+        if parent_run_id is not None:
+            self._below.setdefault(parent_run_id, set()).update(tasks)
+        return tasks
 
 
 def pin_injected_input(config: dict[str, Any], reader: InjectedInput) -> dict[str, Any]:
@@ -284,12 +306,17 @@ async def store_message(
 
 
 async def mark_delivered(*, run_id: str, thread_id: str, user_id: str) -> None:
-    """Mark what a finished graph took as delivered and drop the thread's expired messages."""
+    """Mark what a finished graph's tasks hold as delivered and drop the thread's expired messages.
+
+    A message a failed task gave back and no task took again stays with the run, for the thread's next run.
+    """
     owned = (RunInputORM.thread_id == thread_id, RunInputORM.user_id == user_id)
     maker = _get_session_maker()
     async with maker() as session:
         await session.execute(
-            update(RunInputORM).where(*owned, RunInputORM.taken_by_run == run_id).values(delivered=True)
+            update(RunInputORM)
+            .where(*owned, RunInputORM.taken_by_run == run_id, RunInputORM.taken_by_attempt.is_not(None))
+            .values(delivered=True)
         )
         await session.execute(delete(RunInputORM).where(*owned, _expired()))
         await session.commit()

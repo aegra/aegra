@@ -253,8 +253,10 @@ class RunInput(Base):
     user_id: Mapped[str] = mapped_column(Text, nullable=False)
     # The run that took it; void once that run is no longer pending or running and never delivered it.
     taken_by_run: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # The execution of that run which holds it; NULL once the task that took it failed, so any task of
+    # the run may take it again while the run keeps holding it.
     taken_by_attempt: Mapped[str | None] = mapped_column(Text, nullable=True)
-    # The LangGraph task that took it, by its checkpoint namespace; a task that fails releases what it
+    # The LangGraph task that took it, by its checkpoint namespace; a task that fails gives back what it
     # and the tasks below it took, so a retry of the task takes them again.
     taken_by_task: Mapped[str | None] = mapped_column(Text, nullable=True)
     delivered: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))

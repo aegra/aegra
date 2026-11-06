@@ -1,6 +1,7 @@
 """The injected-input reader keys a claim by the LangGraph task that made it, and a task that fails releases them."""
 
 import asyncio
+from collections.abc import Collection
 from uuid import UUID, uuid4
 
 import pytest
@@ -40,12 +41,12 @@ class TestClaimKey:
 
 
 @pytest.fixture
-def released(monkeypatch: pytest.MonkeyPatch) -> list[str]:
-    """The namespaces the reader is asked to release."""
-    calls: list[str] = []
+def released(monkeypatch: pytest.MonkeyPatch) -> list[list[str]]:
+    """The namespaces the reader is asked to release, one sorted list per call."""
+    calls: list[list[str]] = []
 
-    async def release(self: InjectedInput, task: str) -> None:
-        calls.append(task)
+    async def release(self: InjectedInput, tasks: Collection[str]) -> None:
+        calls.append(sorted(tasks))
 
     monkeypatch.setattr(InjectedInput, "release", release)
     return calls
@@ -63,16 +64,44 @@ async def _start(handler: ReleaseOnFailure, *, namespace: str | None, parent: UU
 
 
 class TestReleaseOnFailure:
-    async def test_a_task_that_fails_releases_its_claims(self, released: list[str]) -> None:
+    async def test_a_task_that_fails_releases_its_claims(self, released: list[list[str]]) -> None:
         handler = _handler()
         graph = await _start(handler, namespace=None)
         task = await _start(handler, namespace="call_model:t1", parent=graph)
 
         await handler.on_chain_error(ConnectionError("model provider unavailable"), run_id=task, parent_run_id=graph)
 
-        assert released == ["call_model:t1"]
+        assert released == [["call_model:t1"]]
 
-    async def test_a_task_that_ends_releases_nothing(self, released: list[str]) -> None:
+    async def test_a_task_that_fails_releases_what_the_tasks_below_it_took(self, released: list[list[str]]) -> None:
+        handler = _handler()
+        graph = await _start(handler, namespace=None)
+        agent = await _start(handler, namespace="agent:p", parent=graph)
+        subgraph = await _start(handler, namespace="agent:p", parent=agent)
+        # A stateful subgraph's tasks run under its name alone, not under the task that invoked it.
+        take = await _start(handler, namespace="agent|take:t1", parent=subgraph)
+        await handler.on_chain_end({}, run_id=take, parent_run_id=subgraph)
+        answer = await _start(handler, namespace="agent|answer:t2", parent=subgraph)
+        error = ConnectionError("model provider unavailable")
+
+        await handler.on_chain_error(error, run_id=answer, parent_run_id=subgraph)
+        await handler.on_chain_error(error, run_id=subgraph, parent_run_id=agent)
+        await handler.on_chain_error(error, run_id=agent, parent_run_id=graph)
+
+        assert released == [["agent|answer:t2"], ["agent:p", "agent|answer:t2", "agent|take:t1"]]
+
+    async def test_a_task_that_fails_releases_nothing_an_earlier_task_took(self, released: list[list[str]]) -> None:
+        handler = _handler()
+        graph = await _start(handler, namespace=None)
+        first = await _start(handler, namespace="first:t1", parent=graph)
+        await handler.on_chain_end({}, run_id=first, parent_run_id=graph)
+        later = await _start(handler, namespace="later:t2", parent=graph)
+
+        await handler.on_chain_error(ValueError("boom"), run_id=later, parent_run_id=graph)
+
+        assert released == [["later:t2"]]
+
+    async def test_a_task_that_ends_releases_nothing(self, released: list[list[str]]) -> None:
         handler = _handler()
         graph = await _start(handler, namespace=None)
         task = await _start(handler, namespace="call_model:t1", parent=graph)
@@ -90,7 +119,9 @@ class TestReleaseOnFailure:
             pytest.param(asyncio.CancelledError(), id="cancel"),
         ],
     )
-    async def test_an_interrupt_or_a_cancel_releases_nothing(self, released: list[str], error: BaseException) -> None:
+    async def test_an_interrupt_or_a_cancel_releases_nothing(
+        self, released: list[list[str]], error: BaseException
+    ) -> None:
         handler = _handler()
         graph = await _start(handler, namespace=None)
         task = await _start(handler, namespace="call_model:t1", parent=graph)
@@ -99,7 +130,7 @@ class TestReleaseOnFailure:
 
         assert released == []
 
-    async def test_an_error_of_a_run_outside_a_task_releases_nothing(self, released: list[str]) -> None:
+    async def test_an_error_of_a_run_outside_a_task_releases_nothing(self, released: list[list[str]]) -> None:
         handler = _handler()
         graph = await _start(handler, namespace=None)
 
@@ -108,7 +139,7 @@ class TestReleaseOnFailure:
 
         assert released == []
 
-    async def test_a_failing_run_nested_in_a_task_leaves_the_task_to_recover(self, released: list[str]) -> None:
+    async def test_a_failing_run_nested_in_a_task_leaves_the_task_to_recover(self, released: list[list[str]]) -> None:
         handler = _handler()
         graph = await _start(handler, namespace=None)
         task = await _start(handler, namespace="call_model:t1", parent=graph)
@@ -118,9 +149,9 @@ class TestReleaseOnFailure:
 
         assert released == []
         await handler.on_chain_error(ValueError("parser failed"), run_id=task, parent_run_id=graph)
-        assert released == ["call_model:t1"]
+        assert released == [["call_model:t1"]]
 
-    async def test_a_failing_subgraph_releases_its_failed_task_and_then_itself(self, released: list[str]) -> None:
+    async def test_a_failing_subgraph_releases_its_failed_task_and_then_itself(self, released: list[list[str]]) -> None:
         handler = _handler()
         graph = await _start(handler, namespace=None)
         agent = await _start(handler, namespace="agent:p", parent=graph)
@@ -132,10 +163,10 @@ class TestReleaseOnFailure:
         await handler.on_chain_error(error, run_id=subgraph, parent_run_id=agent)
         await handler.on_chain_error(error, run_id=agent, parent_run_id=graph)
 
-        assert released == ["agent:p|model:t1", "agent:p"]
+        assert released == [["agent:p|model:t1"], ["agent:p", "agent:p|model:t1"]]
 
     async def test_a_release_that_fails_fails_the_task(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        async def release(self: InjectedInput, task: str) -> None:
+        async def release(self: InjectedInput, tasks: Collection[str]) -> None:
             raise ConnectionRefusedError(111, "Connect call failed")
 
         def fail(_: None) -> None:

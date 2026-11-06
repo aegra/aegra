@@ -355,13 +355,17 @@ async def _take_as(reader: InjectedInput, task: str, message_id: str, monkeypatc
     assert await reader.take([message_id]) == [message_id]
 
 
-async def _claimant(sessions: SessionFactory, thread_id: str, message_id: str) -> str | None:
+async def _claim(
+    sessions: SessionFactory, thread_id: str, message_id: str
+) -> tuple[str | None, str | None, str | None]:
+    """The run, attempt, and task holding a message."""
     async with sessions() as session:
-        return await session.scalar(
-            select(RunInputORM.taken_by_task).where(
+        row = await session.execute(
+            select(RunInputORM.taken_by_run, RunInputORM.taken_by_attempt, RunInputORM.taken_by_task).where(
                 RunInputORM.thread_id == thread_id, RunInputORM.message_id == message_id
             )
         )
+        return row.one().tuple()
 
 
 class TestRelease:
@@ -373,31 +377,67 @@ class TestRelease:
         await _store(sessions, thread_id, "m1")
         await _take_as(reader, "agent:p|call_model:t1", "m1", monkeypatch)
 
-        await reader.release("agent:p")
+        await reader.release({"agent:p|call_model:t1"})
 
         monkeypatch.setattr(injected_input, "_current_task", lambda: "agent:p|1|call_model:t2")
         assert await _pending_ids(reader) == ["m1"]
         assert await reader.take(["m1"]) == ["m1"]
 
-    async def test_release_reaches_the_task_and_the_tasks_below_it_only(
+    async def test_release_reaches_only_the_tasks_named(
         self, sessions: SessionFactory, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         thread_id = await _thread(sessions)
         reader = _reader(thread_id, await _run(sessions, thread_id))
         claims = {
             "m1": "call_model:t1",
-            "m2": "call_model:t1|tools:t2",
-            "m3": "call_model:t12|tools:t3",
-            "m4": "callXmodel:t1|tools:t2",
+            "m2": "agent|tools:t2",
+            "m3": "call_model:t1|tools:t3",
+            "m4": "agent|tools:t4",
         }
         for message_id, task in claims.items():
             await _store(sessions, thread_id, message_id)
             await _take_as(reader, task, message_id, monkeypatch)
 
-        await reader.release("call_model:t1")
+        await reader.release({"call_model:t1", "agent|tools:t2"})
 
         monkeypatch.setattr(injected_input, "_current_task", lambda: "other:t9")
         assert await _pending_ids(reader) == ["m1", "m2"]
+
+    async def test_a_released_message_stays_with_its_run(
+        self, sessions: SessionFactory, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        thread_id = await _thread(sessions)
+        run_id = await _run(sessions, thread_id)
+        reader = _reader(thread_id, run_id)
+        await _store(sessions, thread_id, "m1")
+        await _take_as(reader, "call_model:t1", "m1", monkeypatch)
+
+        await reader.release({"call_model:t1"})
+
+        assert await _claim(sessions, thread_id, "m1") == (run_id, None, None)
+        assert await _pending_ids(_reader(thread_id, await _run(sessions, thread_id))) == []
+        await _age(sessions, thread_id, "m1")
+        await _store(sessions, thread_id, "m2")
+        assert await _ids_in_table(sessions, thread_id) == ["m1", "m2"]
+        await _set_status(sessions, run_id, "error")
+        assert await _pending_ids(_reader(thread_id, await _run(sessions, thread_id))) == ["m1", "m2"]
+
+    async def test_a_released_message_no_task_takes_again_is_not_delivered(
+        self, sessions: SessionFactory, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        thread_id = await _thread(sessions)
+        run_id = await _run(sessions, thread_id)
+        reader = _reader(thread_id, run_id)
+        await _store(sessions, thread_id, "m1")
+        await _store(sessions, thread_id, "m2")
+        await _take_as(reader, "call_model:t1", "m1", monkeypatch)
+        await _take_as(reader, "call_model:t2", "m2", monkeypatch)
+        await reader.release({"call_model:t1"})
+
+        await mark_delivered(run_id=run_id, thread_id=thread_id, user_id=_USER_ID)
+        await _set_status(sessions, run_id, "success")
+
+        assert await _pending_ids(_reader(thread_id, await _run(sessions, thread_id))) == ["m1"]
 
     async def test_release_keeps_what_an_earlier_attempt_took(
         self, sessions: SessionFactory, monkeypatch: pytest.MonkeyPatch
@@ -407,9 +447,9 @@ class TestRelease:
         await _store(sessions, thread_id, "m1")
         await _take_as(_reader(thread_id, run_id), "work:t1", "m1", monkeypatch)
 
-        await _reader(thread_id, run_id).release("work:t1")
+        await _reader(thread_id, run_id).release({"work:t1"})
 
-        assert await _claimant(sessions, thread_id, "m1") == "work:t1"
+        assert (await _claim(sessions, thread_id, "m1"))[2] == "work:t1"
 
     async def test_release_keeps_what_another_run_took(
         self, sessions: SessionFactory, monkeypatch: pytest.MonkeyPatch
@@ -418,9 +458,9 @@ class TestRelease:
         await _store(sessions, thread_id, "m1")
         await _take_as(_reader(thread_id, await _run(sessions, thread_id)), "work:t1", "m1", monkeypatch)
 
-        await _reader(thread_id, await _run(sessions, thread_id)).release("work:t1")
+        await _reader(thread_id, await _run(sessions, thread_id)).release({"work:t1"})
 
-        assert await _claimant(sessions, thread_id, "m1") == "work:t1"
+        assert (await _claim(sessions, thread_id, "m1"))[2] == "work:t1"
 
 
 def _model_failing_once(prompts: list[list[str]]) -> Callable[..., Awaitable[dict[str, Any]]]:
@@ -625,6 +665,49 @@ class TestNodesOfASubgraph:
         assert [message.content for message in result["messages"]] == ["start", "also check the tests"]
         assert await _pending_ids(_reader(thread_id, await _run(sessions, thread_id))) == []
 
+    async def test_a_retried_stateful_subgraph_takes_a_message_again(self, sessions: SessionFactory) -> None:
+        thread_id = await _thread(sessions)
+        run_id = await _run(sessions, thread_id)
+        await _store(sessions, thread_id, "m1", "also check the tests")
+        offered: list[list[str]] = []
+        tries: Counter[str] = Counter()
+
+        async def take(state: MessagesState, config: RunnableConfig) -> dict[str, Any]:
+            injected = await _take_injected(config, held=set())
+            offered.append([item["content"] for item in injected])
+            return {"messages": injected}
+
+        async def answer(state: MessagesState) -> dict[str, Any]:
+            tries["answer"] += 1
+            if tries["answer"] == 1:
+                raise ConnectionError("model provider unavailable")
+            return {"messages": [AIMessage("ok")]}
+
+        # A stateful subgraph keeps its own checkpoints, so its tasks run under its name alone.
+        agent = (
+            StateGraph(MessagesState)
+            .add_node("take", take)
+            .add_node("answer", answer)
+            .add_edge(START, "take")
+            .add_edge("take", "answer")
+            .compile(checkpointer=True)
+        )
+        graph = (
+            StateGraph(MessagesState)
+            .add_node("agent", agent, retry_policy=RetryPolicy(max_attempts=3, initial_interval=0.01))
+            .add_edge(START, "agent")
+            .compile(checkpointer=InMemorySaver())
+        )
+        config = pin_injected_input({"configurable": {"thread_id": thread_id}}, _reader(thread_id, run_id))
+
+        result = await graph.ainvoke({"messages": [HumanMessage(content="start", id="h1")]}, config)
+        await mark_delivered(run_id=run_id, thread_id=thread_id, user_id=_USER_ID)
+        await _set_status(sessions, run_id, "success")
+
+        assert offered == [["also check the tests"], ["also check the tests"]]
+        assert [message.content for message in result["messages"]] == ["start", "also check the tests", "ok"]
+        assert await _pending_ids(_reader(thread_id, await _run(sessions, thread_id))) == []
+
     async def test_a_node_a_subgraph_runs_again_is_not_offered_what_its_first_run_took(
         self, sessions: SessionFactory
     ) -> None:
@@ -735,6 +818,33 @@ class TestExpiry:
         second = _reader(thread_id, await _run(sessions, thread_id))
 
         assert await _pending_ids(second) == ["m1"]
+
+    async def test_an_aged_message_a_failed_node_took_carries_to_the_next_run(self, sessions: SessionFactory) -> None:
+        thread_id = await _thread(sessions)
+        first_run = await _run(sessions, thread_id)
+        await _store(sessions, thread_id, "m1")
+
+        async def call_model(state: MessagesState, config: RunnableConfig) -> dict[str, Any]:
+            await _take_injected(config, held=set())
+            raise ConnectionError("model provider unavailable")
+
+        # No RetryPolicy: the node's failure is the run's.
+        graph = (
+            StateGraph(MessagesState)
+            .add_node("call_model", call_model)
+            .add_edge(START, "call_model")
+            .compile(checkpointer=InMemorySaver())
+        )
+        config = pin_injected_input({"configurable": {"thread_id": thread_id}}, _reader(thread_id, first_run))
+        with pytest.raises(ConnectionError):
+            await graph.ainvoke({"messages": [HumanMessage(content="start", id="h1")]}, config)
+        await _set_status(sessions, first_run, "error")
+        await _age(sessions, thread_id, "m1")
+
+        await _store(sessions, thread_id, "m2")
+        second = _reader(thread_id, await _run(sessions, thread_id))
+
+        assert await _pending_ids(second) == ["m1", "m2"]
 
     async def test_the_next_inject_keeps_an_aged_message_a_run_took(self, sessions: SessionFactory) -> None:
         thread_id = await _thread(sessions)

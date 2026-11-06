@@ -7,7 +7,6 @@ from typing import Any
 from unittest.mock import AsyncMock
 
 import pytest
-from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from langgraph_sdk import Auth
 
@@ -18,6 +17,7 @@ from aegra_api.core.auth_enforcement import apply_auth_enforcement
 from aegra_api.models.auth import User
 from aegra_api.services.event_streaming import capabilities as caps
 from aegra_api.services.event_streaming import inject
+from tests.fixtures.clients import create_test_app, make_client
 
 _USER = "inject-user"
 _BODY: dict[str, Any] = {
@@ -59,13 +59,14 @@ def stored(monkeypatch: pytest.MonkeyPatch) -> AsyncMock:
 def _client(monkeypatch: pytest.MonkeyPatch, auth: Auth | None) -> TestClient:
     monkeypatch.setattr(auth_handlers, "get_auth_instance", lambda: auth)
     monkeypatch.setattr(es_module, "_get_session_maker", lambda: _Session)
-    app = FastAPI()
+    app = create_test_app(include_runs=False, include_threads=False)
     user = User(identity=_USER)
     app.dependency_overrides[require_auth] = lambda: user
     app.dependency_overrides[get_current_user] = lambda: user
+    # The shared app mounts neither the commands router nor auth enforcement.
     app.include_router(es_module.router)
     apply_auth_enforcement(app)
-    return TestClient(app)
+    return make_client(app)
 
 
 def test_inject_without_handlers_stores_the_client_message(monkeypatch: pytest.MonkeyPatch, stored: AsyncMock) -> None:

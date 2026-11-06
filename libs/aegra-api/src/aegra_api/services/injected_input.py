@@ -5,13 +5,15 @@ The command stores each message in ``run_inputs``; the graph reads them through 
 
 * ``accept()`` declares that the run takes live input. Until a pending or running
   run of the thread has declared it, ``input.inject`` is refused.
-* ``pending()`` returns the messages this attempt has not taken, oldest first, each
-  a message dict a ``messages`` reducer accepts (``id`` is the message id).
-* ``take(ids)`` claims messages for this run and returns the ids it claimed.
+* ``pending()`` returns the messages no other run, and no other node of this run,
+  has taken, oldest first, each a message dict a ``messages`` reducer accepts
+  (``id`` is the message id).
+* ``take(ids)`` claims messages for the calling node and returns the ids it claimed.
 
 A claim holds while the run is pending or running, so a run requeued after a
-worker drain or crash sees again what its earlier attempt took. When the graph
-runs to its end, its claims become delivered. A run that pauses at an interrupt,
+worker drain or crash sees again what its earlier attempt took, and a node
+LangGraph retries sees again what its failed try took. When the graph runs to
+its end, its claims become delivered. A run that pauses at an interrupt,
 fails, or is cancelled leaves them to the thread's next run, the resume included,
 which may therefore see a message a node before the pause already added to the
 state: the graph takes it again, so it settles, and skips it, because adding it
@@ -29,6 +31,7 @@ from datetime import timedelta
 from typing import Any, Final, Literal
 from uuid import uuid4
 
+from langgraph.config import get_config
 from sqlalchemy import ColumnElement, and_, delete, exists, func, or_, select, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -62,8 +65,17 @@ def _expired() -> ColumnElement[bool]:
     )
 
 
-def _available_to(run_id: str, attempt: str) -> ColumnElement[bool]:
-    """Undelivered and unexpired; unclaimed, claimed by an earlier attempt of ``run_id``, or by a run that ended."""
+def _current_task() -> str | None:
+    """The LangGraph task calling the reader, which a node's retries share; None outside a graph node."""
+    try:
+        config = get_config()
+    except RuntimeError:
+        return None
+    return config.get("configurable", {}).get("checkpoint_ns")
+
+
+def _available_to(run_id: str, attempt: str, task: str | None) -> ColumnElement[bool]:
+    """Undelivered and unexpired; unclaimed, held by an ended run, or by ``run_id`` in another attempt or this task."""
     claimant_active = exists().where(
         RunORM.run_id == RunInputORM.taken_by_run,
         RunORM.status.in_(_ACTIVE_RUN_STATES),
@@ -73,7 +85,10 @@ def _available_to(run_id: str, attempt: str) -> ColumnElement[bool]:
         ~_expired(),
         or_(
             RunInputORM.taken_by_run.is_(None),
-            and_(RunInputORM.taken_by_run == run_id, RunInputORM.taken_by_attempt != attempt),
+            and_(
+                RunInputORM.taken_by_run == run_id,
+                or_(RunInputORM.taken_by_attempt != attempt, RunInputORM.taken_by_task.is_not_distinct_from(task)),
+            ),
             ~claimant_active,
         ),
     )
@@ -105,19 +120,21 @@ class InjectedInput:
 
     async def pending(self) -> list[InjectedMessage]:
         """Messages this run may take, in the order they were sent."""
+        task = _current_task()
         maker = _get_session_maker()
         async with maker() as session:
             rows = await session.execute(
                 select(RunInputORM.message_id, RunInputORM.message)
-                .where(*self._scope(), _available_to(self.run_id, self.attempt))
+                .where(*self._scope(), _available_to(self.run_id, self.attempt, task))
                 .order_by(RunInputORM.seq)
             )
             return [InjectedMessage(message_id=message_id, message=message) for message_id, message in rows.all()]
 
     async def take(self, message_ids: Sequence[str]) -> list[str]:
-        """Claim messages for this run; returns the ids claimed, which excludes any another run holds."""
+        """Claim messages for the calling node; returns the ids claimed, without those another run or node holds."""
         if not message_ids:
             return []
+        task = _current_task()
         maker = _get_session_maker()
         async with maker() as session:
             result = await session.execute(
@@ -125,9 +142,9 @@ class InjectedInput:
                 .where(
                     *self._scope(),
                     RunInputORM.message_id.in_(message_ids),
-                    _available_to(self.run_id, self.attempt),
+                    _available_to(self.run_id, self.attempt, task),
                 )
-                .values(taken_by_run=self.run_id, taken_by_attempt=self.attempt)
+                .values(taken_by_run=self.run_id, taken_by_attempt=self.attempt, taken_by_task=task)
                 .returning(RunInputORM.message_id)
             )
             taken = set(result.scalars().all())

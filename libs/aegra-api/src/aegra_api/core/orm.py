@@ -254,6 +254,8 @@ class RunInput(Base):
     # The run that took it; void once that run is no longer pending or running and never delivered it.
     taken_by_run: Mapped[str | None] = mapped_column(Text, nullable=True)
     taken_by_attempt: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # The LangGraph task (checkpoint_ns) that took it: a retry of that node sees it again, other nodes do not.
+    taken_by_task: Mapped[str | None] = mapped_column(Text, nullable=True)
     delivered: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))
     created_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), server_default=text("now()"))
 

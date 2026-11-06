@@ -32,6 +32,7 @@ def upgrade() -> None:
         sa.Column("user_id", sa.Text(), nullable=False),
         sa.Column("taken_by_run", sa.Text(), nullable=True),
         sa.Column("taken_by_attempt", sa.Text(), nullable=True),
+        sa.Column("taken_by_task", sa.Text(), nullable=True),
         sa.Column("delivered", sa.Boolean(), server_default=sa.text("false"), nullable=False),
         sa.Column("created_at", sa.TIMESTAMP(timezone=True), server_default=sa.text("now()"), nullable=False),
         sa.ForeignKeyConstraint(["thread_id"], ["thread.thread_id"], ondelete="CASCADE"),

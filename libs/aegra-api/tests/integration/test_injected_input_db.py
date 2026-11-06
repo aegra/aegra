@@ -1,9 +1,9 @@
 """input.inject storage against a real PostgreSQL: admission, order, claims, carry-over, expiry.
 
 These pin what a session fake cannot show: the claim predicate that joins
-``run_inputs`` to ``runs``, the unique key behind idempotent repeats, and the
-foreign key that removes a thread's messages with it. They skip when no
-database is reachable.
+``run_inputs`` to ``runs``, the unique key behind idempotent repeats, the
+foreign key that removes a thread's messages with it, and a node LangGraph
+retries. They skip when no database is reachable.
 """
 
 from collections.abc import AsyncIterator, Callable
@@ -12,6 +12,11 @@ from typing import Any
 from uuid import uuid4
 
 import pytest
+from langchain_core.messages import AIMessage, HumanMessage
+from langchain_core.runnables import RunnableConfig
+from langgraph.checkpoint.memory import InMemorySaver
+from langgraph.graph import START, MessagesState, StateGraph
+from langgraph.types import RetryPolicy
 from sqlalchemy import delete, func, select, text, update
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
@@ -20,7 +25,13 @@ from aegra_api.core.orm import Run as RunORM
 from aegra_api.core.orm import RunInput as RunInputORM
 from aegra_api.core.orm import Thread as ThreadORM
 from aegra_api.services import injected_input
-from aegra_api.services.injected_input import InjectedInput, mark_delivered, store_message, thread_admission
+from aegra_api.services.injected_input import (
+    INJECTED_INPUT_KEY,
+    InjectedInput,
+    mark_delivered,
+    store_message,
+    thread_admission,
+)
 from aegra_api.settings import settings
 
 _USER_ID = "injected-input-test-user"
@@ -215,16 +226,32 @@ class TestStorage:
 
 
 class TestClaims:
-    async def test_an_attempt_never_reads_what_it_took(self, sessions: SessionFactory) -> None:
+    async def test_a_later_node_of_the_attempt_never_reads_what_an_earlier_node_took(
+        self, sessions: SessionFactory, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         thread_id = await _thread(sessions)
         reader = _reader(thread_id, await _run(sessions, thread_id))
         await _store(sessions, thread_id, "m1")
         await _store(sessions, thread_id, "m2")
-
+        monkeypatch.setattr(injected_input, "_current_task", lambda: "first_node:1")
         assert await reader.take(["m1"]) == ["m1"]
+
+        monkeypatch.setattr(injected_input, "_current_task", lambda: "second_node:2")
 
         assert await _pending_ids(reader) == ["m2"]
         assert await reader.take(["m1"]) == []
+
+    async def test_a_retried_node_sees_again_what_its_failed_try_took(
+        self, sessions: SessionFactory, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        thread_id = await _thread(sessions)
+        reader = _reader(thread_id, await _run(sessions, thread_id))
+        await _store(sessions, thread_id, "m1")
+        monkeypatch.setattr(injected_input, "_current_task", lambda: "call_model:1")
+        assert await reader.take(["m1"]) == ["m1"]
+
+        assert await _pending_ids(reader) == ["m1"]
+        assert await reader.take(["m1"]) == ["m1"]
 
     async def test_a_taken_message_is_hidden_from_another_active_run(self, sessions: SessionFactory) -> None:
         thread_id = await _thread(sessions)
@@ -247,18 +274,24 @@ class TestClaims:
 
         assert await second.take(["m1", "m2", "missing"]) == ["m2"]
 
-    async def test_a_requeued_run_sees_again_what_its_earlier_attempt_took(self, sessions: SessionFactory) -> None:
+    async def test_a_requeued_run_sees_again_what_its_earlier_attempt_took(
+        self, sessions: SessionFactory, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         thread_id = await _thread(sessions)
         run_id = await _run(sessions, thread_id)
         earlier = _reader(thread_id, run_id)
         await _store(sessions, thread_id, "m1")
+        monkeypatch.setattr(injected_input, "_current_task", lambda: "work:1")
         await earlier.take(["m1"])
 
         await _set_status(sessions, run_id, "pending")
         requeued = _reader(thread_id, run_id)
+        # The requeued attempt may resume past the node that took it, at a later checkpoint.
+        monkeypatch.setattr(injected_input, "_current_task", lambda: "work:2")
 
         assert await _pending_ids(requeued) == ["m1"]
         assert await requeued.take(["m1"]) == ["m1"]
+        monkeypatch.setattr(injected_input, "_current_task", lambda: "work:3")
         assert await _pending_ids(requeued) == []
 
     @pytest.mark.parametrize("ended", ["error", "interrupted", "success"])
@@ -310,6 +343,85 @@ class TestClaims:
         second = _reader(thread_id, await _run(sessions, thread_id))
 
         assert await _pending_ids(second) == ["m1"]
+
+
+class TestNodeRetries:
+    async def test_a_node_langgraph_retries_reads_again_what_its_failed_try_took(
+        self, sessions: SessionFactory
+    ) -> None:
+        thread_id = await _thread(sessions)
+        run_id = await _run(sessions, thread_id)
+        await _store(sessions, thread_id, "m1", "also check the tests")
+        prompts: list[list[str]] = []
+
+        async def call_model(state: MessagesState, config: RunnableConfig) -> dict[str, Any]:
+            """The streaming guide's snippet, with a model that fails once with a retryable error."""
+            reader = config["configurable"].get(INJECTED_INPUT_KEY)
+            injected = []
+            if reader is not None:
+                await reader.accept()
+                pending = await reader.pending()
+                taken = set(await reader.take([item.message_id for item in pending]))
+                held = {message.id for message in state["messages"]}
+                injected = [
+                    item.message for item in pending if item.message_id in taken and item.message_id not in held
+                ]
+            prompts.append(
+                [str(message.text) for message in state["messages"]] + [item["content"] for item in injected]
+            )
+            if len(prompts) == 1:
+                raise ConnectionError("model provider unavailable")
+            return {"messages": [*injected, AIMessage(content="ok")]}
+
+        graph = (
+            StateGraph(MessagesState)
+            .add_node("call_model", call_model, retry_policy=RetryPolicy(max_attempts=3, initial_interval=0.01))
+            .add_edge(START, "call_model")
+            .compile(checkpointer=InMemorySaver())
+        )
+        config: RunnableConfig = {
+            "configurable": {"thread_id": thread_id, INJECTED_INPUT_KEY: _reader(thread_id, run_id)}
+        }
+
+        result = await graph.ainvoke({"messages": [HumanMessage(content="start", id="h1")]}, config)
+        await mark_delivered(run_id=run_id, thread_id=thread_id, user_id=_USER_ID)
+        await _set_status(sessions, run_id, "success")
+
+        assert prompts == [["start", "also check the tests"], ["start", "also check the tests"]]
+        assert [message.content for message in result["messages"]] == ["start", "also check the tests", "ok"]
+        assert await _pending_ids(_reader(thread_id, await _run(sessions, thread_id))) == []
+
+    async def test_a_later_node_does_not_read_what_an_earlier_node_took(self, sessions: SessionFactory) -> None:
+        thread_id = await _thread(sessions)
+        run_id = await _run(sessions, thread_id)
+        await _store(sessions, thread_id, "m1")
+        seen_later: list[str] = []
+
+        async def first(state: MessagesState, config: RunnableConfig) -> dict[str, Any]:
+            reader = config["configurable"][INJECTED_INPUT_KEY]
+            await reader.take(await _pending_ids(reader))
+            await _store(sessions, thread_id, "m2")
+            return {}
+
+        async def later(state: MessagesState, config: RunnableConfig) -> dict[str, Any]:
+            seen_later.extend(await _pending_ids(config["configurable"][INJECTED_INPUT_KEY]))
+            return {}
+
+        graph = (
+            StateGraph(MessagesState)
+            .add_node("first", first)
+            .add_node("later", later)
+            .add_edge(START, "first")
+            .add_edge("first", "later")
+            .compile(checkpointer=InMemorySaver())
+        )
+        config: RunnableConfig = {
+            "configurable": {"thread_id": thread_id, INJECTED_INPUT_KEY: _reader(thread_id, run_id)}
+        }
+
+        await graph.ainvoke({"messages": [HumanMessage(content="start", id="h1")]}, config)
+
+        assert seen_later == ["m2"]
 
 
 class TestExpiry:

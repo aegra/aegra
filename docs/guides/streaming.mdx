@@ -466,8 +466,8 @@ Aegra pins a reader on every run's config under `configurable["aegra_injected_in
 | Method | Effect |
 |:--|:--|
 | `await reader.accept()` | Declares that this run takes `input.inject`. Call it when the run starts and again where a resumed run continues: a run resumed after an interrupt starts at the interrupted node. Repeating it is harmless. |
-| `await reader.pending()` | Messages not yet taken, oldest first. Each item has `message_id` and `message`, a message dict a `messages` reducer accepts. |
-| `await reader.take(ids)` | Claims messages for this run and returns the ids it claimed. Another run on the same thread may have claimed the rest. |
+| `await reader.pending()` | Messages that no other run, and no other node of this run, has taken, oldest first. Each item has `message_id` and `message`, a message dict a `messages` reducer accepts. |
+| `await reader.take(ids)` | Claims messages for the calling node and returns the ids it claimed. Another run on the same thread, or another node of this run, may have claimed the rest. |
 
 ```python
 async def call_model(state: State, config: RunnableConfig) -> dict:
@@ -486,7 +486,7 @@ async def call_model(state: State, config: RunnableConfig) -> dict:
 
 The `live_input` graph in `examples/` shows the full pattern, with `accept()` in its first node and an optional approval pause (`pause_after`) that shows the resume.
 
-Taken messages become delivered when the graph finishes. A run that pauses at an interrupt, fails, or is cancelled leaves them to the thread's next run, a resume included, so a resume can see again a message that a node before the interrupt already added to the state: take it, so it settles, and skip it, as the snippet does. Adding it again under the same id would only replace it in the `messages` channel, but a model called with it would read it twice. A run requeued after a worker restart sees again what it took. Messages that no run took carry to the thread's next run and expire `INPUT_INJECT_TTL_SECONDS` (default 3600) after they were sent. A message a run took stays until a run delivers it, and a delivered message is kept until the same time, so repeating its id stays safe until then. Deleting the thread removes all of them.
+Taken messages become delivered when the graph finishes. A run that pauses at an interrupt, fails, or is cancelled leaves them to the thread's next run, a resume included, so a resume can see again a message that a node before the interrupt already added to the state: take it, so it settles, and skip it, as the snippet does. Adding it again under the same id would only replace it in the `messages` channel, but a model called with it would read it twice. A run requeued after a worker restart sees again what it took, and so does a node that LangGraph retries, for example under a `RetryPolicy`: the retry sees again what its failed try took. Messages that no run took carry to the thread's next run and expire `INPUT_INJECT_TTL_SECONDS` (default 3600) after they were sent. A message a run took stays until a run delivers it, and a delivered message is kept until the same time, so repeating its id stays safe until then. Deleting the thread removes all of them.
 
 The Python SDK has no `input.inject` method yet; send the command body as above. The JavaScript SDK's thread stream sends it with `thread.input.inject(params)`.
 

@@ -56,7 +56,7 @@ async def work(state: State, config: RunnableConfig) -> dict[str, Any]:
     reader = _reader(config)
     if reader is not None and state.drain:
         pending = await reader.pending()
-        # take() reports what this run claimed; another run on the thread may have taken the rest.
+        # take() reports what this node claimed; another run, or an earlier node of this run, may hold the rest.
         taken = set(await reader.take([item.message_id for item in pending]))
         # A resume sees again what the paused run took: taking it settles it, and the state already holds it.
         held = {message.id for message in state.messages}

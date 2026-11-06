@@ -1,4 +1,6 @@
+import asyncio
 import os
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -226,3 +228,101 @@ class TestDatabaseManager:
         # Store should be initialized with index=None
         mock_db_deps["store_cls"].assert_called_with(conn=mock_db_deps["pool_instance"], index=None)
         mock_db_deps["store_instance"].setup.assert_awaited_once()
+
+    @staticmethod
+    def _assert_released(manager: DatabaseManager, deps: dict[str, Any]) -> None:
+        deps["pool_instance"].close.assert_awaited_once()
+        deps["engine_instance"].dispose.assert_awaited_once()
+        assert manager.engine is None
+        assert manager.lg_pool is None
+        assert manager._checkpointer is None
+        assert manager._store is None
+
+    async def test_initialize_releases_resources_when_checkpointer_setup_fails(
+        self, db_manager: DatabaseManager, mock_db_deps: dict[str, Any]
+    ) -> None:
+        mock_db_deps["saver_instance"].setup.side_effect = RuntimeError("setup failed")
+
+        with pytest.raises(RuntimeError, match="setup failed"):
+            await db_manager.initialize()
+
+        self._assert_released(db_manager, mock_db_deps)
+
+    async def test_initialize_releases_resources_when_store_setup_fails(
+        self, db_manager: DatabaseManager, mock_db_deps: dict[str, Any]
+    ) -> None:
+        mock_db_deps["store_instance"].setup.side_effect = RuntimeError("store setup failed")
+
+        with pytest.raises(RuntimeError, match="store setup failed"):
+            await db_manager.initialize()
+
+        self._assert_released(db_manager, mock_db_deps)
+
+    async def test_initialize_releases_resources_when_pool_open_fails(
+        self, db_manager: DatabaseManager, mock_db_deps: dict[str, Any]
+    ) -> None:
+        mock_db_deps["pool_instance"].open.side_effect = OSError("connection refused")
+
+        with pytest.raises(OSError, match="connection refused"):
+            await db_manager.initialize()
+
+        self._assert_released(db_manager, mock_db_deps)
+
+    async def test_initialize_releases_resources_and_propagates_cancellation(
+        self, db_manager: DatabaseManager, mock_db_deps: dict[str, Any]
+    ) -> None:
+        mock_db_deps["saver_instance"].setup.side_effect = asyncio.CancelledError()
+
+        with pytest.raises(asyncio.CancelledError):
+            await db_manager.initialize()
+
+        self._assert_released(db_manager, mock_db_deps)
+
+    async def test_initialize_raises_original_error_when_cleanup_also_fails(
+        self, db_manager: DatabaseManager, mock_db_deps: dict[str, Any]
+    ) -> None:
+        mock_db_deps["saver_instance"].setup.side_effect = RuntimeError("setup failed")
+        mock_db_deps["engine_instance"].dispose.side_effect = RuntimeError("dispose failed")
+        mock_db_deps["pool_instance"].close.side_effect = RuntimeError("close failed")
+
+        with pytest.raises(RuntimeError, match="setup failed"):
+            await db_manager.initialize()
+
+        mock_db_deps["engine_instance"].dispose.assert_awaited_once()
+        mock_db_deps["pool_instance"].close.assert_awaited_once()
+        assert db_manager.engine is None
+        assert db_manager.lg_pool is None
+
+    async def test_initialize_starts_fresh_after_a_failed_initialize(
+        self, db_manager: DatabaseManager, mock_db_deps: dict[str, Any]
+    ) -> None:
+        mock_db_deps["saver_instance"].setup.side_effect = [RuntimeError("setup failed"), None]
+
+        with pytest.raises(RuntimeError, match="setup failed"):
+            await db_manager.initialize()
+        await db_manager.initialize()
+
+        assert mock_db_deps["create_engine"].call_count == 2
+        assert mock_db_deps["pool_instance"].open.await_count == 2
+        assert db_manager.engine is mock_db_deps["engine_instance"]
+        assert db_manager.get_checkpointer() is mock_db_deps["saver_instance"]
+
+    async def test_close_closes_pool_and_clears_state_when_engine_dispose_fails(
+        self, db_manager: DatabaseManager
+    ) -> None:
+        engine = AsyncMock()
+        engine.dispose.side_effect = RuntimeError("dispose failed")
+        pool = AsyncMock()
+        db_manager.engine = engine
+        db_manager.lg_pool = pool
+        db_manager._checkpointer = AsyncMock()
+        db_manager._store = AsyncMock()
+
+        with pytest.raises(RuntimeError, match="dispose failed"):
+            await db_manager.close()
+
+        pool.close.assert_awaited_once()
+        assert db_manager.engine is None
+        assert db_manager.lg_pool is None
+        assert db_manager._checkpointer is None
+        assert db_manager._store is None

@@ -20,7 +20,7 @@ from aegra_api.observability.otel import flush_otel_spans
 from aegra_api.services.broker import broker_manager
 from aegra_api.services.event_streaming.native_stream import stream_native_v3_events
 from aegra_api.services.graph_streaming import stream_graph_events
-from aegra_api.services.injected_input import INJECTED_INPUT_KEY, InjectedInput, mark_delivered
+from aegra_api.services.injected_input import InjectedInput, mark_delivered, pin_injected_input
 from aegra_api.services.langgraph_service import create_run_config, get_langgraph_service
 from aegra_api.services.run_status import finalize_run, start_run
 from aegra_api.services.streaming_service import streaming_service
@@ -300,8 +300,8 @@ def _build_run_config(job: RunJob) -> dict[str, Any]:
         checkpoint=job.execution.checkpoint,
     )
     # Server-pinned like thread_id/run_id: a client value under the key never reaches the graph.
-    config["configurable"][INJECTED_INPUT_KEY] = InjectedInput(
-        run_id=job.identity.run_id, thread_id=job.identity.thread_id, user_id=job.user.identity
+    config = pin_injected_input(
+        config, InjectedInput(run_id=job.identity.run_id, thread_id=job.identity.thread_id, user_id=job.user.identity)
     )
     if job.behavior.interrupt_before is not None:
         items = job.behavior.interrupt_before

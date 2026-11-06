@@ -10,28 +10,34 @@ The command stores each message in ``run_inputs``; the graph reads them through 
   (``id`` is the message id).
 * ``take(ids)`` claims messages for the calling node and returns the ids it claimed.
 
-A claim holds while the run is pending or running, so a run requeued after a
-worker drain or crash sees again what its earlier attempt took, and a node
-LangGraph retries, a compiled subgraph included, sees again what its failed try
-took. When the graph runs to its end, its claims become delivered. A run that pauses at an interrupt,
-fails, or is cancelled leaves them to the thread's next run, the resume included,
-which may therefore see a message a node before the pause already added to the
-state: the graph takes it again, so it settles, and skips it, because adding it
-under the same id would only replace it in the state while a model called with
-it would read it twice. A message no run took expires ``INPUT_INJECT_TTL_SECONDS``
-after it was sent; one a run took stays until a run delivers it, and a delivered
-one is kept as long after it was sent, so a repeat of its id is still stored once.
+A claim belongs to the LangGraph task that made it, so every parallel branch and
+every repeated node, inside a compiled subgraph too, is a node of its own. A claim
+holds while the run is pending or running, so a run requeued after a worker drain
+or crash sees again what its earlier attempt took. A task that fails releases what
+it and the tasks below it took, so a node LangGraph retries, a compiled subgraph
+included, takes them again. When the graph runs to its end, its claims become
+delivered. A run that pauses at an interrupt, fails, or is cancelled leaves them to
+the thread's next run, the resume included, which may therefore see a message a
+node before the pause already added to the state: the graph takes it again, so it
+settles, and skips it, because adding it under the same id would only replace it in
+the state while a model called with it would read it twice. A message no run took
+expires ``INPUT_INJECT_TTL_SECONDS`` after it was sent; one a run took stays until a
+run delivers it, and a delivered one is kept as long after it was sent, so a repeat
+of its id is still stored once.
 """
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import timedelta
 from typing import Any, Final, Literal
-from uuid import uuid4
+from uuid import UUID, uuid4
 
+from langchain_core.callbacks import AsyncCallbackHandler
 from langgraph.config import get_config
+from langgraph.errors import GraphBubbleUp
 from sqlalchemy import ColumnElement, and_, delete, exists, func, or_, select, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -66,22 +72,16 @@ def _expired() -> ColumnElement[bool]:
 
 
 def _current_task() -> str | None:
-    """The node calling the reader, keyed as every try of it is; None outside a graph node.
+    """The LangGraph task calling the reader, as its ``checkpoint_ns``; None outside a graph node.
 
-    LangGraph re-runs a retried node under its own ``checkpoint_ns`` (``node:task_id``
-    segments joined by ``|``), but re-runs a retried subgraph node under a numeric counter
-    segment with new inner task ids, so the key keeps the top-level task as it is and
-    names the nodes below it without their ids.
+    Every task execution has a namespace of its own (``node:task_id`` segments joined by ``|``);
+    a retried function node keeps it, while the nodes of a retried subgraph get new ones.
     """
     try:
         config = get_config()
     except RuntimeError:
         return None
-    checkpoint_ns = config.get("configurable", {}).get("checkpoint_ns")
-    if not checkpoint_ns:
-        return checkpoint_ns
-    top, *inner = (part for part in checkpoint_ns.split("|") if not part.isdigit())
-    return "|".join([top, *(part.split(":")[0] for part in inner)])
+    return config.get("configurable", {}).get("checkpoint_ns")
 
 
 def _available_to(run_id: str, attempt: str, task: str | None) -> ColumnElement[bool]:
@@ -160,6 +160,89 @@ class InjectedInput:
             taken = set(result.scalars().all())
             await session.commit()
         return [message_id for message_id in message_ids if message_id in taken]
+
+    async def release(self, task: str) -> None:
+        """Unclaim what ``task`` and the tasks below it took in this attempt, so the task's retry takes it again."""
+        below = RunInputORM.taken_by_task.startswith(f"{task}|", autoescape=True)
+        maker = _get_session_maker()
+        async with maker() as session:
+            await session.execute(
+                update(RunInputORM)
+                .where(
+                    *self._scope(),
+                    RunInputORM.taken_by_attempt == self.attempt,
+                    or_(RunInputORM.taken_by_task == task, below),
+                )
+                .values(taken_by_run=None, taken_by_attempt=None, taken_by_task=None)
+            )
+            await session.commit()
+
+
+class ReleaseOnFailure(AsyncCallbackHandler):
+    """Releases what a LangGraph task took when the task fails, so the task's retry takes it again."""
+
+    # A release that cannot reach the database fails the task rather than leave its retry without the messages.
+    raise_error = True
+
+    def __init__(self, reader: InjectedInput) -> None:
+        self.reader = reader
+        self._namespaces: dict[UUID, str] = {}
+
+    async def on_chain_start(
+        self,
+        serialized: dict[str, Any],
+        inputs: dict[str, Any],
+        *,
+        run_id: UUID,
+        parent_run_id: UUID | None = None,
+        tags: list[str] | None = None,
+        metadata: dict[str, Any] | None = None,
+        **kwargs: Any,
+    ) -> None:
+        """Note the task namespace a run executes in."""
+        namespace = (metadata or {}).get("langgraph_checkpoint_ns")
+        if namespace:
+            self._namespaces[run_id] = namespace
+
+    async def on_chain_end(
+        self,
+        outputs: dict[str, Any],
+        *,
+        run_id: UUID,
+        parent_run_id: UUID | None = None,
+        tags: list[str] | None = None,
+        **kwargs: Any,
+    ) -> None:
+        """Forget a run that finished."""
+        self._namespaces.pop(run_id, None)
+
+    async def on_chain_error(
+        self,
+        error: BaseException,
+        *,
+        run_id: UUID,
+        parent_run_id: UUID | None = None,
+        tags: list[str] | None = None,
+        **kwargs: Any,
+    ) -> None:
+        """Release the claims of a task that failed; an interrupt or a cancel keeps them."""
+        namespace = self._namespaces.pop(run_id, None)
+        if namespace is None or isinstance(error, GraphBubbleUp | asyncio.CancelledError):
+            return
+        # A run nested in a task shares its namespace, and the task may still recover from its error.
+        if parent_run_id is not None and self._namespaces.get(parent_run_id) == namespace:
+            return
+        await self.reader.release(namespace)
+
+
+def pin_injected_input(config: dict[str, Any], reader: InjectedInput) -> dict[str, Any]:
+    """``config`` with ``reader`` under ``INJECTED_INPUT_KEY`` and a callback that releases a failed task's claims."""
+    callbacks = config.get("callbacks")
+    return {
+        **config,
+        "configurable": {**config.get("configurable", {}), INJECTED_INPUT_KEY: reader},
+        "callbacks": [*(callbacks if isinstance(callbacks, list) else []), ReleaseOnFailure(reader)],
+    }
 
 
 async def thread_admission(session: AsyncSession, *, thread_id: str, user_id: str) -> Admission:

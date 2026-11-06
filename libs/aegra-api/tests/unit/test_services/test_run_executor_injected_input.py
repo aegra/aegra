@@ -7,12 +7,14 @@ from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from langchain_core.callbacks import BaseCallbackHandler
 from sqlalchemy.exc import OperationalError
 
 from aegra_api.models.auth import User
 from aegra_api.models.run_job import RunExecution, RunIdentity, RunJob
+from aegra_api.services import langgraph_service as langgraph_service_module
 from aegra_api.services import run_executor as run_executor_module
-from aegra_api.services.injected_input import INJECTED_INPUT_KEY, InjectedInput
+from aegra_api.services.injected_input import INJECTED_INPUT_KEY, InjectedInput, ReleaseOnFailure
 from aegra_api.services.run_executor import _build_run_config, _stream_graph
 
 
@@ -38,6 +40,21 @@ class TestReaderIsPinned:
         reader = config["configurable"][INJECTED_INPUT_KEY]
         assert isinstance(reader, InjectedInput)
         assert reader.run_id == "run-1"
+
+    def test_a_failed_task_releases_its_claims_through_the_pinned_reader(self) -> None:
+        config = _build_run_config(_job())
+
+        [handler] = [callback for callback in config["callbacks"] if isinstance(callback, ReleaseOnFailure)]
+        assert handler.reader is config["configurable"][INJECTED_INPUT_KEY]
+
+    def test_tracing_callbacks_are_kept(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        tracer = BaseCallbackHandler()
+        monkeypatch.setattr(langgraph_service_module, "get_tracing_callbacks", lambda: [tracer])
+
+        config = _build_run_config(_job())
+
+        assert config["callbacks"][0] is tracer
+        assert isinstance(config["callbacks"][1], ReleaseOnFailure)
 
 
 @pytest.fixture

@@ -2,21 +2,25 @@
 
 These pin what a session fake cannot show: the claim predicate that joins
 ``run_inputs`` to ``runs``, the unique key behind idempotent repeats, the
-foreign key that removes a thread's messages with it, and a node LangGraph
-retries. They skip when no database is reachable.
+foreign key that removes a thread's messages with it, and the nodes LangGraph
+retries, runs in parallel, or runs again inside a subgraph. They skip when no
+database is reachable.
 """
 
+import asyncio
+from collections import Counter, defaultdict
 from collections.abc import AsyncIterator, Awaitable, Callable
 from datetime import timedelta
-from typing import Any
+from typing import Any, TypedDict
 from uuid import uuid4
 
 import pytest
 from langchain_core.messages import AIMessage, HumanMessage
 from langchain_core.runnables import RunnableConfig
 from langgraph.checkpoint.memory import InMemorySaver
-from langgraph.graph import START, MessagesState, StateGraph
-from langgraph.types import RetryPolicy
+from langgraph.graph import END, START, MessagesState, StateGraph
+from langgraph.graph.state import CompiledStateGraph
+from langgraph.types import RetryPolicy, Send
 from sqlalchemy import delete, func, select, text, update
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
@@ -29,6 +33,7 @@ from aegra_api.services.injected_input import (
     INJECTED_INPUT_KEY,
     InjectedInput,
     mark_delivered,
+    pin_injected_input,
     store_message,
     thread_admission,
 )
@@ -345,6 +350,79 @@ class TestClaims:
         assert await _pending_ids(second) == ["m1"]
 
 
+async def _take_as(reader: InjectedInput, task: str, message_id: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(injected_input, "_current_task", lambda: task)
+    assert await reader.take([message_id]) == [message_id]
+
+
+async def _claimant(sessions: SessionFactory, thread_id: str, message_id: str) -> str | None:
+    async with sessions() as session:
+        return await session.scalar(
+            select(RunInputORM.taken_by_task).where(
+                RunInputORM.thread_id == thread_id, RunInputORM.message_id == message_id
+            )
+        )
+
+
+class TestRelease:
+    async def test_a_released_claim_is_pending_again_for_the_retry(
+        self, sessions: SessionFactory, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        thread_id = await _thread(sessions)
+        reader = _reader(thread_id, await _run(sessions, thread_id))
+        await _store(sessions, thread_id, "m1")
+        await _take_as(reader, "agent:p|call_model:t1", "m1", monkeypatch)
+
+        await reader.release("agent:p")
+
+        monkeypatch.setattr(injected_input, "_current_task", lambda: "agent:p|1|call_model:t2")
+        assert await _pending_ids(reader) == ["m1"]
+        assert await reader.take(["m1"]) == ["m1"]
+
+    async def test_release_reaches_the_task_and_the_tasks_below_it_only(
+        self, sessions: SessionFactory, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        thread_id = await _thread(sessions)
+        reader = _reader(thread_id, await _run(sessions, thread_id))
+        claims = {
+            "m1": "call_model:t1",
+            "m2": "call_model:t1|tools:t2",
+            "m3": "call_model:t12|tools:t3",
+            "m4": "callXmodel:t1|tools:t2",
+        }
+        for message_id, task in claims.items():
+            await _store(sessions, thread_id, message_id)
+            await _take_as(reader, task, message_id, monkeypatch)
+
+        await reader.release("call_model:t1")
+
+        monkeypatch.setattr(injected_input, "_current_task", lambda: "other:t9")
+        assert await _pending_ids(reader) == ["m1", "m2"]
+
+    async def test_release_keeps_what_an_earlier_attempt_took(
+        self, sessions: SessionFactory, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        thread_id = await _thread(sessions)
+        run_id = await _run(sessions, thread_id)
+        await _store(sessions, thread_id, "m1")
+        await _take_as(_reader(thread_id, run_id), "work:t1", "m1", monkeypatch)
+
+        await _reader(thread_id, run_id).release("work:t1")
+
+        assert await _claimant(sessions, thread_id, "m1") == "work:t1"
+
+    async def test_release_keeps_what_another_run_took(
+        self, sessions: SessionFactory, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        thread_id = await _thread(sessions)
+        await _store(sessions, thread_id, "m1")
+        await _take_as(_reader(thread_id, await _run(sessions, thread_id)), "work:t1", "m1", monkeypatch)
+
+        await _reader(thread_id, await _run(sessions, thread_id)).release("work:t1")
+
+        assert await _claimant(sessions, thread_id, "m1") == "work:t1"
+
+
 def _model_failing_once(prompts: list[list[str]]) -> Callable[..., Awaitable[dict[str, Any]]]:
     """The streaming guide's snippet as a node, with a model that fails once with a retryable error."""
 
@@ -383,9 +461,7 @@ class TestNodeRetries:
             .add_edge(START, "call_model")
             .compile(checkpointer=InMemorySaver())
         )
-        config: RunnableConfig = {
-            "configurable": {"thread_id": thread_id, INJECTED_INPUT_KEY: _reader(thread_id, run_id)}
-        }
+        config = pin_injected_input({"configurable": {"thread_id": thread_id}}, _reader(thread_id, run_id))
 
         result = await graph.ainvoke({"messages": [HumanMessage(content="start", id="h1")]}, config)
         await mark_delivered(run_id=run_id, thread_id=thread_id, user_id=_USER_ID)
@@ -415,9 +491,7 @@ class TestNodeRetries:
             .add_edge(START, "agent")
             .compile(checkpointer=InMemorySaver())
         )
-        config: RunnableConfig = {
-            "configurable": {"thread_id": thread_id, INJECTED_INPUT_KEY: _reader(thread_id, run_id)}
-        }
+        config = pin_injected_input({"configurable": {"thread_id": thread_id}}, _reader(thread_id, run_id))
 
         result = await graph.ainvoke({"messages": [HumanMessage(content="start", id="h1")]}, config)
         await mark_delivered(run_id=run_id, thread_id=thread_id, user_id=_USER_ID)
@@ -451,13 +525,149 @@ class TestNodeRetries:
             .add_edge("first", "later")
             .compile(checkpointer=InMemorySaver())
         )
-        config: RunnableConfig = {
-            "configurable": {"thread_id": thread_id, INJECTED_INPUT_KEY: _reader(thread_id, run_id)}
-        }
+        config = pin_injected_input({"configurable": {"thread_id": thread_id}}, _reader(thread_id, run_id))
 
         await graph.ainvoke({"messages": [HumanMessage(content="start", id="h1")]}, config)
 
         assert seen_later == ["m2"]
+
+
+class _Work(TypedDict):
+    worker: int
+
+
+async def _take_injected(config: RunnableConfig, held: set[str]) -> list[dict[str, Any]]:
+    """The streaming guide's snippet: take every pending message, keep those the node claimed and the state lacks."""
+    reader = config["configurable"][INJECTED_INPUT_KEY]
+    pending = await reader.pending()
+    taken = set(await reader.take([item.message_id for item in pending]))
+    return [item.message for item in pending if item.message_id in taken and item.message_id not in held]
+
+
+def _fanning_out(worker: Callable[[_Work, RunnableConfig], Awaitable[dict[str, Any]]]) -> CompiledStateGraph:
+    """A compiled subgraph that runs ``worker`` as two parallel Send tasks."""
+
+    def fan_out(state: MessagesState) -> list[Send]:
+        return [Send("worker", {"worker": 1}), Send("worker", {"worker": 2})]
+
+    return (
+        StateGraph(MessagesState).add_node("worker", worker).add_conditional_edges(START, fan_out, ["worker"]).compile()
+    )
+
+
+class TestNodesOfASubgraph:
+    async def test_parallel_tasks_of_a_subgraph_take_a_message_once(self, sessions: SessionFactory) -> None:
+        thread_id = await _thread(sessions)
+        run_id = await _run(sessions, thread_id)
+        await _store(sessions, thread_id, "m1", "also check the tests")
+        took: dict[int, list[str]] = {}
+
+        async def worker(state: _Work, config: RunnableConfig) -> dict[str, Any]:
+            injected = await _take_injected(config, held=set())
+            took[state["worker"]] = [item["content"] for item in injected]
+            return {"messages": injected}
+
+        graph = (
+            StateGraph(MessagesState)
+            .add_node("agent", _fanning_out(worker))
+            .add_edge(START, "agent")
+            .compile(checkpointer=InMemorySaver())
+        )
+        config = pin_injected_input({"configurable": {"thread_id": thread_id}}, _reader(thread_id, run_id))
+
+        result = await graph.ainvoke({"messages": [HumanMessage(content="start", id="h1")]}, config)
+
+        assert sorted(took.values()) == [[], ["also check the tests"]]
+        assert [message.content for message in result["messages"]] == ["start", "also check the tests"]
+
+    async def test_a_retried_subgraph_gives_a_message_to_one_parallel_task_per_try(
+        self, sessions: SessionFactory
+    ) -> None:
+        thread_id = await _thread(sessions)
+        run_id = await _run(sessions, thread_id)
+        await _store(sessions, thread_id, "m1", "also check the tests")
+        took: list[tuple[int, int, list[str]]] = []
+        tries: Counter[int] = Counter()
+        first_took: defaultdict[int, asyncio.Event] = defaultdict(asyncio.Event)
+
+        async def worker(state: _Work, config: RunnableConfig) -> dict[str, Any]:
+            number = state["worker"]
+            tries[number] += 1
+            attempt = tries[number]
+            # Worker 2 reads after worker 1 took, then fails its first try, so LangGraph retries the subgraph.
+            if number == 2:
+                await first_took[attempt].wait()
+            injected = await _take_injected(config, held=set())
+            took.append((attempt, number, [item["content"] for item in injected]))
+            first_took[attempt].set()
+            if number == 2 and attempt == 1:
+                raise ConnectionError("model provider unavailable")
+            return {"messages": injected}
+
+        graph = (
+            StateGraph(MessagesState)
+            .add_node("agent", _fanning_out(worker), retry_policy=RetryPolicy(max_attempts=3, initial_interval=0.01))
+            .add_edge(START, "agent")
+            .compile(checkpointer=InMemorySaver())
+        )
+        config = pin_injected_input({"configurable": {"thread_id": thread_id}}, _reader(thread_id, run_id))
+
+        result = await graph.ainvoke({"messages": [HumanMessage(content="start", id="h1")]}, config)
+        await mark_delivered(run_id=run_id, thread_id=thread_id, user_id=_USER_ID)
+        await _set_status(sessions, run_id, "success")
+
+        assert sorted(took) == [
+            (1, 1, ["also check the tests"]),
+            (1, 2, []),
+            (2, 1, ["also check the tests"]),
+            (2, 2, []),
+        ]
+        assert [message.content for message in result["messages"]] == ["start", "also check the tests"]
+        assert await _pending_ids(_reader(thread_id, await _run(sessions, thread_id))) == []
+
+    async def test_a_node_a_subgraph_runs_again_is_not_offered_what_its_first_run_took(
+        self, sessions: SessionFactory
+    ) -> None:
+        thread_id = await _thread(sessions)
+        run_id = await _run(sessions, thread_id)
+        await _store(sessions, thread_id, "m1", "also check the tests")
+        offered: list[list[str]] = []
+
+        async def call_model(state: MessagesState, config: RunnableConfig) -> dict[str, Any]:
+            reader = config["configurable"][INJECTED_INPUT_KEY]
+            pending = await reader.pending()
+            offered.append([item.message_id for item in pending])
+            taken = set(await reader.take([item.message_id for item in pending]))
+            return {"messages": [*(item.message for item in pending if item.message_id in taken), AIMessage("ok")]}
+
+        def tools(state: MessagesState) -> dict[str, Any]:
+            return {}
+
+        def route(state: MessagesState) -> str:
+            return "tools" if len(offered) == 1 else END
+
+        # A ReAct loop: call_model runs again after tools, inside a compiled subgraph and without the held filter.
+        agent = (
+            StateGraph(MessagesState)
+            .add_node("call_model", call_model)
+            .add_node("tools", tools)
+            .add_edge(START, "call_model")
+            .add_conditional_edges("call_model", route, ["tools", END])
+            .add_edge("tools", "call_model")
+            .compile()
+        )
+        graph = (
+            StateGraph(MessagesState)
+            .add_node("agent", agent)
+            .add_edge(START, "agent")
+            .compile(checkpointer=InMemorySaver())
+        )
+        config = pin_injected_input({"configurable": {"thread_id": thread_id}}, _reader(thread_id, run_id))
+
+        result = await graph.ainvoke({"messages": [HumanMessage(content="start", id="h1")]}, config)
+
+        assert offered == [["m1"], []]
+        assert [message.content for message in result["messages"]] == ["start", "also check the tests", "ok", "ok"]
 
 
 class TestExpiry:

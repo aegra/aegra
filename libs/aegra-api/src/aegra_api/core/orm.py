@@ -20,9 +20,11 @@ from typing import Any
 import structlog
 from sqlalchemy import (
     TIMESTAMP,
+    BigInteger,
     Boolean,
     Float,
     ForeignKey,
+    Identity,
     Index,
     Integer,
     Text,
@@ -170,6 +172,8 @@ class Run(Base):
     user_id: Mapped[str] = mapped_column(Text, nullable=False)
     created_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), server_default=text("now()"))
     updated_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), server_default=text("now()"))
+    # Set by the graph through its injected-input reader; input.inject is refused until a running run sets it.
+    accepts_input_inject: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))
 
     # Worker execution: stores RunJob params so workers can reconstruct
     # the job from the database after receiving a run_id via Redis.
@@ -234,6 +238,31 @@ class ThreadTTL(Base):
     expires_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), nullable=False)
 
     __table_args__ = (Index("idx_thread_ttl_expires_at", "expires_at"),)
+
+
+class RunInput(Base):
+    """A message sent with ``input.inject``, waiting for a run of its thread to take it."""
+
+    __tablename__ = "run_inputs"
+
+    # The send order; delivery follows it, never a client timestamp.
+    seq: Mapped[int] = mapped_column(BigInteger, Identity(), primary_key=True)
+    thread_id: Mapped[str] = mapped_column(Text, ForeignKey("thread.thread_id", ondelete="CASCADE"), nullable=False)
+    message_id: Mapped[str] = mapped_column(Text, nullable=False)
+    message: Mapped[dict] = mapped_column(JsonbSafe, nullable=False)
+    user_id: Mapped[str] = mapped_column(Text, nullable=False)
+    # The run that took it; void once that run is no longer pending or running and never delivered it.
+    taken_by_run: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # The execution of that run which holds it; NULL once the task that took it failed, so any task of
+    # the run may take it again while the run keeps holding it.
+    taken_by_attempt: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # The LangGraph task that took it, by its checkpoint namespace; a task that fails gives back what it
+    # and the tasks below it took, so a retry of the task takes them again.
+    taken_by_task: Mapped[str | None] = mapped_column(Text, nullable=True)
+    delivered: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))
+    created_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), server_default=text("now()"))
+
+    __table_args__ = (Index("idx_run_inputs_thread_message", "thread_id", "message_id", unique=True),)
 
 
 # ---------------------------------------------------------------------------

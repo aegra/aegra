@@ -204,6 +204,14 @@ AEGRA_CHECKPOINT_DURABILITY=exit
 
 An invalid value stops the server at startup. See [checkpoint durability](/guides/threads-and-state#checkpoint-durability) for the trade-offs.
 
+## Input to running runs
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `INPUT_INJECT_TTL_SECONDS` | `3600` | How long a message sent with the Agent Protocol v2 `input.inject` command waits for a run to take it, counted from when it was sent. Until then a message the active run did not take carries to the thread's next run. Must be greater than `0` |
+
+See [sending input to a running run](/guides/streaming#sending-input-to-a-running-run).
+
 ## Prometheus metrics
 
 | Variable | Default | Description |

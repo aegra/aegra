@@ -1,0 +1,322 @@
+"""Messages sent to a running run with the Agent Protocol v2 ``input.inject`` command.
+
+The command stores each message in ``run_inputs``; the graph reads them through the
+``InjectedInput`` reader Aegra pins on every run's config under ``INJECTED_INPUT_KEY``:
+
+* ``accept()`` declares that the run takes live input. Until a pending or running
+  run of the thread has declared it, ``input.inject`` is refused.
+* ``pending()`` returns the messages no other run, and no other node of this run,
+  has taken, oldest first, each a message dict a ``messages`` reducer accepts
+  (``id`` is the message id).
+* ``take(ids)`` claims messages for the calling node and returns the ids it claimed.
+
+A claim belongs to the LangGraph task that made it, so every parallel branch and
+every repeated node, inside a compiled subgraph too, is a node of its own. A claim
+holds while the run is pending or running, so a run requeued after a worker drain
+or crash sees again what its earlier attempt took. A task that fails gives back what
+it and the tasks below it took: the run keeps holding them, any of its tasks may take
+them again, and a node LangGraph retries, a compiled subgraph included, does. When
+the graph runs to its end, the messages its tasks hold become delivered; one given
+back that no task took again goes to the thread's next run. A run that pauses at an
+interrupt, fails, or is cancelled leaves its claims to the thread's next run, the
+resume included, which may therefore see a message a
+node before the pause already added to the state: the graph takes it again, so it
+settles, and skips it, because adding it under the same id would only replace it in
+the state while a model called with it would read it twice. A message no run took
+expires ``INPUT_INJECT_TTL_SECONDS`` after it was sent; one a run took stays until a
+run delivers it, and a delivered one is kept as long after it was sent, so a repeat
+of its id is still stored once.
+"""
+
+from __future__ import annotations
+
+import asyncio
+from collections.abc import Collection, Sequence
+from dataclasses import dataclass, field
+from datetime import timedelta
+from typing import Any, Final, Literal
+from uuid import UUID, uuid4
+
+from langchain_core.callbacks import AsyncCallbackHandler
+from langgraph.config import get_config
+from langgraph.errors import GraphBubbleUp
+from sqlalchemy import ColumnElement, and_, delete, exists, func, or_, select, update
+from sqlalchemy.dialects.postgresql import insert
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from aegra_api.core.orm import Run as RunORM
+from aegra_api.core.orm import RunInput as RunInputORM
+from aegra_api.core.orm import _get_session_maker
+from aegra_api.settings import settings
+
+INJECTED_INPUT_KEY: Final = "aegra_injected_input"
+
+_ACTIVE_RUN_STATES = ("pending", "running")
+
+Admission = Literal["accepting", "not_accepting", "no_active_run"]
+
+
+@dataclass(frozen=True, slots=True)
+class InjectedMessage:
+    """One injected message as the graph receives it."""
+
+    message_id: str
+    message: dict[str, Any]
+
+
+def _expired() -> ColumnElement[bool]:
+    """Sent longer than the TTL ago and held by no run: never taken, or already delivered."""
+    ttl = timedelta(seconds=settings.event_streaming.INPUT_INJECT_TTL_SECONDS)
+    return and_(
+        RunInputORM.created_at <= func.now() - ttl,
+        or_(RunInputORM.taken_by_run.is_(None), RunInputORM.delivered.is_(True)),
+    )
+
+
+def _current_task() -> str | None:
+    """The LangGraph task calling the reader, as its ``checkpoint_ns``; None outside a graph node.
+
+    Every task execution has a namespace of its own (``node:task_id`` segments joined by ``|``);
+    a retried function node keeps it, while the nodes of a retried subgraph get new ones.
+    """
+    try:
+        config = get_config()
+    except RuntimeError:
+        return None
+    return config.get("configurable", {}).get("checkpoint_ns")
+
+
+def _available_to(run_id: str, attempt: str, task: str | None) -> ColumnElement[bool]:
+    """Undelivered and unexpired; unclaimed, held by an ended run, or by ``run_id`` outside this attempt's other tasks.
+
+    ``run_id`` may take what its own tasks of another attempt took, what a failed task gave back
+    (``taken_by_attempt`` is NULL), and what ``task`` itself took.
+    """
+    claimant_active = exists().where(
+        RunORM.run_id == RunInputORM.taken_by_run,
+        RunORM.status.in_(_ACTIVE_RUN_STATES),
+    )
+    return and_(
+        RunInputORM.delivered.is_(False),
+        ~_expired(),
+        or_(
+            RunInputORM.taken_by_run.is_(None),
+            and_(
+                RunInputORM.taken_by_run == run_id,
+                or_(
+                    RunInputORM.taken_by_attempt.is_distinct_from(attempt),
+                    RunInputORM.taken_by_task.is_not_distinct_from(task),
+                ),
+            ),
+            ~claimant_active,
+        ),
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class InjectedInput:
+    """A run's handle on its thread's injected messages; pinned by the server, never built by clients."""
+
+    run_id: str
+    thread_id: str
+    user_id: str
+    # One per execution: a requeued attempt of the run gets a new reader.
+    attempt: str = field(default_factory=lambda: uuid4().hex)
+
+    def _scope(self) -> tuple[ColumnElement[bool], ...]:
+        return (RunInputORM.thread_id == self.thread_id, RunInputORM.user_id == self.user_id)
+
+    async def accept(self) -> None:
+        """Declare that this run takes input.inject."""
+        maker = _get_session_maker()
+        async with maker() as session:
+            await session.execute(
+                update(RunORM)
+                .where(RunORM.run_id == self.run_id, RunORM.user_id == self.user_id)
+                .values(accepts_input_inject=True)
+            )
+            await session.commit()
+
+    async def pending(self) -> list[InjectedMessage]:
+        """Messages this run may take, in the order they were sent."""
+        task = _current_task()
+        maker = _get_session_maker()
+        async with maker() as session:
+            rows = await session.execute(
+                select(RunInputORM.message_id, RunInputORM.message)
+                .where(*self._scope(), _available_to(self.run_id, self.attempt, task))
+                .order_by(RunInputORM.seq)
+            )
+            return [InjectedMessage(message_id=message_id, message=message) for message_id, message in rows.all()]
+
+    async def take(self, message_ids: Sequence[str]) -> list[str]:
+        """Claim messages for the calling node; returns the ids claimed, without those another run or node holds."""
+        if not message_ids:
+            return []
+        task = _current_task()
+        maker = _get_session_maker()
+        async with maker() as session:
+            result = await session.execute(
+                update(RunInputORM)
+                .where(
+                    *self._scope(),
+                    RunInputORM.message_id.in_(message_ids),
+                    _available_to(self.run_id, self.attempt, task),
+                )
+                .values(taken_by_run=self.run_id, taken_by_attempt=self.attempt, taken_by_task=task)
+                .returning(RunInputORM.message_id)
+            )
+            taken = set(result.scalars().all())
+            await session.commit()
+        return [message_id for message_id in message_ids if message_id in taken]
+
+    async def release(self, tasks: Collection[str]) -> None:
+        """Give back what ``tasks`` took in this attempt: the run keeps holding it and any of its tasks may take it."""
+        if not tasks:
+            return
+        maker = _get_session_maker()
+        async with maker() as session:
+            await session.execute(
+                update(RunInputORM)
+                .where(
+                    *self._scope(),
+                    RunInputORM.taken_by_attempt == self.attempt,
+                    RunInputORM.taken_by_task.in_(tasks),
+                )
+                .values(taken_by_attempt=None, taken_by_task=None)
+            )
+            await session.commit()
+
+
+class ReleaseOnFailure(AsyncCallbackHandler):
+    """Gives back what a LangGraph task and the tasks below it took when the task fails, so its retry takes it again."""
+
+    # A release that cannot reach the database fails the task rather than leave its retry without the messages.
+    raise_error = True
+
+    def __init__(self, reader: InjectedInput) -> None:
+        self.reader = reader
+        self._namespaces: dict[UUID, str] = {}
+        # The task namespaces that ran below each run still running, their own included once they ended.
+        self._below: dict[UUID, set[str]] = {}
+
+    async def on_chain_start(
+        self,
+        serialized: dict[str, Any],
+        inputs: dict[str, Any],
+        *,
+        run_id: UUID,
+        parent_run_id: UUID | None = None,
+        tags: list[str] | None = None,
+        metadata: dict[str, Any] | None = None,
+        **kwargs: Any,
+    ) -> None:
+        """Note the task namespace a run executes in."""
+        namespace = (metadata or {}).get("langgraph_checkpoint_ns")
+        if namespace:
+            self._namespaces[run_id] = namespace
+
+    async def on_chain_end(
+        self,
+        outputs: dict[str, Any],
+        *,
+        run_id: UUID,
+        parent_run_id: UUID | None = None,
+        tags: list[str] | None = None,
+        **kwargs: Any,
+    ) -> None:
+        """Forget a run that finished; what ran below it now counts as below its parent."""
+        self._ended(run_id, parent_run_id)
+
+    async def on_chain_error(
+        self,
+        error: BaseException,
+        *,
+        run_id: UUID,
+        parent_run_id: UUID | None = None,
+        tags: list[str] | None = None,
+        **kwargs: Any,
+    ) -> None:
+        """Give back the claims of a task that failed and of the tasks below it; an interrupt or a cancel keeps them."""
+        namespace = self._namespaces.get(run_id)
+        # A run nested in a task shares its namespace, and the task may still recover from its error.
+        nested = parent_run_id is not None and self._namespaces.get(parent_run_id) == namespace
+        tasks = self._ended(run_id, parent_run_id)
+        if namespace is None or nested or isinstance(error, GraphBubbleUp | asyncio.CancelledError):
+            return
+        await self.reader.release(tasks)
+
+    def _ended(self, run_id: UUID, parent_run_id: UUID | None) -> set[str]:
+        """Forget a run; returns its namespace with those below it, which now count as below its parent."""
+        tasks = self._below.pop(run_id, set())
+        namespace = self._namespaces.pop(run_id, None)
+        if namespace is not None:
+            tasks.add(namespace)
+        if parent_run_id is not None:
+            self._below.setdefault(parent_run_id, set()).update(tasks)
+        return tasks
+
+
+def pin_injected_input(config: dict[str, Any], reader: InjectedInput) -> dict[str, Any]:
+    """``config`` with ``reader`` under ``INJECTED_INPUT_KEY`` and a callback that releases a failed task's claims."""
+    callbacks = config.get("callbacks")
+    return {
+        **config,
+        "configurable": {**config.get("configurable", {}), INJECTED_INPUT_KEY: reader},
+        "callbacks": [*(callbacks if isinstance(callbacks, list) else []), ReleaseOnFailure(reader)],
+    }
+
+
+async def thread_admission(session: AsyncSession, *, thread_id: str, user_id: str) -> Admission:
+    """Whether the caller's thread has an active run that takes input.inject."""
+    rows = await session.scalars(
+        select(RunORM.accepts_input_inject).where(
+            RunORM.thread_id == thread_id,
+            RunORM.user_id == user_id,
+            RunORM.status.in_(_ACTIVE_RUN_STATES),
+        )
+    )
+    declarations = rows.all()
+    if not declarations:
+        return "no_active_run"
+    return "accepting" if any(declarations) else "not_accepting"
+
+
+async def store_message(
+    session: AsyncSession, *, thread_id: str, user_id: str, message_id: str, message: dict[str, Any]
+) -> bool:
+    """Store a message for the thread's runs; commits.
+
+    An identical repeat of a message the thread still holds is stored once and returns True.
+    Returns False when the id already names a different message.
+    """
+    owned = (RunInputORM.thread_id == thread_id, RunInputORM.user_id == user_id)
+    await session.execute(delete(RunInputORM).where(*owned, _expired()))
+    inserted = await session.scalar(
+        insert(RunInputORM)
+        .values(thread_id=thread_id, message_id=message_id, message=message, user_id=user_id)
+        .on_conflict_do_nothing(index_elements=["thread_id", "message_id"])
+        .returning(RunInputORM.seq)
+    )
+    existing = None
+    if inserted is None:
+        existing = await session.scalar(select(RunInputORM.message).where(*owned, RunInputORM.message_id == message_id))
+    await session.commit()
+    return inserted is not None or existing == message
+
+
+async def mark_delivered(*, run_id: str, thread_id: str, user_id: str) -> None:
+    """Mark what a finished graph's tasks hold as delivered and drop the thread's expired messages.
+
+    A message a failed task gave back and no task took again stays with the run, for the thread's next run.
+    """
+    owned = (RunInputORM.thread_id == thread_id, RunInputORM.user_id == user_id)
+    maker = _get_session_maker()
+    async with maker() as session:
+        await session.execute(
+            update(RunInputORM)
+            .where(*owned, RunInputORM.taken_by_run == run_id, RunInputORM.taken_by_attempt.is_not(None))
+            .values(delivered=True)
+        )
+        await session.execute(delete(RunInputORM).where(*owned, _expired()))
+        await session.commit()

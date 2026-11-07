@@ -10,6 +10,7 @@ from aegra_api.settings import (
     AppSettings,
     CronSettings,
     DatabaseSettings,
+    EventStreamingSettings,
     RedisSettings,
     ThreadTTLSettings,
     WorkerSettings,
@@ -686,6 +687,22 @@ class TestThreadTTLSettings:
         ttl = ThreadTTLSettings(_env_file=None)
 
         assert ttl.AEGRA_THREAD_TTL == '{"default_ttl": 60}'
+
+
+class TestInputInjectTTL:
+    """INPUT_INJECT_TTL_SECONDS bounds how long an input.inject message waits for a run."""
+
+    def test_defaults_to_one_hour(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv("INPUT_INJECT_TTL_SECONDS", raising=False)
+
+        assert EventStreamingSettings(_env_file=None).INPUT_INJECT_TTL_SECONDS == 3600
+
+    @pytest.mark.parametrize("value", ["0", "-5"])
+    def test_rejects_a_non_positive_ttl(self, monkeypatch: pytest.MonkeyPatch, value: str) -> None:
+        monkeypatch.setenv("INPUT_INJECT_TTL_SECONDS", value)
+
+        with pytest.raises(ValidationError):
+            EventStreamingSettings(_env_file=None)
 
 
 class TestMaxSearchLimit:

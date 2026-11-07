@@ -8,8 +8,10 @@ def load_chat_model(fully_specified_name: str) -> BaseChatModel:
     """Load a chat model from a fully specified name.
 
     Args:
-        fully_specified_name: String in the format 'provider/model'
-            e.g. 'openai/gpt-4o-mini', 'anthropic/claude-sonnet-4-20250514'.
+        fully_specified_name: String in the format 'provider/model', where the
+            model id may itself contain slashes for gateway routes, e.g.
+            'openai/gpt-4o-mini', 'anthropic/claude-sonnet-4-20250514',
+            'openai/deepseek-ai/DeepSeek-V3'.
 
     Returns:
         A BaseChatModel instance.
@@ -19,11 +21,7 @@ def load_chat_model(fully_specified_name: str) -> BaseChatModel:
     """
     if not fully_specified_name or not fully_specified_name.strip():
         raise ValueError("fully_specified_name must be in 'provider/model' format, got empty string")
-    if fully_specified_name.count("/") != 1:
-        raise ValueError(
-            f"fully_specified_name must be in 'provider/model' format, got '{fully_specified_name}'"
-        )
-    provider, model = fully_specified_name.split("/", maxsplit=1)
+    provider, _, model = fully_specified_name.partition("/")
     if not provider.strip() or not model.strip():
         raise ValueError(
             f"fully_specified_name must be in 'provider/model' format, got '{fully_specified_name}'"

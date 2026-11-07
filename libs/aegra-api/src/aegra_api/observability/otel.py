@@ -13,7 +13,8 @@ from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import BatchSpanProcessor, ConsoleSpanExporter
 
 from aegra_api.observability.base import ObservabilityProvider
-from aegra_api.observability.span_enrichment import SpanEnrichmentProcessor
+from aegra_api.observability.sampling import is_trace_id_from_run_id_enabled
+from aegra_api.observability.span_enrichment import RunIdAwareIdGenerator, SpanEnrichmentProcessor
 from aegra_api.observability.targets import (
     BaseOtelTarget,
     GenericOtelTarget,
@@ -97,7 +98,12 @@ class OpenTelemetryProvider(ObservabilityProvider):
             }
         )
 
-        self._tracer_provider = TracerProvider(resource=resource)
+        is_trace_id_from_run_id_enabled()
+
+        self._tracer_provider = TracerProvider(
+            resource=resource,
+            id_generator=RunIdAwareIdGenerator(),
+        )
         self._tracer_provider.add_span_processor(SpanEnrichmentProcessor())
         processors_count = 0
 

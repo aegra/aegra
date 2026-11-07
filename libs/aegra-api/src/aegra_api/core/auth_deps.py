@@ -3,9 +3,12 @@
 from typing import Annotated, Any
 
 from fastapi import Depends, HTTPException, Request
+from fastapi.security import APIKeyHeader
 
 from aegra_api.core.auth_middleware import get_auth_backend
 from aegra_api.models.auth import User
+
+_authorization_header = APIKeyHeader(name="Authorization", auto_error=False)
 
 # Several dependencies on one request can call require_auth; the backend must run once
 # because a credential may be single-use.
@@ -59,7 +62,10 @@ def _to_user_model(user: Any) -> User:
     return User(**user_data)
 
 
-async def require_auth(request: Request) -> User:
+async def require_auth(
+    request: Request,
+    _authorization: str | None = Depends(_authorization_header),
+) -> User:
     """FastAPI dependency for authentication.
 
     Replaces Starlette AuthenticationMiddleware by calling the auth backend directly.
@@ -133,6 +139,9 @@ def get_current_user(request: Request) -> User:
     Raises:
         HTTPException: If user is not authenticated
     """
+    cached = request.scope.get(_AUTH_RESULT_SCOPE_KEY)
+    if cached is not None:
+        return cached
     # Try reading from request.scope first (set by require_auth dependency)
     user = request.scope.get("user")
     if user is None:
@@ -141,8 +150,9 @@ def get_current_user(request: Request) -> User:
             raise HTTPException(status_code=401, detail="Authentication required")
         user = request.user
 
-    # Convert to User model
-    return _to_user_model(user)
+    user_model = _to_user_model(user)
+    request.scope[_AUTH_RESULT_SCOPE_KEY] = user_model
+    return user_model
 
 
 def get_user_id(user: User = Depends(get_current_user)) -> str:

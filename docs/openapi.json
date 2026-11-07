@@ -141,7 +141,12 @@
               }
             }
           }
-        }
+        },
+        "security": [
+          {
+            "APIKeyHeader": []
+          }
+        ]
       },
       "post": {
         "tags": [
@@ -191,7 +196,12 @@
               }
             }
           }
-        }
+        },
+        "security": [
+          {
+            "APIKeyHeader": []
+          }
+        ]
       }
     },
     "/assistants/search": {
@@ -237,7 +247,12 @@
               }
             }
           }
-        }
+        },
+        "security": [
+          {
+            "APIKeyHeader": []
+          }
+        ]
       }
     },
     "/assistants/count": {
@@ -280,7 +295,12 @@
               }
             }
           }
-        }
+        },
+        "security": [
+          {
+            "APIKeyHeader": []
+          }
+        ]
       }
     },
     "/assistants/{assistant_id}": {
@@ -291,6 +311,11 @@
         "summary": "Get Assistant",
         "description": "Get an assistant by its ID.\n\nReturns the latest version of the assistant. Returns 404 if the assistant\ndoes not exist or does not belong to the authenticated user.",
         "operationId": "get_assistant_assistants__assistant_id__get",
+        "security": [
+          {
+            "APIKeyHeader": []
+          }
+        ],
         "parameters": [
           {
             "name": "assistant_id",
@@ -342,6 +367,11 @@
         "summary": "Update Assistant",
         "description": "Update an assistant by its ID.\n\nPartial update: only fields included in the request body are changed.\nCreates a new version of the assistant.",
         "operationId": "update_assistant_assistants__assistant_id__patch",
+        "security": [
+          {
+            "APIKeyHeader": []
+          }
+        ],
         "parameters": [
           {
             "name": "assistant_id",
@@ -403,6 +433,11 @@
         "summary": "Delete Assistant",
         "description": "Delete an assistant by its ID.\n\nPermanently removes the assistant and all of its versions. This action\ncannot be undone.",
         "operationId": "delete_assistant_assistants__assistant_id__delete",
+        "security": [
+          {
+            "APIKeyHeader": []
+          }
+        ],
         "parameters": [
           {
             "name": "assistant_id",
@@ -454,6 +489,11 @@
         "summary": "Set Assistant Latest",
         "description": "Pin a specific version as the latest version of an assistant.\n\nAfter calling this endpoint, the assistant will use the specified version's\nconfiguration when executing runs.",
         "operationId": "set_assistant_latest_assistants__assistant_id__latest_post",
+        "security": [
+          {
+            "APIKeyHeader": []
+          }
+        ],
         "parameters": [
           {
             "name": "assistant_id",
@@ -517,6 +557,11 @@
         "summary": "List Assistant Versions",
         "description": "List all versions of an assistant.\n\nReturns versions ordered from newest to oldest. Each version captures the\nassistant's configuration at the time of creation or update.",
         "operationId": "list_assistant_versions_assistants__assistant_id__versions_post",
+        "security": [
+          {
+            "APIKeyHeader": []
+          }
+        ],
         "parameters": [
           {
             "name": "assistant_id",
@@ -574,6 +619,11 @@
         "summary": "Get Assistant Schemas",
         "description": "Get the JSON schemas for an assistant's graph.\n\nReturns ``graph_id`` and the input, output, state, config and context\nschemas derived from the graph's type annotations. A schema the server\ncould not derive is ``null``; the key is always present.",
         "operationId": "get_assistant_schemas_assistants__assistant_id__schemas_get",
+        "security": [
+          {
+            "APIKeyHeader": []
+          }
+        ],
         "parameters": [
           {
             "name": "assistant_id",
@@ -627,6 +677,11 @@
         "summary": "Get Assistant Graph",
         "description": "Get the graph structure for visualization.\n\nReturns a JSON representation of the graph's nodes and edges suitable for\nrendering in graph visualizers. Use `xray` to expand subgraph nodes into\ntheir internal structure.",
         "operationId": "get_assistant_graph_assistants__assistant_id__graph_get",
+        "security": [
+          {
+            "APIKeyHeader": []
+          }
+        ],
         "parameters": [
           {
             "name": "assistant_id",
@@ -699,6 +754,11 @@
         "summary": "Get Assistant Subgraphs",
         "description": "Get subgraphs of an assistant.\n\nReturns the subgraph definitions used by this assistant's graph. Set\n`recurse=true` to include deeply nested subgraphs, or filter to a single\nnamespace.",
         "operationId": "get_assistant_subgraphs_assistants__assistant_id__subgraphs_get",
+        "security": [
+          {
+            "APIKeyHeader": []
+          }
+        ],
         "parameters": [
           {
             "name": "assistant_id",
@@ -791,7 +851,12 @@
               }
             }
           }
-        }
+        },
+        "security": [
+          {
+            "APIKeyHeader": []
+          }
+        ]
       },
       "post": {
         "tags": [
@@ -841,7 +906,12 @@
               }
             }
           }
-        }
+        },
+        "security": [
+          {
+            "APIKeyHeader": []
+          }
+        ]
       }
     },
     "/threads/{thread_id}": {
@@ -852,6 +922,11 @@
         "summary": "Get Thread",
         "description": "Get a thread by its ID.\n\nReturns 404 if the thread does not exist or does not belong to the\nauthenticated user.",
         "operationId": "get_thread_threads__thread_id__get",
+        "security": [
+          {
+            "APIKeyHeader": []
+          }
+        ],
         "parameters": [
           {
             "name": "thread_id",
@@ -903,6 +978,11 @@
         "summary": "Update Thread",
         "description": "Update a thread's metadata.\n\nMerges the provided metadata with the existing metadata (shallow merge).",
         "operationId": "update_thread_threads__thread_id__patch",
+        "security": [
+          {
+            "APIKeyHeader": []
+          }
+        ],
         "parameters": [
           {
             "name": "thread_id",
@@ -964,6 +1044,11 @@
         "summary": "Delete Thread",
         "description": "Delete a thread by its ID.\n\nPermanently removes the thread, its metadata, and its checkpoint history\nstored in the graph backend. Any active runs on the thread are\nautomatically cancelled before deletion.",
         "operationId": "delete_thread_threads__thread_id__delete",
+        "security": [
+          {
+            "APIKeyHeader": []
+          }
+        ],
         "parameters": [
           {
             "name": "thread_id",
@@ -1031,6 +1116,11 @@
         "summary": "Get Thread State",
         "description": "Get the current state of a thread.\n\nReturns the latest checkpoint's values, pending next nodes, interrupt\ndata, and metadata. If the thread has no associated graph yet (no runs\nexecuted), returns an empty state.",
         "operationId": "get_thread_state_threads__thread_id__state_get",
+        "security": [
+          {
+            "APIKeyHeader": []
+          }
+        ],
         "parameters": [
           {
             "name": "thread_id",
@@ -1112,6 +1202,11 @@
         "summary": "Update Thread State",
         "description": "Update thread state or retrieve it via POST.\n\nWhen `values` is provided, creates a new checkpoint with the updated state.\nUse `as_node` to attribute the update to a specific graph node. When\n`values` is null AND `as_node` is not provided, this endpoint acts as a\nPOST-based alternative to the GET state endpoint (useful when passing\ncomplex checkpoint/subgraph parameters in the request body).\n\nWhen `values` is null AND `as_node` is provided (e.g. ``as_node=\"__copy__\"``\nas LangGraph Studio sends for \"Re-run from here\"), this creates a new\ncheckpoint derived from the supplied ``checkpoint_id`` without applying\nany state change \u2014 used to anchor a subsequent run as a fork of that\ncheckpoint rather than of the thread's latest state.",
         "operationId": "update_thread_state_threads__thread_id__state_post",
+        "security": [
+          {
+            "APIKeyHeader": []
+          }
+        ],
         "parameters": [
           {
             "name": "thread_id",
@@ -1183,6 +1278,11 @@
         "summary": "Get Thread State At Checkpoint",
         "description": "Get the thread state at a specific checkpoint.\n\nUse this to inspect historical state at any point in the thread's\nexecution history. Returns 404 if the checkpoint does not exist.",
         "operationId": "get_thread_state_at_checkpoint_threads__thread_id__state__checkpoint_id__get",
+        "security": [
+          {
+            "APIKeyHeader": []
+          }
+        ],
         "parameters": [
           {
             "name": "thread_id",
@@ -1282,6 +1382,11 @@
         "summary": "Get Thread State At Checkpoint Post",
         "description": "Get the thread state at a specific checkpoint (POST variant).\n\nIdentical to the GET checkpoint endpoint but accepts the checkpoint\nconfiguration in the request body. Useful when the checkpoint namespace\ncontains characters that are awkward in URL paths.",
         "operationId": "get_thread_state_at_checkpoint_post_threads__thread_id__state_checkpoint_post",
+        "security": [
+          {
+            "APIKeyHeader": []
+          }
+        ],
         "parameters": [
           {
             "name": "thread_id",
@@ -1345,6 +1450,11 @@
         "summary": "Get Thread History Post",
         "description": "Get the checkpoint history for a thread (POST variant).\n\nReturns a list of past states ordered from newest to oldest. Use `limit`\nto control how many states are returned and `before` to paginate.",
         "operationId": "get_thread_history_post_threads__thread_id__history_post",
+        "security": [
+          {
+            "APIKeyHeader": []
+          }
+        ],
         "parameters": [
           {
             "name": "thread_id",
@@ -1410,6 +1520,11 @@
         "summary": "Get Thread History Get",
         "description": "Get the checkpoint history for a thread.\n\nReturns a list of past states ordered from newest to oldest. Use `limit`\nto control how many states are returned and `before` to paginate.",
         "operationId": "get_thread_history_get_threads__thread_id__history_get",
+        "security": [
+          {
+            "APIKeyHeader": []
+          }
+        ],
         "parameters": [
           {
             "name": "thread_id",
@@ -1592,7 +1707,12 @@
               }
             }
           }
-        }
+        },
+        "security": [
+          {
+            "APIKeyHeader": []
+          }
+        ]
       }
     },
     "/threads/search": {
@@ -1638,7 +1758,12 @@
               }
             }
           }
-        }
+        },
+        "security": [
+          {
+            "APIKeyHeader": []
+          }
+        ]
       }
     },
     "/threads/{thread_id}/runs": {
@@ -1649,6 +1774,11 @@
         "summary": "Create Run",
         "description": "Create and execute a new run.\n\nStarts graph execution asynchronously and returns the run record\nimmediately with status `pending`. Poll the run or use the stream\nendpoint to follow progress. Provide either `input` or `command` (for\nhuman-in-the-loop resumption) but not both.",
         "operationId": "create_run_threads__thread_id__runs_post",
+        "security": [
+          {
+            "APIKeyHeader": []
+          }
+        ],
         "parameters": [
           {
             "name": "thread_id",
@@ -1720,6 +1850,11 @@
         "summary": "List Runs",
         "description": "List runs for a thread.\n\nReturns runs ordered by creation time (newest first). Use `status` to\nfilter and `limit`/`offset` to paginate.",
         "operationId": "list_runs_threads__thread_id__runs_get",
+        "security": [
+          {
+            "APIKeyHeader": []
+          }
+        ],
         "parameters": [
           {
             "name": "thread_id",
@@ -1811,6 +1946,11 @@
         "summary": "Create And Stream Run",
         "description": "Create a new run and stream its execution via SSE.\n\nReturns a `text/event-stream` response with Server-Sent Events. Each\nevent has a `type` field (e.g. `values`, `updates`, `messages`,\n`metadata`, `end`) and a JSON `data` payload.\n\nSet `on_disconnect` to `\"continue\"` if the run should keep executing\nafter the client disconnects (default is `\"cancel\"`). Use `stream_mode`\nto control which event types are emitted.\n\nA periodic SSE keepalive comment is sent every\n``KEEPALIVE_INTERVAL_SECS`` so idle proxies don't drop long-running\nsilent nodes (e.g. agents holding an upstream WebSocket).",
         "operationId": "create_and_stream_run_threads__thread_id__runs_stream_post",
+        "security": [
+          {
+            "APIKeyHeader": []
+          }
+        ],
         "parameters": [
           {
             "name": "thread_id",
@@ -1887,6 +2027,11 @@
         "summary": "Get Run",
         "description": "Get a run by its ID.\n\nReturns the current state of the run including its status, input, output,\nand error information.",
         "operationId": "get_run_threads__thread_id__runs__run_id__get",
+        "security": [
+          {
+            "APIKeyHeader": []
+          }
+        ],
         "parameters": [
           {
             "name": "thread_id",
@@ -1947,6 +2092,11 @@
         "summary": "Update Run",
         "description": "Update a run's status.\n\nPrimarily used to interrupt a running execution. Set `status` to\n`\"interrupted\"` to cooperatively stop the run. When a live worker owns\nthe run, interruption is asynchronous and the response may still report\n`pending` or `running`. Poll or stream the run until it becomes terminal.",
         "operationId": "update_run_threads__thread_id__runs__run_id__patch",
+        "security": [
+          {
+            "APIKeyHeader": []
+          }
+        ],
         "parameters": [
           {
             "name": "thread_id",
@@ -2017,6 +2167,11 @@
         "summary": "Delete Run",
         "description": "Delete a run record.\n\nIf the run is active (pending or running) and `force=0`, returns 409\nConflict. Set `force=1` to cancel the run first (best-effort) and then\ndelete it. Returns 204 No Content on success.",
         "operationId": "delete_run_threads__thread_id__runs__run_id__delete",
+        "security": [
+          {
+            "APIKeyHeader": []
+          }
+        ],
         "parameters": [
           {
             "name": "thread_id",
@@ -2096,6 +2251,11 @@
         "summary": "Join Run",
         "description": "Wait for a run to complete and return its output.\n\nReturns a chunked ``application/json`` response. While the run is still\nexecuting, the server sends periodic ``\\n`` heartbeat bytes to keep the\nconnection alive through proxies and load balancers (AWS ALB, Cloudflare,\netc.). The final chunk is the JSON result. Leading whitespace is ignored\nby JSON parsers, so clients can parse the concatenated body normally.\n\nIf the run is already in a terminal state, the output is returned\nimmediately with no heartbeat overhead.\n\nA run that failed, or that the wait gave up on, returns\n``{\"__error__\": {\"error\": ..., \"message\": ...}}`` instead of an output.\n``langgraph_sdk``'s ``runs.join`` hands that body back as-is, unlike\n``runs.wait``, which inspects the key and raises.\n\nSessions are managed manually (not via ``Depends``) to avoid holding a\npool connection during the long wait.",
         "operationId": "join_run_threads__thread_id__runs__run_id__join_get",
+        "security": [
+          {
+            "APIKeyHeader": []
+          }
+        ],
         "parameters": [
           {
             "name": "thread_id",
@@ -2156,6 +2316,11 @@
         "summary": "Wait For Run",
         "description": "Create a run, execute it, and wait for completion.\n\nReturns a chunked ``application/json`` response with periodic ``\\n``\nheartbeat bytes to keep the connection alive. The final chunk is the\nJSON result. Uses ``BG_JOB_TIMEOUT_SECS`` (default 1 hour) as the\nsafety-net timeout.\n\nA run that failed, or that the wait gave up on, returns\n``{\"__error__\": {\"error\": ..., \"message\": ...}}`` instead of an output;\nthe LangGraph SDK reads that key and raises.\n\nSessions are managed manually (not via ``Depends``) to avoid holding a\npool connection during the long wait.",
         "operationId": "wait_for_run_threads__thread_id__runs_wait_post",
+        "security": [
+          {
+            "APIKeyHeader": []
+          }
+        ],
         "parameters": [
           {
             "name": "thread_id",
@@ -2227,6 +2392,11 @@
         "summary": "Stream Run",
         "description": "Stream an existing run's execution via SSE.\n\nAttach to a run that was created without streaming (e.g. via the create\nendpoint) to receive its events in real time. If the run has already\nfinished, a single `end` event is emitted. Use the `Last-Event-ID`\nheader to resume from a specific event after a disconnect.\n\nA periodic SSE keepalive comment is sent every\n``KEEPALIVE_INTERVAL_SECS`` so idle proxies don't drop attached streams.",
         "operationId": "stream_run_threads__thread_id__runs__run_id__stream_get",
+        "security": [
+          {
+            "APIKeyHeader": []
+          }
+        ],
         "parameters": [
           {
             "name": "thread_id",
@@ -2326,6 +2496,11 @@
         "summary": "Cancel Run Endpoint",
         "description": "Cancel a running execution.\n\n`action=cancel` and `action=interrupt` are currently aliases: both stop\nthe run immediately and finalize it as interrupted. Neither action\nprovides cooperative graph-level handling or guarantees saved partial\nstate. Set `wait=1` to wait up to 10 seconds\nfor the background task to settle before returning the updated run. The\nresponse may still report `pending` or `running` if the timeout expires.\nWithout `wait=1`, a live-owned run is cancelled asynchronously, so the\nresponse may still report `pending` or `running`.",
         "operationId": "cancel_run_endpoint_threads__thread_id__runs__run_id__cancel_post",
+        "security": [
+          {
+            "APIKeyHeader": []
+          }
+        ],
         "parameters": [
           {
             "name": "thread_id",
@@ -2418,6 +2593,11 @@
         "summary": "Cancel Runs",
         "description": "Cancel several runs at once, by status or by thread_id plus run_ids.\n\nRuns the caller does not own or that already finished are skipped. The\nthread must exist for the run_ids form; unknown run ids are ignored.",
         "operationId": "cancel_runs_runs_cancel_post",
+        "security": [
+          {
+            "APIKeyHeader": []
+          }
+        ],
         "parameters": [
           {
             "name": "action",
@@ -2530,7 +2710,12 @@
               }
             }
           }
-        }
+        },
+        "security": [
+          {
+            "APIKeyHeader": []
+          }
+        ]
       }
     },
     "/runs/stream": {
@@ -2595,7 +2780,12 @@
               }
             }
           }
-        }
+        },
+        "security": [
+          {
+            "APIKeyHeader": []
+          }
+        ]
       }
     },
     "/runs": {
@@ -2657,7 +2847,12 @@
               }
             }
           }
-        }
+        },
+        "security": [
+          {
+            "APIKeyHeader": []
+          }
+        ]
       }
     },
     "/runs/crons": {
@@ -2707,7 +2902,12 @@
               }
             }
           }
-        }
+        },
+        "security": [
+          {
+            "APIKeyHeader": []
+          }
+        ]
       }
     },
     "/threads/{thread_id}/runs/crons": {
@@ -2718,6 +2918,11 @@
         "summary": "Create Cron For Thread",
         "description": "Create a cron job bound to an existing thread.\n\nThe thread is reused for every scheduled run. Triggers the first run\nimmediately and returns the ``Run`` object. When ``enabled=False`` is\npassed the first run is suppressed and the persisted cron is returned.",
         "operationId": "create_cron_for_thread_threads__thread_id__runs_crons_post",
+        "security": [
+          {
+            "APIKeyHeader": []
+          }
+        ],
         "parameters": [
           {
             "name": "thread_id",
@@ -2779,6 +2984,11 @@
         "summary": "Update Cron",
         "description": "Update an existing cron job.\n\nOnly provided fields are updated (partial patch). Returns the full\n``Cron`` object after update.",
         "operationId": "update_cron_runs_crons__cron_id__patch",
+        "security": [
+          {
+            "APIKeyHeader": []
+          }
+        ],
         "parameters": [
           {
             "name": "cron_id",
@@ -2840,6 +3050,11 @@
         "summary": "Delete Cron",
         "description": "Delete a cron job.",
         "operationId": "delete_cron_runs_crons__cron_id__delete",
+        "security": [
+          {
+            "APIKeyHeader": []
+          }
+        ],
         "parameters": [
           {
             "name": "cron_id",
@@ -2921,7 +3136,12 @@
               }
             }
           }
-        }
+        },
+        "security": [
+          {
+            "APIKeyHeader": []
+          }
+        ]
       }
     },
     "/runs/crons/count": {
@@ -2964,7 +3184,12 @@
               }
             }
           }
-        }
+        },
+        "security": [
+          {
+            "APIKeyHeader": []
+          }
+        ]
       }
     },
     "/store/items": {
@@ -2975,6 +3200,11 @@
         "summary": "Put Store Item",
         "description": "Create or update an item in the store.\n\nIf an item with the same namespace and key already exists, its value is\noverwritten. Values must be JSON objects (dictionaries).",
         "operationId": "put_store_item_store_items_put",
+        "security": [
+          {
+            "APIKeyHeader": []
+          }
+        ],
         "requestBody": {
           "required": true,
           "content": {
@@ -3008,6 +3238,11 @@
         "summary": "Get Store Item",
         "description": "Get an item from the store by key.\n\nReturns 404 if no item exists at the given namespace and key.",
         "operationId": "get_store_item_store_items_get",
+        "security": [
+          {
+            "APIKeyHeader": []
+          }
+        ],
         "parameters": [
           {
             "name": "key",
@@ -3095,6 +3330,11 @@
         "summary": "Delete Store Item",
         "description": "Delete an item from the store.\n\nAccepts parameters via JSON body (`namespace` + `key`) or query\nparameters. The JSON body takes precedence when both are provided.",
         "operationId": "delete_store_item_store_items_delete",
+        "security": [
+          {
+            "APIKeyHeader": []
+          }
+        ],
         "parameters": [
           {
             "name": "key",
@@ -3209,7 +3449,12 @@
               }
             }
           }
-        }
+        },
+        "security": [
+          {
+            "APIKeyHeader": []
+          }
+        ]
       }
     },
     "/store/namespaces": {
@@ -3251,7 +3496,12 @@
               }
             }
           }
-        }
+        },
+        "security": [
+          {
+            "APIKeyHeader": []
+          }
+        ]
       }
     },
     "/threads/{thread_id}/stream/events": {
@@ -3262,6 +3512,11 @@
         "summary": "Stream Thread Events",
         "description": "Open a channel-filtered SSE stream of the thread's run events.\n\nThread-scoped: events for any run on the thread flow through, so a\nclient can open the stream then issue ``run.start``. Each SSE frame's\n``data:`` is a protocol event envelope; ``id:`` is the ``seq`` a client\nechoes back as ``since`` on resume.\n\nDB work runs in short-lived sessions (the upfront ownership check here, and\neach run-lister poll) so no connection is held for the SSE lifetime (#423).",
         "operationId": "stream_thread_events_threads__thread_id__stream_events_post",
+        "security": [
+          {
+            "APIKeyHeader": []
+          }
+        ],
         "parameters": [
           {
             "name": "thread_id",
@@ -3320,6 +3575,11 @@
         "summary": "Post Thread Command",
         "description": "Run a single v2 command on the thread and return its response envelope.\n\nUses a short-lived session (the run created by ``run.start`` executes on\nthe worker; the response returns before streaming begins).",
         "operationId": "post_thread_command_threads__thread_id__commands_post",
+        "security": [
+          {
+            "APIKeyHeader": []
+          }
+        ],
         "parameters": [
           {
             "name": "thread_id",
@@ -6232,6 +6492,20 @@
             ],
             "title": "Strategy",
             "description": "Expiry strategy: 'delete' removes the thread, 'keep_latest' prunes history"
+          },
+          "ttl": {
+            "anyOf": [
+              {
+                "type": "number",
+                "maximum": 1000000000.0,
+                "exclusiveMinimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ttl",
+            "description": "Alias for \"default_ttl\" accepted by the LangGraph SDK."
           }
         },
         "type": "object",
@@ -6297,6 +6571,13 @@
           "type"
         ],
         "title": "ValidationError"
+      }
+    },
+    "securitySchemes": {
+      "APIKeyHeader": {
+        "type": "apiKey",
+        "in": "header",
+        "name": "Authorization"
       }
     }
   },

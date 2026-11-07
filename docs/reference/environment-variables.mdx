@@ -17,6 +17,7 @@ cp .env.example .env
 | `VERSION` | `0.11.0` | Application version |
 | `DEBUG` | `false` | Enable debug mode |
 | `AEGRA_CONFIG` | `aegra.json` | Path to the configuration file |
+| `AEGRA_CONTAINER_RUNTIME` | unset | Container CLI for `aegra dev`, `aegra up`, and `aegra down`: `docker` or `podman`. Unset prefers a running Docker daemon, then Podman if it is installed, then Docker if it is installed but stopped. `aegra down` first targets runtimes that still have the project's containers. |
 | `MAX_SEARCH_LIMIT` | `1000` | Max `limit` for `POST /threads/search` and `POST /store/items/search`. Omitted or null `limit` uses `min(20, MAX_SEARCH_LIMIT)`. Default cap matches LangGraph Platform threads.search (`1..1000`). |
 
 ## Database

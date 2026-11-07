@@ -6,7 +6,7 @@ description: "Get a running Aegra server in under 5 minutes."
 ## Prerequisites
 
 - Python 3.12+
-- Docker (for PostgreSQL)
+- Docker or Podman (for PostgreSQL). With `AEGRA_CONTAINER_RUNTIME` unset, Aegra uses a running Docker daemon, then Podman if it is installed, then Docker if it is installed but stopped. Set the variable to `docker` or `podman` to choose directly.
 
 ## Create a project
 

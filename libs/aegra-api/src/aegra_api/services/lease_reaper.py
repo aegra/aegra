@@ -17,11 +17,15 @@ from sqlalchemy import select, update
 from aegra_api.core.orm import Run as RunORM
 from aegra_api.core.orm import _get_session_maker
 from aegra_api.core.redis_manager import redis_manager
+from aegra_api.models.run_job import RunJob
 from aegra_api.observability.metrics import REAPER_RECOVERED_RUNS
 from aegra_api.services.run_status import set_thread_status_if_no_active_runs
+from aegra_api.services.webhook_delivery import RunOutcome, job_for_webhook, notify_run_finished
 from aegra_api.settings import settings
 
 logger = structlog.getLogger(__name__)
+
+_MAX_RETRIES_ERROR = "Max retries exceeded after repeated worker failures"
 
 
 class LeaseReaper:
@@ -127,6 +131,7 @@ class LeaseReaper:
         retryable: list[str] = []
         exhausted: list[str] = []
         exhausted_threads_by_user: dict[str, set[str]] = {}
+        failed_jobs: list[RunJob] = []
 
         maker = _get_session_maker()
         async with maker() as session:
@@ -136,6 +141,8 @@ class LeaseReaper:
                     RunORM.thread_id,
                     RunORM.user_id,
                     RunORM.execution_params,
+                    RunORM.assistant_id,
+                    RunORM.created_at,
                 )
                 .where(
                     RunORM.run_id.in_(run_ids),
@@ -145,7 +152,7 @@ class LeaseReaper:
                 .with_for_update(skip_locked=True)
             )
 
-            for run_id, thread_id, user_id, execution_params in locked_result.fetchall():
+            for run_id, thread_id, user_id, execution_params, assistant_id, created_at in locked_result.fetchall():
                 params = dict(execution_params or {})
                 retry_count = params.get("_retry_count", 0) + 1
                 params["_retry_count"] = retry_count
@@ -160,7 +167,7 @@ class LeaseReaper:
                 if is_exhausted:
                     values.update(
                         status="error",
-                        error_message="Max retries exceeded after repeated worker failures",
+                        error_message=_MAX_RETRIES_ERROR,
                     )
                 else:
                     values["status"] = "pending"
@@ -182,6 +189,11 @@ class LeaseReaper:
                 if is_exhausted:
                     exhausted.append(run_id)
                     exhausted_threads_by_user.setdefault(user_id, set()).add(thread_id)
+                    failed_job = job_for_webhook(
+                        params, run_id=run_id, thread_id=thread_id, assistant_id=assistant_id, created_at=created_at
+                    )
+                    if failed_job is not None:
+                        failed_jobs.append(failed_job)
                     logger.error(
                         "Run exceeded max retries, marking as permanently failed",
                         run_id=run_id,
@@ -205,6 +217,12 @@ class LeaseReaper:
                     user_id=user_id,
                 )
             await session.commit()
+
+        # No worker survives to report these runs, so their webhooks go out from here.
+        for job in failed_jobs:
+            notify_run_finished(
+                job, RunOutcome(status="error", error={"error": "Error", "message": _MAX_RETRIES_ERROR})
+            )
 
         return retryable, exhausted
 

@@ -1,12 +1,15 @@
 """Unit tests for run_status service."""
 
+from datetime import UTC, datetime
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from aegra_api.core.orm import Run as RunORM
 from aegra_api.services.run_status import (
     _safe_serialize,
     finalize_run,
+    interrupt_run_before_delete,
     interrupt_unowned_run,
     set_thread_status,
     set_thread_status_if_no_active_runs,
@@ -291,3 +294,48 @@ class TestSafeSerialize:
 
         assert result["error"] == "Output serialization failed"
         assert "original_type" in result
+
+
+class TestInterruptRunBeforeDelete:
+    @staticmethod
+    def _run() -> RunORM:
+        return RunORM(
+            run_id="run-1",
+            thread_id="thread-1",
+            assistant_id="asst-1",
+            user_id="user-1",
+            status="running",
+            execution_params={"behavior": {"webhook": "https://h.example/x"}},
+            created_at=datetime(2026, 11, 1, tzinfo=UTC),
+        )
+
+    @pytest.mark.asyncio
+    async def test_commits_the_cancel_and_reports_it_when_it_wins(self) -> None:
+        run = self._run()
+
+        with (
+            patch("aegra_api.services.run_status.finalize_run", new_callable=AsyncMock, return_value=True) as finalize,
+            patch("aegra_api.services.run_status.report_cancelled_run") as report,
+        ):
+            await interrupt_run_before_delete(run)
+
+        finalize.assert_awaited_once_with(
+            "run-1", "thread-1", user_id="user-1", status="interrupted", thread_status="idle", output={}
+        )
+        report.assert_called_once_with(
+            run.execution_params,
+            run_id="run-1",
+            thread_id="thread-1",
+            assistant_id="asst-1",
+            created_at=run.created_at,
+        )
+
+    @pytest.mark.asyncio
+    async def test_leaves_the_report_to_whoever_finalized_first(self) -> None:
+        with (
+            patch("aegra_api.services.run_status.finalize_run", new_callable=AsyncMock, return_value=False),
+            patch("aegra_api.services.run_status.report_cancelled_run") as report,
+        ):
+            await interrupt_run_before_delete(self._run())
+
+        report.assert_not_called()

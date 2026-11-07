@@ -77,6 +77,14 @@ class RunCreate(BaseModel):
         None,
         description="Strategy for handling concurrent runs on same thread: 'reject', 'interrupt', 'rollback', or 'enqueue'.",
     )
+    webhook: str | None = Field(
+        None,
+        description=(
+            "Absolute http(s) URL that receives a POST with the run, its final values and any error once the run "
+            "reaches a terminal status. Must pass the server's webhooks.url policy; a URL the server will not call "
+            "returns 422."
+        ),
+    )
 
     # Human-in-the-loop fields (core HITL functionality)
     command: dict[str, Any] | None = Field(

@@ -35,6 +35,21 @@ class TestWebhookValidation:
         req = CronCreate(input={"q": 1}, assistant_id="a", schedule="* * * * *", webhook=url)
         assert req.webhook == url
 
+    def test_update_rejects_non_http_scheme(self) -> None:
+        with pytest.raises(ValidationError):
+            CronUpdate(webhook="ftp://example.com/hook")
+
+    def test_update_marks_an_explicit_null_webhook_as_set(self) -> None:
+        req = CronUpdate.model_validate({"webhook": None})
+
+        assert "webhook" in req.model_fields_set
+        assert req.webhook is None
+
+    def test_update_leaves_an_omitted_webhook_unset(self) -> None:
+        req = CronUpdate.model_validate({"enabled": False})
+
+        assert "webhook" not in req.model_fields_set
+
 
 class TestEndTimeMustBeFuture:
     def test_rejects_past_end_time_on_create(self) -> None:

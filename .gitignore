@@ -12,6 +12,9 @@ wheels/
 # env files
 .env
 
+# Config the E2E workflow generates from aegra.json
+aegra.e2e.json
+
 # Pycharm
 .idea/
 

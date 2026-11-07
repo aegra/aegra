@@ -1,10 +1,14 @@
 """Unit tests for lease_reaper service."""
 
+from datetime import UTC, datetime
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from redis import RedisError
 
+from aegra_api.models.auth import User
+from aegra_api.models.run_job import RunBehavior, RunExecution, RunIdentity, RunJob
 from aegra_api.observability.metrics import REAPER_RECOVERED_RUNS
 from aegra_api.services.lease_reaper import LeaseReaper
 
@@ -61,8 +65,8 @@ class TestRecoverCrashedRuns:
         session = AsyncMock()
         locked = MagicMock()
         locked.fetchall.return_value = [
-            ("run-1", "thread-1", "user-1", {"_retry_count": 0}),
-            ("run-2", "thread-2", "user-2", {"_retry_count": 1}),
+            ("run-1", "thread-1", "user-1", {"_retry_count": 0}, "assistant-1", None),
+            ("run-2", "thread-2", "user-2", {"_retry_count": 1}, "assistant-1", None),
         ]
         updated_run_1 = MagicMock()
         updated_run_1.scalar_one_or_none.return_value = "run-1"
@@ -112,7 +116,7 @@ class TestRecoverCrashedRuns:
         session = AsyncMock()
         locked = MagicMock()
         locked.fetchall.return_value = [
-            ("run-1", "thread-1", "user-1", {"_retry_count": 1}),
+            ("run-1", "thread-1", "user-1", {"_retry_count": 1}, "assistant-1", None),
         ]
         unchanged = MagicMock()
         unchanged.scalar_one_or_none.return_value = None
@@ -482,3 +486,78 @@ class TestStartStop:
         # Should not raise
         await reaper.stop()
         assert reaper._task is None
+
+
+_CREATED_AT = datetime(2026, 10, 1, 12, 0, tzinfo=UTC)
+
+
+def _params_with_webhook(retry_count: int, webhook: str | None = "https://hooks.example.com/runs") -> dict[str, Any]:
+    job = RunJob(
+        identity=RunIdentity(run_id="unused", thread_id="unused", graph_id="graph-1"),
+        user=User(identity="user-1"),
+        execution=RunExecution(input_data={"msg": "hi"}),
+        behavior=RunBehavior(webhook=webhook),
+    )
+    return {**job.to_execution_params(), "_retry_count": retry_count}
+
+
+class TestRecoverCrashedRunsWebhook:
+    """Runs the reaper gives up on still report through their webhook: no worker is left to do it."""
+
+    @staticmethod
+    async def _recover(rows: list[tuple[Any, ...]]) -> MagicMock:
+        session = AsyncMock()
+        locked = MagicMock()
+        locked.fetchall.return_value = rows
+        updated = [MagicMock(**{"scalar_one_or_none.return_value": row[0]}) for row in rows]
+        session.execute = AsyncMock(side_effect=[locked, *updated])
+        session.commit = AsyncMock()
+
+        with (
+            patch("aegra_api.services.lease_reaper._get_session_maker", return_value=_make_session_maker(session)),
+            patch("aegra_api.services.lease_reaper.settings") as mock_settings,
+            patch("aegra_api.services.lease_reaper.set_thread_status_if_no_active_runs", new_callable=AsyncMock),
+            patch("aegra_api.services.lease_reaper.notify_run_finished") as mock_notify,
+        ):
+            mock_settings.worker.BG_JOB_MAX_RETRIES = 1
+            await LeaseReaper._recover_crashed_runs([row[0] for row in rows])
+        return mock_notify
+
+    async def test_exhausted_run_reports_an_error(self) -> None:
+        mock_notify = await self._recover(
+            [("run-1", "thread-1", "user-1", _params_with_webhook(retry_count=1), "assistant-1", _CREATED_AT)]
+        )
+
+        mock_notify.assert_called_once()
+        job, outcome = mock_notify.call_args.args
+        assert job.identity.run_id == "run-1"
+        assert job.identity.thread_id == "thread-1"
+        assert job.identity.assistant_id == "assistant-1"
+        assert job.identity.created_at == _CREATED_AT
+        assert job.behavior.webhook == "https://hooks.example.com/runs"
+        assert outcome.status == "error"
+        assert outcome.error == {
+            "error": "Error",
+            "message": "Max retries exceeded after repeated worker failures",
+        }
+
+    async def test_retried_run_is_not_reported(self) -> None:
+        mock_notify = await self._recover(
+            [("run-1", "thread-1", "user-1", _params_with_webhook(retry_count=0), "assistant-1", _CREATED_AT)]
+        )
+
+        mock_notify.assert_not_called()
+
+    async def test_exhausted_run_without_webhook_is_not_reported(self) -> None:
+        mock_notify = await self._recover(
+            [("run-1", "thread-1", "user-1", _params_with_webhook(retry_count=1, webhook=None), "a-1", _CREATED_AT)]
+        )
+
+        mock_notify.assert_not_called()
+
+    async def test_unreadable_params_skip_the_webhook_without_failing_recovery(self) -> None:
+        params = {"behavior": {"webhook": "https://hooks.example.com/runs"}, "_retry_count": 1}
+
+        mock_notify = await self._recover([("run-1", "thread-1", "user-1", params, "assistant-1", _CREATED_AT)])
+
+        mock_notify.assert_not_called()

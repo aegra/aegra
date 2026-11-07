@@ -43,6 +43,7 @@ description: "What Aegra supports today, what's coming soon, and what's not yet 
 | Stateless runs | Supported | Execute without persisting thread state. |
 | Checkpoint durability | Supported | `durability` (`sync`, `async`, `exit`) per run or cron, deprecated `checkpoint_during` alias, server default via `checkpointer.durability` or `AEGRA_CHECKPOINT_DURABILITY`. |
 | Cron / scheduled jobs | Supported | Create, read, update, delete, search, and count scheduled jobs, including metadata filtering. Standard and seconds-level cron expressions. IANA timezone support. |
+| Webhooks | Supported | `webhook` on runs and crons: a POST with the finished run, its final values, and any error. LangGraph `webhooks` config (`url` policy, `headers`, `env_prefix`, `allowed_fields`) and `http.disable_webhooks`. Relative (loopback) webhook URLs return `422`. See [Webhooks](/guides/webhooks). |
 
 ### Scaling and reliability
 
@@ -125,7 +126,6 @@ description: "What Aegra supports today, what's coming soon, and what's not yet 
 |:--|:--|:--|
 | RemoteGraph | Not yet planned | Call remote graphs as local subgraphs. |
 | Encryption at rest | Not yet planned | Database-level encryption. Use Postgres TDE or volume encryption. |
-| Webhook callbacks | Not yet planned | Notify external services on run completion. |
 | Rate limiting | Not yet planned | Per-user or per-key request throttling. |
 | Multi-org workspaces | Not yet planned | Tenant isolation within a single deployment. |
 

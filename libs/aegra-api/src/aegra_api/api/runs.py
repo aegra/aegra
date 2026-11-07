@@ -25,9 +25,10 @@ from aegra_api.models.enums import RunCancellationAction
 from aegra_api.models.errors import CONFLICT, NOT_FOUND, SSE_RESPONSE
 from aegra_api.services.broker import broker_manager
 from aegra_api.services.run_preparation import _prepare_run
-from aegra_api.services.run_status import interrupt_unowned_run
+from aegra_api.services.run_status import interrupt_run_before_delete, interrupt_unowned_run
 from aegra_api.services.run_waiters import TERMINAL_STATES, encode_output, heartbeat_wait_body, run_result_body
 from aegra_api.services.streaming_service import streaming_service
+from aegra_api.services.webhook_delivery import report_cancelled_run
 from aegra_api.settings import settings
 from aegra_api.utils.status_compat import validate_run_status
 
@@ -59,6 +60,13 @@ async def _request_run_interruption(
     )
 
     if reconciled:
+        report_cancelled_run(
+            run_orm.execution_params,
+            run_id=run_orm.run_id,
+            thread_id=run_orm.thread_id,
+            assistant_id=run_orm.assistant_id,
+            created_at=run_orm.created_at,
+        )
         # A delayed worker can outlive an expired lease, so request a stop.
         # Signaling stays here to close streams when no executor owns the run.
         if action == "interrupt":
@@ -630,6 +638,7 @@ async def delete_run(
     # If forcing and active, cancel first
     if force and run_orm.status in ["pending", "running"]:
         logger.info(f"[delete_run] force-cancelling active run run_id={run_id}")
+        await interrupt_run_before_delete(run_orm)
         await streaming_service.cancel_run(run_id)
         # Best-effort: wait for bg task to settle
         task = active_runs.get(run_id)

@@ -269,14 +269,23 @@ class TestDeleteThreadById:
         with (
             patch("aegra_api.services.run_cleanup._get_session_maker", return_value=mock_maker),
             patch(
+                "aegra_api.services.run_cleanup.interrupt_run_before_delete", new_callable=AsyncMock
+            ) as mock_interrupt,
+            patch(
                 "aegra_api.services.run_cleanup.streaming_service.cancel_run",
                 new_callable=AsyncMock,
             ) as mock_cancel,
             patch("aegra_api.services.run_cleanup.active_runs", {run_id: mock_task}),
         ):
+            calls: list[str] = []
+            mock_interrupt.side_effect = lambda run: calls.append(f"interrupt {run.run_id}")
+            mock_cancel.side_effect = lambda rid: calls.append(f"cancel {rid}")
             await _delete_thread_by_id(thread_id, user_id)
 
         mock_cancel.assert_called_once_with(run_id)
+        # The cancel is committed, and its webhook sent, before the row can be deleted.
+        mock_interrupt.assert_awaited_once_with(active_run)
+        assert calls == [f"interrupt {run_id}", f"cancel {run_id}"]
 
     @pytest.mark.asyncio
     async def test_noop_when_thread_not_found(self, mock_session: AsyncMock) -> None:
@@ -327,6 +336,7 @@ class TestDeleteThreadById:
 
         with (
             patch("aegra_api.services.run_cleanup._get_session_maker", return_value=mock_maker),
+            patch("aegra_api.services.run_cleanup.interrupt_run_before_delete", new_callable=AsyncMock),
             patch(
                 "aegra_api.services.run_cleanup.streaming_service.cancel_run",
                 new_callable=AsyncMock,
@@ -373,6 +383,7 @@ class TestDeleteThreadById:
 
         with (
             patch("aegra_api.services.run_cleanup._get_session_maker", return_value=mock_maker),
+            patch("aegra_api.services.run_cleanup.interrupt_run_before_delete", new_callable=AsyncMock),
             patch(
                 "aegra_api.services.run_cleanup.streaming_service.cancel_run",
                 new_callable=AsyncMock,
@@ -417,6 +428,7 @@ class TestDeleteThreadById:
 
         with (  # noqa: SIM117
             patch("aegra_api.services.run_cleanup._get_session_maker", return_value=mock_maker),
+            patch("aegra_api.services.run_cleanup.interrupt_run_before_delete", new_callable=AsyncMock),
             patch(
                 "aegra_api.services.run_cleanup.streaming_service.cancel_run",
                 new_callable=AsyncMock,

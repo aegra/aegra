@@ -226,3 +226,29 @@ class TestAuthorizationMetadataInjection:
         assert metadata.get("team_id") == "team888"
 
         elog("Assistant metadata injection", {"metadata": metadata})
+
+    @pytest.mark.asyncio
+    async def test_cron_create_and_update_metadata_injection(self) -> None:
+        """Test that the crons handler's metadata is stored on create and survives updates"""
+        client = get_client_with_auth("frank", "user", "team777")
+
+        # The handler's team_id wins over the one the client sends.
+        created = await client.crons.create(
+            "agent", schedule="0 0 1 1 *", input={}, metadata={"client": "sent", "team_id": "spoofed"}, enabled=False
+        )
+        cron_id = created["cron_id"]
+        try:
+            [stored] = [c for c in await client.crons.search(limit=100) if c["cron_id"] == cron_id]
+            assert stored["metadata"] == {"client": "sent", "team_id": "team777"}
+
+            # The client sends no metadata, so the handler's stamp merges onto the stored metadata.
+            paused = await client.crons.update(cron_id, enabled=False)
+            assert paused["metadata"] == {"client": "sent", "team_id": "team777"}
+
+            # Metadata the client sends replaces the stored metadata and carries the stamp.
+            edited = await client.crons.update(cron_id, metadata={"client": "edited"})
+            assert edited["metadata"] == {"client": "edited", "team_id": "team777"}
+        finally:
+            await client.crons.delete(cron_id)
+
+        elog("Cron metadata injection", {"created": stored["metadata"], "edited": edited["metadata"]})

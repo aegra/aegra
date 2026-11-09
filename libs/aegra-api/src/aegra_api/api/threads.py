@@ -17,7 +17,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from aegra_api.core.active_runs import active_runs
 from aegra_api.core.auth_deps import auth_dependency, get_current_user
 from aegra_api.core.auth_filters import build_metadata_filter
-from aegra_api.core.auth_handlers import build_auth_context, handle_event
+from aegra_api.core.auth_handlers import apply_handler_edits, build_auth_context, handle_event
 from aegra_api.core.database import db_manager
 from aegra_api.core.orm import Run as RunORM
 from aegra_api.core.orm import Thread as ThreadORM
@@ -221,17 +221,7 @@ async def create_thread(
     ctx = build_auth_context(user, "threads", "create")
     value = request.model_dump()
     filters = await handle_event(ctx, value)
-
-    # If handler modified metadata, update request
-    if filters and "metadata" in filters:
-        handler_meta = filters["metadata"]
-        if isinstance(handler_meta, dict):
-            request.metadata = {**(request.metadata or {}), **handler_meta}
-    elif value.get("metadata"):
-        # Handler may have modified value dict directly
-        handler_meta = value["metadata"]
-        if isinstance(handler_meta, dict):
-            request.metadata = {**(request.metadata or {}), **handler_meta}
+    apply_handler_edits(request, filters, value, ("metadata",))
 
     thread_id = request.thread_id or str(uuid4())
     # Resolve before the insert so an invalid ttl request 422s without DB work.
@@ -358,16 +348,7 @@ async def update_thread(
     ctx = build_auth_context(user, "threads", "update")
     value = {**request.model_dump(), "thread_id": thread_id}
     filters = await handle_event(ctx, value)
-
-    # If handler modified metadata, update request
-    if filters and "metadata" in filters:
-        handler_meta = filters["metadata"]
-        if isinstance(handler_meta, dict):
-            request.metadata = {**(request.metadata or {}), **handler_meta}
-    elif value.get("metadata"):
-        handler_meta = value["metadata"]
-        if isinstance(handler_meta, dict):
-            request.metadata = {**(request.metadata or {}), **handler_meta}
+    apply_handler_edits(request, filters, value, ("metadata",))
 
     # This read is the 404 probe and the ownership check; the merge below does
     # not read the column into Python, so it cannot lose a concurrent writer's

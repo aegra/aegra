@@ -318,7 +318,7 @@ The same flow backs the Vue/React `useStream()` composables.
 
 | Endpoint | Purpose |
 |---|---|
-| `POST /threads/{thread_id}/commands` | Run a command: `run.start` (start a run), `input.respond` (resume an interrupt). Returns a JSON response envelope. |
+| `POST /threads/{thread_id}/commands` | Run a command: `run.start` (start a run), `input.respond` (resume an interrupt), `input.inject` (send a message to the running run). Returns a JSON response envelope. |
 | `POST /threads/{thread_id}/stream/events` | Open a channel-filtered SSE stream of the thread's run events. |
 
 The stream is scoped to the **thread**, not a run — you open it, then issue `run.start`, and the events of whatever run executes flow through. The client mints the thread id, and `run.start` creates the thread if it doesn't exist yet.
@@ -427,6 +427,68 @@ curl -X POST http://localhost:8000/threads/$THREAD/commands   -H "Content-Type: 
 | `namespace` | Accepted for protocol compatibility. Interrupt ids already encode the subgraph namespace, so the server does not read it. |
 
 `update` and `goto` fold into the same `Command` as the resume, so the resumed run writes a single checkpoint.
+
+### Sending input to a running run
+
+`input.inject` hands a message to the run that is already going on the thread, for example a user adding "also check the tests" while the agent works. No run is started: the graph picks the message up at its next step.
+
+```bash
+curl -X POST http://localhost:8000/threads/$THREAD/commands \
+  -H "Content-Type: application/json" \
+  -d '{
+        "id": 3,
+        "method": "input.inject",
+        "params": {
+          "namespace": [],
+          "message": {"role": "user", "content": "also check the tests", "id": "msg-1"}
+        }
+      }'
+# → {"type": "success", "id": 3, "result": {}}
+```
+
+| Param | Effect |
+|:--|:--|
+| `message.role` | `user` or `system`. |
+| `message.content` | Non-empty text. |
+| `message.name` | Optional sender name. |
+| `message.id` | Optional. Becomes the message id in the thread's state and makes a retry safe: the same id with the same message is stored once, the same id with a different message returns `invalid_argument`. The server assigns one when it is absent. |
+| other `message` fields | Kept in the message's `additional_kwargs`. |
+| `namespace` | Must be `[]`. Injecting into a subgraph returns `not_supported`. |
+
+The server adds `additional_kwargs.injected_by`, the identity of the authenticated caller, replacing any value the client sent. Only the thread's owner can inject, and the `@auth.on.threads.create_run` handler runs for the command; see [authentication](/guides/authentication).
+
+The graph decides whether it takes live input: an inject is refused with `not_supported` until a pending or running run of the thread has declared it, and with `no_such_run` when the thread has no such run. `run.start` on a thread with an active run still starts a second run.
+
+#### Reading injected messages in a graph
+
+Aegra pins a reader on every run's config under `configurable["aegra_injected_input"]`; it is absent outside a server run:
+
+| Method | Effect |
+|:--|:--|
+| `await reader.accept()` | Declares that this run takes `input.inject`. Call it when the run starts and again where a resumed run continues: a run resumed after an interrupt starts at the interrupted node. Repeating it is harmless. |
+| `await reader.pending()` | Messages that no other run, and no other node of this run, has taken, oldest first. Each item has `message_id` and `message`, a message dict a `messages` reducer accepts. |
+| `await reader.take(ids)` | Claims messages for the calling node and returns the ids it claimed. Another run on the same thread, or another node of this run, may have claimed the rest. |
+
+```python
+async def call_model(state: State, config: RunnableConfig) -> dict:
+    reader = config["configurable"].get("aegra_injected_input")
+    injected = []
+    if reader is not None:
+        await reader.accept()
+        pending = await reader.pending()
+        taken = set(await reader.take([item.message_id for item in pending]))
+        # A resume sees again what the paused run took: take it so it settles, skip what the state holds.
+        held = {message.id for message in state["messages"]}
+        injected = [item.message for item in pending if item.message_id in taken and item.message_id not in held]
+    response = await model.ainvoke([*state["messages"], *injected])
+    return {"messages": [*injected, response]}
+```
+
+The `live_input` graph in `examples/` shows the full pattern, with `accept()` in its first node and an optional approval pause (`pause_after`) that shows the resume.
+
+Taken messages become delivered when the graph finishes. A run that pauses at an interrupt, fails, or is cancelled leaves them to the thread's next run, a resume included, so a resume can see again a message that a node before the interrupt already added to the state: take it, so it settles, and skip it, as the snippet does. Adding it again under the same id would only replace it in the `messages` channel, but a model called with it would read it twice. A run requeued after a worker restart sees again what it took. A node that fails releases what it took, so when LangGraph retries it, for example under a `RetryPolicy`, whether it is a function or a compiled subgraph, the retry takes it again. Every parallel branch and every repeated node, inside a compiled subgraph too, counts as a node of its own. Messages that no run took carry to the thread's next run and expire `INPUT_INJECT_TTL_SECONDS` (default 3600) after they were sent. A message a run took stays until a run delivers it, and a delivered message is kept until the same time, so repeating its id stays safe until then. Deleting the thread removes all of them.
+
+The Python SDK has no `input.inject` method yet; send the command body as above. The JavaScript SDK's thread stream sends it with `thread.input.inject(params)`.
 
 <Note>
   This first release covers the HTTP SSE + commands path the JS/Python SDKs use, verified end-to-end against the stock `langgraph-sdk`. The WebSocket transport and the `agent.getTree` / `state.fork` / `subscription.*` commands are not yet implemented; SSE filtering via the POST body covers the `useStream()` path without them.

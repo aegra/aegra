@@ -11,6 +11,7 @@
     "factory": "./examples/factory/graph.py:graph",
     "stress_test": "./examples/stress_test/graph.py:graph",
     "stress_tool_agent": "./examples/stress_tool_agent/graph.py:graph",
+    "live_input": "./examples/live_input/graph.py:graph",
     "cron_example": "./examples/cron_example/graph.py:graph"
   },
   "http": {

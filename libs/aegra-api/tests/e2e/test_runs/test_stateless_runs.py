@@ -5,14 +5,18 @@ These tests hit a real running Aegra server and exercise the ``POST /runs/wait``
 
 Requirements:
   - A running Aegra server (``uv run aegra dev`` or ``docker compose up``)
-  - The ``agent`` graph deployed in the server's ``aegra.json``
+  - The ``agent`` and ``stress_test`` graphs deployed in the server's ``aegra.json``
 """
+
+import json
 
 import pytest
 from httpx import AsyncClient
+from sqlalchemy import text
+from sqlalchemy.ext.asyncio import create_async_engine
 
 from aegra_api.settings import settings
-from tests.e2e._utils import elog, get_e2e_client
+from tests.e2e._utils import await_terminal_run, elog, get_e2e_client
 
 # ---------------------------------------------------------------------------
 # POST /runs/wait  (stateless wait)
@@ -182,6 +186,51 @@ async def test_stateless_stream_with_keep() -> None:
                 break
 
         assert event_count > 0
+
+
+@pytest.mark.e2e
+@pytest.mark.asyncio
+async def test_stateless_stream_disconnect_is_reclaimed_by_thread_ttl() -> None:
+    """A disconnected stateless stream is removed by the TTL fallback after its run settles."""
+    sdk = get_e2e_client()
+    assistant = await sdk.assistants.create(graph_id="stress_test", if_exists="do_nothing")
+    input_data = {"messages": [{"role": "user", "content": json.dumps({"delay": 0.2, "steps": 20})}]}
+
+    async with (
+        AsyncClient(base_url=settings.app.SERVER_URL, timeout=120.0) as http,
+        http.stream(
+            "POST",
+            "/runs/stream",
+            json={"assistant_id": assistant["assistant_id"], "input": input_data, "on_disconnect": "continue"},
+        ) as response,
+    ):
+        assert response.status_code == 200, await response.aread()
+        location = response.headers["content-location"]
+        _, thread_id, _, run_id = location.strip("/").split("/", 3)
+        async for _ in response.aiter_lines():
+            break
+
+    run = await await_terminal_run(sdk, thread_id, run_id, timeout=30.0)
+    assert run["status"] == "success"
+    assert (await sdk.threads.get(thread_id))["thread_id"] == thread_id
+
+    engine = create_async_engine(settings.db.database_url)
+    try:
+        async with engine.begin() as connection:
+            result = await connection.execute(
+                text("UPDATE thread_ttl SET expires_at = now() - interval '1 second' WHERE thread_id = :thread_id"),
+                {"thread_id": thread_id},
+            )
+            assert result.rowcount == 1, "stateless thread should have a TTL fallback row"
+    finally:
+        await engine.dispose()
+
+    async with AsyncClient(base_url=settings.app.SERVER_URL, timeout=30.0) as http:
+        prune = await http.post("/threads/prune")
+    assert prune.status_code == 200, prune.text
+    assert prune.json()["deleted"] >= 1
+    with pytest.raises(Exception, match="404|not found|Not Found"):
+        await sdk.threads.get(thread_id)
 
 
 # ---------------------------------------------------------------------------

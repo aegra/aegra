@@ -1,6 +1,7 @@
 """Unit tests for run_preparation helpers."""
 
 from collections.abc import Iterator
+from datetime import timedelta
 from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import AsyncMock, MagicMock
@@ -85,6 +86,48 @@ class TestValidateResumeCommand:
         session = _session_returning(_thread("idle"))
         await _validate_resume_command(session, "t1", None)
         session.scalar.assert_not_awaited()
+
+
+async def test_update_thread_metadata_adds_ttl_for_new_stateless_thread() -> None:
+    """Stateless threads receive a one-hour fallback TTL in the creation transaction."""
+    session = AsyncMock()
+    session.scalar.return_value = None
+    session.add = MagicMock()
+
+    await mod.update_thread_metadata(
+        session,
+        "thread-1",
+        "assistant-1",
+        "graph-1",
+        user_id="user-1",
+        is_ephemeral=True,
+    )
+
+    created_thread, ttl_row = [call.args[0] for call in session.add.call_args_list]
+    assert created_thread.thread_id == "thread-1"
+    assert created_thread.user_id == "user-1"
+    assert ttl_row.thread_id == "thread-1"
+    assert ttl_row.strategy == "delete"
+    assert ttl_row.ttl_minutes == 60
+    assert ttl_row.expires_at - ttl_row.created_at == timedelta(minutes=60)
+
+
+async def test_update_thread_metadata_does_not_add_ttl_to_existing_thread() -> None:
+    """Existing persistent threads do not become stateless cleanup candidates."""
+    session = AsyncMock()
+    session.scalar.return_value = SimpleNamespace(metadata_json={})
+
+    await mod.update_thread_metadata(
+        session,
+        "thread-1",
+        "assistant-1",
+        "graph-1",
+        user_id="user-1",
+        is_ephemeral=True,
+    )
+
+    session.add.assert_not_called()
+    session.execute.assert_awaited_once()
 
 
 _CHECKPOINT_ID = "1ef4f797-8335-6428-8001-8a1503f9b875"

@@ -12,7 +12,7 @@ from typing import Any
 
 import structlog
 
-from aegra_api.core.active_runs import active_runs, executing_runs, reconciled_run_cancellations
+from aegra_api.core.active_runs import active_runs, executing_runs
 from aegra_api.core.auth_ctx import with_auth_ctx
 from aegra_api.core.redis_manager import redis_manager
 from aegra_api.models.run_job import RunJob
@@ -23,7 +23,7 @@ from aegra_api.services.graph_streaming import stream_graph_events
 from aegra_api.services.langgraph_service import create_run_config, create_thread_config, get_langgraph_service
 from aegra_api.services.run_status import finalize_run, start_run
 from aegra_api.services.streaming_service import streaming_service
-from aegra_api.services.webhook_delivery import RunOutcome, notify_run_finished
+from aegra_api.services.webhook_delivery import finish_executing
 from aegra_api.settings import settings
 from aegra_api.utils.run_utils import map_command_to_langgraph
 
@@ -53,8 +53,6 @@ async def execute_run(job: RunJob) -> None:
     finalized = False
     # What the completion webhook reports; partial values survive a failed run.
     result = _GraphResult()
-    final_status = "error"
-    error_info: dict[str, str] | None = None
     started_at: datetime | None = None
     executing_runs.add(run_id)
 
@@ -67,7 +65,6 @@ async def execute_run(job: RunJob) -> None:
         final_output = await _stream_graph(job, result)
 
         if final_output.has_interrupt:
-            final_status = "interrupted"
             finalized = await finalize_run(
                 run_id,
                 thread_id,
@@ -75,9 +72,9 @@ async def execute_run(job: RunJob) -> None:
                 status="interrupted",
                 thread_status="interrupted",
                 output=final_output.data,
+                webhook_job=job,
             )
         else:
-            final_status = "success"
             finalized = await finalize_run(
                 run_id,
                 thread_id,
@@ -85,6 +82,7 @@ async def execute_run(job: RunJob) -> None:
                 status="success",
                 thread_status="idle",
                 output=final_output.data,
+                webhook_job=job,
             )
 
     except asyncio.CancelledError:
@@ -97,8 +95,6 @@ async def execute_run(job: RunJob) -> None:
             resumes_elsewhere = True
             logger.info("Shutdown drain cancel, skipping finalize for requeue", run_id=run_id)
         elif run_id in _timeout_cancellations:
-            final_status = "error"
-            error_info = {"error": "TimeoutError", "message": _TIMEOUT_ERROR}
             finalized = await finalize_run(
                 run_id,
                 thread_id,
@@ -107,6 +103,8 @@ async def execute_run(job: RunJob) -> None:
                 thread_status="error",
                 output={},
                 error=_TIMEOUT_ERROR,
+                error_type="TimeoutError",
+                webhook_job=job,
             )
             if finalized:
                 await _best_effort_signal(
@@ -116,7 +114,6 @@ async def execute_run(job: RunJob) -> None:
                     "TimeoutError",
                 )
         else:
-            final_status = "interrupted"
             finalized = await finalize_run(
                 run_id,
                 thread_id,
@@ -124,6 +121,7 @@ async def execute_run(job: RunJob) -> None:
                 status="interrupted",
                 thread_status="idle",
                 output={},
+                webhook_job=job,
             )
             if finalized:
                 await _best_effort_signal(streaming_service.signal_run_cancelled, run_id)
@@ -131,9 +129,6 @@ async def execute_run(job: RunJob) -> None:
     except Exception as exc:
         logger.exception("Run failed", run_id=run_id)
         safe_message = f"{type(exc).__name__}: execution failed"
-        # Also reached when finalizing a success fails, so reset the status set above.
-        final_status = "error"
-        error_info = {"error": type(exc).__name__, "message": str(exc)}
         finalized = await finalize_run(
             run_id,
             thread_id,
@@ -142,6 +137,8 @@ async def execute_run(job: RunJob) -> None:
             thread_status="error",
             output={},
             error=str(exc),
+            error_type=type(exc).__name__,
+            webhook_job=job,
         )
         if finalized:
             await _best_effort_signal(streaming_service.signal_run_error, run_id, safe_message, type(exc).__name__)
@@ -154,17 +151,7 @@ async def execute_run(job: RunJob) -> None:
         _shutdown_cancellations.discard(run_id)
         _timeout_cancellations.discard(run_id)
         active_runs.pop(run_id, None)
-        # No await between this check and leaving executing_runs, so the API either handed the run over or reports it.
-        handed_off = run_id in reconciled_run_cancellations
-        reconciled_run_cancellations.discard(run_id)
-        executing_runs.discard(run_id)
-        if finalized:
-            notify_run_finished(
-                job,
-                RunOutcome(status=final_status, values=result.state, error=error_info, run_started_at=started_at),
-            )
-        elif handed_off:
-            notify_run_finished(job, RunOutcome(status="interrupted", values=result.state, run_started_at=started_at))
+        finish_executing(job, values=result.state, run_started_at=started_at)
         if not resumes_elsewhere:
             await streaming_service.cleanup_run(run_id)
             await _signal_run_done(run_id)

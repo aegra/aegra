@@ -8,11 +8,12 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from aegra_api.core.active_runs import executing_runs, reconciled_run_cancellations
+from aegra_api.core.active_runs import executing_runs
 from aegra_api.models.auth import User
 from aegra_api.models.run_job import RunBehavior, RunExecution, RunIdentity, RunJob
 from aegra_api.models.runs import Durability
 from aegra_api.services import run_executor as run_executor_module
+from aegra_api.services import webhook_delivery
 from aegra_api.services.run_executor import (
     _GraphResult,
     _lease_loss_cancellations,
@@ -24,7 +25,7 @@ from aegra_api.services.run_executor import (
     _timeout_cancellations,
     execute_run,
 )
-from aegra_api.services.webhook_delivery import RunOutcome
+from aegra_api.services.webhook_delivery import RunOutcome, report_run
 
 
 async def _empty_async_gen():  # type: ignore[no-untyped-def]
@@ -121,6 +122,7 @@ class TestExecuteRunCancelledError:
     @pytest.mark.asyncio
     async def test_timeout_cancel_sets_error_and_signals(self) -> None:
         mock_finalize = AsyncMock(return_value=True)
+        job = _make_job()
 
         with (
             patch("aegra_api.services.run_executor.start_run", new_callable=AsyncMock, return_value=True),
@@ -139,7 +141,7 @@ class TestExecuteRunCancelledError:
             _timeout_cancellations.add("run-1")
             try:
                 with pytest.raises(asyncio.CancelledError):
-                    await execute_run(_make_job())
+                    await execute_run(job)
             finally:
                 _timeout_cancellations.discard("run-1")
 
@@ -151,6 +153,8 @@ class TestExecuteRunCancelledError:
             thread_status="error",
             output={},
             error="Job exceeded maximum execution time",
+            error_type="TimeoutError",
+            webhook_job=job,
         )
         mock_streaming.signal_run_error.assert_awaited_once_with(
             "run-1",
@@ -750,136 +754,176 @@ def _stream_filling(
     return _fake
 
 
+async def _finalize_that_wins(
+    run_id: str, _thread_id: str, *, status: str, webhook_job: RunJob, **_kwargs: Any
+) -> bool:
+    """A finalize whose update wins: like finalize_run, it reports the run."""
+    report_run(webhook_job, RunOutcome(status=status), run_id=run_id)
+    return True
+
+
+def _cancel_committed_elsewhere(data: dict[str, Any]) -> Callable[[RunJob, _GraphResult], Awaitable[_GraphResult]]:
+    """A ``_stream_graph`` stand-in during which another actor commits the run's cancel and reports it."""
+
+    async def _fake(job: RunJob, result: _GraphResult) -> _GraphResult:
+        result.data = data
+        result.state = data
+        report_run(None, RunOutcome(status="interrupted"), run_id=job.identity.run_id)
+        raise asyncio.CancelledError
+
+    return _fake
+
+
 class TestExecuteRunWebhook:
-    """Every terminal run hands its outcome to the webhook dispatcher; runs that resume elsewhere do not."""
+    """execute_run finalizes with its job, and sends the report kept for it with what it streamed."""
 
     @staticmethod
     async def _execute(
         stream: Callable[[RunJob, _GraphResult], Awaitable[_GraphResult]],
         *,
-        finalized: bool = True,
-        started: bool = True,
         finalize: AsyncMock | None = None,
-    ) -> MagicMock:
+        start: AsyncMock | None = None,
+    ) -> tuple[MagicMock, AsyncMock, RunJob]:
+        job = _make_job()
+        finalize = finalize or AsyncMock(side_effect=_finalize_that_wins)
         with (
-            patch("aegra_api.services.run_executor.start_run", new_callable=AsyncMock, return_value=started),
+            patch("aegra_api.services.run_executor.start_run", start or AsyncMock(return_value=True)),
             patch("aegra_api.services.run_executor._stream_graph", stream),
-            patch("aegra_api.services.run_executor.finalize_run", finalize or AsyncMock(return_value=finalized)),
+            patch("aegra_api.services.run_executor.finalize_run", finalize),
             patch("aegra_api.services.run_executor._signal_end_event", new_callable=AsyncMock),
             patch("aegra_api.services.run_executor.streaming_service") as mock_streaming,
             patch("aegra_api.services.run_executor._signal_run_done", new_callable=AsyncMock),
-            patch("aegra_api.services.run_executor.notify_run_finished") as mock_notify,
+            patch.object(webhook_delivery, "notify_run_finished") as mock_notify,
         ):
             mock_streaming.cleanup_run = AsyncMock()
             mock_streaming.signal_run_error = AsyncMock()
             mock_streaming.signal_run_cancelled = AsyncMock()
             with contextlib.suppress(asyncio.CancelledError):
-                await execute_run(_make_job())
-        return mock_notify
+                await execute_run(job)
+        return mock_notify, finalize, job
 
     @staticmethod
-    def _outcome(mock_notify: MagicMock) -> RunOutcome:
+    def _outcome(mock_notify: MagicMock, job: RunJob) -> RunOutcome:
         mock_notify.assert_called_once()
-        job, outcome = mock_notify.call_args.args
-        assert job.identity.run_id == "run-1"
+        sent_job, outcome = mock_notify.call_args.args
+        assert sent_job is job
         return outcome
 
-    async def test_success_reports_final_values(self) -> None:
-        mock_notify = await self._execute(_stream_filling({"count": 2}))
+    async def test_success_is_finalized_with_the_job_and_reported_with_its_values(self) -> None:
+        mock_notify, finalize, job = await self._execute(_stream_filling({"count": 2}))
 
-        outcome = self._outcome(mock_notify)
+        assert finalize.await_args.kwargs["status"] == "success"
+        assert finalize.await_args.kwargs["webhook_job"] is job
+        outcome = self._outcome(mock_notify, job)
         assert outcome.status == "success"
         assert outcome.values == {"count": 2}
-        assert outcome.error is None
         assert outcome.run_started_at is not None
         assert outcome.run_started_at <= outcome.run_ended_at
 
-    async def test_graph_interrupt_reports_interrupted(self) -> None:
-        mock_notify = await self._execute(_stream_filling({"count": 1}, interrupt=True))
+    async def test_graph_interrupt_is_finalized_as_interrupted(self) -> None:
+        mock_notify, finalize, job = await self._execute(_stream_filling({"count": 1}, interrupt=True))
 
-        assert self._outcome(mock_notify).status == "interrupted"
+        assert finalize.await_args.kwargs["status"] == "interrupted"
+        assert finalize.await_args.kwargs["thread_status"] == "interrupted"
+        assert self._outcome(mock_notify, job).values == {"count": 1}
 
-    async def test_failure_reports_error_and_partial_values(self) -> None:
-        mock_notify = await self._execute(_stream_filling({"count": 1}, error=RuntimeError("graph exploded")))
+    async def test_failure_is_finalized_with_its_error_type_and_reports_partial_values(self) -> None:
+        mock_notify, finalize, job = await self._execute(
+            _stream_filling({"count": 1}, error=RuntimeError("graph exploded"))
+        )
 
-        outcome = self._outcome(mock_notify)
-        assert outcome.status == "error"
-        assert outcome.error == {"error": "RuntimeError", "message": "graph exploded"}
-        assert outcome.values == {"count": 1}
+        kwargs = finalize.await_args.kwargs
+        assert (kwargs["status"], kwargs["error"], kwargs["error_type"]) == ("error", "graph exploded", "RuntimeError")
+        assert kwargs["webhook_job"] is job
+        assert self._outcome(mock_notify, job).values == {"count": 1}
 
-    async def test_timeout_reports_timeout_error(self) -> None:
+    async def test_timeout_is_finalized_as_a_timeout_error(self) -> None:
         _timeout_cancellations.add("run-1")
         try:
-            mock_notify = await self._execute(_stream_filling({}, error=asyncio.CancelledError()))
+            mock_notify, finalize, job = await self._execute(_stream_filling({}, error=asyncio.CancelledError()))
         finally:
             _timeout_cancellations.discard("run-1")
 
-        outcome = self._outcome(mock_notify)
-        assert outcome.status == "error"
-        assert outcome.error == {"error": "TimeoutError", "message": "Job exceeded maximum execution time"}
+        kwargs = finalize.await_args.kwargs
+        assert (kwargs["status"], kwargs["error"], kwargs["error_type"]) == (
+            "error",
+            "Job exceeded maximum execution time",
+            "TimeoutError",
+        )
+        assert kwargs["webhook_job"] is job
+        assert self._outcome(mock_notify, job).status == "error"
 
-    async def test_user_cancel_reports_interrupted(self) -> None:
-        mock_notify = await self._execute(_stream_filling({"count": 1}, error=asyncio.CancelledError()))
+    async def test_user_cancel_is_finalized_as_interrupted_without_an_error(self) -> None:
+        mock_notify, finalize, job = await self._execute(_stream_filling({"count": 1}, error=asyncio.CancelledError()))
 
-        outcome = self._outcome(mock_notify)
-        assert outcome.status == "interrupted"
-        assert outcome.error is None
+        assert finalize.await_args.kwargs["status"] == "interrupted"
+        assert "error" not in finalize.await_args.kwargs
+        assert finalize.await_args.kwargs["webhook_job"] is job
+        assert self._outcome(mock_notify, job).status == "interrupted"
 
     @pytest.mark.parametrize("cancellations", [_lease_loss_cancellations, _shutdown_cancellations])
-    async def test_run_that_resumes_elsewhere_is_not_reported(self, cancellations: set[str]) -> None:
+    async def test_run_that_resumes_elsewhere_is_neither_finalized_nor_reported(self, cancellations: set[str]) -> None:
         cancellations.add("run-1")
         try:
-            mock_notify = await self._execute(_stream_filling({}, error=asyncio.CancelledError()))
+            mock_notify, finalize, _job = await self._execute(_stream_filling({}, error=asyncio.CancelledError()))
         finally:
             cancellations.discard("run-1")
 
+        finalize.assert_not_awaited()
         mock_notify.assert_not_called()
 
     async def test_lost_finalization_race_is_not_reported(self) -> None:
-        mock_notify = await self._execute(_stream_filling({"count": 2}), finalized=False)
+        mock_notify, _finalize, _job = await self._execute(
+            _stream_filling({"count": 2}), finalize=AsyncMock(return_value=False)
+        )
 
         mock_notify.assert_not_called()
 
-    async def test_failed_success_finalization_reports_the_error_status_it_stored(self) -> None:
+    async def test_failed_success_finalization_is_finalized_and_reported_as_an_error(self) -> None:
         # The success write fails, the error path then records the run as an error.
-        finalize = AsyncMock(side_effect=[RuntimeError("db write failed"), True])
+        attempts: list[dict[str, Any]] = []
 
-        mock_notify = await self._execute(_stream_filling({"count": 2}), finalize=finalize)
+        async def _finalize(run_id: str, thread_id: str, **kwargs: Any) -> bool:
+            attempts.append(kwargs)
+            if len(attempts) == 1:
+                raise RuntimeError("db write failed")
+            return await _finalize_that_wins(run_id, thread_id, **kwargs)
 
-        outcome = self._outcome(mock_notify)
-        assert finalize.await_args_list[1].kwargs["status"] == "error"
-        assert outcome.status == "error"
-        assert outcome.error == {"error": "RuntimeError", "message": "db write failed"}
+        mock_notify, _finalize_mock, job = await self._execute(
+            _stream_filling({"count": 2}), finalize=AsyncMock(side_effect=_finalize)
+        )
+
+        assert [attempt["status"] for attempt in attempts] == ["success", "error"]
+        assert (attempts[1]["error"], attempts[1]["error_type"]) == ("db write failed", "RuntimeError")
+        assert self._outcome(mock_notify, job).status == "error"
 
     async def test_run_that_never_started_is_not_reported(self) -> None:
-        mock_notify = await self._execute(_stream_filling({}), started=False)
+        mock_notify, finalize, _job = await self._execute(_stream_filling({}), start=AsyncMock(return_value=False))
 
+        finalize.assert_not_awaited()
         mock_notify.assert_not_called()
 
-    async def test_cancel_the_api_handed_over_reports_streamed_values_and_start_time(self) -> None:
-        # The API committed the cancel, so this finalize loses; the webhook still carries what the run produced.
-        reconciled_run_cancellations.add("run-1")
-        try:
-            mock_notify = await self._execute(
-                _stream_filling({"count": 1}, error=asyncio.CancelledError()), finalized=False
-            )
-        finally:
-            reconciled_run_cancellations.discard("run-1")
+    async def test_cancel_committed_elsewhere_is_reported_with_the_streamed_values_and_start_time(self) -> None:
+        # The other actor's update won, so this finalize loses; the webhook still carries what the run produced.
+        mock_notify, _finalize, job = await self._execute(
+            _cancel_committed_elsewhere({"count": 1}), finalize=AsyncMock(return_value=False)
+        )
 
-        outcome = self._outcome(mock_notify)
+        outcome = self._outcome(mock_notify, job)
         assert outcome.status == "interrupted"
         assert outcome.values == {"count": 1}
         assert outcome.error is None
         assert outcome.run_started_at is not None
+        assert "run-1" not in webhook_delivery._reports_for_executor
 
-    async def test_handed_over_run_that_never_started_reports_without_values(self) -> None:
-        reconciled_run_cancellations.add("run-1")
-        try:
-            mock_notify = await self._execute(_stream_filling({}), started=False)
-        finally:
-            reconciled_run_cancellations.discard("run-1")
+    async def test_cancel_committed_before_the_run_started_is_reported_without_values(self) -> None:
+        async def _start(run_id: str, **_kwargs: Any) -> bool:
+            report_run(None, RunOutcome(status="interrupted"), run_id=run_id)
+            return False
 
-        outcome = self._outcome(mock_notify)
+        mock_notify, _finalize, job = await self._execute(_stream_filling({}), start=AsyncMock(side_effect=_start))
+
+        outcome = self._outcome(mock_notify, job)
         assert outcome.status == "interrupted"
         assert outcome.values is None
         assert outcome.run_started_at is None
@@ -898,18 +942,9 @@ class TestExecuteRunWebhook:
 
     @pytest.mark.parametrize("started", [True, False])
     async def test_run_leaves_executing_runs_however_it_ends(self, started: bool) -> None:
-        await self._execute(_stream_filling({}, error=RuntimeError("boom")), started=started)
+        await self._execute(_stream_filling({}, error=RuntimeError("boom")), start=AsyncMock(return_value=started))
 
         assert "run-1" not in executing_runs
-
-    async def test_handover_mark_is_cleared_when_the_run_ends(self) -> None:
-        reconciled_run_cancellations.add("run-1")
-        try:
-            await self._execute(_stream_filling({}, error=asyncio.CancelledError()), finalized=False)
-
-            assert "run-1" not in reconciled_run_cancellations
-        finally:
-            reconciled_run_cancellations.discard("run-1")
 
 
 def _webhook_job() -> RunJob:

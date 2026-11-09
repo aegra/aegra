@@ -36,7 +36,7 @@ from aegra_api.services.run_executor import (
     execute_run,
 )
 from aegra_api.services.run_status import finalize_run
-from aegra_api.services.webhook_delivery import RunOutcome, job_for_webhook, notify_run_finished
+from aegra_api.services.webhook_delivery import job_for_run
 from aegra_api.settings import settings
 
 logger = structlog.getLogger(__name__)
@@ -66,18 +66,15 @@ async def _cleanup_cancelled_execution(run_id: str, execution_task: asyncio.Task
             return
 
         thread_id, user_id = identity
-        job = await _load_webhook_job(run_id)
-        # Wins only when execute_run never finalized the run, so nothing else reported it.
-        finalized = await finalize_run(
+        await finalize_run(
             run_id,
             thread_id,
             user_id=user_id,
             status="interrupted",
             thread_status="idle",
             output={},
+            webhook_job=await _load_webhook_job(run_id),
         )
-        if finalized and job is not None:
-            notify_run_finished(job, RunOutcome(status="interrupted"))
     except Exception:
         logger.exception("Failed to persist explicit run cancellation", run_id=run_id)
 
@@ -298,19 +295,16 @@ class WorkerExecutor(BaseExecutor):
                 identity = await _get_run_identity(run_id)
                 if identity is not None:
                     thread_id, user_id = identity
-                    job = await _load_webhook_job(run_id)
-                    # Wins only when execute_run never finalized the run, so nothing else reported it.
-                    finalized = await finalize_run(
+                    await finalize_run(
                         run_id,
                         thread_id,
                         user_id=user_id,
                         status="error",
                         thread_status="error",
                         error=_TIMEOUT_ERROR,
+                        error_type="TimeoutError",
+                        webhook_job=await _load_webhook_job(run_id),
                     )
-                    if finalized and job is not None:
-                        error = {"error": "TimeoutError", "message": _TIMEOUT_ERROR}
-                        notify_run_finished(job, RunOutcome(status="error", error=error))
                 await _release_lease(run_id, worker_name)
         except asyncio.CancelledError:
             logger.info("Job task cancelled", worker=worker_name, run_id=run_id)
@@ -422,15 +416,7 @@ async def _load_webhook_job(run_id: str) -> RunJob | None:
     maker = _get_session_maker()
     async with maker() as session:
         run = await session.scalar(select(RunORM).where(RunORM.run_id == run_id))
-    if run is None:
-        return None
-    return job_for_webhook(
-        run.execution_params,
-        run_id=run_id,
-        thread_id=run.thread_id,
-        assistant_id=run.assistant_id,
-        created_at=run.created_at,
-    )
+    return job_for_run(run) if run is not None else None
 
 
 async def _get_run_identity(run_id: str) -> tuple[str, str] | None:

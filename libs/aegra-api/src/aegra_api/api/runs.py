@@ -28,7 +28,7 @@ from aegra_api.services.run_preparation import _prepare_run
 from aegra_api.services.run_status import interrupt_run_before_delete, interrupt_unowned_run
 from aegra_api.services.run_waiters import TERMINAL_STATES, encode_output, heartbeat_wait_body, run_result_body
 from aegra_api.services.streaming_service import streaming_service
-from aegra_api.services.webhook_delivery import report_cancelled_run
+from aegra_api.services.webhook_delivery import job_for_run
 from aegra_api.settings import settings
 from aegra_api.utils.status_compat import validate_run_status
 
@@ -57,16 +57,10 @@ async def _request_run_interruption(
         run_orm.run_id,
         run_orm.thread_id,
         user_id=run_orm.user_id,
+        webhook_job=job_for_run(run_orm),
     )
 
     if reconciled:
-        report_cancelled_run(
-            run_orm.execution_params,
-            run_id=run_orm.run_id,
-            thread_id=run_orm.thread_id,
-            assistant_id=run_orm.assistant_id,
-            created_at=run_orm.created_at,
-        )
         # A delayed worker can outlive an expired lease, so request a stop.
         # Signaling stays here to close streams when no executor owns the run.
         if action == "interrupt":

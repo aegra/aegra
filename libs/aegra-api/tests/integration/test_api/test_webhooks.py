@@ -15,6 +15,7 @@ from aegra_api.models.auth import User
 from aegra_api.models.run_job import RunBehavior, RunIdentity, RunJob
 from aegra_api.services import webhook_policy
 from aegra_api.services.cron_service import CronService, get_cron_service
+from aegra_api.services.webhook_delivery import RunOutcome
 from tests.fixtures.clients import create_test_app, make_client
 from tests.fixtures.database import DummyScalarResult, DummySessionBase
 from tests.fixtures.session_fixtures import override_session_dependency
@@ -163,7 +164,7 @@ class TestCancelledRunWebhook:
         webhook: str | None = _WEBHOOK,
         executing_here: bool = False,
         listed_in_active_runs: bool = False,
-        handed_over: set[str] | None = None,
+        kept: dict[str, RunOutcome] | None = None,
     ) -> MagicMock:
         app = create_test_app(include_runs=True, include_threads=False)
         run = DummyRun(status="running")
@@ -180,22 +181,22 @@ class TestCancelledRunWebhook:
             async def refresh(self, _obj: Any) -> None:
                 return None
 
+            async def execute(self, _stmt: Any) -> MagicMock:
+                # The guarded interrupt UPDATE matches the run only when no live worker owns it.
+                return MagicMock(**{"scalar_one_or_none.return_value": "test-run-123" if reconciled else None})
+
         override_session_dependency(app, Session)
         client = make_client(app)
 
         with (
             patch("aegra_api.api.runs.streaming_service") as mock_streaming,
-            patch("aegra_api.api.runs.interrupt_unowned_run", new_callable=AsyncMock, return_value=reconciled),
             patch("aegra_api.services.webhook_delivery.notify_run_finished") as mock_notify,
             patch.dict(
                 "aegra_api.api.runs.active_runs",
                 {"test-run-123": MagicMock()} if executing_here or listed_in_active_runs else {},
             ),
             patch("aegra_api.services.webhook_delivery.executing_runs", {"test-run-123"} if executing_here else set()),
-            patch(
-                "aegra_api.services.webhook_delivery.reconciled_run_cancellations",
-                handed_over if handed_over is not None else set(),
-            ),
+            patch("aegra_api.services.webhook_delivery._reports_for_executor", kept if kept is not None else {}),
         ):
             mock_streaming.cancel_run = AsyncMock()
             mock_streaming.interrupt_run = AsyncMock()
@@ -224,30 +225,30 @@ class TestCancelledRunWebhook:
 
     def test_cancel_of_a_run_executing_in_this_process_hands_the_report_to_its_executor(self) -> None:
         # The executor has the streamed values and start time; the endpoint would report neither.
-        handed_over: set[str] = set()
+        kept: dict[str, RunOutcome] = {}
 
-        mock_notify = self._cancel(reconciled=True, executing_here=True, handed_over=handed_over)
+        mock_notify = self._cancel(reconciled=True, executing_here=True, kept=kept)
 
         mock_notify.assert_not_called()
-        assert handed_over == {"test-run-123"}
+        assert kept["test-run-123"].status == "interrupted"
 
     def test_cancel_before_the_worker_enters_execution_is_reported_by_the_endpoint(self) -> None:
         # A worker lists the run in active_runs before taking its lease; after this cancel it never executes it.
-        handed_over: set[str] = set()
+        kept: dict[str, RunOutcome] = {}
 
-        mock_notify = self._cancel(reconciled=True, listed_in_active_runs=True, handed_over=handed_over)
+        mock_notify = self._cancel(reconciled=True, listed_in_active_runs=True, kept=kept)
 
         mock_notify.assert_called_once()
         assert mock_notify.call_args.args[1].status == "interrupted"
-        assert handed_over == set()
+        assert kept == {}
 
     def test_cancel_of_a_queued_run_reports_it_without_handing_over(self) -> None:
-        handed_over: set[str] = set()
+        kept: dict[str, RunOutcome] = {}
 
-        mock_notify = self._cancel(reconciled=True, handed_over=handed_over)
+        mock_notify = self._cancel(reconciled=True, kept=kept)
 
         mock_notify.assert_called_once()
-        assert handed_over == set()
+        assert kept == {}
 
 
 class TestDeletedRunWebhook:

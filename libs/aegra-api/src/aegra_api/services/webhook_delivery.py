@@ -11,7 +11,7 @@ import json
 import logging
 import random
 from contextvars import ContextVar
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from typing import Any
 
@@ -19,7 +19,8 @@ import httpx
 import structlog
 from pydantic import ValidationError
 
-from aegra_api.core.active_runs import executing_runs, reconciled_run_cancellations
+from aegra_api.core.active_runs import executing_runs
+from aegra_api.core.orm import Run as RunORM
 from aegra_api.core.serializers import GeneralSerializer
 from aegra_api.models.run_job import RunJob
 from aegra_api.services.webhook_policy import (
@@ -306,19 +307,39 @@ def notify_run_finished(job: RunJob, outcome: RunOutcome) -> None:
         logger.exception("Could not schedule run webhook", run_id=job.identity.run_id)
 
 
-def report_cancelled_run(
-    params: dict[str, Any] | None,
-    *,
-    run_id: str,
-    thread_id: str,
-    assistant_id: str | None,
-    created_at: datetime | None,
-) -> None:
-    """Report a run that a cancel or delete request made terminal."""
+def job_for_run(run: RunORM) -> RunJob | None:
+    """The stored run's job when it asked for a webhook, else None."""
+    return job_for_webhook(
+        run.execution_params,
+        run_id=run.run_id,
+        thread_id=run.thread_id,
+        assistant_id=run.assistant_id,
+        created_at=run.created_at,
+    )
+
+
+# Reports committed while their run executed in this process, kept for its executor to send.
+_reports_for_executor: dict[str, RunOutcome] = {}
+
+
+def report_run(job: RunJob | None, outcome: RunOutcome, *, run_id: str) -> None:
+    """Report a run whose terminal status the caller's conditional update has just committed.
+
+    Only one such update wins per run, so this is the run's only report. A run still executing in
+    this process is sent by its executor instead, which adds the values it streamed and its start time.
+    """
     if run_id in executing_runs:
-        # Still executing here: its executor reports it, with the values and start time it has.
-        reconciled_run_cancellations.add(run_id)
+        _reports_for_executor[run_id] = outcome
         return
-    job = job_for_webhook(params, run_id=run_id, thread_id=thread_id, assistant_id=assistant_id, created_at=created_at)
     if job is not None:
-        notify_run_finished(job, RunOutcome(status="interrupted"))
+        notify_run_finished(job, outcome)
+
+
+def finish_executing(job: RunJob, *, values: Any, run_started_at: datetime | None) -> None:
+    """Take the run out of ``executing_runs`` and send the report kept for its executor, if any."""
+    run_id = job.identity.run_id
+    # No await between the two, so report_run either kept the report here or sends it itself.
+    executing_runs.discard(run_id)
+    outcome = _reports_for_executor.pop(run_id, None)
+    if outcome is not None:
+        notify_run_finished(job, replace(outcome, values=values, run_started_at=run_started_at))

@@ -12,6 +12,7 @@ import httpx
 import pytest
 from langchain_core.messages import AIMessage
 
+from aegra_api.core.orm import Run as RunORM
 from aegra_api.models.auth import User
 from aegra_api.models.run_job import RunBehavior, RunExecution, RunIdentity, RunJob
 from aegra_api.services import webhook_delivery, webhook_policy
@@ -20,9 +21,11 @@ from aegra_api.services.webhook_delivery import (
     WebhookDispatcher,
     _PinnedAddressTransport,
     build_run_payload,
+    finish_executing,
+    job_for_run,
     notify_run_finished,
     redact_webhook_url,
-    report_cancelled_run,
+    report_run,
 )
 from aegra_api.services.webhook_policy import WebhookDNSError, WebhookUrlError, get_webhook_settings, webhooks_enabled
 
@@ -622,45 +625,118 @@ class TestNotifyRunFinished:
         dispatcher.submit.assert_called_once()
 
 
-class TestReportCancelledRun:
-    @staticmethod
-    def _report(*, executing: set[str], handed_over: set[str], webhook: str | None = _WEBHOOK) -> MagicMock:
-        with (
-            patch.object(webhook_delivery, "executing_runs", executing),
-            patch.object(webhook_delivery, "reconciled_run_cancellations", handed_over),
-            patch.object(webhook_delivery, "notify_run_finished") as mock_notify,
-        ):
-            report_cancelled_run(
-                _job(webhook=webhook).to_execution_params(),
-                run_id="run-1",
-                thread_id="thread-1",
-                assistant_id="assistant-1",
-                created_at=_CREATED_AT,
-            )
-        return mock_notify
+class TestJobForRun:
+    def test_rebuilds_the_stored_runs_job(self) -> None:
+        run = RunORM(
+            run_id="run-1",
+            thread_id="thread-1",
+            assistant_id="assistant-1",
+            user_id="user-1",
+            execution_params=_job().to_execution_params(),
+            created_at=_CREATED_AT,
+        )
 
-    def test_run_executing_here_is_handed_to_its_executor(self) -> None:
-        handed_over: set[str] = set()
+        job = job_for_run(run)
 
-        mock_notify = self._report(executing={"run-1"}, handed_over=handed_over)
+        assert job is not None
+        assert job.identity.run_id == "run-1"
+        assert job.identity.assistant_id == "assistant-1"
+        assert job.identity.created_at == _CREATED_AT
+        assert job.behavior.webhook == _WEBHOOK
+
+    def test_returns_none_for_a_run_without_a_webhook(self) -> None:
+        run = RunORM(run_id="run-1", thread_id="thread-1", execution_params=_job(webhook=None).to_execution_params())
+
+        assert job_for_run(run) is None
+
+
+@pytest.fixture
+def kept_reports(monkeypatch: pytest.MonkeyPatch) -> tuple[set[str], dict[str, RunOutcome]]:
+    """Isolated ``executing_runs`` and kept reports, shared by report_run and finish_executing."""
+    executing: set[str] = set()
+    kept: dict[str, RunOutcome] = {}
+    monkeypatch.setattr(webhook_delivery, "executing_runs", executing)
+    monkeypatch.setattr(webhook_delivery, "_reports_for_executor", kept)
+    return executing, kept
+
+
+class TestReportRun:
+    """Decides who sends a run's webhook once a conditional update has made the run terminal."""
+
+    def test_run_not_executing_here_is_reported_now(self, kept_reports: tuple[set[str], dict[str, RunOutcome]]) -> None:
+        _executing, kept = kept_reports
+        job = _job()
+        outcome = RunOutcome(status="interrupted")
+
+        with patch.object(webhook_delivery, "notify_run_finished") as mock_notify:
+            report_run(job, outcome, run_id="run-1")
+
+        mock_notify.assert_called_once_with(job, outcome)
+        assert kept == {}
+
+    def test_run_executing_here_is_kept_for_its_executor(
+        self, kept_reports: tuple[set[str], dict[str, RunOutcome]]
+    ) -> None:
+        # The executor has the streamed values and start time; the caller has neither.
+        executing, kept = kept_reports
+        executing.add("run-1")
+        outcome = RunOutcome(status="interrupted")
+
+        with patch.object(webhook_delivery, "notify_run_finished") as mock_notify:
+            report_run(_job(), outcome, run_id="run-1")
 
         mock_notify.assert_not_called()
-        assert handed_over == {"run-1"}
+        assert kept == {"run-1": outcome}
 
-    def test_run_not_executing_here_is_reported_now_as_interrupted(self) -> None:
-        handed_over: set[str] = set()
+    def test_run_without_a_webhook_job_reports_nothing(
+        self, kept_reports: tuple[set[str], dict[str, RunOutcome]]
+    ) -> None:
+        with patch.object(webhook_delivery, "notify_run_finished") as mock_notify:
+            report_run(None, RunOutcome(status="interrupted"), run_id="run-1")
 
-        mock_notify = self._report(executing=set(), handed_over=handed_over)
+        mock_notify.assert_not_called()
+
+
+class TestFinishExecuting:
+    def test_sends_the_kept_report_with_the_streamed_values_and_start_time(
+        self, kept_reports: tuple[set[str], dict[str, RunOutcome]]
+    ) -> None:
+        executing, kept = kept_reports
+        executing.add("run-1")
+        kept["run-1"] = RunOutcome(status="interrupted", run_ended_at=_ENDED_AT)
+
+        with patch.object(webhook_delivery, "notify_run_finished") as mock_notify:
+            finish_executing(_job(), values={"step_count": 1}, run_started_at=_STARTED_AT)
 
         job, outcome = mock_notify.call_args.args
         assert job.identity.run_id == "run-1"
-        assert job.identity.created_at == _CREATED_AT
-        assert outcome.status == "interrupted"
-        assert outcome.values is None
-        assert outcome.run_started_at is None
-        assert handed_over == set()
+        assert outcome == RunOutcome(
+            status="interrupted", values={"step_count": 1}, run_started_at=_STARTED_AT, run_ended_at=_ENDED_AT
+        )
+        assert executing == set()
+        assert kept == {}
 
-    def test_run_without_a_webhook_reports_nothing(self) -> None:
-        mock_notify = self._report(executing=set(), handed_over=set(), webhook=None)
+    def test_run_with_no_kept_report_sends_nothing(self, kept_reports: tuple[set[str], dict[str, RunOutcome]]) -> None:
+        executing, _kept = kept_reports
+        executing.add("run-1")
+
+        with patch.object(webhook_delivery, "notify_run_finished") as mock_notify:
+            finish_executing(_job(), values={"step_count": 1}, run_started_at=_STARTED_AT)
 
         mock_notify.assert_not_called()
+        assert executing == set()
+
+    def test_report_committed_after_the_run_finished_executing_is_sent_by_its_committer(
+        self, kept_reports: tuple[set[str], dict[str, RunOutcome]]
+    ) -> None:
+        executing, kept = kept_reports
+        executing.add("run-1")
+        job = _job()
+        outcome = RunOutcome(status="interrupted")
+
+        with patch.object(webhook_delivery, "notify_run_finished") as mock_notify:
+            finish_executing(job, values=None, run_started_at=None)
+            report_run(job, outcome, run_id="run-1")
+
+        mock_notify.assert_called_once_with(job, outcome)
+        assert kept == {}

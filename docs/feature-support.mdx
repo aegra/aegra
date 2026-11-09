@@ -35,7 +35,8 @@ description: "What Aegra supports today, what's coming soon, and what's not yet 
 
 | Feature | Status | Notes |
 |:--|:--|:--|
-| Background runs | Supported | Non-blocking execution with polling. |
+  | Background runs | Supported | Non-blocking execution with polling. |
+  | Stateless batch runs | Supported | Atomically create up to 100 stateless runs with `POST /runs/batch`. |
 | Streaming (7 SSE modes) | Supported | values, updates, messages, messages-tuple, custom, events, and debug. |
 | SSE reconnection | Supported | Resume interrupted streams from where they left off. |
 | Sync wait | Supported | Block until run completes and return final output. |

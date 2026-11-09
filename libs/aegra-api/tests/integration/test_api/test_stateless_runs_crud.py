@@ -436,3 +436,31 @@ class TestStatelessRouteRegistration:
 
         resp = client.get("/runs")
         assert resp.status_code == 405
+
+    def test_runs_batch_route_exists(self) -> None:
+        """Expose POST /runs/batch in the stateless router."""
+        app = create_test_app(include_runs=True)
+        override_session_dependency(app, BasicSession)
+        client = make_client(app)
+
+        resp = client.get("/runs/batch")
+        assert resp.status_code == 405
+
+    def test_runs_batch_requires_an_array(self) -> None:
+        """Reject a non-array body before any run preparation occurs."""
+        app = create_test_app(include_runs=True)
+        override_session_dependency(app, BasicSession)
+        client = make_client(app)
+
+        resp = client.post("/runs/batch", json={"assistant_id": "agent", "input": {}})
+        assert resp.status_code == 422
+
+    def test_runs_batch_rejects_more_than_100_runs(self) -> None:
+        """Reject batches larger than the documented endpoint limit."""
+        app = create_test_app(include_runs=True)
+        override_session_dependency(app, BasicSession)
+        client = make_client(app)
+        payload = [{"assistant_id": "agent", "input": {"value": index}} for index in range(101)]
+
+        resp = client.post("/runs/batch", json=payload)
+        assert resp.status_code == 422

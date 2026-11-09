@@ -1,4 +1,6 @@
+import json
 import os
+import sys
 from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -248,3 +250,36 @@ class TestDatabaseManager:
         assert index["embed"].__name__ == "embed"
         assert index["dims"] == 2
         mock_db_deps["store_instance"].setup.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_initialize_loads_embed_file_that_imports_from_dependencies(
+        self,
+        db_manager: DatabaseManager,
+        mock_db_deps: dict[str, Any],
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """An embed file can import from the config's ``dependencies``, which graph loading adds only later."""
+        shared = tmp_path / "shared"
+        shared.mkdir()
+        (shared / "embed_vocabulary.py").write_text('WORDS = ("short", "dark")\n')
+        (tmp_path / "embeddings.py").write_text(
+            "from embed_vocabulary import WORDS\n\n\n"
+            "async def embed(texts: list[str]) -> list[list[float]]:\n"
+            "    return [[float(text.count(word)) for word in WORDS] for text in texts]\n"
+        )
+        store_config = {"index": {"dims": 2, "embed": "./embeddings.py:embed"}}
+        config_path = tmp_path / "aegra.json"
+        config_path.write_text(json.dumps({"dependencies": ["./shared"], "graphs": {}, "store": store_config}))
+        monkeypatch.setattr(settings.app, "AEGRA_CONFIG", str(config_path))
+        monkeypatch.setattr(sys, "path", list(sys.path))
+        mock_db_deps["load_store_config"].return_value = store_config
+
+        try:
+            await db_manager.initialize()
+        finally:
+            sys.modules.pop("embed_vocabulary", None)
+
+        _, kwargs = mock_db_deps["store_cls"].call_args
+        assert await kwargs["index"]["embed"](["short and dark"]) == [[1.0, 1.0]]
+        assert str(shared) in sys.path

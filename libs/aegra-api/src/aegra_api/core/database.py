@@ -7,7 +7,7 @@ from psycopg.rows import dict_row
 from psycopg_pool import AsyncConnectionPool
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 
-from aegra_api.config import get_config_dir, load_store_config
+from aegra_api.config import get_config_dir, load_store_config, setup_dependencies
 from aegra_api.core.store_index import resolve_store_index
 from aegra_api.settings import settings
 
@@ -76,7 +76,11 @@ class DatabaseManager:
         # Load store configuration for semantic search (if configured)
         store_config = load_store_config()
         index_config = store_config.get("index") if store_config else None
-        store_index = resolve_store_index(index_config, base_dir=get_config_dir()) if index_config else None
+        store_index = None
+        if index_config:
+            # An embedding file may import from `dependencies` like a graph file, and graphs load after this.
+            setup_dependencies()
+            store_index = resolve_store_index(index_config, base_dir=get_config_dir())
 
         self._store = AsyncPostgresStore(conn=self.lg_pool, index=store_index)
         await self._store.setup()  # Ensure tables exist

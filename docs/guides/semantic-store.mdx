@@ -125,7 +125,7 @@ async def aembed_texts(texts: list[str]) -> list[list[float]]:
     return [item.embedding for item in response.data]
 ```
 
-The name can be an async function, a sync function, or a LangChain `Embeddings` instance, and every vector it returns must have `dims` values. Aegra loads the file once at startup; a missing file or name stops startup with an error that names it. `embed_kwargs` does not apply here, so configure the function in its own file.
+The name can be an async function, a sync function, or a LangChain `Embeddings` instance, and every vector it returns must have `dims` values. Aegra loads the file once at startup, after adding the [`dependencies`](/guides/dependencies) paths, so it can import from them like a graph file; a missing file or name stops startup with an error that names it. `embed_kwargs` does not apply here, so configure the function in its own file.
 
 ## Usage
 

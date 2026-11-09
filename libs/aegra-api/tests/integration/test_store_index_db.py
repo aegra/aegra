@@ -45,27 +45,27 @@ async def schema_pool() -> AsyncIterator[AsyncConnectionPool[psycopg.AsyncConnec
         admin = await psycopg.AsyncConnection.connect(settings.db.database_url_sync, autocommit=True, connect_timeout=5)
     except psycopg.OperationalError as exc:
         pytest.skip(f"PostgreSQL test database is unavailable: {exc}")
-
-    schema = f"store_index_test_{uuid4().hex[:12]}"
-    async with admin:
-        await admin.execute(sql.SQL("CREATE SCHEMA {}").format(sql.Identifier(schema)))
-        pool = AsyncConnectionPool(
-            conninfo=settings.db.database_url_sync,
-            connection_class=psycopg.AsyncConnection[DictRow],
-            open=False,
-            kwargs={
-                "autocommit": True,
-                "prepare_threshold": None,
-                "row_factory": dict_row,
-                "options": f"-c search_path={schema},public",
-            },
-        )
-        await pool.open()
-        try:
-            yield pool
-        finally:
-            await pool.close()
-            await admin.execute(sql.SQL("DROP SCHEMA {} CASCADE").format(sql.Identifier(schema)))
+    else:
+        schema = f"store_index_test_{uuid4().hex[:12]}"
+        async with admin:
+            await admin.execute(sql.SQL("CREATE SCHEMA {}").format(sql.Identifier(schema)))
+            pool = AsyncConnectionPool(
+                conninfo=settings.db.database_url_sync,
+                connection_class=psycopg.AsyncConnection[DictRow],
+                open=False,
+                kwargs={
+                    "autocommit": True,
+                    "prepare_threshold": None,
+                    "row_factory": dict_row,
+                    "options": f"-c search_path={schema},public",
+                },
+            )
+            await pool.open()
+            try:
+                yield pool
+            finally:
+                await pool.close()
+                await admin.execute(sql.SQL("DROP SCHEMA {} CASCADE").format(sql.Identifier(schema)))
 
 
 async def test_store_searches_with_embed_function_loaded_from_path(

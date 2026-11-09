@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from aegra_api.config import load_checkpointer_config, load_http_config, load_store_config
+from aegra_api.config import load_checkpointer_config, load_http_config, load_mcp_config, load_store_config
 
 
 def test_load_http_config_from_aegra_json(tmp_path, monkeypatch):
@@ -250,3 +250,69 @@ def test_load_checkpointer_config_no_config(tmp_path: Path, monkeypatch: pytest.
     config = load_checkpointer_config()
 
     assert config is None
+
+
+# ============================================================================
+# MCP Config Tests
+# ============================================================================
+
+
+def test_load_mcp_config_with_final_response_only(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Test loading MCP config with final_response_only set."""
+    monkeypatch.chdir(tmp_path)
+
+    config_file = tmp_path / "aegra.json"
+    config_file.write_text(
+        json.dumps(
+            {
+                "graphs": {"test": "./test.py:graph"},
+                "mcp": {"final_response_only": True},
+            }
+        )
+    )
+
+    config = load_mcp_config()
+
+    assert config is not None
+    assert config["final_response_only"] is True
+
+
+def test_load_mcp_config_no_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Test loading when no config file exists."""
+    monkeypatch.chdir(tmp_path)
+
+    config = load_mcp_config()
+
+    assert config is None
+
+
+def test_load_mcp_config_no_mcp_section(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Test loading when config exists but no mcp section."""
+    monkeypatch.chdir(tmp_path)
+
+    config_file = tmp_path / "aegra.json"
+    config_file.write_text(json.dumps({"graphs": {"test": "./test.py:graph"}}))
+
+    config = load_mcp_config()
+
+    assert config is None
+
+
+def test_load_mcp_config_from_langgraph_json(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Test loading MCP config from langgraph.json fallback."""
+    monkeypatch.chdir(tmp_path)
+
+    config_file = tmp_path / "langgraph.json"
+    config_file.write_text(
+        json.dumps(
+            {
+                "graphs": {"test": "./test.py:graph"},
+                "mcp": {"final_response_only": True},
+            }
+        )
+    )
+
+    config = load_mcp_config()
+
+    assert config is not None
+    assert config["final_response_only"] is True

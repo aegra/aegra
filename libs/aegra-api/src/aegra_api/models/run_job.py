@@ -75,6 +75,8 @@ class RunJob(BaseModel):
     # JSONB-persisted; deliberately ``dict[str, Any]`` so legacy/drifted rows stay readable via
     # ``from_run_orm``. OTEL boundary in ``merge_run_metadata`` filters at emit. Do not narrow.
     run_metadata: dict[str, Any] = Field(default_factory=dict)
+    # Open Responses bookkeeping. Kept off ``run_metadata`` so it is not copied onto traces.
+    responses_meta: dict[str, Any] | None = None
 
     def to_execution_params(self) -> dict[str, Any]:
         """Serialize for the ``execution_params`` JSONB column.
@@ -89,6 +91,7 @@ class RunJob(BaseModel):
             "execution": self.execution.model_dump(),
             "behavior": self.behavior.model_dump(),
             "run_metadata": self.run_metadata,
+            "responses_meta": self.responses_meta,
         }
 
     @classmethod
@@ -107,4 +110,5 @@ class RunJob(BaseModel):
             execution=RunExecution.model_validate(params["execution"]),
             behavior=RunBehavior.model_validate(params["behavior"]),
             run_metadata=params.get("run_metadata") or {},
+            responses_meta=params.get("responses_meta"),
         )

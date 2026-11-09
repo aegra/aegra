@@ -254,6 +254,7 @@ async def _prepare_run(
     *,
     initial_status: str,
     event_streaming_v2: bool = False,
+    responses_meta: dict[str, Any] | None = None,
 ) -> tuple[str, Run, RunJob]:
     """Shared run-creation logic used by create, stream, and wait endpoints.
 
@@ -331,6 +332,7 @@ async def _prepare_run(
             subgraphs=request.stream_subgraphs or False,
         ),
         run_metadata=request.metadata or {},
+        responses_meta=responses_meta,
     )
 
     # Persist run record with trace metadata for worker observability.

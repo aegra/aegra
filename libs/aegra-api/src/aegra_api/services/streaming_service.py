@@ -6,13 +6,18 @@ from typing import Any
 
 import structlog
 
-from aegra_api.core.sse import create_error_event
+from aegra_api.core.active_runs import active_runs
+from aegra_api.core.sse import create_end_event, create_error_event
 from aegra_api.models import Run
+from aegra_api.services.base_broker import BaseRunBroker
 from aegra_api.services.broker import broker_manager
 from aegra_api.services.event_converter import EventConverter
 from aegra_api.utils import extract_event_sequence
 
 logger = structlog.getLogger(__name__)
+
+# Runs in these states will not publish again once the local producer is gone.
+_TERMINAL_RUN_STATUSES = frozenset({"success", "error", "interrupted", "timeout"})
 
 
 class StreamingService:
@@ -100,16 +105,26 @@ class StreamingService:
             if last_event_id:
                 last_sent_sequence = extract_event_sequence(last_event_id)
 
-            async for event_id, sse_event in self._replay_stored_events(run_id, last_event_id):
+            saw_end = False
+            async for event_id, sse_event, is_end in self._replay_stored_events(run, last_event_id):
                 # Track the highest replayed sequence for live dedup
                 replayed_seq = extract_event_sequence(event_id)
                 if replayed_seq > last_sent_sequence:
                     last_sent_sequence = replayed_seq
+                saw_end = saw_end or is_end
                 yield sse_event
 
             # Stream live events if run is still active
-            async for sse_event in self._stream_live_events(run, last_sent_sequence):
+            async for sse_event, is_end in self._stream_live_events(run, last_sent_sequence):
+                saw_end = saw_end or is_end
                 yield sse_event
+
+            # Status commits before ``end``. Another server has no live broker,
+            # so close from the stored status when that publish is missing.
+            if not saw_end:
+                closing = _stored_end_event(run)
+                if closing is not None:
+                    yield closing
 
         except asyncio.CancelledError:
             logger.debug(f"Stream cancelled for run {run_id}")
@@ -124,21 +139,17 @@ class StreamingService:
             logger.exception("stream execution failed", run_id=run_id)
             yield create_error_event({"error": type(e).__name__, "message": "execution failed"})
 
-    async def _replay_stored_events(self, run_id: str, last_event_id: str | None) -> AsyncIterator[tuple[str, str]]:
-        """Replay stored events from the broker's replay buffer.
-
-        Yields (event_id, sse_event) tuples so the caller can track
-        the highest replayed sequence for live deduplication.
-        """
-        broker = broker_manager.get_or_create_broker(run_id)
+    async def _replay_stored_events(self, run: Run, last_event_id: str | None) -> AsyncIterator[tuple[str, str, bool]]:
+        """Replay stored events. Yields ``(event_id, sse_event, is_end)``."""
+        broker = self._replay_broker(run)
         stored_events = await broker.replay(last_event_id)
 
         for event_id, raw_event in stored_events:
             sse_event = await self._convert_raw_to_sse(event_id, raw_event)
             if sse_event:
-                yield event_id, sse_event
+                yield event_id, sse_event, _broker_event_is_end(raw_event)
 
-    async def _stream_live_events(self, run: Run, last_sent_sequence: int) -> AsyncIterator[str]:
+    async def _stream_live_events(self, run: Run, last_sent_sequence: int) -> AsyncIterator[tuple[str, bool]]:
         """Stream live events from broker."""
         run_id = run.run_id
         broker = broker_manager.get_broker(run_id)
@@ -146,7 +157,7 @@ class StreamingService:
         # If run is in a terminal state and broker is either missing or finished,
         # there are no live events to stream. Using get_broker (not get_or_create)
         # avoids creating a blank broker that would hang forever in aiter().
-        if run.status in ["success", "error", "interrupted"] and (broker is None or broker.is_finished()):
+        if run.status in _TERMINAL_RUN_STATUSES and (broker is None or broker.is_finished()):
             return
 
         if broker is None:
@@ -160,7 +171,7 @@ class StreamingService:
 
             sse_event = await self._convert_raw_to_sse(event_id, raw_event)
             if sse_event:
-                yield sse_event
+                yield sse_event, _broker_event_is_end(raw_event)
                 last_sent_sequence = current_sequence
 
     async def interrupt_run(self, run_id: str, *, emit_end_event: bool = True) -> bool:
@@ -200,6 +211,100 @@ class StreamingService:
     async def _convert_raw_to_sse(self, event_id: str, raw_event: Any) -> str | None:
         """Convert a raw event from broker to SSE format."""
         return self.event_converter.convert_raw_to_sse(event_id, raw_event)
+
+    async def iter_broker_events(
+        self,
+        run: Run,
+        last_event_id: str | None = None,
+    ) -> AsyncIterator[tuple[str, str, Any]]:
+        """Yield ``(event_id, event_type, payload)`` from replay, then live events.
+
+        Same replay and dedup rules as ``stream_run_execution``. Callers that
+        need the whole buffer for cursor state pass ``last_event_id=None``.
+        """
+        last_sent_sequence = extract_event_sequence(last_event_id) if last_event_id else 0
+        async for event_id, event_type, payload in self._replay_raw_events(run, last_event_id):
+            replayed = extract_event_sequence(event_id)
+            if replayed > last_sent_sequence:
+                last_sent_sequence = replayed
+            yield event_id, event_type, payload
+
+        async for event_id, event_type, payload in self._live_raw_events(run, last_sent_sequence):
+            yield event_id, event_type, payload
+
+    def _replay_broker(self, run: Run) -> BaseRunBroker:
+        """Broker for replay. A finished run with no local producer is not cached."""
+        if run.status in _TERMINAL_RUN_STATUSES and run.run_id not in active_runs:
+            return broker_manager.open_replay_broker(run.run_id)
+        return broker_manager.get_or_create_broker(run.run_id)
+
+    async def _replay_raw_events(
+        self,
+        run: Run,
+        last_event_id: str | None,
+    ) -> AsyncIterator[tuple[str, str, Any]]:
+        # History lives in Redis or the producer's buffer. A new handle for a
+        # finished run stays out of the cache; mark_finished does not remove it.
+        broker = self._replay_broker(run)
+        try:
+            for event_id, raw_event in await broker.replay(last_event_id):
+                parsed = parse_broker_event(raw_event)
+                if parsed is None:
+                    continue
+                event_type, payload = parsed
+                yield event_id, event_type, payload
+        finally:
+            # Status commits before ``end``. Waiting hangs when that publish never
+            # arrives; the responses stream closes from the saved response instead.
+            if run.status in _TERMINAL_RUN_STATUSES and run.run_id not in active_runs:
+                broker.mark_finished()
+
+    async def _live_raw_events(self, run: Run, last_sent_sequence: int) -> AsyncIterator[tuple[str, str, Any]]:
+        run_id = run.run_id
+        broker = broker_manager.get_broker(run_id)
+        if run.status in _TERMINAL_RUN_STATUSES and (broker is None or broker.is_finished()):
+            return
+        if broker is None:
+            broker = broker_manager.get_or_create_broker(run_id)
+        async for event_id, raw_event in broker.aiter():
+            current_sequence = extract_event_sequence(event_id)
+            if current_sequence <= last_sent_sequence:
+                continue
+            parsed = parse_broker_event(raw_event)
+            if parsed is None:
+                continue
+            event_type, payload = parsed
+            last_sent_sequence = current_sequence
+            yield event_id, event_type, payload
+
+
+def _stored_end_event(run: Run) -> str | None:
+    """Close a finished run whose broker never published ``end``."""
+    # A local producer can still publish; closing now would race that frame.
+    if run.status not in _TERMINAL_RUN_STATUSES or run.run_id in active_runs:
+        return None
+    status = "error" if run.status == "error" else run.status
+    return create_end_event(status=status)
+
+
+def _broker_event_is_end(raw_event: Any) -> bool:
+    parsed = parse_broker_event(raw_event)
+    return parsed is not None and parsed[0] == "end"
+
+
+def parse_broker_event(raw_event: Any) -> tuple[str, Any] | None:
+    """Split a broker value into ``(event_type, payload)``.
+
+    Matches ``EventConverter`` for the non-subgraph shapes: ``(mode, chunk)``
+    and legacy ``(node_path, mode, chunk)``.
+    """
+    if isinstance(raw_event, tuple):
+        if len(raw_event) == 2 and isinstance(raw_event[0], str):
+            return raw_event[0], raw_event[1]
+        if len(raw_event) == 3 and isinstance(raw_event[1], str):
+            return raw_event[1], raw_event[2]
+        return None
+    return "values", raw_event
 
 
 # Global streaming service instance

@@ -246,6 +246,7 @@ Configure custom routes and CORS.
   "http": {
     "app": "./custom_routes.py:app",
     "enable_custom_route_auth": false,
+    "responses": false,
     "cors": {
       "allow_origin_regex": "^https://[a-z0-9-]+\\.example\\.com$"
     }
@@ -257,6 +258,7 @@ Configure custom routes and CORS.
 |-------|------|---------|-------------|
 | `app` | `string` | `None` | Import path to custom FastAPI app |
 | `enable_custom_route_auth` | `bool` | `false` | Require Aegra auth on every FastAPI route in the custom app. See [custom routes](/guides/custom-routes#authentication-on-custom-routes) for what it covers |
+| `responses` | `bool` | `false` | Mount the Open Responses API at `/v1/responses` and `/v1/conversations`. See [Open Responses](/guides/open-responses) |
 | `cors.allow_origins` | `list[str]` | `["*"]` (`[]` if `allow_origin_regex` is set) | Allowed CORS origins |
 | `cors.allow_origin_regex` | `string` | `None` | Regular expression for additional allowed origins; when present without `allow_origins`, the origin-list default is `[]` |
 | `cors.allow_credentials` | `bool` | `false` with a regex or wildcard origins, `true` with concrete origins and no regex | Allow credentials in CORS requests |

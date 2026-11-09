@@ -517,19 +517,20 @@ class TestRecoverCrashedRunsWebhook:
             patch("aegra_api.services.lease_reaper._get_session_maker", return_value=_make_session_maker(session)),
             patch("aegra_api.services.lease_reaper.settings") as mock_settings,
             patch("aegra_api.services.lease_reaper.set_thread_status_if_no_active_runs", new_callable=AsyncMock),
-            patch("aegra_api.services.lease_reaper.notify_run_finished") as mock_notify,
+            patch("aegra_api.services.lease_reaper.report_run") as mock_report,
         ):
             mock_settings.worker.BG_JOB_MAX_RETRIES = 1
             await LeaseReaper._recover_crashed_runs([row[0] for row in rows])
-        return mock_notify
+        return mock_report
 
     async def test_exhausted_run_reports_an_error(self) -> None:
-        mock_notify = await self._recover(
+        mock_report = await self._recover(
             [("run-1", "thread-1", "user-1", _params_with_webhook(retry_count=1), "assistant-1", _CREATED_AT)]
         )
 
-        mock_notify.assert_called_once()
-        job, outcome = mock_notify.call_args.args
+        mock_report.assert_called_once()
+        job, outcome = mock_report.call_args.args
+        assert mock_report.call_args.kwargs == {"run_id": "run-1"}
         assert job.identity.run_id == "run-1"
         assert job.identity.thread_id == "thread-1"
         assert job.identity.assistant_id == "assistant-1"
@@ -542,22 +543,22 @@ class TestRecoverCrashedRunsWebhook:
         }
 
     async def test_retried_run_is_not_reported(self) -> None:
-        mock_notify = await self._recover(
+        mock_report = await self._recover(
             [("run-1", "thread-1", "user-1", _params_with_webhook(retry_count=0), "assistant-1", _CREATED_AT)]
         )
 
-        mock_notify.assert_not_called()
+        mock_report.assert_not_called()
 
     async def test_exhausted_run_without_webhook_is_not_reported(self) -> None:
-        mock_notify = await self._recover(
+        mock_report = await self._recover(
             [("run-1", "thread-1", "user-1", _params_with_webhook(retry_count=1, webhook=None), "a-1", _CREATED_AT)]
         )
 
-        mock_notify.assert_not_called()
+        mock_report.assert_not_called()
 
     async def test_unreadable_params_skip_the_webhook_without_failing_recovery(self) -> None:
         params = {"behavior": {"webhook": "https://hooks.example.com/runs"}, "_retry_count": 1}
 
-        mock_notify = await self._recover([("run-1", "thread-1", "user-1", params, "assistant-1", _CREATED_AT)])
+        mock_report = await self._recover([("run-1", "thread-1", "user-1", params, "assistant-1", _CREATED_AT)])
 
-        mock_notify.assert_not_called()
+        mock_report.assert_not_called()

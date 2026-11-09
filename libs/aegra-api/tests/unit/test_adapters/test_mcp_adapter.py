@@ -193,7 +193,7 @@ async def test_graph_tool_run_executes_graph_and_returns_output() -> None:
             patch("aegra_api.adapters.mcp_adapter._prepare_run") as mock_prepare,
             patch("aegra_api.adapters.mcp_adapter.executor") as mock_executor,
             patch("aegra_api.adapters.mcp_adapter._read_run_result", new_callable=AsyncMock) as mock_read,
-            patch("aegra_api.adapters.mcp_adapter._delete_thread_by_id", new_callable=AsyncMock),
+            patch("aegra_api.adapters.mcp_adapter.delete_thread_by_id", new_callable=AsyncMock),
         ):
             mock_session = AsyncMock()
             mock_maker.return_value = MagicMock(
@@ -240,7 +240,7 @@ async def test_graph_tool_run_returns_filtered_output_when_final_response_only()
             patch("aegra_api.adapters.mcp_adapter._prepare_run") as mock_prepare,
             patch("aegra_api.adapters.mcp_adapter.executor") as mock_executor,
             patch("aegra_api.adapters.mcp_adapter._read_run_result", new_callable=AsyncMock) as mock_read,
-            patch("aegra_api.adapters.mcp_adapter._delete_thread_by_id", new_callable=AsyncMock),
+            patch("aegra_api.adapters.mcp_adapter.delete_thread_by_id", new_callable=AsyncMock),
         ):
             mock_session = AsyncMock()
             mock_maker.return_value = MagicMock(
@@ -286,7 +286,7 @@ async def test_graph_tool_run_returns_full_output_when_final_response_only_disab
             patch("aegra_api.adapters.mcp_adapter._prepare_run") as mock_prepare,
             patch("aegra_api.adapters.mcp_adapter.executor") as mock_executor,
             patch("aegra_api.adapters.mcp_adapter._read_run_result", new_callable=AsyncMock) as mock_read,
-            patch("aegra_api.adapters.mcp_adapter._delete_thread_by_id", new_callable=AsyncMock),
+            patch("aegra_api.adapters.mcp_adapter.delete_thread_by_id", new_callable=AsyncMock),
         ):
             mock_session = AsyncMock()
             mock_maker.return_value = MagicMock(
@@ -320,7 +320,7 @@ async def test_graph_tool_run_returns_error_when_run_fails() -> None:
             patch("aegra_api.adapters.mcp_adapter._prepare_run") as mock_prepare,
             patch("aegra_api.adapters.mcp_adapter.executor") as mock_executor,
             patch("aegra_api.adapters.mcp_adapter._read_run_result", new_callable=AsyncMock) as mock_read,
-            patch("aegra_api.adapters.mcp_adapter._delete_thread_by_id", new_callable=AsyncMock),
+            patch("aegra_api.adapters.mcp_adapter.delete_thread_by_id", new_callable=AsyncMock),
         ):
             mock_session = AsyncMock()
             mock_maker.return_value = MagicMock(
@@ -350,7 +350,7 @@ async def test_graph_tool_run_raises_tool_error_on_timeout() -> None:
             patch("aegra_api.adapters.mcp_adapter._get_session_maker") as mock_maker,
             patch("aegra_api.adapters.mcp_adapter._prepare_run") as mock_prepare,
             patch("aegra_api.adapters.mcp_adapter.executor") as mock_executor,
-            patch("aegra_api.adapters.mcp_adapter._delete_thread_by_id", new_callable=AsyncMock) as mock_delete,
+            patch("aegra_api.adapters.mcp_adapter.delete_thread_by_id", new_callable=AsyncMock) as mock_delete,
         ):
             mock_session = AsyncMock()
             mock_maker.return_value = MagicMock(

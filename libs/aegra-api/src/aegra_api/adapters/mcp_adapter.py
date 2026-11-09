@@ -27,7 +27,6 @@ from starlette.responses import JSONResponse as StarletteJSONResponse
 from starlette.routing import Route
 from starlette.types import ASGIApp, Receive, Scope, Send
 
-from aegra_api.api.stateless_runs import _delete_thread_by_id
 from aegra_api.config import get_config_dir, load_mcp_config
 from aegra_api.core.auth_deps import _to_user_model
 from aegra_api.core.auth_middleware import get_auth_backend
@@ -37,6 +36,7 @@ from aegra_api.models.auth import User
 from aegra_api.models.runs import RunCreate
 from aegra_api.services.executor import executor
 from aegra_api.services.langgraph_service import LangGraphService
+from aegra_api.services.run_cleanup import delete_thread_by_id
 from aegra_api.services.run_preparation import _prepare_run
 from aegra_api.settings import settings
 from aegra_api.utils.assistants import resolve_assistant_id
@@ -180,7 +180,7 @@ class _GraphTool(Tool):
             status, output, error_msg = await _read_run_result(run_id, thread_id, user.identity)
         finally:
             try:
-                await _delete_thread_by_id(thread_id, user.identity)
+                await delete_thread_by_id(thread_id, user.identity)
             except Exception:
                 logger.exception("mcp_thread_cleanup_failed", thread_id=thread_id)
 

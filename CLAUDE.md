@@ -65,7 +65,7 @@ aegra/
 │           ├── cli.py                # Main CLI entry point
 │           ├── env.py                # .env file loading
 │           ├── commands/             # Command implementations (init)
-│           ├── utils/                # Docker utilities
+│           ├── utils/                # Container runtime utilities (Docker, Podman)
 │           └── templates/            # Project templates for `aegra init`
 │
 ├── examples/                         # Example agents and configs

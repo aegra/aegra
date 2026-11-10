@@ -3,7 +3,7 @@ title: "CLI reference"
 description: "Complete reference for all Aegra CLI commands."
 ---
 
-The Aegra CLI manages project creation, development servers, and Docker deployments.
+The Aegra CLI manages project creation, development servers, and Compose deployments. `aegra dev`, `aegra up`, and `aegra down` run `docker compose` or `podman compose`. With `AEGRA_CONTAINER_RUNTIME` unset, each command picks the runtime as described below. Set the variable to `docker` or `podman` to choose directly.
 
 ## Install
 
@@ -43,7 +43,7 @@ aegra dev
 ```
 
 What it does:
-1. Starts a PostgreSQL container via Docker Compose
+1. Starts PostgreSQL with Compose. When `AEGRA_CONTAINER_RUNTIME` is unset, this prefers a running Docker daemon, then Podman if it is installed, then Docker if it is installed but stopped. Set the variable to `docker` or `podman` to choose directly.
 2. Loads your `.env` file
 3. Applies database migrations automatically
 4. Runs uvicorn with `--reload` by default
@@ -93,7 +93,7 @@ Use `aegra serve` for:
 
 ### `aegra up`
 
-Build and start all Docker services (PostgreSQL + app).
+Build and start all Compose services (PostgreSQL + app). When `AEGRA_CONTAINER_RUNTIME` is unset, this uses a running Docker daemon, then Podman if it is installed, then Docker if it is installed but stopped. Set the variable to `docker` or `podman` to choose directly.
 
 ```bash
 aegra up
@@ -109,7 +109,16 @@ aegra up
 
 ### `aegra down`
 
-Stop Docker services.
+Stop Compose services.
+
+With `AEGRA_CONTAINER_RUNTIME` set to `docker` or `podman`, this uses only that runtime. If it is not running, `aegra down` tries to start it before running `compose down`, and exits non-zero if it cannot.
+
+With the variable unset, this checks each installed runtime for containers from the Compose file, then runs `compose down` on every runtime that has them:
+
+- A runtime whose status check exits non-zero counts as not running, whatever the cause, including a permission error. It is skipped, so its containers stay until that runtime can be reached and `aegra down` is run again, and `aegra down` can still exit successfully after stopping another runtime.
+- Stopped containers are included when `compose ps --all` succeeds. If it fails, the check falls back to `compose ps`, which only sees running containers. A runtime with running containers still counts as an owner, so `aegra down` can exit successfully. A runtime with none counts as a failed check.
+- If a runtime's status check times out, or its container listing or Podman Compose check fails or times out, `aegra down` stops the owners it can and exits non-zero. If it has no owner it can stop, it stops nothing. When the failure was a status check or listing, set the variable to choose a runtime.
+- If every check finishes and no containers are found, it uses the same auto-detect order as `aegra up`. That order can select a skipped runtime that is not running. `aegra down` then tries to start it and runs `compose down` there, which removes its containers for this file, and its volumes with `--volumes`.
 
 ```bash
 aegra down              # Stop containers

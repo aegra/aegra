@@ -11,6 +11,7 @@ from redis import TimeoutError as RedisTimeoutError
 from aegra_api.core.active_runs import active_runs, explicit_run_cancellations
 from aegra_api.models.auth import User
 from aegra_api.models.run_job import RunBehavior, RunExecution, RunIdentity, RunJob
+from aegra_api.observability.span_enrichment import _run_trace_id
 from aegra_api.services.run_executor import _shutdown_cancellations, _timeout_cancellations
 from aegra_api.services.worker_executor import (
     WorkerExecutor,
@@ -346,11 +347,20 @@ class TestIsRunTerminal:
 
 
 class TestRestoreTraceContext:
+    def setup_method(self) -> None:
+        _run_trace_id.set(None)
+
+    def teardown_method(self) -> None:
+        _run_trace_id.set(None)
+
     def test_sets_structlog_context_vars(self) -> None:
         job = _make_run_job()
         trace = {"correlation_id": "req-abc"}
 
-        with patch(f"{MODULE}.set_trace_context") as mock_set_trace:
+        with (
+            patch(f"{MODULE}.prepare_run_otel_trace"),
+            patch(f"{MODULE}.set_trace_context") as mock_set_trace,
+        ):
             _restore_trace_context("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee", job, trace)
 
         mock_set_trace.assert_called_once()
@@ -366,6 +376,10 @@ class TestRestoreTraceContext:
 
         with (
             patch(f"{MODULE}.structlog.contextvars.clear_contextvars", side_effect=lambda: call_order.append("clear")),
+            patch(
+                f"{MODULE}.prepare_run_otel_trace",
+                side_effect=lambda _run_id: call_order.append("prepare"),
+            ),
             patch(f"{MODULE}.set_trace_context", side_effect=lambda **kw: call_order.append("set_trace")),
             patch(
                 f"{MODULE}.structlog.contextvars.bind_contextvars", side_effect=lambda **kw: call_order.append("bind")
@@ -374,7 +388,22 @@ class TestRestoreTraceContext:
         ):
             _restore_trace_context("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee", job, trace)
 
-        assert call_order == ["clear", "set_trace", "bind"]
+        assert call_order == ["clear", "prepare", "set_trace", "bind"]
+
+    def test_prepares_deterministic_otel_trace_from_run_id(self) -> None:
+        job = _make_run_job()
+        run_id = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+
+        with (
+            patch(f"{MODULE}.prepare_run_otel_trace") as mock_prepare,
+            patch(f"{MODULE}.set_trace_context"),
+            patch(f"{MODULE}.structlog.contextvars.clear_contextvars"),
+            patch(f"{MODULE}.structlog.contextvars.bind_contextvars"),
+            patch(f"{MODULE}.correlation_id"),
+        ):
+            _restore_trace_context(run_id, job, {"correlation_id": "req-abc"})
+
+        mock_prepare.assert_called_once_with(run_id)
 
     def test_user_metadata_merged_with_system_keys(self) -> None:
         """job.run_metadata is merged into the trace context metadata."""

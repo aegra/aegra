@@ -17,6 +17,7 @@ cp .env.example .env
 | `VERSION` | `0.11.0` | Application version |
 | `DEBUG` | `false` | Enable debug mode |
 | `AEGRA_CONFIG` | `aegra.json` | Path to the configuration file |
+| `AEGRA_CONTAINER_RUNTIME` | unset | Container CLI for `aegra dev`, `aegra up`, and `aegra down`: `docker` or `podman`. Unset prefers a running Docker daemon, then Podman if it is installed, then Docker if it is installed but stopped. `aegra down` first targets runtimes that still have the project's containers. |
 | `MAX_SEARCH_LIMIT` | `1000` | Max `limit` for `POST /threads/search` and `POST /store/items/search`. Omitted or null `limit` uses `min(20, MAX_SEARCH_LIMIT)`. Default cap matches LangGraph Platform threads.search (`1..1000`). |
 
 ## Database
@@ -219,6 +220,7 @@ When enabled, a `/metrics` endpoint serves standard HTTP request metrics (reques
 | `OTEL_SERVICE_NAME` | `aegra-backend` | Service name for traces |
 | `OTEL_TARGETS` | `""` | Comma-separated list: `LANGFUSE`, `PHOENIX`, `GENERIC` |
 | `OTEL_CONSOLE_EXPORT` | `false` | Log traces to console |
+| `OTEL_TRACE_ID_FROM_RUN_ID` | `true` | Seed OTEL `trace_id` from `run_id` (auto-disabled for ratio samplers) |
 
 ### Langfuse
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import subprocess
 import sys
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -18,6 +19,45 @@ from aegra_cli.cli import (
     get_project_slug,
 )
 from aegra_cli.env import load_env_file
+from aegra_cli.utils.container_runtime import (
+    ContainerRuntime,
+    ProjectOwnership,
+    RuntimeSelectionError,
+    ensure_compose_plugin,
+    resolve_container_runtime,
+    runtimes_owning_project,
+)
+
+
+def _pinned_docker_runtime() -> ContainerRuntime:
+    return ContainerRuntime.DOCKER
+
+
+def _runtime_gate_passes(_runtime: ContainerRuntime) -> bool:
+    return True
+
+
+def _no_project_owners(_compose_file: Path) -> ProjectOwnership:
+    return ProjectOwnership([], False)
+
+
+def _completed_process(returncode: int) -> MagicMock:
+    completed = MagicMock()
+    completed.returncode = returncode
+    return completed
+
+
+@pytest.fixture(autouse=True)
+def pin_cli_compose_runtime(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep up/down tests off the host container runtime."""
+    # setenv records the original value so a later load_env_file write is undone.
+    monkeypatch.setenv("AEGRA_CONTAINER_RUNTIME", "")
+    monkeypatch.delenv("AEGRA_CONTAINER_RUNTIME")
+    monkeypatch.setattr("aegra_cli.cli.resolve_container_runtime", _pinned_docker_runtime)
+    monkeypatch.setattr("aegra_cli.cli.ensure_runtime_ready", _runtime_gate_passes)
+    monkeypatch.setattr("aegra_cli.cli.ensure_compose_plugin", _runtime_gate_passes)
+    monkeypatch.setattr("aegra_cli.cli.runtimes_owning_project", _no_project_owners)
+
 
 if TYPE_CHECKING:
     from collections.abc import Generator
@@ -1467,3 +1507,532 @@ class TestLoadEnvFile:
             load_env_file(env_file)
 
             assert os.environ["AUTH_TYPE"] == "noop"
+
+
+class TestContainerRuntimeCli:
+    """aegra dev/up/down follow Docker or Podman."""
+
+    def test_help_mentions_runtime_override(self, cli_runner: CliRunner) -> None:
+        dev_help = cli_runner.invoke(cli, ["dev", "--help"])
+        up_help = cli_runner.invoke(cli, ["up", "--help"])
+        assert dev_help.exit_code == 0
+        assert "AEGRA_CONTAINER_RUNTIME" in dev_help.output
+        assert "AEGRA_CONTAINER_RUNTIME" in up_help.output
+
+    @pytest.mark.parametrize("command", ["dev", "up"])
+    def test_help_describes_automatic_runtime_order(
+        self, cli_runner: CliRunner, command: str
+    ) -> None:
+        result = cli_runner.invoke(cli, [command, "--help"])
+
+        # Click rewraps help to the terminal width, so compare with whitespace collapsed.
+        help_text = " ".join(result.output.split())
+        assert result.exit_code == 0
+        assert "a running Docker daemon, then installed Podman, then installed Docker" in help_text
+
+    def test_up_uses_podman_compose(self, cli_runner: CliRunner, tmp_path: Path) -> None:
+        with cli_runner.isolated_filesystem(temp_dir=tmp_path):
+            with (
+                patch(
+                    "aegra_cli.cli.resolve_container_runtime",
+                    return_value=ContainerRuntime.PODMAN,
+                ),
+                patch("aegra_cli.cli.subprocess.run") as mock_run,
+            ):
+                mock_run.return_value.returncode = 0
+                result = cli_runner.invoke(cli, ["up", "postgres"])
+
+            assert result.exit_code == 0, result.output
+            command = mock_run.call_args.args[0]
+            assert command[:2] == ["podman", "compose"]
+            assert "postgres" in command
+            assert "podman compose" in result.output
+
+    def test_down_uses_podman_compose(self, cli_runner: CliRunner, tmp_path: Path) -> None:
+        with cli_runner.isolated_filesystem(temp_dir=tmp_path):
+            Path("docker-compose.yml").write_text("services: {}\n")
+            with (
+                patch(
+                    "aegra_cli.cli.resolve_container_runtime",
+                    return_value=ContainerRuntime.PODMAN,
+                ),
+                patch("aegra_cli.cli.subprocess.run") as mock_run,
+            ):
+                mock_run.return_value.returncode = 0
+                result = cli_runner.invoke(cli, ["down", "-v"])
+
+            assert result.exit_code == 0, result.output
+            command = mock_run.call_args.args[0]
+            assert command[:2] == ["podman", "compose"]
+            assert "down" in command
+            assert "-v" in command
+            assert "podman compose" in result.output
+
+    def test_up_rejects_invalid_runtime(
+        self, cli_runner: CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("AEGRA_CONTAINER_RUNTIME", "containerd")
+        monkeypatch.setattr("aegra_cli.cli.resolve_container_runtime", resolve_container_runtime)
+        with cli_runner.isolated_filesystem(temp_dir=tmp_path):
+            result = cli_runner.invoke(cli, ["up"])
+
+        assert result.exit_code == 1
+        assert "Invalid AEGRA_CONTAINER_RUNTIME" in result.output
+
+    def test_up_errors_when_neither_runtime_is_installed(
+        self, cli_runner: CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr("aegra_cli.cli.resolve_container_runtime", resolve_container_runtime)
+        with cli_runner.isolated_filesystem(temp_dir=tmp_path):
+            with (
+                patch("aegra_cli.utils.container_runtime.is_docker_installed", return_value=False),
+                patch("aegra_cli.utils.container_runtime.is_podman_installed", return_value=False),
+            ):
+                result = cli_runner.invoke(cli, ["up"])
+
+        assert result.exit_code == 1
+        assert "Neither Docker nor Podman" in result.output
+
+    def test_down_errors_when_neither_runtime_is_installed(
+        self, cli_runner: CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr("aegra_cli.cli.resolve_container_runtime", resolve_container_runtime)
+        with cli_runner.isolated_filesystem(temp_dir=tmp_path):
+            Path("docker-compose.yml").write_text("services: {}\n")
+            with (
+                patch("aegra_cli.utils.container_runtime.is_docker_installed", return_value=False),
+                patch("aegra_cli.utils.container_runtime.is_podman_installed", return_value=False),
+            ):
+                result = cli_runner.invoke(cli, ["down"])
+
+        assert result.exit_code == 1
+        assert "Neither Docker nor Podman" in result.output
+
+    def test_up_stops_when_runtime_does_not_start(
+        self, cli_runner: CliRunner, tmp_path: Path
+    ) -> None:
+        with cli_runner.isolated_filesystem(temp_dir=tmp_path):
+            with (
+                patch("aegra_cli.cli.ensure_runtime_ready", return_value=False),
+                patch("aegra_cli.cli.subprocess.run") as mock_run,
+            ):
+                result = cli_runner.invoke(cli, ["up"])
+
+        assert result.exit_code == 1
+        mock_run.assert_not_called()
+
+    def test_up_stops_when_podman_compose_plugin_is_missing(
+        self, cli_runner: CliRunner, tmp_path: Path
+    ) -> None:
+        with cli_runner.isolated_filesystem(temp_dir=tmp_path):
+            with (
+                patch(
+                    "aegra_cli.cli.resolve_container_runtime",
+                    return_value=ContainerRuntime.PODMAN,
+                ),
+                patch("aegra_cli.cli.ensure_compose_plugin", ensure_compose_plugin),
+                patch(
+                    "aegra_cli.utils.container_runtime.podman_compose_available", return_value=False
+                ),
+                patch("aegra_cli.cli.subprocess.run") as mock_run,
+            ):
+                result = cli_runner.invoke(cli, ["up"])
+
+        assert result.exit_code == 1
+        assert "podman-compose" in result.output
+        mock_run.assert_not_called()
+
+    def test_up_reads_podman_runtime_from_dotenv(
+        self, cli_runner: CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr("aegra_cli.cli.resolve_container_runtime", resolve_container_runtime)
+        with cli_runner.isolated_filesystem(temp_dir=tmp_path):
+            Path(".env").write_text("AEGRA_CONTAINER_RUNTIME=podman\n")
+            with (
+                patch("aegra_cli.utils.container_runtime.is_podman_installed", return_value=True),
+                patch("aegra_cli.cli.subprocess.run") as mock_run,
+            ):
+                mock_run.return_value.returncode = 0
+                result = cli_runner.invoke(cli, ["up"])
+
+        assert result.exit_code == 0, result.output
+        assert mock_run.call_args.args[0][0] == "podman"
+
+    def test_shell_runtime_overrides_dotenv(
+        self, cli_runner: CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("AEGRA_CONTAINER_RUNTIME", "docker")
+        monkeypatch.setattr("aegra_cli.cli.resolve_container_runtime", resolve_container_runtime)
+        with cli_runner.isolated_filesystem(temp_dir=tmp_path):
+            Path(".env").write_text("AEGRA_CONTAINER_RUNTIME=podman\n")
+            with (
+                patch("aegra_cli.utils.container_runtime.is_docker_installed", return_value=True),
+                patch("aegra_cli.cli.subprocess.run") as mock_run,
+            ):
+                mock_run.return_value.returncode = 0
+                result = cli_runner.invoke(cli, ["up"])
+
+        assert result.exit_code == 0, result.output
+        assert mock_run.call_args.args[0][0] == "docker"
+
+    def test_up_reports_missing_podman_binary(self, cli_runner: CliRunner, tmp_path: Path) -> None:
+        with cli_runner.isolated_filesystem(temp_dir=tmp_path):
+            with (
+                patch(
+                    "aegra_cli.cli.resolve_container_runtime",
+                    return_value=ContainerRuntime.PODMAN,
+                ),
+                patch("aegra_cli.cli.subprocess.run", side_effect=FileNotFoundError("podman")),
+            ):
+                result = cli_runner.invoke(cli, ["up"])
+
+        assert result.exit_code == 1
+        assert "podman is not installed" in result.output
+
+    def test_down_reports_missing_podman_binary(
+        self, cli_runner: CliRunner, tmp_path: Path
+    ) -> None:
+        with cli_runner.isolated_filesystem(temp_dir=tmp_path):
+            Path("docker-compose.yml").write_text("services: {}\n")
+            with (
+                patch(
+                    "aegra_cli.cli.resolve_container_runtime",
+                    return_value=ContainerRuntime.PODMAN,
+                ),
+                patch("aegra_cli.cli.subprocess.run", side_effect=FileNotFoundError("podman")),
+            ):
+                result = cli_runner.invoke(cli, ["down"])
+
+        assert result.exit_code == 1
+        assert "podman is not installed" in result.output
+
+    def test_up_names_podman_when_compose_fails(
+        self, cli_runner: CliRunner, tmp_path: Path
+    ) -> None:
+        with cli_runner.isolated_filesystem(temp_dir=tmp_path):
+            with (
+                patch(
+                    "aegra_cli.cli.resolve_container_runtime",
+                    return_value=ContainerRuntime.PODMAN,
+                ),
+                patch("aegra_cli.cli.subprocess.run") as mock_run,
+            ):
+                mock_run.return_value.returncode = 3
+                result = cli_runner.invoke(cli, ["up"])
+
+        assert result.exit_code == 3
+        assert "podman compose exited with code 3" in result.output
+
+    def test_dev_starts_postgres_with_podman_from_dotenv(
+        self, cli_runner: CliRunner, tmp_path: Path
+    ) -> None:
+        with cli_runner.isolated_filesystem(temp_dir=tmp_path):
+            Path("aegra.json").write_text('{"graphs": {}}\n')
+            Path("docker-compose.yml").write_text("services: {}\n")
+            Path(".env").write_text("AEGRA_CONTAINER_RUNTIME=podman\n")
+            with (
+                patch("aegra_cli.utils.container_runtime.is_podman_installed", return_value=True),
+                patch("aegra_cli.utils.container_runtime.is_podman_running", return_value=True),
+                patch(
+                    "aegra_cli.utils.container_runtime.podman_compose_available", return_value=True
+                ),
+                patch(
+                    "aegra_cli.utils.container_runtime.is_postgres_container_running",
+                    return_value=False,
+                ),
+                patch("aegra_cli.utils.container_runtime.subprocess.run") as mock_run,
+                patch("aegra_cli.cli.subprocess.Popen") as mock_popen,
+            ):
+                mock_run.return_value.returncode = 0
+                mock_popen.return_value = create_mock_popen(0)
+                result = cli_runner.invoke(cli, ["dev"])
+
+        assert result.exit_code == 0, result.output
+        assert mock_run.call_args.args[0][0] == "podman"
+        assert "postgres" in mock_run.call_args.args[0]
+
+    def test_down_stops_the_runtime_that_owns_the_project(
+        self, cli_runner: CliRunner, tmp_path: Path
+    ) -> None:
+        with cli_runner.isolated_filesystem(temp_dir=tmp_path):
+            Path("docker-compose.yml").write_text("services: {}\n")
+            with (
+                patch(
+                    "aegra_cli.cli.runtimes_owning_project",
+                    return_value=ProjectOwnership([ContainerRuntime.PODMAN], False),
+                ),
+                patch(
+                    "aegra_cli.cli.resolve_container_runtime",
+                    return_value=ContainerRuntime.DOCKER,
+                ) as mock_resolve,
+                patch("aegra_cli.cli.subprocess.run") as mock_run,
+            ):
+                mock_run.return_value.returncode = 0
+                result = cli_runner.invoke(cli, ["down"])
+
+        assert result.exit_code == 0, result.output
+        assert mock_run.call_args.args[0][:2] == ["podman", "compose"]
+        mock_resolve.assert_not_called()
+
+    def test_explicit_runtime_ignores_project_owner(
+        self, cli_runner: CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("AEGRA_CONTAINER_RUNTIME", "podman")
+        with cli_runner.isolated_filesystem(temp_dir=tmp_path):
+            Path("docker-compose.yml").write_text("services: {}\n")
+            with (
+                patch(
+                    "aegra_cli.cli.runtimes_owning_project",
+                    return_value=ProjectOwnership([ContainerRuntime.DOCKER], False),
+                ) as mock_owners,
+                patch(
+                    "aegra_cli.cli.resolve_container_runtime",
+                    return_value=ContainerRuntime.PODMAN,
+                ),
+                patch("aegra_cli.utils.container_runtime.is_podman_installed", return_value=True),
+                patch("aegra_cli.cli.subprocess.run") as mock_run,
+            ):
+                mock_run.return_value.returncode = 0
+                result = cli_runner.invoke(cli, ["down"])
+
+        assert result.exit_code == 0, result.output
+        assert mock_run.call_args.args[0][0] == "podman"
+        mock_owners.assert_not_called()
+
+    def test_down_stops_when_explicit_runtime_cannot_be_selected(
+        self, cli_runner: CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("AEGRA_CONTAINER_RUNTIME", "podman")
+        with cli_runner.isolated_filesystem(temp_dir=tmp_path):
+            Path("docker-compose.yml").write_text("services: {}\n")
+            with patch(
+                "aegra_cli.cli.resolve_container_runtime",
+                side_effect=RuntimeSelectionError("Podman is not installed"),
+            ):
+                result = cli_runner.invoke(cli, ["down"])
+
+        assert result.exit_code == 1
+        assert "Podman is not installed" in result.output
+
+    def test_down_stops_every_runtime_that_owns_the_project(
+        self, cli_runner: CliRunner, tmp_path: Path
+    ) -> None:
+        """A project can end up on both runtimes, and stopping one would leave containers behind."""
+        with cli_runner.isolated_filesystem(temp_dir=tmp_path):
+            Path("docker-compose.yml").write_text("services: {}\n")
+            with (
+                patch(
+                    "aegra_cli.cli.runtimes_owning_project",
+                    return_value=ProjectOwnership(
+                        [ContainerRuntime.DOCKER, ContainerRuntime.PODMAN],
+                        False,
+                    ),
+                ),
+                patch("aegra_cli.cli.subprocess.run") as mock_run,
+            ):
+                mock_run.return_value.returncode = 0
+                result = cli_runner.invoke(cli, ["down"])
+
+        assert result.exit_code == 0, result.output
+        commands = [call.args[0][0] for call in mock_run.call_args_list]
+        assert commands == ["docker", "podman"]
+
+    def test_down_reports_failure_when_one_owner_fails(
+        self, cli_runner: CliRunner, tmp_path: Path
+    ) -> None:
+        with cli_runner.isolated_filesystem(temp_dir=tmp_path):
+            Path("docker-compose.yml").write_text("services: {}\n")
+            with (
+                patch(
+                    "aegra_cli.cli.runtimes_owning_project",
+                    return_value=ProjectOwnership(
+                        [ContainerRuntime.DOCKER, ContainerRuntime.PODMAN],
+                        False,
+                    ),
+                ),
+                patch("aegra_cli.cli.subprocess.run") as mock_run,
+            ):
+                mock_run.side_effect = [_completed_process(1), _completed_process(0)]
+                result = cli_runner.invoke(cli, ["down"])
+
+        assert result.exit_code == 1
+        assert "failed to stop" in result.output
+        assert mock_run.call_count == 2
+
+    def test_down_stops_when_owner_lacks_podman_compose(
+        self, cli_runner: CliRunner, tmp_path: Path
+    ) -> None:
+        with cli_runner.isolated_filesystem(temp_dir=tmp_path):
+            Path("docker-compose.yml").write_text("services: {}\n")
+            with (
+                patch(
+                    "aegra_cli.cli.runtimes_owning_project",
+                    return_value=ProjectOwnership([ContainerRuntime.PODMAN], False),
+                ),
+                patch("aegra_cli.cli.ensure_compose_plugin", ensure_compose_plugin),
+                patch(
+                    "aegra_cli.utils.container_runtime.podman_compose_available", return_value=False
+                ),
+                patch("aegra_cli.cli.subprocess.run") as mock_run,
+            ):
+                result = cli_runner.invoke(cli, ["down"])
+
+        assert result.exit_code == 1
+        assert "podman-compose" in result.output
+        mock_run.assert_not_called()
+
+    def test_down_stops_when_ownership_cannot_be_listed(
+        self, cli_runner: CliRunner, tmp_path: Path
+    ) -> None:
+        with cli_runner.isolated_filesystem(temp_dir=tmp_path):
+            Path("docker-compose.yml").write_text("services: {}\n")
+            with (
+                patch(
+                    "aegra_cli.cli.runtimes_owning_project",
+                    return_value=ProjectOwnership([], True),
+                ),
+                patch("aegra_cli.cli.subprocess.run") as mock_run,
+            ):
+                result = cli_runner.invoke(cli, ["down"])
+
+        assert result.exit_code == 1
+        mock_run.assert_not_called()
+        assert "Nothing was stopped" in result.output
+        assert "AEGRA_CONTAINER_RUNTIME" in result.output
+
+    def test_down_stops_known_owners_when_another_listing_fails(
+        self, cli_runner: CliRunner, tmp_path: Path
+    ) -> None:
+        with cli_runner.isolated_filesystem(temp_dir=tmp_path):
+            Path("docker-compose.yml").write_text("services: {}\n")
+            with (
+                patch(
+                    "aegra_cli.cli.runtimes_owning_project",
+                    return_value=ProjectOwnership([ContainerRuntime.DOCKER], True),
+                ),
+                patch("aegra_cli.cli.subprocess.run") as mock_run,
+            ):
+                mock_run.return_value.returncode = 0
+                result = cli_runner.invoke(cli, ["down"])
+
+        assert result.exit_code == 1
+        assert mock_run.call_args.args[0][0] == "docker"
+        assert "Another runtime" in result.output
+
+    def test_down_stops_other_owners_when_one_compose_check_fails(
+        self, cli_runner: CliRunner, tmp_path: Path
+    ) -> None:
+        """A hung Podman Compose check must not leave Docker's confirmed containers running."""
+        commands: list[list[str]] = []
+
+        def fake_run(command: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+            """Both runtimes own the project, then `podman compose version` hangs."""
+            commands.append(command)
+            if command[:3] == ["podman", "compose", "version"]:
+                raise subprocess.TimeoutExpired(command, 10)
+            return subprocess.CompletedProcess(command, 0, stdout="abc\n", stderr="")
+
+        with cli_runner.isolated_filesystem(temp_dir=tmp_path):
+            Path("docker-compose.yml").write_text("services: {}\n")
+            with (
+                patch("aegra_cli.cli.runtimes_owning_project", runtimes_owning_project),
+                patch("aegra_cli.cli.ensure_compose_plugin", ensure_compose_plugin),
+                patch(
+                    "aegra_cli.utils.container_runtime.shutil.which",
+                    return_value="/usr/bin/runtime",
+                ),
+                patch("aegra_cli.cli.subprocess.run", side_effect=fake_run),
+            ):
+                result = cli_runner.invoke(cli, ["down"])
+
+        stopped = [command[0] for command in commands if command[-1] == "down"]
+        assert result.exit_code == 1
+        assert stopped == ["docker"]
+        assert "Podman Compose is not available" in result.output
+        assert "Another runtime" in result.output
+        assert "Services stopped successfully" not in result.output
+
+    def test_down_exits_nonzero_when_a_runtime_check_hangs(
+        self, cli_runner: CliRunner, tmp_path: Path
+    ) -> None:
+        """A hung check does not prove a runtime is stopped, so reporting success would be wrong."""
+        commands: list[list[str]] = []
+
+        def fake_run(command: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+            """Docker answers every command and Podman hangs."""
+            commands.append(command)
+            if command[0] == "podman":
+                raise subprocess.TimeoutExpired(command, 10)
+            return subprocess.CompletedProcess(command, 0, stdout="abc\n", stderr="")
+
+        with cli_runner.isolated_filesystem(temp_dir=tmp_path):
+            Path("docker-compose.yml").write_text("services: {}\n")
+            with (
+                patch("aegra_cli.cli.runtimes_owning_project", runtimes_owning_project),
+                patch(
+                    "aegra_cli.utils.container_runtime.shutil.which",
+                    return_value="/usr/bin/runtime",
+                ),
+                patch("aegra_cli.cli.subprocess.run", side_effect=fake_run),
+            ):
+                result = cli_runner.invoke(cli, ["down"])
+
+        assert result.exit_code == 1
+        assert commands[-1][:2] == ["docker", "compose"]
+        assert commands[-1][-1] == "down"
+        assert "Could not check Podman" in result.output
+        assert "Another runtime" in result.output
+        assert "Services stopped successfully" not in result.output
+
+    def test_down_stops_nothing_when_every_runtime_check_hangs(
+        self, cli_runner: CliRunner, tmp_path: Path
+    ) -> None:
+        """With no confirmed owner, stopping a guessed runtime could miss the real containers."""
+        commands: list[list[str]] = []
+
+        def fake_run(command: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+            """Every command hangs."""
+            commands.append(command)
+            raise subprocess.TimeoutExpired(command, 10)
+
+        with cli_runner.isolated_filesystem(temp_dir=tmp_path):
+            Path("docker-compose.yml").write_text("services: {}\n")
+            with (
+                patch("aegra_cli.cli.runtimes_owning_project", runtimes_owning_project),
+                patch(
+                    "aegra_cli.utils.container_runtime.shutil.which",
+                    return_value="/usr/bin/runtime",
+                ),
+                patch("aegra_cli.cli.subprocess.run", side_effect=fake_run),
+            ):
+                result = cli_runner.invoke(cli, ["down"])
+
+        assert result.exit_code == 1
+        assert commands == [["docker", "info"], ["podman", "info"]]
+        assert "Nothing was stopped" in result.output
+
+    def test_down_succeeds_when_the_other_runtime_reports_stopped(
+        self, cli_runner: CliRunner, tmp_path: Path
+    ) -> None:
+        """Unlike a hung check, a stopped runtime is a known state and must not fail the command."""
+
+        def fake_run(command: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+            """Docker answers every command and Podman reports it is stopped."""
+            if command[0] == "podman":
+                return subprocess.CompletedProcess(command, 1, stdout="", stderr="")
+            return subprocess.CompletedProcess(command, 0, stdout="abc\n", stderr="")
+
+        with cli_runner.isolated_filesystem(temp_dir=tmp_path):
+            Path("docker-compose.yml").write_text("services: {}\n")
+            with (
+                patch("aegra_cli.cli.runtimes_owning_project", runtimes_owning_project),
+                patch(
+                    "aegra_cli.utils.container_runtime.shutil.which",
+                    return_value="/usr/bin/runtime",
+                ),
+                patch("aegra_cli.cli.subprocess.run", side_effect=fake_run),
+            ):
+                result = cli_runner.invoke(cli, ["down"])
+
+        assert result.exit_code == 0
+        assert "Services stopped successfully" in result.output

@@ -196,10 +196,7 @@ async def stamp_cron_team(ctx: AuthContext, value: dict) -> HandlerResult:
     """
     if value.get("metadata") is None:
         value["metadata"] = {}
-    try:
-        team_id = ctx.user["team_id"] if "team_id" in ctx.user else getattr(ctx.user, "team_id", None)
-        if team_id:
-            value["metadata"]["team_id"] = team_id
-    except (KeyError, AttributeError):
-        pass
+    team_id = getattr(ctx.user, "team_id", None)
+    if team_id:
+        value["metadata"]["team_id"] = team_id
     return True

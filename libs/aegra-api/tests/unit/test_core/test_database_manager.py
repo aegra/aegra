@@ -324,6 +324,20 @@ class TestDatabaseManager:
 
         self._assert_released(db_manager, mock_db_deps)
 
+    async def test_initialize_releases_resources_when_embed_file_fails_to_load(
+        self, db_manager: DatabaseManager, mock_db_deps: dict[str, Any], tmp_path: Path
+    ) -> None:
+        (tmp_path / "embeddings.py").write_text("import embed_package_that_is_not_installed\n")
+        mock_db_deps["load_store_config"].return_value = {"index": {"dims": 2, "embed": "./embeddings.py:embed"}}
+
+        with (
+            patch("aegra_api.core.database.get_config_dir", return_value=tmp_path),
+            pytest.raises(ModuleNotFoundError, match="embed_package_that_is_not_installed"),
+        ):
+            await db_manager.initialize()
+
+        self._assert_released(db_manager, mock_db_deps)
+
     async def test_initialize_releases_resources_and_propagates_cancellation(
         self, db_manager: DatabaseManager, mock_db_deps: dict[str, Any]
     ) -> None:

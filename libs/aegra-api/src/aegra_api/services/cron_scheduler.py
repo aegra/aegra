@@ -25,6 +25,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from aegra_api.core.orm import Cron as CronORM
 from aegra_api.core.orm import _get_session_maker
 from aegra_api.models import RunCreate, User
+from aegra_api.models.run_job import CronTrigger
 from aegra_api.services.cron_service import (
     CronService,
     should_delete_stateless_thread,
@@ -64,10 +65,12 @@ def _build_run_create(cron: CronORM) -> RunCreate:
         multitask_strategy=payload.get("multitask_strategy"),
         durability=payload.get("durability"),
         checkpoint_during=payload.get("checkpoint_during"),
-        # Cron metadata_dict is stored on the cron record for search/filter, not
-        # forwarded onto fired runs. Re-wire here if run-level tagging is needed.
-        metadata=None,
     )
+
+
+def _build_trigger(cron: CronORM, scheduled_time: datetime) -> CronTrigger:
+    """Describe the firing of *cron* for *scheduled_time* so the run can carry it."""
+    return CronTrigger(cron_id=cron.cron_id, scheduled_time=scheduled_time, cron_metadata=cron.metadata_dict or {})
 
 
 async def _validate_cron_user(user_id: str) -> bool:
@@ -193,6 +196,9 @@ class CronScheduler:
             display_name="cron-scheduler",
             is_authenticated=True,
         )
+        # The claimed next_run_date is the occurrence this firing serves; a
+        # re-fire after a crashed claim carries the same one.
+        trigger = _build_trigger(cron, cron.next_run_date or now)
 
         try:
             _run_id, _run, _job = await _prepare_run(
@@ -201,6 +207,7 @@ class CronScheduler:
                 run_request,
                 user,
                 initial_status="pending",
+                trigger=trigger,
             )
             run_created = True
             logger.info("Cron fired run", cron_id=cron.cron_id, run_id=_run_id, thread_id=thread_id)

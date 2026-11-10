@@ -1,10 +1,12 @@
 """Tests for RunJob Pydantic model and serialization."""
 
+from datetime import UTC, datetime
+
 import pytest
 from pydantic import ValidationError
 
 from aegra_api.models.auth import User
-from aegra_api.models.run_job import RunBehavior, RunExecution, RunIdentity, RunJob
+from aegra_api.models.run_job import CronTrigger, RunBehavior, RunExecution, RunIdentity, RunJob
 
 
 class TestRunIdentity:
@@ -18,6 +20,23 @@ class TestRunIdentity:
         assert identity.run_id == "r1"
         assert identity.thread_id == "t1"
         assert identity.graph_id == "g1"
+
+
+class TestCronTrigger:
+    def test_frozen(self) -> None:
+        trigger = CronTrigger(cron_id="c1", scheduled_time=datetime(2026, 1, 1, 9, 0, tzinfo=UTC))
+        with pytest.raises(ValidationError):
+            trigger.cron_id = "c2"  # type: ignore[misc]
+
+    def test_pinned_keys_render_the_occurrence_as_iso_8601_utc(self) -> None:
+        trigger = CronTrigger(cron_id="c1", scheduled_time=datetime(2026, 1, 1, 9, 0, 30, tzinfo=UTC))
+
+        assert trigger.pinned_keys() == {"cron_id": "c1", "cron_scheduled_time": "2026-01-01T09:00:30+00:00"}
+
+    def test_cron_metadata_defaults_to_empty(self) -> None:
+        trigger = CronTrigger(cron_id="c1", scheduled_time=datetime(2026, 1, 1, 9, 0, tzinfo=UTC))
+
+        assert trigger.cron_metadata == {}
 
 
 class TestRunExecution:
@@ -121,6 +140,47 @@ class TestRunJob:
 
         restored = RunJob.from_run_orm(FakeORM())
         assert restored.user.model_extra.get("team_id") == "team-42"
+
+    def test_trigger_roundtrip_keeps_the_same_pinned_keys(self) -> None:
+        """A worker rebuilt from execution_params pins the same values the API process would."""
+        job = RunJob(
+            identity=RunIdentity(run_id="r1", thread_id="t1", graph_id="g1"),
+            user=User(identity="u1"),
+            trigger=CronTrigger(
+                cron_id="c1", scheduled_time=datetime(2026, 1, 1, 9, 0, tzinfo=UTC), cron_metadata={"team": "ops"}
+            ),
+        )
+        params = job.to_execution_params()
+        assert params["trigger"] == {
+            "cron_id": "c1",
+            "scheduled_time": "2026-01-01T09:00:00Z",
+            "cron_metadata": {"team": "ops"},
+        }
+
+        class FakeORM:
+            run_id = "r1"
+            thread_id = "t1"
+            execution_params = params
+
+        restored = RunJob.from_run_orm(FakeORM())
+        assert restored.trigger == job.trigger
+        assert restored.trigger is not None
+        assert restored.trigger.pinned_keys() == job.trigger.pinned_keys()
+
+    def test_request_created_run_has_no_trigger(self) -> None:
+        job = RunJob(
+            identity=RunIdentity(run_id="r1", thread_id="t1", graph_id="g1"),
+            user=User(identity="u1"),
+        )
+        params = job.to_execution_params()
+        assert params["trigger"] is None
+
+        class FakeORM:
+            run_id = "r1"
+            thread_id = "t1"
+            execution_params = params
+
+        assert RunJob.from_run_orm(FakeORM()).trigger is None
 
     def test_defaults_when_optional_fields_missing(self) -> None:
         """RunJob with minimal required fields."""

@@ -184,3 +184,19 @@ async def allow_assistant_create(ctx: AuthContext, value: AssistantsCreate) -> H
     except (KeyError, AttributeError):
         pass
     return True
+
+
+@auth.on.crons.create
+@auth.on.crons.update
+async def stamp_cron_team(ctx: AuthContext, value: dict) -> HandlerResult:
+    """Inject team_id into cron metadata on create and update.
+
+    The cron stores what this handler sets. On update, metadata the client did
+    not send merges onto the stored metadata instead of replacing it.
+    """
+    if value.get("metadata") is None:
+        value["metadata"] = {}
+    team_id = getattr(ctx.user, "team_id", None)
+    if team_id:
+        value["metadata"]["team_id"] = team_id
+    return True

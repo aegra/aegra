@@ -11,6 +11,7 @@ import pytest
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
+from aegra_api.core.auth_handlers import AuthContextWrapper
 from aegra_api.models.crons import CronResponse
 from aegra_api.services.cron_service import get_cron_service
 from tests.fixtures.clients import create_test_app, make_client
@@ -786,3 +787,115 @@ class TestCronDurability:
 
         assert resp.status_code == 422
         mock_cron_service.update_cron.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Auth handler edits reach the service
+# ---------------------------------------------------------------------------
+
+
+async def _stamp_in_place(ctx: AuthContextWrapper, value: dict[str, Any]) -> None:
+    """A crons handler that edits ``value`` in place, as the authentication guide shows."""
+    if ctx.resource != "crons":
+        return None
+    value["metadata"] = {**(value.get("metadata") or {}), "owner": "test-user"}
+    value["context"] = {**(value.get("context") or {}), "tier": "gold"}
+    return None
+
+
+async def _return_edits(ctx: AuthContextWrapper, value: dict[str, Any]) -> dict[str, Any] | None:
+    """A crons handler that returns its edits instead of mutating ``value``."""
+    if ctx.resource != "crons":
+        return None
+    value["metadata"] = {"ignored": True}
+    return {"metadata": {"team": "a"}, "config": {"tags": ["scheduled"]}}
+
+
+_CREATE_BODY: dict[str, Any] = {
+    "input": {"q": 1},
+    "assistant_id": "asst-001",
+    "schedule": "*/5 * * * *",
+    "metadata": {"client": "sent"},
+}
+
+
+class TestCreateKeepsHandlerEdits:
+    """A crons.create handler's edits must reach the request the service stores."""
+
+    @pytest.mark.parametrize("path", ["/runs/crons", "/threads/t-001/runs/crons"])
+    def test_in_place_edits_are_stored(self, client: TestClient, mock_cron_service: AsyncMock, path: str) -> None:
+        mock_cron_service.create_cron.return_value = AsyncMock()
+
+        with patch("aegra_api.api.crons.handle_event", side_effect=_stamp_in_place):
+            resp = client.post(path, json=_CREATE_BODY)
+
+        assert resp.status_code == 200, resp.text
+        request = mock_cron_service.create_cron.await_args.args[0]
+        assert request.metadata == {"client": "sent", "owner": "test-user"}
+        assert request.context == {"tier": "gold"}
+
+    @pytest.mark.parametrize("path", ["/runs/crons", "/threads/t-001/runs/crons"])
+    def test_returned_edits_win_over_in_place_ones(
+        self, client: TestClient, mock_cron_service: AsyncMock, path: str
+    ) -> None:
+        mock_cron_service.create_cron.return_value = AsyncMock()
+
+        with patch("aegra_api.api.crons.handle_event", side_effect=_return_edits):
+            resp = client.post(path, json={**_CREATE_BODY, "config": {"recursion_limit": 5}})
+
+        assert resp.status_code == 200, resp.text
+        request = mock_cron_service.create_cron.await_args.args[0]
+        assert request.metadata == {"client": "sent", "team": "a"}
+        assert request.config == {"recursion_limit": 5, "tags": ["scheduled"]}
+
+    def test_no_handler_edit_leaves_the_request_as_sent(self, client: TestClient, mock_cron_service: AsyncMock) -> None:
+        mock_cron_service.create_cron.return_value = AsyncMock()
+
+        resp = client.post("/runs/crons", json=_CREATE_BODY)
+
+        assert resp.status_code == 200, resp.text
+        request = mock_cron_service.create_cron.await_args.args[0]
+        assert request.metadata == {"client": "sent"}
+        assert request.context is None
+
+
+class TestUpdateKeepsHandlerEdits:
+    """A crons.update handler's edits must reach the service, marked when only the handler set them."""
+
+    def test_edits_join_the_fields_the_client_sent(self, client: TestClient, mock_cron_service: AsyncMock) -> None:
+        mock_cron_service.update_cron.return_value = _cron_response()
+
+        with patch("aegra_api.api.crons.handle_event", side_effect=_stamp_in_place):
+            resp = client.patch(
+                "/runs/crons/cron-001", json={"metadata": {"client": "sent"}, "context": {"region": "eu"}}
+            )
+
+        assert resp.status_code == 200, resp.text
+        args = mock_cron_service.update_cron.await_args
+        assert args.args[1].metadata == {"client": "sent", "owner": "test-user"}
+        assert args.args[1].context == {"region": "eu", "tier": "gold"}
+        assert args.kwargs["merge_fields"] == set()
+
+    def test_fields_only_the_handler_set_are_marked_for_merging(
+        self, client: TestClient, mock_cron_service: AsyncMock
+    ) -> None:
+        mock_cron_service.update_cron.return_value = _cron_response()
+
+        with patch("aegra_api.api.crons.handle_event", side_effect=_stamp_in_place):
+            resp = client.patch("/runs/crons/cron-001", json={"enabled": False})
+
+        assert resp.status_code == 200, resp.text
+        args = mock_cron_service.update_cron.await_args
+        assert args.args[1].metadata == {"owner": "test-user"}
+        assert args.args[1].context == {"tier": "gold"}
+        assert args.kwargs["merge_fields"] == {"metadata", "context"}
+
+    def test_no_handler_edit_marks_nothing(self, client: TestClient, mock_cron_service: AsyncMock) -> None:
+        mock_cron_service.update_cron.return_value = _cron_response()
+
+        resp = client.patch("/runs/crons/cron-001", json={"enabled": False})
+
+        assert resp.status_code == 200, resp.text
+        args = mock_cron_service.update_cron.await_args
+        assert args.args[1].metadata is None
+        assert args.kwargs["merge_fields"] == set()

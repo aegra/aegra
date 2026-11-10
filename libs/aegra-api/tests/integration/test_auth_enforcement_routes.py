@@ -12,7 +12,9 @@ from __future__ import annotations
 
 import inspect
 from collections.abc import Iterator
+from datetime import UTC, datetime
 from typing import Any
+from unittest.mock import AsyncMock
 
 import pytest
 from fastapi import FastAPI
@@ -27,7 +29,10 @@ from aegra_api.core.auth_enforcement import (
     reset_dispatch_state,
 )
 from aegra_api.core.database import db_manager
+from aegra_api.core.orm import Cron as CronORM
 from aegra_api.models.auth import User
+from aegra_api.models.crons import CronCreate, CronResponse
+from aegra_api.services.cron_service import get_cron_service
 from tests.fixtures.session_fixtures import ThreadSession, override_session_dependency
 
 
@@ -219,6 +224,104 @@ def test_self_dispatching_route_keeps_value_mutation(monkeypatch: pytest.MonkeyP
         "Handler metadata injection was lost; the route dispatched against a "
         "throwaway dict instead of its own request model"
     )
+
+
+def _inject_team_id(value: dict[str, Any]) -> None:
+    # Mirrors the thread handler above: metadata may be absent or None.
+    if value.get("metadata") is None:
+        value["metadata"] = {}
+    value["metadata"]["team_id"] = "team999"
+
+
+@pytest.mark.parametrize(
+    "client_metadata",
+    [
+        pytest.param({"a": 1}, id="handler-adds-a-key"),
+        pytest.param({"a": 1, "team_id": "spoofed"}, id="handler-wins-over-the-clients-value"),
+    ],
+)
+def test_cron_create_keeps_value_mutation(client_metadata: dict[str, Any], monkeypatch: pytest.MonkeyPatch) -> None:
+    """A crons.create handler injecting metadata in place must reach the stored cron."""
+    auth = Auth()
+
+    @auth.on.crons.create
+    async def inject(ctx: Any, value: Any) -> bool:
+        _inject_team_id(value)
+        return True
+
+    app = _build_app(auth, monkeypatch)
+
+    async def create_cron(request: CronCreate, user_identity: str, *, thread_id: str | None = None) -> CronORM:
+        now = datetime.now(UTC)
+        return CronORM(
+            cron_id="cron-1",
+            assistant_id=request.assistant_id,
+            thread_id=thread_id,
+            user_id=user_identity,
+            schedule=request.schedule,
+            payload={},
+            metadata_dict=request.metadata or {},
+            enabled=False,
+            created_at=now,
+            updated_at=now,
+        )
+
+    service = AsyncMock()
+    service.create_cron.side_effect = create_cron
+    app.dependency_overrides[get_cron_service] = lambda: service
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/runs/crons",
+            json={
+                "assistant_id": "agent",
+                "schedule": "0 0 * * *",
+                "input": {},
+                "enabled": False,
+                "metadata": client_metadata,
+            },
+        )
+
+    assert response.status_code == 200, response.text
+    assert response.json()["metadata"] == {"a": 1, "team_id": "team999"}, (
+        "Handler metadata injection was lost; the route stored the request without the handler's edits"
+    )
+
+
+@pytest.mark.parametrize(
+    ("body", "merge_fields"),
+    [
+        # The client sent no metadata, so the stamp merges onto the stored metadata instead of replacing it.
+        pytest.param({"enabled": False}, {"metadata"}, id="handler-only-metadata-merges"),
+        pytest.param({"metadata": {"team_id": "spoofed"}}, set(), id="handler-wins-over-the-clients-value"),
+    ],
+)
+def test_cron_update_keeps_value_mutation(
+    body: dict[str, Any], merge_fields: set[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A crons.update handler injecting metadata in place must reach the stored cron."""
+    auth = Auth()
+
+    @auth.on.crons.update
+    async def inject(ctx: Any, value: Any) -> bool:
+        _inject_team_id(value)
+        return True
+
+    app = _build_app(auth, monkeypatch)
+    now = datetime.now(UTC)
+    service = AsyncMock()
+    service.update_cron.return_value = CronResponse(
+        cron_id="cron-1", assistant_id="agent", schedule="0 0 * * *", created_at=now, updated_at=now
+    )
+    app.dependency_overrides[get_cron_service] = lambda: service
+
+    with TestClient(app) as client:
+        response = client.patch("/runs/crons/cron-1", json=body)
+
+    assert response.status_code == 200, response.text
+    request = service.update_cron.await_args.args[1]
+    assert request.metadata == {"team_id": "team999"}
+    assert service.update_cron.await_args.kwargs["merge_fields"] == merge_fields
 
 
 def test_cron_create_authorizes_every_layer_of_its_chain(monkeypatch: pytest.MonkeyPatch) -> None:

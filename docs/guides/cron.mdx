@@ -208,6 +208,18 @@ await client.crons.delete(cron_id="<cron_id>")
 
 Deletion is permanent. When a cron is bound to a thread and that thread is deleted, the cron is removed atomically as well (`ON DELETE CASCADE`).
 
+## Authorization handlers
+
+A `crons.create` or `crons.update` handler can add to the cron's `metadata`, `config`, and `context`, either by mutating `value` in place or by returning those fields in a dict. The cron stores what the handler adds, and every firing runs with the stored `config` and `context`.
+
+```python
+@auth.on.crons.create
+async def stamp_owner(ctx, value):
+    value["metadata"] = {**(value.get("metadata") or {}), "owner": ctx.user.identity}
+```
+
+On update, a field (`metadata`, `config`, or `context`) the client sends replaces the stored value and carries the handler's additions. A field only the handler sets merges onto the stored value, so `client.crons.update(cron_id, enabled=False)` keeps the cron's metadata.
+
 ## Limitations
 
 - **Scheduled runs skip per-request auth handlers.** Creating a cron runs the full auth chain (`crons.create` → `assistants.read` → `threads.read`/`search`), but each *scheduled firing* executes as a background daemon under the cron owner's identity and does not re-dispatch `@auth.on(...)` handlers. Put per-run authorization logic in the graph itself if it must apply to scheduled runs.

@@ -4,6 +4,7 @@ Handles CRUD operations on cron records and delegates run creation
 to the existing run preparation pipeline.
 """
 
+from collections.abc import Collection
 from datetime import UTC, datetime, timedelta
 from typing import Any, cast
 from urllib.parse import urlparse, urlunparse
@@ -304,8 +305,14 @@ class CronService:
         cron_id: str,
         request: CronUpdate,
         user_identity: str,
+        *,
+        merge_fields: Collection[str] = frozenset(),
     ) -> CronResponse:
-        """Update an existing cron job and return the updated ``CronResponse``."""
+        """Update an existing cron job and return the updated ``CronResponse``.
+
+        ``merge_fields`` names dict fields an auth handler set without the client
+        sending them; those merge onto the stored value instead of replacing it.
+        """
         cron = await self._get_cron_or_404(cron_id, user_identity, lock=True)
 
         values: dict[str, Any] = {"updated_at": datetime.now(UTC)}
@@ -337,12 +344,16 @@ class CronService:
         if request.enabled is not None:
             values["enabled"] = request.enabled
 
-        # Metadata (full replace, matching SDK behavior)
+        # Client-sent metadata replaces the stored dict (SDK behavior); handler-only metadata merges onto it.
         if request.metadata is not None:
-            values["metadata_dict"] = request.metadata
+            stored_metadata = (cron.metadata_dict or {}) if "metadata" in merge_fields else {}
+            values["metadata_dict"] = {**stored_metadata, **request.metadata}
 
         # Merge payload fields into existing payload
         new_payload = _build_payload(request)
+        for field in merge_fields:
+            if isinstance(new_payload.get(field), dict):
+                new_payload[field] = {**(existing_payload.get(field) or {}), **new_payload[field]}
         if new_payload:
             existing_payload.update(new_payload)
             values["payload"] = existing_payload

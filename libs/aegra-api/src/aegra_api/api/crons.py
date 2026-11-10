@@ -18,7 +18,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from aegra_api.core.auth_deps import auth_dependency, get_current_user
-from aegra_api.core.auth_handlers import build_auth_context, handle_event
+from aegra_api.core.auth_handlers import apply_handler_edits, build_auth_context, handle_event
 from aegra_api.core.orm import Cron as CronORM
 from aegra_api.core.orm import Thread as ThreadORM
 from aegra_api.core.orm import get_session
@@ -44,6 +44,9 @@ from aegra_api.services.run_preparation import _prepare_run
 router = APIRouter(tags=["Crons"], dependencies=auth_dependency)
 logger = structlog.getLogger(__name__)
 
+# Fields a crons handler may stamp; the cron stores them and every firing reads config and context.
+_HANDLER_EDITABLE_FIELDS = ("metadata", "config", "context")
+
 
 async def _authorize_cron_create(
     user: User,
@@ -59,11 +62,15 @@ async def _authorize_cron_create(
 
     * thread-scoped create: ``crons.create`` → ``assistants.read`` → ``threads.read``
     * stateless create:     ``crons.create`` → ``assistants.read`` → ``threads.search``
+
+    The ``crons.create`` handler's edits to metadata, config, and context are
+    folded into ``request``, so the stored cron carries them.
     """
     cron_value: dict[str, object] = request.model_dump()
     if thread_id is not None:
         cron_value["thread_id"] = thread_id
-    await handle_event(build_auth_context(user, "crons", "create"), cron_value)
+    filters = await handle_event(build_auth_context(user, "crons", "create"), cron_value)
+    apply_handler_edits(request, filters, cron_value, _HANDLER_EDITABLE_FIELDS)
 
     await handle_event(
         build_auth_context(user, "assistants", "read"),
@@ -156,9 +163,10 @@ async def update_cron(
     # An explicit null clears the end time, so a handler guarding end_time must see it.
     if "end_time" in request.model_fields_set:
         value["end_time"] = request.end_time
-    await handle_event(ctx, value)
+    filters = await handle_event(ctx, value)
+    merge_fields = apply_handler_edits(request, filters, value, _HANDLER_EDITABLE_FIELDS)
 
-    return await service.update_cron(cron_id, request, user.identity)
+    return await service.update_cron(cron_id, request, user.identity, merge_fields=merge_fields)
 
 
 # ---------------------------------------------------------------------------

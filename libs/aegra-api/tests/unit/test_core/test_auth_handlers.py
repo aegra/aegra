@@ -9,10 +9,12 @@ from langgraph_sdk.auth.types import AuthContext as LangGraphAuthContext
 
 from aegra_api.core.auth_handlers import (
     AuthContextWrapper,
+    apply_handler_edits,
     build_auth_context,
     handle_event,
 )
 from aegra_api.models.auth import User
+from aegra_api.models.crons import CronUpdate
 
 
 class TestAuthContextWrapper:
@@ -425,3 +427,77 @@ class TestHandleEvent:
             await handle_event(ctx, {})
             # Handler should still be called (cache stores handler, not result)
             assert mock_handler.call_count == 2
+
+
+class TestApplyHandlerEdits:
+    """apply_handler_edits folds a handler's edits into the request a route persists."""
+
+    def test_merges_an_in_place_edit_over_the_clients_value(self) -> None:
+        request = CronUpdate(metadata={"client": "sent"})
+        value = {"metadata": {"client": "sent", "owner": "u"}}
+
+        unset = apply_handler_edits(request, None, value, ("metadata",))
+
+        assert request.metadata == {"client": "sent", "owner": "u"}
+        assert unset == set()
+
+    def test_a_returned_field_wins_over_the_in_place_edit(self) -> None:
+        request = CronUpdate(metadata={"client": "sent"})
+        value = {"metadata": {"ignored": True}}
+
+        apply_handler_edits(request, {"metadata": {"team": "a"}}, value, ("metadata",))
+
+        assert request.metadata == {"client": "sent", "team": "a"}
+
+    def test_an_in_place_edit_wins_over_the_clients_value_for_the_same_key(self) -> None:
+        request = CronUpdate(metadata={"client": "sent", "team_id": "spoofed"})
+        value = {"metadata": {"client": "sent", "team_id": "team777"}}
+
+        apply_handler_edits(request, None, value, ("metadata",))
+
+        assert request.metadata == {"client": "sent", "team_id": "team777"}
+
+    def test_a_returned_field_wins_over_the_clients_value_for_the_same_key(self) -> None:
+        request = CronUpdate(metadata={"team_id": "spoofed"})
+        value = {"metadata": {"team_id": "spoofed"}}
+
+        apply_handler_edits(request, {"metadata": {"team_id": "team777"}}, value, ("metadata",))
+
+        assert request.metadata == {"team_id": "team777"}
+
+    def test_a_returned_filter_without_the_field_keeps_the_in_place_edit(self) -> None:
+        # The SDK's documented owner handler stamps value["metadata"] and returns a search filter.
+        request = CronUpdate()
+        value = {"metadata": {"owner": "u"}}
+
+        unset = apply_handler_edits(request, {"owner": "u"}, value, ("metadata",))
+
+        assert request.metadata == {"owner": "u"}
+        assert unset == {"metadata"}
+
+    def test_ignores_edits_that_are_not_dicts(self) -> None:
+        request = CronUpdate(config={"tags": ["a"]})
+        value = {"metadata": None, "config": "not a dict"}
+
+        unset = apply_handler_edits(request, {"context": ["x"]}, value, ("metadata", "config", "context"))
+
+        assert request.metadata is None
+        assert request.config == {"tags": ["a"]}
+        assert request.context is None
+        assert unset == set()
+
+    def test_leaves_fields_it_is_not_given_alone(self) -> None:
+        request = CronUpdate()
+
+        apply_handler_edits(request, None, {"context": {"tier": "gold"}}, ("metadata",))
+
+        assert request.context is None
+
+    def test_reports_the_fields_the_client_left_unset(self) -> None:
+        request = CronUpdate(metadata={"client": "sent"})
+        value = {"metadata": {"client": "sent", "owner": "u"}, "context": {"tier": "gold"}}
+
+        unset = apply_handler_edits(request, None, value, ("metadata", "config", "context"))
+
+        assert request.context == {"tier": "gold"}
+        assert unset == {"context"}

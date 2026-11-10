@@ -390,6 +390,71 @@ class TestUpdateCron:
         mock_session.commit.assert_awaited_once()
 
 
+class TestUpdateCronMergeFields:
+    """Fields only an auth handler set merge onto the stored value; fields the client sent replace it."""
+
+    @staticmethod
+    def _update_params(mock_session: AsyncMock) -> dict[str, Any]:
+        return mock_session.execute.await_args_list[0].args[0].compile().params
+
+    @pytest.mark.asyncio
+    async def test_merges_handler_only_metadata_onto_the_stored_metadata(
+        self,
+        cron_service: CronService,
+        mock_session: AsyncMock,
+    ) -> None:
+        existing = _make_cron_orm(metadata_dict={"client": "kept"})
+        mock_session.scalar.side_effect = [existing, existing]
+
+        await cron_service.update_cron(
+            "cron-001", CronUpdate(metadata={"owner": "u"}), "test-user", merge_fields={"metadata"}
+        )
+
+        assert self._update_params(mock_session)["metadata"] == {"client": "kept", "owner": "u"}
+
+    @pytest.mark.asyncio
+    async def test_replaces_metadata_the_client_sent(
+        self,
+        cron_service: CronService,
+        mock_session: AsyncMock,
+    ) -> None:
+        existing = _make_cron_orm(metadata_dict={"client": "old"})
+        mock_session.scalar.side_effect = [existing, existing]
+
+        await cron_service.update_cron("cron-001", CronUpdate(metadata={"new": 1}), "test-user")
+
+        assert self._update_params(mock_session)["metadata"] == {"new": 1}
+
+    @pytest.mark.asyncio
+    async def test_merges_handler_only_context_onto_the_stored_payload(
+        self,
+        cron_service: CronService,
+        mock_session: AsyncMock,
+    ) -> None:
+        existing = _make_cron_orm(payload={"input": {"q": 1}, "context": {"region": "eu"}})
+        mock_session.scalar.side_effect = [existing, existing]
+
+        await cron_service.update_cron(
+            "cron-001", CronUpdate(context={"tier": "gold"}), "test-user", merge_fields={"context"}
+        )
+
+        payload = self._update_params(mock_session)["payload"]
+        assert payload == {"input": {"q": 1}, "context": {"region": "eu", "tier": "gold"}}
+
+    @pytest.mark.asyncio
+    async def test_replaces_context_the_client_sent(
+        self,
+        cron_service: CronService,
+        mock_session: AsyncMock,
+    ) -> None:
+        existing = _make_cron_orm(payload={"input": {"q": 1}, "context": {"region": "eu"}})
+        mock_session.scalar.side_effect = [existing, existing]
+
+        await cron_service.update_cron("cron-001", CronUpdate(context={"tier": "gold"}), "test-user")
+
+        assert self._update_params(mock_session)["payload"]["context"] == {"tier": "gold"}
+
+
 # ---------------------------------------------------------------------------
 # CronService.delete_cron
 # ---------------------------------------------------------------------------

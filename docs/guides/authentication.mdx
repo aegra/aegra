@@ -241,9 +241,7 @@ several resources still checks each one: creating a cron authorizes
 layer. Creating a run likewise authorizes `threads.create_run`, then
 `assistants.read` for the assistant it uses.
 
-Handlers may also inject data by mutating `value` in place. Setting
-`value["metadata"]["team_id"]` in an `@auth.on.threads.create` handler stores
-that metadata on the new thread.
+Handlers may also inject data by mutating `value` in place. Setting `value["metadata"]["team_id"]` in an `@auth.on.threads.create` handler stores that metadata on the new thread. `@auth.on.crons.create` and `@auth.on.crons.update` handlers inject `metadata`, `config`, and `context` the same way: the cron stores them, and every scheduled run uses the stored `config` and `context`. A thread or cron handler can also return the field it sets in a dict; the returned field wins over an in-place edit. On cron update, a field (`metadata`, `config`, or `context`) the client did not send merges onto the stored value instead of replacing it.
 
 <Note>
 Route-to-handler mapping lives in `core/auth_registry.py`. A route that is not

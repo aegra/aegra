@@ -105,7 +105,8 @@ description: "What Aegra supports today, what's coming soon, and what's not yet 
 
 | Feature | Status | Notes |
 |:--|:--|:--|
-| Docker / Docker Compose | Supported | `aegra up` or `docker compose up`. |
+| Docker / Docker Compose | Supported | `aegra up` or `docker compose up`. Docker is the default local runtime. |
+| Podman | Supported | Local Compose through `podman compose` for `aegra dev`, `aegra up`, and `aegra down`. Set `AEGRA_CONTAINER_RUNTIME=podman` to choose it directly. With the variable unset, it is used when Docker is not running and Podman is installed. |
 | PaaS deployment | Supported | Railway, Render, Fly.io — any platform that runs Docker. |
 | Kubernetes | Supported | Helm chart or raw manifests. |
 | Dev server with hot reload | Supported | `aegra dev` with auto-reload and managed PostgreSQL. |

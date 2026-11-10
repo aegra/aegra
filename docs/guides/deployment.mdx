@@ -7,8 +7,8 @@ Aegra provides three CLI commands for different deployment scenarios:
 
 | Command | Starts PostgreSQL? | Starts Redis? | Starts app? | Best for |
 |---------|-------------------|--------------|-------------|----------|
-| `aegra dev` | Yes (Docker) | No | Yes (host, hot reload) | Local development |
-| `aegra up` | Yes (Docker) | Yes (Docker) | Yes (Docker) | Self-hosted production |
+| `aegra dev` | Yes (Docker or Podman) | No | Yes (host, hot reload) | Local development |
+| `aegra up` | Yes (Docker or Podman) | Yes (Docker or Podman) | Yes (Docker or Podman) | Self-hosted production |
 | `aegra serve` | No | No | Yes (host) | PaaS, containers, bare metal |
 
 ## Local development
@@ -17,7 +17,7 @@ Aegra provides three CLI commands for different deployment scenarios:
 aegra dev
 ```
 
-This starts a PostgreSQL container via Docker Compose and runs the app on your host with hot reload. No Redis is required -- runs execute as in-process asyncio tasks.
+This starts a PostgreSQL container with Compose and runs the app on your host with hot reload. With `AEGRA_CONTAINER_RUNTIME` unset, that is a running Docker daemon, then Podman if it is installed, then Docker if it is installed but stopped. No Redis is required -- runs execute as in-process asyncio tasks.
 
 What it does:
 1. Finds or generates `docker-compose.yml` with PostgreSQL
@@ -241,7 +241,7 @@ The generated `docker-compose.yml` uses `/health` to monitor the API container. 
 
 <AccordionGroup>
   <Accordion title="Connection refused on startup">
-    PostgreSQL is not reachable. If using `aegra dev` or `aegra up`, make sure Docker is running. If using `aegra serve`, verify your `DATABASE_URL` or `POSTGRES_*` variables in `.env`.
+    PostgreSQL is not reachable. If using `aegra dev` or `aegra up`, make sure Docker or Podman is running. If using `aegra serve`, verify your `DATABASE_URL` or `POSTGRES_*` variables in `.env`.
   </Accordion>
   <Accordion title="Password authentication failed">
     Wrong database credentials. Check that `POSTGRES_USER` and `POSTGRES_PASSWORD` in your `.env` match what PostgreSQL was initialized with.

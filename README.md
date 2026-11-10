@@ -35,7 +35,7 @@ Aegra is a drop-in replacement for LangSmith Deployments. Use the same LangGraph
 
 ### Using the CLI (Recommended)
 
-**Prerequisites:** Python 3.12+, Docker (for PostgreSQL)
+**Prerequisites:** Python 3.12+, Docker or Podman (for PostgreSQL; Docker is the default)
 
 ```bash
 pip install aegra-cli
@@ -119,8 +119,8 @@ aegra init ./my-agent   # Create at path (still prompts for template)
 
 aegra dev               # Start development server (hot reload + auto PostgreSQL)
 aegra serve             # Start production server (no reload)
-aegra up                # Build and start all Docker services
-aegra down              # Stop Docker services
+aegra up                # Build and start Compose services (Docker by default, or Podman)
+aegra down              # Stop Compose services
 
 aegra version           # Show version info
 ```

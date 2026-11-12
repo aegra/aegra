@@ -356,15 +356,16 @@ class ThreadEventSession:
 
         Thread-level events (empty namespace) always pass — lifecycle and other
         terminal signals are not subgraph-scoped. ``namespaces`` is a prefix
-        include-list; ``depth`` caps subgraph nesting.
+        include-list; ``depth`` caps nesting below each matching prefix (below
+        the root when no prefixes are given), as in the SDK's subscribe options.
         """
         if not namespace:
             return True
-        if self._depth is not None and len(namespace) > self._depth:
-            return False
-        if self._namespaces is None:
-            return True
-        return any(_prefix_matches(namespace, prefix) for prefix in self._namespaces)
+        prefixes = self._namespaces if self._namespaces is not None else [()]
+        return any(
+            _prefix_matches(namespace, prefix) and (self._depth is None or len(namespace) - len(prefix) <= self._depth)
+            for prefix in prefixes
+        )
 
 
 def _namespace_depth(namespace: list[str]) -> int:

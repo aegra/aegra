@@ -368,6 +368,25 @@ data: {"type":"event","seq":2,"event_id":"...:2","method":"messages","params":{"
 data: {"type":"event","seq":3,"event_id":"...:3","method":"lifecycle","params":{"data":{"event":"completed"},"namespace":[]}}
 ```
 
+### Filtering by subgraph
+
+Add `namespaces` to receive only some subgraphs' events, and `depth` to limit how far below them to go. Each entry in `namespaces` is a namespace prefix; segments match with or without their runtime `:<task_id>` suffix. `depth` counts levels below the prefix that matched:
+
+```bash
+curl -N -X POST http://localhost:8000/threads/$THREAD/stream/events \
+  -H "Content-Type: application/json" \
+  -d '{"channels": ["messages"], "namespaces": [["researcher"]], "depth": 1}'
+```
+
+| Event namespace | Delivered |
+|---|---|
+| `["researcher:<task_id>"]` | Yes (depth 0, the prefix itself) |
+| `["researcher:<task_id>", "search:<task_id>"]` | Yes (depth 1) |
+| `["researcher:<task_id>", "search:<task_id>", "fetch:<task_id>"]` | No (depth 2) |
+| `["writer:<task_id>"]` | No (not under a requested prefix) |
+
+With several prefixes, each event is measured against the prefix it matches. Without `namespaces`, `depth` counts from the root graph, so `"depth": 0` keeps only root graph events. Events with an empty namespace (root graph and lifecycle events) are always delivered.
+
 ### Channels
 
 `values`, `updates`, `messages`, `tools`, `lifecycle`, `input`, `checkpoints`, `tasks`, and `custom` (plus `custom:<name>`). Message streams arrive as content-block events (`message-start` → `content-block-delta` → `message-finish`); lifecycle reports `started` / `completed` / `failed` / `interrupted`.

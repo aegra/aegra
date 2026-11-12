@@ -83,6 +83,13 @@ async for chunk in client.runs.stream(
     print(chunk)
 ```
 
+### One-click deploy
+
+To run Aegra on a hosted machine instead of your own, deploy it with one click:
+
+<a href="https://repocloud.io/details/Aegra/"><img src="https://d16t0pc4846x52.cloudfront.net/deploylobe.svg" alt="Deploy on RepoCloud" height="42"></a>
+<a href="https://railway.com/deploy/aegra"><img src="https://railway.com/button.svg" alt="Deploy on Railway" height="42"></a>
+
 ## 🔥 Why Aegra?
 
 *Based on [LangChain pricing](https://www.langchain.com/pricing) as of February 2026. An enterprise tier with self-hosting is also available at custom pricing.*

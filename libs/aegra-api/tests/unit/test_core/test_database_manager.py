@@ -1,5 +1,8 @@
 import asyncio
+import json
 import os
+import sys
+from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -229,6 +232,59 @@ class TestDatabaseManager:
         mock_db_deps["store_cls"].assert_called_with(conn=mock_db_deps["pool_instance"], index=None)
         mock_db_deps["store_instance"].setup.assert_awaited_once()
 
+    @pytest.mark.asyncio
+    async def test_initialize_loads_embed_path_relative_to_config_dir(
+        self, db_manager: DatabaseManager, mock_db_deps: dict[str, Any], tmp_path: Path
+    ) -> None:
+        """A path embed is loaded from the config file's directory before the store sees it."""
+        (tmp_path / "embeddings.py").write_text(
+            "async def embed(texts: list[str]) -> list[list[float]]:\n    return [[1.0, 0.0] for _ in texts]\n"
+        )
+        mock_db_deps["load_store_config"].return_value = {"index": {"dims": 2, "embed": "./embeddings.py:embed"}}
+
+        with patch("aegra_api.core.database.get_config_dir", return_value=tmp_path):
+            await db_manager.initialize()
+
+        _, kwargs = mock_db_deps["store_cls"].call_args
+        index = kwargs["index"]
+        assert callable(index["embed"])
+        assert index["embed"].__name__ == "embed"
+        assert index["dims"] == 2
+        mock_db_deps["store_instance"].setup.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_initialize_loads_embed_file_that_imports_from_dependencies(
+        self,
+        db_manager: DatabaseManager,
+        mock_db_deps: dict[str, Any],
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """An embed file can import from the config's ``dependencies``, which graph loading adds only later."""
+        shared = tmp_path / "shared"
+        shared.mkdir()
+        (shared / "embed_vocabulary.py").write_text('WORDS = ("short", "dark")\n')
+        (tmp_path / "embeddings.py").write_text(
+            "from embed_vocabulary import WORDS\n\n\n"
+            "async def embed(texts: list[str]) -> list[list[float]]:\n"
+            "    return [[float(text.count(word)) for word in WORDS] for text in texts]\n"
+        )
+        store_config = {"index": {"dims": 2, "embed": "./embeddings.py:embed"}}
+        config_path = tmp_path / "aegra.json"
+        config_path.write_text(json.dumps({"dependencies": ["./shared"], "graphs": {}, "store": store_config}))
+        monkeypatch.setattr(settings.app, "AEGRA_CONFIG", str(config_path))
+        monkeypatch.setattr(sys, "path", list(sys.path))
+        mock_db_deps["load_store_config"].return_value = store_config
+
+        try:
+            await db_manager.initialize()
+        finally:
+            sys.modules.pop("embed_vocabulary", None)
+
+        _, kwargs = mock_db_deps["store_cls"].call_args
+        assert await kwargs["index"]["embed"](["short and dark"]) == [[1.0, 1.0]]
+        assert str(shared) in sys.path
+
     @staticmethod
     def _assert_released(manager: DatabaseManager, deps: dict[str, Any]) -> None:
         deps["pool_instance"].close.assert_awaited_once()
@@ -264,6 +320,20 @@ class TestDatabaseManager:
         mock_db_deps["pool_instance"].open.side_effect = OSError("connection refused")
 
         with pytest.raises(OSError, match="connection refused"):
+            await db_manager.initialize()
+
+        self._assert_released(db_manager, mock_db_deps)
+
+    async def test_initialize_releases_resources_when_embed_file_fails_to_load(
+        self, db_manager: DatabaseManager, mock_db_deps: dict[str, Any], tmp_path: Path
+    ) -> None:
+        (tmp_path / "embeddings.py").write_text("import embed_package_that_is_not_installed\n")
+        mock_db_deps["load_store_config"].return_value = {"index": {"dims": 2, "embed": "./embeddings.py:embed"}}
+
+        with (
+            patch("aegra_api.core.database.get_config_dir", return_value=tmp_path),
+            pytest.raises(ModuleNotFoundError, match="embed_package_that_is_not_installed"),
+        ):
             await db_manager.initialize()
 
         self._assert_released(db_manager, mock_db_deps)

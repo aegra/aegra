@@ -1,8 +1,10 @@
 """Configuration management for Aegra HTTP settings"""
 
 import json
+import sys
+from collections.abc import Sequence
 from pathlib import Path
-from typing import TypedDict
+from typing import Any, TypedDict
 
 import structlog
 
@@ -70,12 +72,17 @@ class StoreIndexConfig(TypedDict, total=False):
     dims: int
     """Embedding vector dimensions (e.g., 1536 for OpenAI text-embedding-3-small)"""
     embed: str
-    """Embedding model in format '<provider>:<model-id>'
+    """Embedding model as '<provider>:<model-id>', or a custom one as 'path/to/file.py:name'
     Examples:
     - openai:text-embedding-3-small (1536 dims)
     - openai:text-embedding-3-large (3072 dims)
     - bedrock:amazon.titan-embed-text-v2:0 (1024 dims)
     - cohere:embed-english-v3.0 (1024 dims)
+    - ./embeddings.py:embed (an embedding function or Embeddings instance, path relative to the config file)
+    """
+    embed_kwargs: dict[str, Any]
+    """Keyword arguments for the provider's embeddings class, passed to init_embeddings with a provider string.
+    Example: {"dimensions": 512} with openai:text-embedding-3-small
     """
     fields: list[str] | None
     """JSON fields to embed. Defaults to ["$"] (entire document).
@@ -302,3 +309,36 @@ def get_config_dir() -> Path | None:
     if config_path and config_path.exists():
         return config_path.parent.resolve()
     return None
+
+
+def setup_dependencies() -> None:
+    """Add the config file's ``dependencies`` to ``sys.path`` (see ``add_dependency_paths``)."""
+    config = load_config()
+    config_dir = get_config_dir()
+    if config is None or config_dir is None:
+        return
+    add_dependency_paths(config.get("dependencies", []), config_dir=config_dir)
+
+
+def add_dependency_paths(dependencies: Sequence[str], *, config_dir: Path) -> None:
+    """Add dependency directories to ``sys.path``, the first one with the highest priority.
+
+    Relative paths are resolved against ``config_dir``. A missing directory is logged and skipped.
+    """
+    # Iterate in reverse so first dependency in config has highest priority
+    for dep in reversed(dependencies):
+        dep_path = Path(dep)
+
+        # Resolve relative paths from config directory
+        if not dep_path.is_absolute():
+            dep_path = (config_dir / dep_path).resolve()
+        else:
+            dep_path = dep_path.resolve()
+
+        # Add to sys.path if exists and not already present
+        path_str = str(dep_path)
+        if dep_path.exists() and path_str not in sys.path:
+            sys.path.insert(0, path_str)
+            logger.info(f"Added dependency path to sys.path: {path_str}")
+        elif not dep_path.exists():
+            logger.warning(f"Dependency path does not exist: {path_str}")

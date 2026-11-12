@@ -344,7 +344,7 @@ class TestFireCron:
 
         with patch("aegra_api.services.cron_scheduler._prepare_run", new_callable=AsyncMock) as mock_prepare:
             mock_prepare.return_value = ("run-1", Mock(), None)
-            await CronScheduler._fire_cron(AsyncMock(), cron)
+            await CronScheduler()._fire_cron(AsyncMock(), cron)
 
         assert mock_prepare.await_args.kwargs["validate_webhook"] is False
         assert mock_prepare.await_args.args[2].webhook == "https://hooks.example.com/cron"

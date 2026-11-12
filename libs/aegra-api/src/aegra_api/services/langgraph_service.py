@@ -26,6 +26,7 @@ from langgraph.graph import StateGraph
 from langgraph.pregel import Pregel
 from langgraph_sdk.auth.types import BaseUser
 from sqlalchemy import func, select
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from aegra_api.constants import ASSISTANT_NAMESPACE_UUID
 from aegra_api.core.orm import Assistant as AssistantORM
@@ -305,8 +306,10 @@ class LangGraphService:
                         existing.version = new_version
                         existing.updated_at = now
                     continue
-                session.add(
-                    AssistantORM(
+                # Replicas start together: the row lock above can't guard a row that doesn't exist yet.
+                insert_stmt = (
+                    pg_insert(AssistantORM)
+                    .values(
                         assistant_id=assistant_id,
                         name=graph_id,
                         description=description,
@@ -315,7 +318,16 @@ class LangGraphService:
                         user_id="system",
                         metadata_dict={"created_by": "system"},
                     )
+                    .on_conflict_do_nothing()
+                    .returning(AssistantORM.assistant_id)
                 )
+                if (await session.scalars(insert_stmt)).first() is None:
+                    # No conflict target: naming assistant_id lets the race surface on the other
+                    # unique indexes. So check that the row we skipped for is really this one.
+                    winner = select(AssistantORM.assistant_id).where(AssistantORM.assistant_id == assistant_id)
+                    if await session.scalar(winner) is None:
+                        raise RuntimeError(f"Another system assistant already uses graph '{graph_id}'")
+                    continue
                 session.add(
                     AssistantVersionORM(
                         assistant_id=assistant_id,

@@ -241,6 +241,7 @@ Before every firing, Aegra calls the function with the cron owner's identity and
 - The returned `identity` must be the owner's; any other identity fails the firing.
 - Returning `None` disables the cron. The run a cron starts when you create it comes from your request, so it runs as you and the function is not called for it.
 - If the function raises, the firing is skipped and retried once the claim expires (`CRON_CLAIM_DURATION_SECONDS`).
+- Each server instance fires its due crons one at a time, so a call that never returns holds up every later firing on that instance. Put a timeout on the function's lookups, well under `CRON_CLAIM_DURATION_SECONDS`.
 - A path that does not load stops the server at startup while the scheduler is enabled.
 
 The path takes the same forms as `auth.path`, and a file named in both is imported once, so the two functions share its module state.

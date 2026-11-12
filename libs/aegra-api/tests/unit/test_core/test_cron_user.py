@@ -235,6 +235,7 @@ async def test_imports_a_file_with_the_stem_of_a_module_named_elsewhere_on_its_o
     [
         ("no_such_package.deploy_auth:cron_user", ModuleNotFoundError),
         ("no_such_module:cron_user", ModuleNotFoundError),
+        ("broken_package.deploy_auth:cron_user", RuntimeError),
         ("deploy_auth", ValueError),
     ],
 )
@@ -242,7 +243,10 @@ def test_a_cron_user_path_that_does_not_load_leaves_the_auth_handler_loading(
     cron_user: str, error: type[Exception], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _write_config(tmp_path, {"path": "./deploy_auth.py:auth", "cron_user": cron_user})
+    (tmp_path / "broken_package").mkdir()
+    (tmp_path / "broken_package" / "__init__.py").write_text('raise RuntimeError("broken package")\n')
     monkeypatch.chdir(tmp_path)
+    monkeypatch.syspath_prepend(str(tmp_path))
 
     backend = LangGraphAuthBackend()
 

@@ -86,8 +86,9 @@ def _module_file(module_name: str) -> Path | None:
     """Return the file ``module_name`` imports from, or None when Python cannot find one."""
     try:
         spec = importlib.util.find_spec(module_name)
-    except ImportError:
-        # The loader of the path naming this module reports why it does not import.
+    except Exception as e:
+        # Finding it runs its parent packages; the loader of the path naming it reports the failure.
+        logger.warning(f"Could not find module {module_name} named in the auth config: {e}")
         return None
     if spec is None or spec.origin is None:
         return None

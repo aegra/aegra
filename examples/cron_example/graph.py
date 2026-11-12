@@ -40,7 +40,8 @@ def tick(state: State, config: RunnableConfig) -> dict[str, Any]:
     """Record a timestamped tick, the total run count, and who the run ran as."""
     run_number = len(state.messages) + 1
     now = datetime.now(UTC).isoformat()
-    configurable = config.get("configurable", {})
+    # The server sets langgraph_auth_user; a run's own config can override user_display_name.
+    auth_user = config.get("configurable", {}).get("langgraph_auth_user")
     return {
         "messages": [
             AIMessage(
@@ -48,7 +49,7 @@ def tick(state: State, config: RunnableConfig) -> dict[str, Any]:
                 additional_kwargs={
                     "run_number": run_number,
                     "timestamp": now,
-                    "run_by": configurable.get("user_display_name"),
+                    "run_by": getattr(auth_user, "display_name", None),
                 },
             )
         ]

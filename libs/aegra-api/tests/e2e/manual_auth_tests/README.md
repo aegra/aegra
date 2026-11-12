@@ -52,8 +52,9 @@ This starts Docker (dev executor + [`aegra.auth.json`](../../../../../aegra.auth
 
 Root [`aegra.auth.json`](../../../../../aegra.auth.json) registers:
 
-- Graph: `examples/react_agent`
+- Graphs: `examples/react_agent`, `examples/cron_example`
 - Auth: `examples/jwt_mock_auth_example.py:auth`
+- Cron user resolver: `examples/jwt_mock_auth_example.py:cron_user`
 - Custom HTTP app: `examples/custom_routes_example.py:app`
 
 ## Test files
@@ -61,6 +62,7 @@ Root [`aegra.auth.json`](../../../../../aegra.auth.json) registers:
 - `test_auth_e2e.py` — Core auth flow (JWT, custom routes, error handling)
 - `test_authorization_handlers_e2e.py` — `@auth.on.*` authorization handlers
 - `test_thread_user_isolation_e2e.py` — Per-user thread isolation
+- `test_cron_user_e2e.py` — Scheduled cron firings run as the user `auth.cron_user` returns. The server needs `CRON_ALLOW_SECONDS_SCHEDULE=true` and a short `CRON_POLL_INTERVAL_SECONDS` (the CI job sets both; for `make e2e-auth`, put them in `.env`), otherwise the test skips
 
 ## Notes
 

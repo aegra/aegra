@@ -14,12 +14,14 @@ Add this to your aegra.json or langgraph.json:
     "agent": "./graphs/react_agent/graph.py:graph"
   },
   "auth": {
-    "path": "./jwt_mock_auth_example.py:auth"
+    "path": "./jwt_mock_auth_example.py:auth",
+    "cron_user": "./jwt_mock_auth_example.py:cron_user"
   }
 }
 
 This example includes:
 - Authentication handler (@auth.authenticate)
+- Cron user resolver (cron_user) for scheduled cron firings
 - Authorization handlers (@auth.on.*) for fine-grained access control
 - Custom user fields (role, team_id, subscription_tier)
 - Metadata injection in create operations
@@ -91,6 +93,24 @@ async def authenticate(headers: dict[str, str]) -> dict[str, str | bool | list[s
         # A team doubles as the user's org for org-scoped store sharing; no team => no org.
         "org_id": team_id if has_team else None,
         "email": f"{user_id}@example.com",
+    }
+
+
+async def cron_user(identity: str) -> dict[str, str | bool | list[str]]:
+    """Return the user a scheduled cron firing runs as (``auth.cron_user`` in aegra.json).
+
+    A real deployment reads the owner's current claims from its user store and
+    returns None for a removed owner, which disables the cron. Mock tokens are the
+    only store here, so a firing gets the claims of a token with the default role.
+    """
+    return {
+        "identity": identity,
+        "display_name": f"User {identity}",
+        "is_authenticated": True,
+        "permissions": ["user", "user:read", "user:write"],
+        "role": "user",
+        "team_id": "team_default",
+        "email": f"{identity}@example.com",
     }
 
 

@@ -300,6 +300,8 @@ jobs:
           PORT: "2026"
           REDIS_BROKER_ENABLED: "false"
           PYTHONPATH: ${{ github.workspace }}/examples
+          CRON_ALLOW_SECONDS_SCHEDULE: "true"
+          CRON_POLL_INTERVAL_SECONDS: "1"
         working-directory: libs/aegra-api
         run: |
           uv run uvicorn aegra_api.main:app --host 0.0.0.0 --port 2026 > server.log 2>&1 &

@@ -11,7 +11,9 @@ from unittest.mock import AsyncMock, Mock, patch
 import pytest
 from fastapi import HTTPException
 
-from aegra_api.services.cron_scheduler import CronScheduler, _build_run_create
+from aegra_api.core.auth_deps import _to_user_model
+from aegra_api.models import User
+from aegra_api.services.cron_scheduler import CronScheduler, _build_run_create, _scheduler_user
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -105,6 +107,44 @@ class TestSchedulerLifecycle:
         await scheduler.stop()  # should not raise
         assert scheduler._running is False
         assert scheduler._task is None
+
+    @pytest.mark.asyncio
+    async def test_start_uses_the_configured_cron_user_resolver(self) -> None:
+        scheduler = CronScheduler()
+        resolver = AsyncMock(return_value=None)
+        with (
+            patch.object(scheduler, "_loop", new_callable=AsyncMock),
+            patch("aegra_api.services.cron_scheduler.load_cron_user_resolver", return_value=resolver),
+        ):
+            await scheduler.start()
+            assert scheduler._cron_user is resolver
+            await scheduler.stop()
+
+    @pytest.mark.asyncio
+    async def test_start_keeps_the_scheduler_user_without_a_resolver(self) -> None:
+        scheduler = CronScheduler()
+        with (
+            patch.object(scheduler, "_loop", new_callable=AsyncMock),
+            patch("aegra_api.services.cron_scheduler.load_cron_user_resolver", return_value=None),
+        ):
+            await scheduler.start()
+            assert scheduler._cron_user is _scheduler_user
+            await scheduler.stop()
+
+    @pytest.mark.asyncio
+    async def test_start_fails_when_the_cron_user_resolver_does_not_load(self) -> None:
+        scheduler = CronScheduler()
+        with (
+            patch.object(scheduler, "_loop", new_callable=AsyncMock),
+            patch(
+                "aegra_api.services.cron_scheduler.load_cron_user_resolver",
+                side_effect=FileNotFoundError("missing.py"),
+            ),
+            pytest.raises(FileNotFoundError),
+        ):
+            await scheduler.start()
+        assert scheduler._task is None
+        assert scheduler._running is False
 
 
 # ---------------------------------------------------------------------------
@@ -304,7 +344,7 @@ class TestFireCron:
 
         with patch("aegra_api.services.cron_scheduler._prepare_run", new_callable=AsyncMock) as mock_prepare:
             mock_prepare.return_value = ("run-1", Mock(), None)
-            await CronScheduler._fire_cron(AsyncMock(), cron)
+            await CronScheduler()._fire_cron(AsyncMock(), cron)
 
         assert mock_prepare.await_args.kwargs["validate_webhook"] is False
         assert mock_prepare.await_args.args[2].webhook == "https://hooks.example.com/cron"
@@ -530,6 +570,132 @@ class TestFireCron:
             assert run_request.interrupt_before == ["step1"]
             assert run_request.stream_mode == "values"
             assert run_request.checkpoint == {"checkpoint_id": "abc", "checkpoint_ns": ""}
+
+
+# ---------------------------------------------------------------------------
+# The user a firing runs as
+# ---------------------------------------------------------------------------
+
+
+class TestFiringUser:
+    """A firing runs as the scheduler user, or as the user ``auth.cron_user`` resolves."""
+
+    @staticmethod
+    async def _fire(scheduler: CronScheduler, cron: Mock, session: AsyncMock) -> AsyncMock:
+        with patch(
+            "aegra_api.services.cron_scheduler._prepare_run",
+            new_callable=AsyncMock,
+            return_value=("run-1", Mock(), None),
+        ) as mock_prepare:
+            await scheduler._fire_cron(session, cron)
+        return mock_prepare
+
+    @pytest.mark.asyncio
+    async def test_fires_as_the_owner_named_cron_scheduler_by_default(self) -> None:
+        scheduler = CronScheduler()
+        cron = _make_cron_orm(user_id="alice", thread_id="t-1")
+
+        mock_prepare = await self._fire(scheduler, cron, AsyncMock())
+
+        user = mock_prepare.call_args[0][3]
+        assert user.to_dict() == User(identity="alice", display_name="cron-scheduler").to_dict()
+
+    @pytest.mark.asyncio
+    async def test_fires_as_the_user_the_resolver_returns(self) -> None:
+        resolver = AsyncMock(
+            return_value={
+                "identity": "alice",
+                "display_name": "Alice",
+                "permissions": ["reports:run"],
+                "tenant_id": "acme",
+            }
+        )
+        scheduler = CronScheduler()
+        scheduler._cron_user = resolver
+        cron = _make_cron_orm(user_id="alice", thread_id="t-1")
+
+        mock_prepare = await self._fire(scheduler, cron, AsyncMock())
+
+        resolver.assert_awaited_once_with("alice")
+        user = mock_prepare.call_args[0][3]
+        assert user.identity == "alice"
+        assert user.display_name == "Alice"
+        assert user.permissions == ["reports:run"]
+        assert user.tenant_id == "acme"
+
+    @pytest.mark.asyncio
+    async def test_defaults_the_display_name_to_the_identity_as_a_request_does(self) -> None:
+        resolved = {"identity": "alice", "permissions": ["reports:run"], "tenant_id": "acme"}
+        scheduler = CronScheduler()
+        scheduler._cron_user = AsyncMock(return_value=dict(resolved))
+        cron = _make_cron_orm(user_id="alice", thread_id="t-1")
+
+        mock_prepare = await self._fire(scheduler, cron, AsyncMock())
+
+        user = mock_prepare.call_args[0][3]
+        assert user.display_name == "alice"
+        assert user.to_dict() == _to_user_model(dict(resolved)).to_dict()
+
+    @pytest.mark.asyncio
+    async def test_fires_as_a_user_model_the_resolver_returns(self) -> None:
+        resolved = User.model_validate({"identity": "alice", "display_name": "Alice", "role": "admin"})
+        scheduler = CronScheduler()
+        scheduler._cron_user = AsyncMock(return_value=resolved)
+        cron = _make_cron_orm(user_id="alice", thread_id="t-1")
+
+        mock_prepare = await self._fire(scheduler, cron, AsyncMock())
+
+        assert mock_prepare.call_args[0][3].role == "admin"
+
+    @pytest.mark.asyncio
+    async def test_disables_the_cron_when_the_resolver_returns_none(self) -> None:
+        scheduler = CronScheduler()
+        scheduler._cron_user = AsyncMock(return_value=None)
+        cron = _make_cron_orm(user_id="removed-user")
+        mock_session = AsyncMock()
+
+        mock_prepare = await self._fire(scheduler, cron, mock_session)
+
+        mock_prepare.assert_not_awaited()
+        stmt = mock_session.execute.call_args[0][0]
+        assert stmt.compile().params["enabled"] is False
+        mock_session.commit.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_disables_the_cron_of_an_empty_owner_by_default(self) -> None:
+        scheduler = CronScheduler()
+        cron = _make_cron_orm(user_id="")
+        mock_session = AsyncMock()
+
+        mock_prepare = await self._fire(scheduler, cron, mock_session)
+
+        mock_prepare.assert_not_awaited()
+        assert mock_session.execute.call_args[0][0].compile().params["enabled"] is False
+
+    @pytest.mark.asyncio
+    async def test_does_not_fire_as_another_identity(self) -> None:
+        scheduler = CronScheduler()
+        scheduler._cron_user = AsyncMock(return_value={"identity": "mallory"})
+        cron = _make_cron_orm(user_id="alice")
+        mock_session = AsyncMock()
+
+        with pytest.raises(ValueError, match="mallory"):
+            await self._fire(scheduler, cron, mock_session)
+
+        mock_session.execute.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_leaves_the_claim_when_the_resolver_raises(self) -> None:
+        scheduler = CronScheduler()
+        scheduler._cron_user = AsyncMock(side_effect=ConnectionError("user store unavailable"))
+        cron = _make_cron_orm(user_id="alice")
+        mock_session = AsyncMock()
+
+        with pytest.raises(ConnectionError):
+            await self._fire(scheduler, cron, mock_session)
+
+        mock_session.execute.assert_not_awaited()
+        mock_session.commit.assert_not_awaited()
 
 
 # ---------------------------------------------------------------------------

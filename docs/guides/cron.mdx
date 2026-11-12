@@ -224,8 +224,12 @@ To give firings the owner's current fields, name an async function in `auth.cron
 ```
 
 ```python
+import asyncio
+
+
 async def cron_user(identity: str) -> dict | None:
-    account = await accounts.get(identity)  # your user store
+    async with asyncio.timeout(10):
+        account = await accounts.get(identity)  # your user store
     if account is None or account.disabled:
         return None  # disables the cron
     return {

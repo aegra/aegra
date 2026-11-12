@@ -58,6 +58,19 @@ Aegra accepts the graph ID directly in `assistant_id` for cron creation and reso
 
 Pass `durability` (or the deprecated `checkpoint_during`) to control when every fired run writes checkpoints. For example, `durability="exit"` writes one checkpoint per run. See [checkpoint durability](/guides/threads-and-state#checkpoint-durability).
 
+Pass `webhook` to be told when each fired run finishes. Every run the cron starts, including the first one, POSTs the run, its final values and any error to that URL. Because stateless crons delete their thread afterwards, the webhook is the simplest way to collect their results:
+
+```python
+cron_run = await client.crons.create(
+    assistant_id="agent",
+    schedule="0 9 * * *",
+    input={"messages": [{"role": "user", "content": "Daily summary"}]},
+    webhook="https://my-server.example.com/aegra/runs?token=<secret>",
+)
+```
+
+The URL is checked against the server's webhook policy when the cron is created or updated, and again before every call. See [Webhooks](/guides/webhooks) for the payload and the policy.
+
 By default, each stateless cron run deletes its ephemeral thread after the run completes, including the immediate first run that is triggered when the cron is created.
 
 <Note>
@@ -177,13 +190,19 @@ updated = await client.crons.update(
 )
 ```
 
-Supported update fields: `schedule`, `enabled`, `input`, `config`, `metadata`, `timezone`, `durability`, `end_time`.
+Supported update fields: `schedule`, `enabled`, `input`, `config`, `metadata`, `timezone`, `durability`, `end_time`, `webhook`.
 
 The scheduler checks `end_time` after each firing and disables the cron once that time has passed, so a cron can still fire once after its `end_time`. Pass `end_time=None` to remove it, so the cron runs until you disable or delete it; leaving the argument out keeps the current end time. A cron already disabled by its end time stays disabled, so pass `enabled=True` as well to resume it:
 
 ```python
 await client.crons.update(cron_id="<cron_id>", end_time=None)
 await client.crons.update(cron_id="<cron_id>", end_time=None, enabled=True)  # resume an expired cron
+```
+
+To stop a cron calling its webhook, send `"webhook": null`; leaving the field out keeps the current one. The Python SDK drops `None` arguments from `crons.update`, so send the PATCH directly:
+
+```python
+await client.http.patch(f"/runs/crons/{cron_id}", json={"webhook": None})
 ```
 
 ## Disabling and re-enabling

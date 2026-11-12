@@ -303,7 +303,9 @@ class TestRunsEndpoints:
                 mock_session,
             )
 
-            mock_reconcile.assert_awaited_once_with(mock_session, run_id, thread_id, user_id=mock_user.identity)
+            mock_reconcile.assert_awaited_once_with(
+                mock_session, run_id, thread_id, user_id=mock_user.identity, webhook_job=None
+            )
             mock_interrupt.assert_called_once_with(run_id)
             mock_session.execute.assert_not_awaited()
             mock_session.commit.assert_not_awaited()
@@ -381,6 +383,7 @@ class TestRunsEndpoints:
             run_orm.run_id,
             run_orm.thread_id,
             user_id=run_orm.user_id,
+            webhook_job=None,
         )
         mock_cancel.assert_awaited_once_with(run_orm.run_id, emit_end_event=False)
         mock_signal.assert_awaited_once_with(run_orm.run_id)

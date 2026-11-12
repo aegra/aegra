@@ -248,6 +248,7 @@ async def test_stale_worker_cannot_overwrite_reconciled_interruption() -> None:
                     status="success",
                     thread_status="idle",
                     output={"late": True},
+                    webhook_job=None,
                 )
         finally:
             await engine.dispose()

@@ -258,4 +258,7 @@ The generated `docker-compose.yml` uses `/health` to monitor the API container. 
   <Accordion title="Server exits with 'Application startup failed'">
     A startup step failed after the database connected, for example a graph in `aegra.json` that raises on import. Aegra closes the database connections and exits with a non-zero code instead of hanging. Check the traceback above the message in the logs, fix the error, and restart.
   </Accordion>
+  <Accordion title="Startup fails on the webhooks config">
+    The `webhooks` block in `aegra.json` is validated before anything else starts. The usual cause is a header template such as `${{ env.LG_WEBHOOK_TOKEN }}` whose variable is not set in the container: add it to the deployment's environment or secrets, or remove the header. See [webhooks](/guides/webhooks#secure-the-receiver).
+  </Accordion>
 </AccordionGroup>

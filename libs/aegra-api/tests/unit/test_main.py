@@ -7,7 +7,7 @@ import pytest
 
 import aegra_api.main as main_module
 from aegra_api.observability.base import get_observability_manager
-from aegra_api.services import run_preparation
+from aegra_api.services import run_preparation, webhook_policy
 
 
 @pytest.mark.unit
@@ -290,6 +290,11 @@ def lifespan_events(monkeypatch: pytest.MonkeyPatch) -> list[str]:
         setattr(stub, stop_name, _recording(events, f"{label}.{stop_name}"))
         monkeypatch.setattr(main_module, attr, stub)
 
+    # The webhook dispatcher has nothing to start; it only drains at shutdown.
+    dispatcher = MagicMock()
+    dispatcher.stop = _recording(events, "webhooks.stop")
+    monkeypatch.setattr(main_module, "webhook_dispatcher", dispatcher)
+
     graph_service = MagicMock()
     graph_service.initialize = _recording(events, "graphs.initialize")
     monkeypatch.setattr(main_module, "get_langgraph_service", lambda: graph_service)
@@ -321,8 +326,40 @@ async def test_closes_db_manager_when_graph_load_fails(
 
 @pytest.mark.unit
 @pytest.mark.asyncio
+async def test_lifespan_fails_before_any_db_work_on_invalid_webhooks_config(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A webhook header that references an unset variable stops the boot instead of every delivery."""
+    importlib.reload(main_module)
+    monkeypatch.delenv("LG_WEBHOOK_TOKEN", raising=False)
+    monkeypatch.setattr(
+        webhook_policy,
+        "load_webhooks_config",
+        lambda: {"headers": {"Authorization": "Bearer ${{ env.LG_WEBHOOK_TOKEN }}"}},
+    )
+    webhook_policy.get_webhook_settings.cache_clear()
+
+    with (
+        patch("aegra_api.main.run_migrations_async", new_callable=AsyncMock) as mock_migrations,
+        patch("aegra_api.main.db_manager") as mock_db_manager,
+    ):
+        mock_db_manager.initialize = AsyncMock()
+
+        with pytest.raises(ValueError, match="LG_WEBHOOK_TOKEN"):
+            async with main_module.lifespan(MagicMock()):
+                pass
+
+        mock_migrations.assert_not_called()
+        mock_db_manager.initialize.assert_not_called()
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
 async def test_stops_components_in_reverse_start_order_on_shutdown(lifespan_events: list[str]) -> None:
-    """Shutdown must drain the executor before closing the broker, Redis and DB it depends on."""
+    """Shutdown must drain the executor before closing the broker, Redis and DB it depends on.
+
+    Webhooks drain right after the executor: runs it finalizes while draining queue their own.
+    """
     async with main_module.lifespan(MagicMock()):
         pass
 
@@ -339,6 +376,7 @@ async def test_stops_components_in_reverse_start_order_on_shutdown(lifespan_even
         "cron.stop",
         "reaper.stop",
         "executor.stop",
+        "webhooks.stop",
         "broker.stop",
         "redis.close",
         "db.close",
@@ -366,6 +404,7 @@ async def test_unwinds_started_components_when_executor_start_fails(
         "redis.initialize",
         "broker.start",
         "executor.start",
+        "webhooks.stop",
         "broker.stop",
         "redis.close",
         "db.close",
@@ -400,6 +439,7 @@ async def test_keeps_stopping_remaining_components_when_one_stop_fails(
         "cron.stop",
         "reaper.stop",
         "executor.stop",
+        "webhooks.stop",
         "broker.stop",
         "redis.close",
         "db.close",

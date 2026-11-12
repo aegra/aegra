@@ -299,7 +299,7 @@ class TestStreamLegacyInterruptDetection:
 
     @pytest.mark.asyncio
     async def test_interrupt_with_empty_tuple(self) -> None:
-        """The exact shape static breakpoints emit, and the one that went undetected before."""
+        """Static breakpoints emit no Interrupt objects, but still pause the graph."""
         assert await self._run(("updates", {"__interrupt__": ()})) is True
 
     @pytest.mark.asyncio
@@ -665,8 +665,8 @@ class TestStaticBreakpointWithRealGraph:
 
     @pytest.mark.asyncio
     async def test_static_breakpoint_values_event_with_only_interrupt_no_existing_output(self) -> None:
-        """With nothing saved yet the result must stay empty rather than become None,
-        which a naive assign-from-event would produce."""
+        """The marker carries no state; assigning it would replace the empty output
+        with the marker dictionary instead of preserving the initial result."""
         result = _GraphResult()  # no existing data
 
         async def gen(**_kwargs: Any) -> Any:

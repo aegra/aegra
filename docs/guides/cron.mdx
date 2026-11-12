@@ -239,7 +239,7 @@ async def cron_user(identity: str) -> dict | None:
 Before every firing, Aegra calls the function with the cron owner's identity and runs the firing as the user it returns, in the shape `@auth.authenticate` returns. Graphs then read those fields from `config["configurable"]["langgraph_auth_user"]` and `runtime.user` as on any other run. Add a field of your own, such as `"scheduled": True`, if a graph needs to tell a firing from a request.
 
 - The returned `identity` must be the owner's; any other identity fails the firing.
-- Returning `None` disables the cron.
+- Returning `None` disables the cron. The run a cron starts when you create it comes from your request, so it runs as you and the function is not called for it.
 - If the function raises, the firing is skipped and retried once the claim expires (`CRON_CLAIM_DURATION_SECONDS`).
 - A path that does not load stops the server at startup while the scheduler is enabled.
 

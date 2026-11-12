@@ -267,7 +267,7 @@ Before every firing, Aegra calls the function with the cron owner's identity and
 - Each server instance fires its due crons one at a time, so a call that never returns holds up every later firing on that instance. Put a timeout on the function's lookups, well under `CRON_CLAIM_DURATION_SECONDS`.
 - A path that does not load stops the server at startup while the scheduler is enabled.
 
-The path takes the same forms as `auth.path`, and a file named in both is imported once, so the two functions share its module state.
+The path takes the same forms as `auth.path`. When both paths name a file by its path, both give it the same module name, or one names it by its path and the other as a module, the file is imported once, so the two functions share its module state. In the last two cases it is imported under that module name.
 
 ## Limitations
 

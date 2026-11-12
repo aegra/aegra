@@ -52,16 +52,50 @@ def split_import_path(path: str) -> tuple[Path | str, str]:
     file_path = Path(module_path)
     if not file_path.is_absolute():
         # Fallback to CWD if no config found
-        file_path = ((get_config_dir() or Path.cwd()) / file_path).resolve()
-    return file_path, var_name
+        file_path = (get_config_dir() or Path.cwd()) / file_path
+    return file_path.resolve(), var_name
 
 
-def import_auth_file(file_path: Path) -> ModuleType:
-    """Import a file the ``auth`` config names, once per process.
+def import_auth_target(target: Path | str) -> ModuleType:
+    """Import the module or file an ``auth`` path names, once per process.
 
-    The auth handler and the cron user resolver often share a file, so both
-    see one module and its state.
+    The auth handler and the cron user resolver often share a file. They see
+    one module and its state when both paths name it by path, give it the same
+    module name, or name it once by path and once as a module: a file the
+    ``auth`` config also names as a module is imported as that module.
     """
+    if isinstance(target, str):
+        return importlib.import_module(target)
+    module_name = _module_naming(target)
+    if module_name is not None:
+        return importlib.import_module(module_name)
+    return _import_file(target)
+
+
+def _module_naming(file_path: Path) -> str | None:
+    """Return the module an ``auth`` config path names that imports from ``file_path``."""
+    auth_config = load_auth_config() or {}
+    for path in (auth_config.get("path"), auth_config.get("cron_user")):
+        target = split_import_path(path)[0] if path and ":" in path else None
+        if isinstance(target, str) and _module_file(target) == file_path:
+            return target
+    return None
+
+
+def _module_file(module_name: str) -> Path | None:
+    """Return the file ``module_name`` imports from, or None when Python cannot find one."""
+    try:
+        spec = importlib.util.find_spec(module_name)
+    except ImportError:
+        # The loader of the path naming this module reports why it does not import.
+        return None
+    if spec is None or spec.origin is None:
+        return None
+    return Path(spec.origin).resolve()
+
+
+def _import_file(file_path: Path) -> ModuleType:
+    """Import ``file_path`` once per process under a name derived from its stem."""
     module_name = f"auth_module_{file_path.stem}"
     loaded = sys.modules.get(module_name)
     if loaded is not None and getattr(loaded, "__file__", None) == str(file_path):
@@ -193,7 +227,7 @@ class LangGraphAuthBackend(AuthenticationBackend):
                 logger.warning(f"Auth path is not a file: {file_path} (is directory: {file_path.is_dir()})")
                 return None
 
-            auth_module = import_auth_file(file_path)
+            auth_module = import_auth_target(file_path)
             auth_instance = getattr(auth_module, var_name, None)
             if not isinstance(auth_instance, Auth):
                 logger.error(f"Variable '{var_name}' in {file_path} is not an Auth instance")

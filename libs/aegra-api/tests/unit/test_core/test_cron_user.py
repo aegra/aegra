@@ -164,3 +164,88 @@ def test_the_auth_handler_shares_the_module_the_resolver_loaded(
 
     assert isinstance(resolver, FunctionType)
     assert backend.auth_instance is resolver.__globals__["auth"]
+
+
+@pytest.mark.parametrize(
+    "auth",
+    [
+        {"path": "deploy_auth:auth", "cron_user": "./deploy_auth.py:cron_user"},
+        {"path": "./deploy_auth.py:auth", "cron_user": "deploy_auth:cron_user"},
+    ],
+    ids=["path-as-module", "cron-user-as-module"],
+)
+@pytest.mark.parametrize("resolver_first", [True, False], ids=["resolver-first", "handler-first"])
+def test_a_file_named_as_a_module_and_as_a_path_is_imported_once_as_the_module(
+    auth: dict[str, str], resolver_first: bool, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _write_config(tmp_path, auth)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.syspath_prepend(str(tmp_path))
+
+    if resolver_first:
+        resolver = load_cron_user_resolver()
+        backend = LangGraphAuthBackend()
+    else:
+        backend = LangGraphAuthBackend()
+        resolver = load_cron_user_resolver()
+
+    assert isinstance(resolver, FunctionType)
+    assert resolver.__globals__["auth"] is backend.auth_instance
+    assert sys.modules["deploy_auth"].auth is backend.auth_instance
+
+
+@pytest.mark.parametrize("cron_user_form", ["file", "module"])
+def test_a_file_spelled_with_dot_dot_is_the_file_it_resolves_to(
+    cron_user_form: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    detour = tmp_path / "detour"
+    detour.mkdir()
+    cron_user = {"file": f"{detour}/../deploy_auth.py:cron_user", "module": "deploy_auth:cron_user"}[cron_user_form]
+    _write_config(tmp_path, {"path": "./deploy_auth.py:auth", "cron_user": cron_user})
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.syspath_prepend(str(detour / ".."))
+
+    backend = LangGraphAuthBackend()
+    resolver = load_cron_user_resolver()
+
+    assert isinstance(resolver, FunctionType)
+    assert resolver.__globals__["auth"] is backend.auth_instance
+
+
+@pytest.mark.asyncio
+async def test_imports_a_file_with_the_stem_of_a_module_named_elsewhere_on_its_own(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _write_config(tmp_path, {"path": "deploy_auth:auth", "cron_user": "./crons/deploy_auth.py:cron_user"})
+    (tmp_path / "crons").mkdir()
+    (tmp_path / "crons" / "deploy_auth.py").write_text(AUTH_FILE.replace('"acme"', '"globex"'))
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.syspath_prepend(str(tmp_path))
+
+    backend = LangGraphAuthBackend()
+    resolver = load_cron_user_resolver()
+
+    assert resolver is not None
+    assert await resolver("alice") == {"identity": "alice", "tenant_id": "globex"}
+    assert backend.auth_instance is sys.modules["deploy_auth"].auth
+
+
+@pytest.mark.parametrize(
+    ("cron_user", "error"),
+    [
+        ("no_such_package.deploy_auth:cron_user", ModuleNotFoundError),
+        ("no_such_module:cron_user", ModuleNotFoundError),
+        ("deploy_auth", ValueError),
+    ],
+)
+def test_a_cron_user_path_that_does_not_load_leaves_the_auth_handler_loading(
+    cron_user: str, error: type[Exception], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _write_config(tmp_path, {"path": "./deploy_auth.py:auth", "cron_user": cron_user})
+    monkeypatch.chdir(tmp_path)
+
+    backend = LangGraphAuthBackend()
+
+    assert backend.auth_instance is not None
+    with pytest.raises(error):
+        load_cron_user_resolver()

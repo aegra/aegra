@@ -6,16 +6,14 @@ firing runs as. It returns the same shape ``@auth.authenticate`` returns, or
 None to disable the cron.
 """
 
-import importlib
 import inspect
 from collections.abc import Awaitable, Callable, Mapping
-from pathlib import Path
 from typing import Any
 
 import structlog
 
 from aegra_api.config import load_auth_config
-from aegra_api.core.auth_middleware import import_auth_file, split_import_path
+from aegra_api.core.auth_middleware import import_auth_target, split_import_path
 from aegra_api.models.auth import User
 
 logger = structlog.getLogger(__name__)
@@ -42,7 +40,7 @@ def load_cron_user_resolver() -> CronUserResolver | None:
         return None
 
     target, name = split_import_path(path)
-    module = import_auth_file(target) if isinstance(target, Path) else importlib.import_module(target)
+    module = import_auth_target(target)
 
     resolver = getattr(module, name, None)
     if resolver is None:

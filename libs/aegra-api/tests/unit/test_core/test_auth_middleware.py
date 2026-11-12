@@ -1,14 +1,20 @@
 """Unit tests for auth middleware"""
 
+import json
 import os
+import sys
+from collections.abc import Iterator
 from pathlib import Path
+from typing import Any
 from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
+from langgraph_sdk import Auth
 from starlette.authentication import AuthCredentials, AuthenticationError
 from starlette.requests import HTTPConnection
 from starlette.responses import JSONResponse
 
+from aegra_api.core import auth_middleware
 from aegra_api.core.auth_middleware import (
     LangGraphAuthBackend,
     LangGraphUser,
@@ -408,6 +414,48 @@ class TestLangGraphAuthBackend:
             "user-agent": "test-agent",
         }
         mock_auth_instance._authenticate_handler.assert_called_once_with(expected_headers)
+
+
+class TestAuthPathForms:
+    """``auth.path`` names a module or a file, and needs a variable name after ``:``."""
+
+    @pytest.fixture(autouse=True)
+    def restore_sys_modules(self) -> Iterator[None]:
+        before = set(sys.modules)
+        yield
+        for name in set(sys.modules) - before:
+            del sys.modules[name]
+
+    @staticmethod
+    def _configure(directory: Path, auth_path: str, monkeypatch: pytest.MonkeyPatch) -> None:
+        (directory / "path_form_auth.py").write_text("from langgraph_sdk import Auth\n\nauth = Auth()\n")
+        (directory / "aegra.json").write_text(json.dumps({"graphs": {}, "auth": {"path": auth_path}}))
+        monkeypatch.chdir(directory)
+
+    def test_loads_auth_from_an_installed_module(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        self._configure(tmp_path, "path_form_auth:auth", monkeypatch)
+        monkeypatch.syspath_prepend(str(tmp_path))
+
+        backend = LangGraphAuthBackend()
+
+        assert isinstance(backend.auth_instance, Auth)
+        assert backend.auth_instance is sys.modules["path_form_auth"].auth
+
+    def test_logs_and_skips_a_path_without_a_variable_name(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self._configure(tmp_path, "./path_form_auth.py", monkeypatch)
+        errors: list[str] = []
+
+        def record_error(msg: str, *args: Any, **kwargs: Any) -> None:
+            errors.append(msg)
+
+        monkeypatch.setattr(auth_middleware.logger, "error", record_error)
+
+        backend = LangGraphAuthBackend()
+
+        assert backend.auth_instance is None
+        assert errors == ["Invalid auth path format (missing ':'): ./path_form_auth.py"]
 
 
 class TestGetAuthBackend:

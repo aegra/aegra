@@ -101,6 +101,15 @@ def test_rejects_a_missing_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch)
         load_cron_user_resolver()
 
 
+def test_rejects_a_file_python_has_no_loader_for(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _write_config(tmp_path, {"cron_user": "./deploy_auth.txt:cron_user"})
+    (tmp_path / "deploy_auth.txt").write_text(AUTH_FILE)
+    monkeypatch.chdir(tmp_path)
+
+    with pytest.raises(ImportError, match="Could not load module"):
+        load_cron_user_resolver()
+
+
 def test_rejects_a_missing_variable(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     _write_config(tmp_path, {"cron_user": "./deploy_auth.py:no_such_resolver"})
     monkeypatch.chdir(tmp_path)

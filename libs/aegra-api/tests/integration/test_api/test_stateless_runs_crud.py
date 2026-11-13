@@ -4,8 +4,10 @@ Tests hit the FastAPI routes via TestClient with mocked database sessions,
 verifying HTTP status codes, request validation, and delegation behaviour.
 """
 
+from collections.abc import AsyncGenerator
 from unittest.mock import AsyncMock, MagicMock, patch
 
+from aegra_api.core.sse import get_sse_headers, make_sse_response
 from tests.fixtures.clients import create_test_app, make_client
 from tests.fixtures.database import DummySessionBase
 from tests.fixtures.session_fixtures import BasicSession, override_session_dependency
@@ -302,6 +304,29 @@ class TestStatelessStreamRun:
                 },
             )
         assert resp.status_code != 422
+
+    def test_ephemeral_stream_opens_with_exactly_one_keepalive(self) -> None:
+        """The cleanup re-wrap reuses the inner body's opening keepalive instead of adding one."""
+        app = create_test_app(include_runs=True, include_threads=False)
+        override_session_dependency(app, BasicSession)
+        client = make_client(app)
+
+        async def body() -> AsyncGenerator[bytes, None]:
+            yield b"event: values\r\ndata: {}\r\n\r\n"
+
+        inner = make_sse_response(body(), headers={**get_sse_headers(), "Location": "/threads/t/runs/r/stream"})
+
+        with (
+            patch("aegra_api.api.stateless_runs.create_and_stream_run", new_callable=AsyncMock, return_value=inner),
+            patch("aegra_api.api.stateless_runs.delete_thread_by_id", new_callable=AsyncMock) as mock_delete,
+            client.stream("POST", "/runs/stream", json={"assistant_id": "asst-123", "input": {"msg": "hi"}}) as resp,
+        ):
+            assert resp.status_code == 200
+            text = "".join(resp.iter_text())
+
+        assert text.startswith(": heartbeat\r\n\r\nevent: values")
+        assert text.count(": heartbeat") == 1
+        mock_delete.assert_awaited_once()
 
 
 # ---------------------------------------------------------------------------

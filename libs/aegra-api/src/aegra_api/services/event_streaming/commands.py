@@ -10,7 +10,7 @@ identical; only the transport differs.
 from __future__ import annotations
 
 import re
-from typing import Any
+from typing import Any, get_args
 from uuid import UUID
 
 import structlog
@@ -22,7 +22,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from aegra_api.core.orm import Run as RunORM
 from aegra_api.core.orm import Thread as ThreadORM
 from aegra_api.models import User
-from aegra_api.models.runs import RunCreate
+from aegra_api.models.runs import Durability, RunCreate
 from aegra_api.services.event_streaming.protocol import ErrorCode, build_error, build_success
 from aegra_api.services.run_preparation import _prepare_run
 
@@ -85,6 +85,7 @@ async def handle_command(
 
 
 _MULTITASK_STRATEGIES = frozenset({"reject", "rollback", "interrupt", "enqueue"})
+_DURABILITY_MODES: frozenset[str] = frozenset(get_args(Durability))
 
 # Protocol keys plus Aegra extensions per handler. Unknown keys are logged, never
 # silently dropped (#452); test_spec_params.py pins these against the spec.
@@ -100,6 +101,7 @@ RUN_START_KEYS: frozenset[str] = frozenset(
         "interrupt_after",
         "multitaskStrategy",
         "multitask_strategy",
+        "durability",
     }
 )
 INPUT_RESPOND_KEYS: frozenset[str] = frozenset(
@@ -114,6 +116,7 @@ INPUT_RESPOND_KEYS: frozenset[str] = frozenset(
         "metadata",
         "context",
         "assistant_id",
+        "durability",
     }
 )
 
@@ -122,6 +125,14 @@ def _warn_unknown_keys(method: str, params: dict[str, Any], known: frozenset[str
     unknown = sorted(set(params) - known)
     if unknown:
         logger.warning("Ignoring unknown v2 command params", method=method, keys=unknown)
+
+
+def _durability_error(params: dict[str, Any]) -> str | None:
+    """Error message for a ``durability`` outside LangGraph's modes, else ``None``."""
+    durability = params.get("durability")
+    if durability is None or (isinstance(durability, str) and durability in _DURABILITY_MODES):
+        return None
+    return f"Unknown durability {durability!r}; expected one of {sorted(_DURABILITY_MODES)}."
 
 
 def _context_from_params(params: dict[str, Any]) -> tuple[dict[str, Any] | None, str | None]:
@@ -172,6 +183,10 @@ async def _run_start(
     if context is None:
         return build_error(command_id, "invalid_argument", error_message or "invalid params"), None
 
+    durability_error = _durability_error(params)
+    if durability_error is not None:
+        return build_error(command_id, "invalid_argument", durability_error), None
+
     checkpoint_id, error_message = _fork_checkpoint_id(params)
     if error_message is not None:
         return build_error(command_id, "invalid_argument", error_message), None
@@ -202,6 +217,7 @@ async def _run_start(
         interrupt_before=params.get("interrupt_before"),
         interrupt_after=params.get("interrupt_after"),
         multitask_strategy=multitask,
+        durability=params.get("durability"),
     )
     run_id = await _start(session, thread_id, request, user)
     return build_success(command_id, {"run_id": run_id}, applied_through_seq=0), run_id
@@ -250,6 +266,10 @@ async def _input_respond(
     if context is None:
         return build_error(command_id, "invalid_argument", error_message or "invalid params"), None
 
+    durability_error = _durability_error(params)
+    if durability_error is not None:
+        return build_error(command_id, "invalid_argument", durability_error), None
+
     assistant_id = params.get("assistant_id")
     if not isinstance(assistant_id, str) or not assistant_id:
         assistant_id = await _thread_assistant_id(session, thread_id, user)
@@ -262,6 +282,7 @@ async def _input_respond(
         context=context,
         metadata=params.get("metadata"),
         command=command,
+        durability=params.get("durability"),
     )
     run_id = await _start(session, thread_id, request, user)
     return build_success(command_id, {"run_id": run_id}, applied_through_seq=0), run_id

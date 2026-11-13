@@ -159,6 +159,47 @@ class TestCommandRoute:
         assert resp.json()["error"] == "invalid_argument"
         prepare.assert_not_called()
 
+    def test_run_start_forwards_durability(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        captured_requests: list[RunCreate] = []
+
+        async def fake_prepare(*_args: Any, **_kwargs: Any) -> tuple[str, object, object]:
+            captured_requests.append(_args[2])
+            return "run-1", object(), object()
+
+        monkeypatch.setattr(cmd_module, "_prepare_run", fake_prepare)
+        client = TestClient(_make_app(monkeypatch))
+
+        resp = client.post(
+            "/threads/t1/commands",
+            json={
+                "id": 1,
+                "method": "run.start",
+                "params": {"assistant_id": "agent", "input": {"messages": []}, "durability": "exit"},
+            },
+        )
+        assert resp.status_code == 200
+        assert resp.json()["type"] == "success"
+        assert captured_requests[0].durability == "exit"
+
+    def test_run_start_rejects_unknown_durability(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        prepare = AsyncMock()
+        monkeypatch.setattr(cmd_module, "_prepare_run", prepare)
+        client = TestClient(_make_app(monkeypatch))
+
+        resp = client.post(
+            "/threads/t1/commands",
+            json={
+                "id": 1,
+                "method": "run.start",
+                "params": {"assistant_id": "agent", "input": {"messages": []}, "durability": "eventually"},
+            },
+        )
+        assert resp.status_code == 200
+        assert resp.json()["type"] == "error"
+        assert resp.json()["error"] == "invalid_argument"
+        assert "durability" in resp.json()["message"]
+        prepare.assert_not_called()
+
     def test_input_respond_forwards_update_goto_and_context(self, monkeypatch: pytest.MonkeyPatch) -> None:
         captured_requests: list[RunCreate] = []
 
@@ -194,6 +235,46 @@ class TestCommandRoute:
             "goto": "finalize",
         }
         assert request.context == {"reasoning_effort": "high"}
+
+    def test_input_respond_forwards_durability(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        captured_requests: list[RunCreate] = []
+
+        async def fake_prepare(*_args: Any, **_kwargs: Any) -> tuple[str, object, object]:
+            captured_requests.append(_args[2])
+            return "run-2", object(), object()
+
+        monkeypatch.setattr(cmd_module, "_prepare_run", fake_prepare)
+        client = TestClient(_make_app(monkeypatch))
+
+        resp = client.post(
+            "/threads/t1/commands",
+            json={
+                "id": 2,
+                "method": "input.respond",
+                "params": {"assistant_id": "agent", "response": {"approved": True}, "durability": "exit"},
+            },
+        )
+        assert resp.status_code == 200
+        assert resp.json()["type"] == "success"
+        assert captured_requests[0].durability == "exit"
+
+    def test_input_respond_rejects_unknown_durability(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        prepare = AsyncMock()
+        monkeypatch.setattr(cmd_module, "_prepare_run", prepare)
+        client = TestClient(_make_app(monkeypatch))
+
+        resp = client.post(
+            "/threads/t1/commands",
+            json={
+                "id": 2,
+                "method": "input.respond",
+                "params": {"assistant_id": "agent", "response": 1, "durability": ["exit"]},
+            },
+        )
+        assert resp.status_code == 200
+        assert resp.json()["error"] == "invalid_argument"
+        assert "durability" in resp.json()["message"]
+        prepare.assert_not_called()
 
     def test_input_respond_rejects_non_object_update(self, monkeypatch: pytest.MonkeyPatch) -> None:
         prepare = AsyncMock()

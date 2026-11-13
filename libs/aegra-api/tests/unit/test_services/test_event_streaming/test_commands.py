@@ -124,6 +124,43 @@ class TestRunStart:
         assert resp["error"] == "invalid_argument"
         prepared_run.assert_not_called()
 
+    @pytest.mark.parametrize("durability", ["sync", "async", "exit"])
+    async def test_run_start_forwards_durability(self, prepared_run: AsyncMock, user: User, durability: str) -> None:
+        resp, _ = await _dispatch(
+            {
+                "id": 1,
+                "method": "run.start",
+                "params": {"assistant_id": "agent", "input": {"x": 1}, "durability": durability},
+            },
+            user,
+        )
+        assert resp["type"] == "success"
+        assert prepared_run.call_args.args[2].durability == durability
+
+    async def test_run_start_without_durability_leaves_it_to_the_server_default(
+        self, prepared_run: AsyncMock, user: User
+    ) -> None:
+        await _dispatch({"id": 1, "method": "run.start", "params": {"assistant_id": "agent", "input": {"x": 1}}}, user)
+        assert prepared_run.call_args.args[2].durability is None
+
+    @pytest.mark.parametrize("durability", ["eventually", "EXIT", "", 0, True, ["exit"], {"mode": "exit"}])
+    async def test_run_start_rejects_unknown_durability(
+        self, prepared_run: AsyncMock, user: User, durability: Any
+    ) -> None:
+        resp, run_id = await _dispatch(
+            {
+                "id": 1,
+                "method": "run.start",
+                "params": {"assistant_id": "agent", "input": {"x": 1}, "durability": durability},
+            },
+            user,
+        )
+        assert resp["type"] == "error"
+        assert resp["error"] == "invalid_argument"
+        assert "durability" in resp["message"]
+        assert run_id is None
+        prepared_run.assert_not_called()
+
     async def test_run_start_on_interrupted_thread_resumes_with_input(
         self, prepared_run: AsyncMock, user: User
     ) -> None:
@@ -139,6 +176,24 @@ class TestRunStart:
         request = prepared_run.call_args.args[2]
         assert request.command == {"resume": {"answer": 42}}
         assert request.input is None
+
+    async def test_run_start_resume_on_interrupted_thread_keeps_durability(
+        self, prepared_run: AsyncMock, user: User
+    ) -> None:
+        session = AsyncMock()
+        session.scalar = AsyncMock(return_value="interrupted")
+        await _dispatch(
+            {
+                "id": 1,
+                "method": "run.start",
+                "params": {"assistant_id": "agent", "input": {"answer": 42}, "durability": "exit"},
+            },
+            user,
+            session=session,
+        )
+        request = prepared_run.call_args.args[2]
+        assert request.command == {"resume": {"answer": 42}}
+        assert request.durability == "exit"
 
     async def test_run_start_forks_from_configurable_checkpoint_id_without_input(
         self, prepared_run: AsyncMock, user: User
@@ -404,6 +459,33 @@ class TestInputRespondCommandFields:
         assert resp["error"] == "invalid_argument"
         prepared_run.assert_not_called()
 
+    async def test_input_respond_forwards_durability(self, prepared_run: AsyncMock, user: User) -> None:
+        resp, _ = await _dispatch(
+            {
+                "id": 2,
+                "method": "input.respond",
+                "params": {"assistant_id": "agent", "response": 1, "durability": "exit"},
+            },
+            user,
+        )
+        assert resp["type"] == "success"
+        assert prepared_run.call_args.args[2].durability == "exit"
+
+    async def test_input_respond_without_durability_leaves_it_to_the_server_default(
+        self, prepared_run: AsyncMock, user: User
+    ) -> None:
+        await _dispatch({"id": 2, "method": "input.respond", "params": {"assistant_id": "agent", "response": 1}}, user)
+        assert prepared_run.call_args.args[2].durability is None
+
+    async def test_input_respond_rejects_unknown_durability(self, prepared_run: AsyncMock, user: User) -> None:
+        resp, _ = await _dispatch(
+            {"id": 2, "method": "input.respond", "params": {"assistant_id": "agent", "response": 1, "durability": "x"}},
+            user,
+        )
+        assert resp["error"] == "invalid_argument"
+        assert "durability" in resp["message"]
+        prepared_run.assert_not_called()
+
 
 class TestUnknownParamKeys:
     """Keys outside the handler's declared set are logged, never dropped in silence."""
@@ -411,8 +493,11 @@ class TestUnknownParamKeys:
     @pytest.mark.parametrize(
         ("method", "params"),
         [
-            ("run.start", {"assistant_id": "agent", "input": {}, "webhook": "https://x", "durability": "sync"}),
-            ("input.respond", {"assistant_id": "agent", "response": 1, "webhook": "https://x", "durability": "sync"}),
+            ("run.start", {"assistant_id": "agent", "input": {}, "webhook": "https://x", "stream_resumable": True}),
+            (
+                "input.respond",
+                {"assistant_id": "agent", "response": 1, "webhook": "https://x", "stream_resumable": True},
+            ),
         ],
     )
     async def test_unknown_keys_are_logged_with_names(
@@ -423,7 +508,7 @@ class TestUnknownParamKeys:
         resp, _ = await _dispatch({"id": 1, "method": method, "params": params}, user)
         assert resp["type"] == "success"
         warning.assert_called_once()
-        assert warning.call_args.kwargs == {"method": method, "keys": ["durability", "webhook"]}
+        assert warning.call_args.kwargs == {"method": method, "keys": ["stream_resumable", "webhook"]}
 
     async def test_declared_keys_are_not_logged(
         self, prepared_run: AsyncMock, user: User, monkeypatch: pytest.MonkeyPatch

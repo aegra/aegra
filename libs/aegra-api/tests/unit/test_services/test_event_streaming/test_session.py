@@ -280,6 +280,21 @@ class TestSeqAndFilter:
         assert [e["seq"] for e in trimmed[1:]] == [seq_by_id[e["event_id"]] for e in trimmed[1:]]
         assert [e["event_id"] for e in resumed] == [e["event_id"] for e in full[4:]]
 
+    async def test_fallback_event_id_does_not_jump_seq(self, manager: BrokerManager) -> None:
+        """An epoch-ms id from the allocator's Redis fallback is not an event count."""
+        broker = manager.get_or_create_broker("run-1")
+        await broker.put("run-1_event_1", ("values", _protocol_event("values", {"a": 1})))
+        await broker.put("run-1_event_1794574673377", ("values", _protocol_event("values", {"a": 2})))
+        await broker.put("run-1_event_3", ("end", {"status": "success"}))
+        created = {"run-1": datetime(2026, 1, 1, tzinfo=UTC)}
+
+        events = await _collect(
+            _make_session("t1", channels={"values", "lifecycle"}, run_ids=("run-1",), created=created)
+        )
+
+        base = events[0]["seq"] - 1
+        assert [e["seq"] - base for e in events] == [1, 17, 18, 49]
+
     async def test_seq_keeps_rising_after_earlier_runs_expire(self, manager: BrokerManager) -> None:
         """#751: a new connection must not number a new run below seqs the client already saw."""
         created = {"run-1": datetime(2026, 1, 1, 12, tzinfo=UTC), "run-2": datetime(2026, 1, 1, 12, 15, tzinfo=UTC)}

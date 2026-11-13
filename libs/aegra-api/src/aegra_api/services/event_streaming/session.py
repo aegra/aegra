@@ -46,6 +46,8 @@ RunLister = Callable[[], Awaitable[list[tuple[str, str | None, str | None, datet
 _EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
 # seq slots per broker event: one broker event can project to several wire events.
 _SEQ_SLOTS_PER_EVENT = 16
+# Larger id suffixes are allocate_event_id's epoch-ms fallback, not a per-run count.
+_MAX_EVENT_ORDINAL = 1_000_000_000
 
 _TERMINAL_RUN_STATUSES = frozenset({"success", "error", "timeout", "interrupted"})
 
@@ -186,7 +188,7 @@ class ThreadEventSession:
         if method is None:
             return []
         ordinal = extract_event_sequence(event_id)
-        if self._run_seq_base is not None and ordinal:
+        if self._run_seq_base is not None and 0 < ordinal < _MAX_EVENT_ORDINAL:
             # Number from the broker's stored ordinal, so a replay buffer trimmed by Redis keeps each event's seq.
             self._seq = max(self._seq, self._run_seq_base + ordinal * _SEQ_SLOTS_PER_EVENT)
         if method in ("end", "error"):

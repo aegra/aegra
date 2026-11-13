@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import AsyncIterator, Awaitable, Callable
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from aegra_api.services.broker import broker_manager
@@ -37,10 +38,13 @@ __all__ = ["RunLister", "ThreadEventSession", "validate_channels"]
 _IDLE_GRACE_SECONDS = 30.0
 _POLL_INTERVAL_SECONDS = 0.25
 
-# Async callable returning the thread's (run_id, status, graph_name) rows,
-# oldest first. Status backstops runs whose broker events expired (see
-# _drain_run); graph_name feeds the run's root lifecycle events.
-RunLister = Callable[[], Awaitable[list[tuple[str, str | None, str | None]]]]
+# Async callable returning the thread's (run_id, status, graph_name, created_at)
+# rows, oldest first. Status backstops runs whose broker events expired (see
+# _drain_run); graph_name feeds the run's root lifecycle events; created_at
+# anchors the run's seq so it is the same on every connection.
+RunLister = Callable[[], Awaitable[list[tuple[str, str | None, str | None, datetime | None]]]]
+
+_EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
 
 _TERMINAL_RUN_STATUSES = frozenset({"success", "error", "timeout", "interrupted"})
 
@@ -77,6 +81,7 @@ class ThreadEventSession:
         # Per-run lifecycle bookkeeping, reset by _drain_run: the run's root
         # graph name and the subgraph namespaces still open (started, no
         # completed/failed yet) so the terminal can cascade-close them.
+        self._current_run: str | None = None
         self._current_graph: str | None = None
         self._open_namespaces: dict[str, list[str]] = {}
 
@@ -99,8 +104,8 @@ class ThreadEventSession:
 
         while True:
             progressed = False
-            for run_id, run_status, graph_name in await self._fresh_runs():
-                async for envelope in self._drain_run(run_id, run_status, graph_name):
+            for run_id, run_status, graph_name, created_at in await self._fresh_runs():
+                async for envelope in self._drain_run(run_id, run_status, graph_name, created_at):
                     progressed = True
                     yield envelope
                 self._drained.add(run_id)
@@ -116,11 +121,11 @@ class ThreadEventSession:
                 return
             await asyncio.sleep(_POLL_INTERVAL_SECONDS)
 
-    async def _fresh_runs(self) -> list[tuple[str, str | None, str | None]]:
+    async def _fresh_runs(self) -> list[tuple[str, str | None, str | None, datetime | None]]:
         return [row for row in await self._list_run_ids() if row[0] not in self._drained]
 
     async def _drain_run(
-        self, run_id: str, run_status: str | None, graph_name: str | None
+        self, run_id: str, run_status: str | None, graph_name: str | None, created_at: datetime | None
     ) -> AsyncIterator[dict[str, Any]]:
         """Replay then tail one run's broker, re-enveloping each native event.
 
@@ -139,14 +144,17 @@ class ThreadEventSession:
         broker = broker_manager.get_or_create_broker(run_id)
         seen: set[str] = set()
         self._sent_interrupts = set()
+        self._current_run = run_id
         self._current_graph = graph_name
+        if created_at is not None:
+            self._seq = max(self._seq, _run_seq_base(created_at))
         self._open_namespaces = {}
 
         replayed = await broker.replay(None)
         if run_status in _TERMINAL_RUN_STATUSES and not replayed:
             return
 
-        for envelope in self._emit([("lifecycle", self._root_lifecycle("running"), [])], f"{run_id}:running"):
+        for envelope in self._emit([("lifecycle", self._root_lifecycle("running"), [])], f"synth:{run_id}:running"):
             yield envelope
 
         for event_id, raw_event in replayed:
@@ -174,9 +182,16 @@ class ThreadEventSession:
         method, payload = _unwrap(raw_event)
         if method is None:
             return []
-        return self._emit(self._channel_events(method, payload), event_id)
+        if method in ("end", "error"):
+            # The SDK reads the run of a root lifecycle event from a synth:<run_id>: id.
+            event_id = f"synth:{self._current_run}:{method}"
+        params = payload.get("params") if isinstance(payload, dict) else None
+        timestamp = params.get("timestamp") if isinstance(params, dict) else None
+        return self._emit(self._channel_events(method, payload), event_id, timestamp=timestamp)
 
-    def _emit(self, channel_events: list[_ChannelEvent], event_id: str) -> list[dict[str, Any]]:
+    def _emit(
+        self, channel_events: list[_ChannelEvent], event_id: str, *, timestamp: int | None = None
+    ) -> list[dict[str, Any]]:
         """Filter + seq a batch of channel events into wire envelopes."""
         envelopes: list[dict[str, Any]] = []
         for index, (channel, data, namespace) in enumerate(channel_events):
@@ -196,6 +211,7 @@ class ThreadEventSession:
                     namespace=namespace,
                     seq=self._seq,
                     event_id=f"{event_id}:{index}",
+                    timestamp=timestamp,
                 )
             )
         return envelopes
@@ -365,6 +381,13 @@ class ThreadEventSession:
         if self._namespaces is None:
             return True
         return any(_prefix_matches(namespace, prefix) for prefix in self._namespaces)
+
+
+def _run_seq_base(created_at: datetime) -> int:
+    """Microseconds since the epoch: the run's events number up from here on every connection."""
+    if created_at.tzinfo is None:
+        created_at = created_at.replace(tzinfo=UTC)
+    return (created_at - _EPOCH) // timedelta(microseconds=1)
 
 
 def _namespace_depth(namespace: list[str]) -> int:

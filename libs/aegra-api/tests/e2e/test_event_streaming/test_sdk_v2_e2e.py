@@ -251,6 +251,55 @@ async def test_raw_wire_body_matches_sdk_contract() -> None:
         await resp.aclose()
 
 
+async def _root_lifecycle(thread_id: str, *, terminals: int) -> list[dict[str, Any]]:
+    """Open a fresh thread stream and read root lifecycle events until *terminals* runs ended."""
+    events: list[dict[str, Any]] = []
+    async with (
+        httpx.AsyncClient(base_url=_base_url(), timeout=15.0) as http,
+        http.stream("POST", f"/threads/{thread_id}/stream/events", json={"channels": ["lifecycle"]}) as resp,
+    ):
+        assert resp.status_code == 200
+        async for line in resp.aiter_lines():
+            if not line.startswith("data: "):
+                continue
+            event = json.loads(line.removeprefix("data: "))
+            if event["params"]["namespace"]:
+                continue
+            events.append(event)
+            if sum(e["params"]["data"]["event"] != "running" for e in events) == terminals:
+                return events
+    return events
+
+
+@pytest.mark.e2e
+@pytest.mark.asyncio
+async def test_thread_stream_seq_and_run_ids_are_stable_across_connections() -> None:
+    """Each connection numbers a thread's events the same, rising run over run, with synth:<run_id> ids."""
+    if not await _v2_enabled():
+        pytest.skip("FF_V2_EVENT_STREAMING is disabled on the server under test")
+
+    assistant_id = await _ensure_assistant()
+    client = get_client(url=_base_url())
+    thread = await client.threads.create()
+    thread_id = thread["thread_id"]
+    run_ids: list[str] = []
+    for _ in range(2):
+        run = await client.runs.create(
+            thread_id, assistant_id, input={"messages": [{"role": "user", "content": json.dumps({"steps": 1})}]}
+        )
+        await client.runs.join(thread_id, run["run_id"])
+        run_ids.append(run["run_id"])
+
+    first = await _root_lifecycle(thread_id, terminals=2)
+    second = await _root_lifecycle(thread_id, terminals=2)
+    elog("root lifecycle", [(e["seq"], e["event_id"], e["params"]["data"]["event"]) for e in first])
+
+    assert [e["event_id"].split(":")[:2] for e in first] == [["synth", run_ids[0]]] * 2 + [["synth", run_ids[1]]] * 2
+    seqs = [e["seq"] for e in first]
+    assert seqs == sorted(seqs) and len(set(seqs)) == len(seqs)
+    assert [(e["seq"], e["event_id"]) for e in second] == [(e["seq"], e["event_id"]) for e in first]
+
+
 async def _ensure_graph(graph_id: str) -> str:
     client = get_client(url=_base_url())
     assistant = await client.assistants.create(graph_id=graph_id, if_exists="do_nothing")

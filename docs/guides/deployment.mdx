@@ -237,6 +237,8 @@ Failed `/ready` checks return HTTP 503 with generic messages that do not expose 
 
 The generated `docker-compose.yml` uses `/health` to monitor the API container. If the server hangs or becomes unresponsive, Docker marks it unhealthy after 3 consecutive failures (every 30 seconds). Combined with `restart: unless-stopped`, unhealthy containers are automatically restarted.
 
+Both `/health` and `/ready` return HTTP 503 if a LangGraph checkpointer or store persistence probe raises an exception. A successful probe that returns `None` because the requested record does not exist still indicates that the persistence backend is reachable. The `/live` endpoint does not perform these persistence checks.
+
 ## Troubleshooting
 
 <AccordionGroup>

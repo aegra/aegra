@@ -2,17 +2,27 @@
 
 import asyncio
 from collections.abc import AsyncGenerator, AsyncIterator
+from contextlib import aclosing
 from typing import Any
 
 import structlog
 
-from aegra_api.core.sse import create_error_event
+from aegra_api.core.sse import create_end_event, create_error_event
 from aegra_api.models import Run
 from aegra_api.services.broker import broker_manager
 from aegra_api.services.event_converter import EventConverter
 from aegra_api.utils import extract_event_sequence
 
 logger = structlog.getLogger(__name__)
+
+# Redis worker initialization imports this service before executor is ready.
+# Keep terminal statuses local to avoid the run_waiters -> executor cycle.
+_TERMINAL_STATUSES = frozenset({"success", "error", "interrupted"})
+_TERMINAL_EVENT_GRACE_SECONDS = 1.0
+
+
+def _is_end_sse(sse_event: str) -> bool:
+    return sse_event.startswith("event: end")
 
 
 class StreamingService:
@@ -100,12 +110,24 @@ class StreamingService:
             if last_event_id:
                 last_sent_sequence = extract_event_sequence(last_event_id)
 
+            replayed_end = False
             async for event_id, sse_event in self._replay_stored_events(run_id, last_event_id):
                 # Track the highest replayed sequence for live dedup
                 replayed_seq = extract_event_sequence(event_id)
                 if replayed_seq > last_sent_sequence:
                     last_sent_sequence = replayed_seq
+                replayed_end = replayed_end or _is_end_sse(sse_event)
                 yield sse_event
+
+            # Persisted terminal status closes a rejoin even after replay expires.
+            if run.status in _TERMINAL_STATUSES:
+                if not replayed_end:
+                    async for sse_event in self._stream_terminal_events(run_id, last_sent_sequence):
+                        replayed_end = replayed_end or _is_end_sse(sse_event)
+                        yield sse_event
+                if not replayed_end:
+                    yield create_end_event(status=run.status)
+                return
 
             # Stream live events if run is still active
             async for sse_event in self._stream_live_events(run, last_sent_sequence):
@@ -130,13 +152,65 @@ class StreamingService:
         Yields (event_id, sse_event) tuples so the caller can track
         the highest replayed sequence for live deduplication.
         """
-        broker = broker_manager.get_or_create_broker(run_id)
+        broker = broker_manager.get_broker(run_id, for_replay=True)
+        if broker is None:
+            return
         stored_events = await broker.replay(last_event_id)
 
         for event_id, raw_event in stored_events:
             sse_event = await self._convert_raw_to_sse(event_id, raw_event)
             if sse_event:
                 yield event_id, sse_event
+
+    async def _stream_terminal_events(self, run_id: str, last_sent_sequence: int) -> AsyncIterator[str]:
+        broker = broker_manager.get_broker(run_id, for_replay=True)
+        if broker is None:
+            return
+
+        # An acknowledged end still proves publication finished; do not wait again.
+        buffered_end = False
+        for event_id, raw_event in await broker.replay(None):
+            sse_event = await self._convert_raw_to_sse(event_id, raw_event)
+            buffered_end = buffered_end or (sse_event is not None and _is_end_sse(sse_event))
+            sequence = extract_event_sequence(event_id)
+            if sequence > last_sent_sequence and sse_event:
+                last_sent_sequence = sequence
+                yield sse_event
+        if buffered_end or broker.is_finished():
+            return
+
+        # DB finalization precedes terminal publication; abandoned brokers must not hang.
+        pending_events: list[str] = []
+        try:
+            async with asyncio.timeout(_TERMINAL_EVENT_GRACE_SECONDS), aclosing(broker.aiter()) as events:
+                async for event_id, raw_event in events:
+                    sequence = extract_event_sequence(event_id)
+                    if sequence <= last_sent_sequence:
+                        continue
+                    sse_event = await self._convert_raw_to_sse(event_id, raw_event)
+                    if sse_event:
+                        last_sent_sequence = sequence
+                        pending_events.append(sse_event)
+                        if _is_end_sse(sse_event):
+                            break
+        except TimeoutError:
+            logger.debug("Terminal event publication grace expired", run_id=run_id)
+
+        # Sending to a slow client must not inherit the broker's publication timeout.
+        for sse_event in pending_events:
+            yield sse_event
+            if _is_end_sse(sse_event):
+                return
+
+        # Redis may see the end between replay and subscription without delivering it live.
+        for event_id, raw_event in await broker.replay(None):
+            sequence = extract_event_sequence(event_id)
+            if sequence <= last_sent_sequence:
+                continue
+            sse_event = await self._convert_raw_to_sse(event_id, raw_event)
+            if sse_event:
+                last_sent_sequence = sequence
+                yield sse_event
 
     async def _stream_live_events(self, run: Run, last_sent_sequence: int) -> AsyncIterator[str]:
         """Stream live events from broker."""
@@ -146,7 +220,7 @@ class StreamingService:
         # If run is in a terminal state and broker is either missing or finished,
         # there are no live events to stream. Using get_broker (not get_or_create)
         # avoids creating a blank broker that would hang forever in aiter().
-        if run.status in ["success", "error", "interrupted"] and (broker is None or broker.is_finished()):
+        if run.status in _TERMINAL_STATUSES and (broker is None or broker.is_finished()):
             return
 
         if broker is None:

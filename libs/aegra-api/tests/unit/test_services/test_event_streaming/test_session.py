@@ -10,6 +10,7 @@ import pytest
 from aegra_api.services.broker import BrokerManager
 from aegra_api.services.event_streaming import session as session_module
 from aegra_api.services.event_streaming.session import (
+    RunLister,
     ThreadEventSession,
     validate_channels,
 )
@@ -28,7 +29,7 @@ def _lister(
     statuses: dict[str, str] | None = None,
     graph: str | None = None,
     created: dict[str, datetime] | None = None,
-):
+) -> RunLister:
     """Run lister returning (run_id, status, graph_name, created_at) rows; status defaults to running."""
 
     async def list_run_ids() -> list[tuple[str, str | None, str | None, datetime | None]]:
@@ -249,6 +250,35 @@ class TestSeqAndFilter:
         )
 
         assert [e["seq"] for e in first] == [e["seq"] for e in second]
+
+    async def test_seq_survives_a_trimmed_replay_buffer(self, manager: BrokerManager) -> None:
+        """Redis keeps only the newest events per run; a retained event keeps the seq it had before the trim."""
+        events = [("values", _protocol_event("values", {"i": i})) for i in range(1, 6)] + [
+            ("end", {"status": "success"})
+        ]
+        await _seed(manager, "run-1", events)
+        created = {"run-1": datetime(2026, 1, 1, tzinfo=UTC)}
+        full = await _collect(
+            _make_session("t1", channels={"values", "lifecycle"}, run_ids=("run-1",), created=created)
+        )
+        manager.remove_broker("run-1")
+        broker = manager.get_or_create_broker("run-1")
+        for i, raw in enumerate(events, start=1):
+            if i > 3:  # the first three events were trimmed
+                await broker.put(f"run-1_event_{i}", raw)
+
+        trimmed = await _collect(
+            _make_session("t1", channels={"values", "lifecycle"}, run_ids=("run-1",), created=created)
+        )
+        resumed = await _collect(
+            _make_session(
+                "t1", channels={"values", "lifecycle"}, run_ids=("run-1",), created=created, since=full[3]["seq"]
+            )
+        )
+
+        seq_by_id = {e["event_id"]: e["seq"] for e in full}
+        assert [e["seq"] for e in trimmed[1:]] == [seq_by_id[e["event_id"]] for e in trimmed[1:]]
+        assert [e["event_id"] for e in resumed] == [e["event_id"] for e in full[4:]]
 
     async def test_seq_keeps_rising_after_earlier_runs_expire(self, manager: BrokerManager) -> None:
         """#751: a new connection must not number a new run below seqs the client already saw."""

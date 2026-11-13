@@ -31,6 +31,7 @@ from aegra_api.services.event_streaming.normalizers import (
     strip_interrupts,
 )
 from aegra_api.services.event_streaming.protocol import build_event
+from aegra_api.utils import extract_event_sequence
 
 __all__ = ["RunLister", "ThreadEventSession", "validate_channels"]
 
@@ -38,13 +39,13 @@ __all__ = ["RunLister", "ThreadEventSession", "validate_channels"]
 _IDLE_GRACE_SECONDS = 30.0
 _POLL_INTERVAL_SECONDS = 0.25
 
-# Async callable returning the thread's (run_id, status, graph_name, created_at)
-# rows, oldest first. Status backstops runs whose broker events expired (see
-# _drain_run); graph_name feeds the run's root lifecycle events; created_at
-# anchors the run's seq so it is the same on every connection.
+# Async callable returning the thread's (run_id, status, graph_name, created_at) rows, oldest
+# first. Status backstops expired runs (see _drain_run); created_at anchors the run's seq.
 RunLister = Callable[[], Awaitable[list[tuple[str, str | None, str | None, datetime | None]]]]
 
 _EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
+# seq slots per broker event: one broker event can project to several wire events.
+_SEQ_SLOTS_PER_EVENT = 16
 
 _TERMINAL_RUN_STATUSES = frozenset({"success", "error", "timeout", "interrupted"})
 
@@ -82,6 +83,7 @@ class ThreadEventSession:
         # graph name and the subgraph namespaces still open (started, no
         # completed/failed yet) so the terminal can cascade-close them.
         self._current_run: str | None = None
+        self._run_seq_base: int | None = None
         self._current_graph: str | None = None
         self._open_namespaces: dict[str, list[str]] = {}
 
@@ -146,8 +148,9 @@ class ThreadEventSession:
         self._sent_interrupts = set()
         self._current_run = run_id
         self._current_graph = graph_name
-        if created_at is not None:
-            self._seq = max(self._seq, _run_seq_base(created_at))
+        self._run_seq_base = _run_seq_base(created_at) if created_at is not None else None
+        if self._run_seq_base is not None:
+            self._seq = max(self._seq, self._run_seq_base)
         self._open_namespaces = {}
 
         replayed = await broker.replay(None)
@@ -182,6 +185,10 @@ class ThreadEventSession:
         method, payload = _unwrap(raw_event)
         if method is None:
             return []
+        ordinal = extract_event_sequence(event_id)
+        if self._run_seq_base is not None and ordinal:
+            # Number from the broker's stored ordinal, so a replay buffer trimmed by Redis keeps each event's seq.
+            self._seq = max(self._seq, self._run_seq_base + ordinal * _SEQ_SLOTS_PER_EVENT)
         if method in ("end", "error"):
             # The SDK reads the run of a root lifecycle event from a synth:<run_id>: id.
             event_id = f"synth:{self._current_run}:{method}"

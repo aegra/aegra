@@ -21,7 +21,13 @@ def load_chat_model(fully_specified_name: str) -> BaseChatModel:
     """Load a chat model from a fully specified name.
 
     Args:
-        fully_specified_name (str): String in the format 'provider/model'.
+        fully_specified_name (str): String in the format 'provider/model'. The
+            model ID may contain slashes, e.g. 'openai/deepseek-ai/DeepSeek-V3'.
+
+    Raises:
+        ValueError: If the provider or model is missing or whitespace-only.
     """
-    provider, model = fully_specified_name.split("/", maxsplit=1)
+    provider, _, model = fully_specified_name.partition("/")
+    if not provider.strip() or not model.strip():
+        raise ValueError(f"fully_specified_name must be in 'provider/model' format, got '{fully_specified_name}'")
     return init_chat_model(model, model_provider=provider)

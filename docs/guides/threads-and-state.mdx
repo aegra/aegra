@@ -106,6 +106,27 @@ for entry in history:
     print(f"  Next: {entry['next']}")
 ```
 
+### Filtering history
+
+Pass `metadata` to return only the checkpoints whose metadata contains every key-value pair you give. It combines with `limit` (default 10) and `before`:
+
+```python
+# Checkpoints written by one run
+history = await client.threads.get_history(
+    thread_id,
+    metadata={"run_id": "your-run-id"},
+    limit=50,
+)
+
+# Checkpoints at a given step
+history = await client.threads.get_history(thread_id, metadata={"step": 1})
+
+# Checkpoints from manual state updates
+history = await client.threads.get_history(thread_id, metadata={"source": "update"})
+```
+
+LangGraph records a `step` and a `source` (`"input"`, `"loop"`, `"update"`, or `"fork"`) on each checkpoint it writes, and checkpoints written during a run also carry the run's `run_id`. Steps do not restart for each run, and a run started from an earlier checkpoint reuses step numbers, so a step filter can match more than one checkpoint. `GET /threads/{thread_id}/history` takes the same filter as a JSON-encoded `metadata` query parameter.
+
 ### Get state at a specific checkpoint
 
 ```python

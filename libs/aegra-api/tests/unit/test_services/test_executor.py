@@ -2,17 +2,25 @@
 
 import asyncio
 import contextlib
+import uuid
 from datetime import UTC, datetime
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
+from opentelemetry.trace import get_current_span
 from sqlalchemy.exc import SQLAlchemyError
 
 from aegra_api.core.active_runs import active_runs
 from aegra_api.models.auth import User
 from aegra_api.models.run_job import RunExecution, RunIdentity, RunJob
+from aegra_api.observability.sampling import is_trace_id_from_run_id_enabled
+from aegra_api.observability.span_enrichment import RunIdAwareIdGenerator, _run_trace_id
 from aegra_api.services.local_executor import LocalExecutor
+from aegra_api.settings import settings
 
 
 async def _empty_async_gen():
@@ -41,9 +49,6 @@ class TestLocalExecutor:
             job = _make_job()
             await executor.submit(job)
 
-            # Task should be registered in active_runs
-            from aegra_api.core.active_runs import active_runs
-
             assert "run-1" in active_runs
             task = active_runs.pop("run-1")
             task.cancel()
@@ -56,8 +61,6 @@ class TestLocalExecutor:
         async def quick() -> None:
             pass
 
-        from aegra_api.core.active_runs import active_runs
-
         task = asyncio.create_task(quick())
         active_runs["run-done"] = task
         await asyncio.sleep(0.01)
@@ -68,8 +71,6 @@ class TestLocalExecutor:
     @pytest.mark.asyncio
     async def test_wait_for_completion_raises_timeout_on_slow_run(self) -> None:
         """Callers distinguish a slow run from a finished one, as WorkerExecutor already allows."""
-        from aegra_api.core.active_runs import active_runs
-
         executor = LocalExecutor()
         task = asyncio.create_task(asyncio.sleep(9999))
         active_runs["run-slow"] = task
@@ -83,8 +84,6 @@ class TestLocalExecutor:
     @pytest.mark.asyncio
     async def test_wait_for_completion_leaves_a_timed_out_run_running(self) -> None:
         """The wait is shielded: giving up on a run must not cancel it."""
-        from aegra_api.core.active_runs import active_runs
-
         executor = LocalExecutor()
         task = asyncio.create_task(asyncio.sleep(9999))
         active_runs["run-shielded"] = task
@@ -107,8 +106,6 @@ class TestLocalExecutor:
     async def test_stop_cancels_active_tasks(self) -> None:
         executor = LocalExecutor()
 
-        from aegra_api.core.active_runs import active_runs
-
         async def hang_forever() -> None:
             await asyncio.sleep(9999)
 
@@ -120,6 +117,48 @@ class TestLocalExecutor:
         await asyncio.sleep(0.01)
         assert task.done()
         active_runs.pop("run-hang", None)
+
+    @pytest.mark.asyncio
+    async def test_concurrent_runs_each_keep_own_seeded_trace_id(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Two LocalExecutor submits at once: each task's trace_id equals its run_id (#692)."""
+        monkeypatch.delenv("OTEL_TRACES_SAMPLER", raising=False)
+        monkeypatch.delenv("OTEL_TRACES_SAMPLER_ARG", raising=False)
+        monkeypatch.setattr(settings.observability, "OTEL_TRACE_ID_FROM_RUN_ID", True)
+        is_trace_id_from_run_id_enabled.cache_clear()
+        _run_trace_id.set(None)
+
+        run_a = "aaaaaaaa-1111-2222-3333-bbbbbbbbbbbb"
+        run_b = "bbbbbbbb-2222-3333-4444-cccccccccccc"
+        captured: dict[str, int] = {}
+
+        provider = TracerProvider(id_generator=RunIdAwareIdGenerator())
+        provider.add_span_processor(SimpleSpanProcessor(InMemorySpanExporter()))
+        tracer = provider.get_tracer(__name__)
+
+        async def fake_execute_run(job: RunJob) -> None:
+            await asyncio.sleep(0.02)
+            with tracer.start_as_current_span(f"run-{job.identity.run_id}"):
+                captured[job.identity.run_id] = get_current_span().get_span_context().trace_id
+
+        executor = LocalExecutor()
+        try:
+            with patch("aegra_api.services.run_executor.execute_run", new=fake_execute_run):
+                await executor.submit(_make_job(run_a))
+                await executor.submit(_make_job(run_b))
+                await asyncio.gather(
+                    executor.wait_for_completion(run_a, timeout=5.0),
+                    executor.wait_for_completion(run_b, timeout=5.0),
+                )
+
+            assert captured[run_a] == uuid.UUID(run_a).int
+            assert captured[run_b] == uuid.UUID(run_b).int
+            assert captured[run_a] != captured[run_b]
+        finally:
+            provider.shutdown()
+            active_runs.pop(run_a, None)
+            active_runs.pop(run_b, None)
+            _run_trace_id.set(None)
+            is_trace_id_from_run_id_enabled.cache_clear()
 
 
 class TestRunExecutorBoundaryConditions:

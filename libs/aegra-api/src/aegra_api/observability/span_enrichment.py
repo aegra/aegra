@@ -23,11 +23,18 @@ Usage::
 
 import contextvars
 import logging
+import secrets
+import uuid
 from typing import Any
 
 import structlog
+from opentelemetry import context as otel_context
+from opentelemetry import trace
 from opentelemetry.context import Context
 from opentelemetry.sdk.trace import ReadableSpan, Span, SpanProcessor
+from opentelemetry.sdk.trace.id_generator import IdGenerator
+
+from aegra_api.observability.sampling import is_trace_id_from_run_id_enabled
 
 logger = logging.getLogger(__name__)
 
@@ -42,6 +49,8 @@ _PRIMITIVE_ATTR_TYPES: tuple[type, ...] = (str, int, float, bool)
 _trace_attrs: contextvars.ContextVar[dict[str, str | int | float | bool] | None] = contextvars.ContextVar(
     "aegra_otel_trace_attrs", default=None
 )
+
+_run_trace_id: contextvars.ContextVar[int | None] = contextvars.ContextVar("aegra_run_trace_id", default=None)
 
 
 class SpanEnrichmentProcessor(SpanProcessor):
@@ -167,6 +176,36 @@ def merge_run_metadata(
     return merged
 
 
+def seed_otel_trace_id(run_id: str) -> None:
+    _run_trace_id.set(uuid.UUID(run_id).int)
+
+
+def prepare_run_otel_trace(run_id: str) -> None:
+    # attach() token is intentionally not detached — only call in ctx.run / per-job task.
+    otel_context.attach(trace.set_span_in_context(trace.INVALID_SPAN))
+    if is_trace_id_from_run_id_enabled():
+        seed_otel_trace_id(run_id)
+
+
+class RunIdAwareIdGenerator(IdGenerator):
+    """Seeded ``UUID(run_id).int`` when set; otherwise random."""
+
+    def generate_trace_id(self) -> int:
+        seeded = _run_trace_id.get()
+        if seeded is not None:
+            return seeded
+        trace_id = secrets.randbits(128)
+        while trace_id == trace.INVALID_TRACE_ID:
+            trace_id = secrets.randbits(128)
+        return trace_id
+
+    def generate_span_id(self) -> int:
+        span_id = secrets.randbits(64)
+        while span_id == trace.INVALID_SPAN_ID:
+            span_id = secrets.randbits(64)
+        return span_id
+
+
 def make_run_trace_context(
     run_id: str,
     thread_id: str,
@@ -196,6 +235,7 @@ def make_run_trace_context(
     }
     metadata = merge_run_metadata(extra_metadata, system_metadata)
     ctx = contextvars.copy_context()
+    ctx.run(prepare_run_otel_trace, run_id)
     ctx.run(
         set_trace_context,
         user_id=user_identity,

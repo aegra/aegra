@@ -174,6 +174,29 @@ class TestRunStart:
         assert request.checkpoint == {"checkpoint_id": _CHECKPOINT_ID}
         assert request.input == {"x": 1}
 
+    async def test_run_start_fork_on_interrupted_thread_is_a_new_run_not_a_resume(
+        self, prepared_run: AsyncMock, user: User
+    ) -> None:
+        session = AsyncMock()
+        session.scalar = AsyncMock(return_value="interrupted")
+        await _dispatch(
+            {
+                "id": 1,
+                "method": "run.start",
+                "params": {
+                    "assistant_id": "agent",
+                    "input": {"x": 1},
+                    "config": {"configurable": {"checkpoint_id": _CHECKPOINT_ID}},
+                },
+            },
+            user,
+            session=session,
+        )
+        request = prepared_run.call_args.args[2]
+        assert request.command is None
+        assert request.input == {"x": 1}
+        assert request.checkpoint == {"checkpoint_id": _CHECKPOINT_ID}
+
     async def test_run_start_without_checkpoint_id_sets_no_checkpoint(
         self, prepared_run: AsyncMock, user: User
     ) -> None:

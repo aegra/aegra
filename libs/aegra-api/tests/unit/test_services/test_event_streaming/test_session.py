@@ -2,6 +2,7 @@
 
 import asyncio
 from collections.abc import Iterator
+from datetime import UTC, datetime
 from typing import Any
 
 import pytest
@@ -9,6 +10,7 @@ import pytest
 from aegra_api.services.broker import BrokerManager
 from aegra_api.services.event_streaming import session as session_module
 from aegra_api.services.event_streaming.session import (
+    RunLister,
     ThreadEventSession,
     validate_channels,
 )
@@ -22,11 +24,18 @@ def manager(monkeypatch: pytest.MonkeyPatch) -> Iterator[BrokerManager]:
     yield mgr
 
 
-def _lister(*run_ids: str, statuses: dict[str, str] | None = None, graph: str | None = None):
-    """Run lister returning (run_id, status, graph_name) rows; status defaults to running."""
+def _lister(
+    *run_ids: str,
+    statuses: dict[str, str] | None = None,
+    graph: str | None = None,
+    created: dict[str, datetime] | None = None,
+) -> RunLister:
+    """Run lister returning (run_id, status, graph_name, created_at) rows; status defaults to running."""
 
-    async def list_run_ids() -> list[tuple[str, str | None, str | None]]:
-        return [(run_id, (statuses or {}).get(run_id, "running"), graph) for run_id in run_ids]
+    async def list_run_ids() -> list[tuple[str, str | None, str | None, datetime | None]]:
+        return [
+            (run_id, (statuses or {}).get(run_id, "running"), graph, (created or {}).get(run_id)) for run_id in run_ids
+        ]
 
     return list_run_ids
 
@@ -60,11 +69,12 @@ def _make_session(
     depth: int | None = None,
     statuses: dict[str, str] | None = None,
     graph: str | None = None,
+    created: dict[str, datetime] | None = None,
 ) -> ThreadEventSession:
     return ThreadEventSession(
         thread_id,
         channels=channels,
-        list_run_ids=_lister(*run_ids, statuses=statuses, graph=graph),
+        list_run_ids=_lister(*run_ids, statuses=statuses, graph=graph, created=created),
         since=since,
         namespaces=namespaces,
         depth=depth,
@@ -97,6 +107,20 @@ class TestForwarding:
             ("messages", "message-finish"),
             ("lifecycle", "completed"),
         ]
+
+    async def test_producer_timestamp_is_kept(self, manager: BrokerManager) -> None:
+        await _seed(
+            manager,
+            "run-1",
+            [
+                ("values", _protocol_event("values", {"a": 1}, timestamp=1_700_000_000_000)),
+                ("end", {"status": "success"}),
+            ],
+        )
+        events = await _collect(_make_session("t1", channels={"values", "lifecycle"}, run_ids=("run-1",)))
+        assert [e["method"] for e in events] == ["lifecycle", "values", "lifecycle"]
+        assert events[1]["params"]["timestamp"] == 1_700_000_000_000
+        assert events[0]["params"]["timestamp"] > 1_700_000_000_000
 
     async def test_values_payload_in_params_data(self, manager: BrokerManager) -> None:
         await _seed(manager, "run-1", [("values", _protocol_event("values", {"a": 1})), ("end", {"status": "success"})])
@@ -214,6 +238,97 @@ class TestSeqAndFilter:
         await _collect(session)
         assert session.applied_through_seq == 3
 
+    async def test_seq_is_the_same_on_every_connection(self, manager: BrokerManager) -> None:
+        await _seed(manager, "run-1", [("values", _protocol_event("values", {"a": 1})), ("end", {"status": "success"})])
+        created = {"run-1": datetime(2026, 1, 1, tzinfo=UTC)}
+
+        first = await _collect(
+            _make_session("t1", channels={"values", "lifecycle"}, run_ids=("run-1",), created=created)
+        )
+        second = await _collect(
+            _make_session("t1", channels={"values", "lifecycle"}, run_ids=("run-1",), created=created)
+        )
+
+        assert [e["seq"] for e in first] == [e["seq"] for e in second]
+
+    async def test_seq_survives_a_trimmed_replay_buffer(self, manager: BrokerManager) -> None:
+        """Redis keeps only the newest events per run; a retained event keeps the seq it had before the trim."""
+        events = [("values", _protocol_event("values", {"i": i})) for i in range(1, 6)] + [
+            ("end", {"status": "success"})
+        ]
+        await _seed(manager, "run-1", events)
+        created = {"run-1": datetime(2026, 1, 1, tzinfo=UTC)}
+        full = await _collect(
+            _make_session("t1", channels={"values", "lifecycle"}, run_ids=("run-1",), created=created)
+        )
+        manager.remove_broker("run-1")
+        broker = manager.get_or_create_broker("run-1")
+        for i, raw in enumerate(events, start=1):
+            if i > 3:  # the first three events were trimmed
+                await broker.put(f"run-1_event_{i}", raw)
+
+        trimmed = await _collect(
+            _make_session("t1", channels={"values", "lifecycle"}, run_ids=("run-1",), created=created)
+        )
+        resumed = await _collect(
+            _make_session(
+                "t1", channels={"values", "lifecycle"}, run_ids=("run-1",), created=created, since=full[3]["seq"]
+            )
+        )
+
+        seq_by_id = {e["event_id"]: e["seq"] for e in full}
+        assert [e["seq"] for e in trimmed[1:]] == [seq_by_id[e["event_id"]] for e in trimmed[1:]]
+        assert [e["event_id"] for e in resumed] == [e["event_id"] for e in full[4:]]
+
+    async def test_fallback_event_id_does_not_jump_seq(self, manager: BrokerManager) -> None:
+        """An epoch-ms id from the allocator's Redis fallback is not an event count."""
+        broker = manager.get_or_create_broker("run-1")
+        await broker.put("run-1_event_1", ("values", _protocol_event("values", {"a": 1})))
+        await broker.put("run-1_event_1794574673377", ("values", _protocol_event("values", {"a": 2})))
+        await broker.put("run-1_event_3", ("end", {"status": "success"}))
+        created = {"run-1": datetime(2026, 1, 1, tzinfo=UTC)}
+
+        events = await _collect(
+            _make_session("t1", channels={"values", "lifecycle"}, run_ids=("run-1",), created=created)
+        )
+
+        base = events[0]["seq"] - 1
+        assert [e["seq"] - base for e in events] == [1, 17, 18, 49]
+
+    async def test_seq_keeps_rising_after_earlier_runs_expire(self, manager: BrokerManager) -> None:
+        """#751: a new connection must not number a new run below seqs the client already saw."""
+        created = {"run-1": datetime(2026, 1, 1, 12, tzinfo=UTC), "run-2": datetime(2026, 1, 1, 12, 15, tzinfo=UTC)}
+        statuses = {"run-1": "success", "run-2": "success"}
+        await _seed(manager, "run-1", [("values", _protocol_event("values", {"a": 1})), ("end", {"status": "success"})])
+        first = await _collect(
+            _make_session(
+                "t1", channels={"values", "lifecycle"}, run_ids=("run-1",), statuses=statuses, created=created
+            )
+        )
+        cursor = first[-1]["seq"]
+        manager.remove_broker("run-1")  # replay retention expired
+        await _seed(manager, "run-2", [("values", _protocol_event("values", {"a": 2})), ("end", {"status": "success"})])
+
+        fresh = await _collect(
+            _make_session(
+                "t1", channels={"values", "lifecycle"}, run_ids=("run-1", "run-2"), statuses=statuses, created=created
+            )
+        )
+        resumed = await _collect(
+            _make_session(
+                "t1",
+                channels={"values", "lifecycle"},
+                run_ids=("run-1", "run-2"),
+                statuses=statuses,
+                created=created,
+                since=cursor,
+            )
+        )
+
+        assert len(fresh) == 3
+        assert fresh[0]["seq"] > cursor
+        assert [(e["seq"], e["event_id"]) for e in resumed] == [(e["seq"], e["event_id"]) for e in fresh]
+
 
 class TestInterruptsToInputChannel:
     async def test_interrupt_on_values_becomes_input_requested(self, manager: BrokerManager) -> None:
@@ -270,6 +385,17 @@ class TestLifecycle:
         events = await _collect(_make_session("t1", channels={"lifecycle"}, run_ids=("run-1",), graph="my_graph"))
         assert events[0]["params"]["data"] == {"event": "running", "graph_name": "my_graph"}
         assert events[-1]["params"]["data"] == {"event": "completed", "graph_name": "my_graph"}
+
+    async def test_root_lifecycle_event_ids_name_the_run(self, manager: BrokerManager) -> None:
+        await _seed(manager, "run-1", [("end", {"status": "success"})])
+        await _seed(manager, "run-2", [("error", {"error": "RuntimeError", "message": "boom"})])
+        events = await _collect(_make_session("t1", channels={"lifecycle"}, run_ids=("run-1", "run-2")))
+        assert [e["event_id"].split(":")[:2] for e in events] == [
+            ["synth", "run-1"],
+            ["synth", "run-1"],
+            ["synth", "run-2"],
+            ["synth", "run-2"],
+        ]
 
     async def test_completed(self, manager: BrokerManager) -> None:
         await _seed(manager, "run-1", [("end", {"status": "success"})])
@@ -393,12 +519,12 @@ class TestResumeAcrossRuns:
 
         revealed = False
 
-        async def lister() -> list[tuple[str, str | None, str | None]]:
+        async def lister() -> list[tuple[str, str | None, str | None, datetime | None]]:
             nonlocal revealed
             if not revealed:
                 revealed = True
-                return [("run-a", "interrupted", None)]
-            return [("run-a", "interrupted", None), ("run-b", "running", None)]
+                return [("run-a", "interrupted", None, None)]
+            return [("run-a", "interrupted", None, None), ("run-b", "running", None, None)]
 
         async def reveal_run_b() -> None:
             # run-b appears a beat after run-a drains, as the resume round-trip lands.

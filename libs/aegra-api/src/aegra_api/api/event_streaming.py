@@ -12,6 +12,7 @@ verify thread (and run) ownership before doing anything.
 from __future__ import annotations
 
 from collections.abc import AsyncGenerator
+from datetime import datetime
 
 import anyio
 import structlog
@@ -51,7 +52,7 @@ async def _verify_thread_owned_or_new(session: AsyncSession, thread_id: str, use
 
 
 def _thread_run_lister(thread_id: str, user: User) -> RunLister:
-    """Async callable returning the thread's (run_id, status, graph_name) rows (oldest first), user-scoped.
+    """Async callable returning the thread's (run_id, status, graph_name, created_at) rows (oldest first), user-scoped.
 
     Called repeatedly while a stream is live so a run started after the stream
     opened is picked up. Status lets the session drain historical runs whose
@@ -60,18 +61,18 @@ def _thread_run_lister(thread_id: str, user: User) -> RunLister:
     connection is not held for the whole SSE lifetime (see #423).
     """
 
-    async def list_run_ids() -> list[tuple[str, str | None, str | None]]:
+    async def list_run_ids() -> list[tuple[str, str | None, str | None, datetime | None]]:
         maker = _get_session_maker()
         # sse-starlette's anyio cancel punches through asyncio.shield (#530).
         with anyio.CancelScope(shield=True):
             async with maker() as session:
                 rows = await session.execute(
-                    select(RunORM.run_id, RunORM.status, AssistantORM.graph_id)
+                    select(RunORM.run_id, RunORM.status, AssistantORM.graph_id, RunORM.created_at)
                     .outerjoin(AssistantORM, RunORM.assistant_id == AssistantORM.assistant_id)
                     .where(RunORM.thread_id == thread_id, RunORM.user_id == user.identity)
                     .order_by(RunORM.created_at.asc())
                 )
-                return [(run_id, status, graph_id) for run_id, status, graph_id in rows.all()]
+                return [(run_id, status, graph_id, created_at) for run_id, status, graph_id, created_at in rows.all()]
 
     return list_run_ids
 

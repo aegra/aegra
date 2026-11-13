@@ -43,15 +43,18 @@ def build_event(
     namespace: list[str] | None = None,
     seq: int,
     event_id: str | None = None,
+    timestamp: int | None = None,
 ) -> dict[str, Any]:
     """Build a server-push event envelope.
 
     ``params`` wraps the per-channel payload as ``{data, namespace,
     timestamp}`` — the shape the LangGraph SDK reads (``params.data`` is the
     payload, ``params.namespace`` the subgraph path, ``[]`` at the root,
-    ``params.timestamp`` ms-epoch server time).
+    ``params.timestamp`` ms-epoch time the producer emitted it, else now).
     """
-    params: dict[str, Any] = {"data": data, "namespace": namespace or [], "timestamp": time.time_ns() // 1_000_000}
+    if timestamp is None:
+        timestamp = time.time_ns() // 1_000_000
+    params: dict[str, Any] = {"data": data, "namespace": namespace or [], "timestamp": timestamp}
     event: dict[str, Any] = {"type": "event", "seq": seq, "method": method, "params": params}
     if event_id is not None:
         event["event_id"] = event_id

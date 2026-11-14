@@ -250,9 +250,14 @@ def _normalize_namespace(value: str | list[str] | None) -> list[str]:
     return [part for item in value if isinstance(item, str) for part in item.split(".") if part]
 
 
+def namespace_label(value: str) -> str:
+    """Encode a scope value as a valid namespace label: '%' -> '%25', then '.' -> '%2E'."""
+    return value.replace("%", "%25").replace(".", "%2E")
+
+
 def _scope(prefix: str, scope_ids: list[str], namespace: list[str]) -> list[str]:
-    """Bury a namespace under [prefix, *scope_ids] unless it already starts with exactly that."""
-    head = [prefix, *scope_ids]
+    """Bury a namespace under [prefix, *encoded scope_ids] unless it already starts with exactly that."""
+    head = [prefix, *(namespace_label(scope_id) for scope_id in scope_ids)]
     if namespace[: len(head)] == head:
         return namespace
     return [*head, *namespace]

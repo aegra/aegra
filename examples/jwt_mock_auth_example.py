@@ -59,7 +59,11 @@ async def authenticate(headers: dict[str, str]) -> dict[str, str | bool | list[s
     """
     auth_header = headers.get("authorization", "") or headers.get("Authorization", "")
     if not auth_header.startswith("Bearer "):
-        raise Auth.exceptions.HTTPException(status_code=401, detail="Missing or invalid Authorization header")
+        raise Auth.exceptions.HTTPException(
+            status_code=401,
+            detail="Missing or invalid Authorization header",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
 
     token = auth_header[7:]  # Strip "Bearer "
 
@@ -73,6 +77,11 @@ async def authenticate(headers: dict[str, str]) -> dict[str, str | bool | list[s
 
     user_id = parts[0]
     role = parts[1]
+    # Special identities for auth E2E: handler-chosen status must survive dispatch.
+    if user_id == "disabled":
+        raise Auth.exceptions.HTTPException(status_code=403, detail="account disabled")
+    if user_id == "ratelimited":
+        raise Auth.exceptions.HTTPException(status_code=429, detail="too many attempts")
     has_team = len(parts) > 2
     team_id = parts[2] if has_team else "team_default"
 

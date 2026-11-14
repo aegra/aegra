@@ -3,6 +3,7 @@
 from typing import Annotated, Any
 
 from fastapi import Depends, HTTPException, Request
+from langgraph_sdk import Auth
 
 from aegra_api.core.auth_middleware import get_auth_backend
 from aegra_api.models.auth import User
@@ -72,7 +73,8 @@ async def require_auth(request: Request) -> User:
         User object with authentication context including any extra fields
 
     Raises:
-        HTTPException: If no authentication context was attached to the request
+        HTTPException: If authentication fails. Status/detail/headers from
+            ``Auth.exceptions.HTTPException`` are preserved; other failures are 401.
     """
     cached = request.scope.get(_AUTH_RESULT_SCOPE_KEY)
     if cached is not None:
@@ -82,6 +84,14 @@ async def require_auth(request: Request) -> User:
 
     try:
         result = await backend.authenticate(request)
+    except HTTPException:
+        raise
+    except Auth.exceptions.HTTPException as e:
+        raise HTTPException(
+            status_code=e.status_code,
+            detail=e.detail,
+            headers=dict(e.headers) if hasattr(e, "headers") and e.headers else None,
+        ) from e
     except Exception as e:
         raise HTTPException(status_code=401, detail=str(e)) from e
 

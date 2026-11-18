@@ -6,6 +6,8 @@ from functools import cache
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import Response
+from langgraph.store.base import NOT_PROVIDED
+from langgraph.store.postgres.aio import AsyncPostgresStore
 
 from aegra_api.config import load_store_config
 from aegra_api.core.auth_deps import auth_dependency, get_current_user
@@ -55,8 +57,16 @@ async def put_store_item(request: StorePutRequest, user: User = Depends(get_curr
     scoped_namespace = apply_namespace_scoping(request.namespace, user)
 
     store = db_manager.get_store()
+    if request.ttl is not None:
+        _require_store_ttl(store, "ttl")
 
-    await store.aput(namespace=tuple(scoped_namespace), key=request.key, value=request.value)
+    # NOT_PROVIDED (not None) lets the store apply store.ttl.default_ttl.
+    await store.aput(
+        namespace=tuple(scoped_namespace),
+        key=request.key,
+        value=request.value,
+        ttl=request.ttl if request.ttl is not None else NOT_PROVIDED,
+    )
 
     return Response(status_code=204)
 
@@ -66,6 +76,13 @@ async def get_store_item(
     key: str = Query(..., description="Key of the item to retrieve."),
     namespace: str | list[str] | None = Query(
         None, description="Namespace path. Use dot-separated string or repeated query params."
+    ),
+    refresh_ttl: bool | None = Query(
+        None,
+        description=(
+            "Whether this read extends the item's TTL. Omitted uses `store.ttl.refresh_on_read`. "
+            "Requires `store.ttl` in aegra.json."
+        ),
     ),
     user: User = Depends(get_current_user),
 ) -> StoreGetResponse:
@@ -92,7 +109,10 @@ async def get_store_item(
 
     store = db_manager.get_store()
 
-    item = await store.aget(tuple(scoped_namespace), key)
+    if refresh_ttl is not None:
+        _require_store_ttl(store, "refresh_ttl")
+
+    item = await store.aget(tuple(scoped_namespace), key, refresh_ttl=refresh_ttl)
 
     if not item:
         raise HTTPException(404, "Item not found")
@@ -175,6 +195,8 @@ async def search_store_items(
     store = db_manager.get_store()
     limit = request.limit if request.limit is not None else effective_search_limit()
     offset = request.offset or 0
+    if request.refresh_ttl is not None:
+        _require_store_ttl(store, "refresh_ttl")
 
     # Search with LangGraph store
     # asearch takes namespace_prefix as a positional-only argument
@@ -184,6 +206,7 @@ async def search_store_items(
         filter=request.filter,
         limit=limit,
         offset=offset,
+        refresh_ttl=request.refresh_ttl,
     )
 
     items = [StoreItem(key=r.key, value=r.value, namespace=list(r.namespace)) for r in results]
@@ -235,6 +258,12 @@ async def list_namespaces(
     )
 
     return StoreListNamespacesResponse(namespaces=[list(ns) for ns in result])
+
+
+def _require_store_ttl(store: AsyncPostgresStore, field: str) -> None:
+    """Reject a TTL field when the store has no expiry policy, rather than accept and ignore it."""
+    if store.ttl_config is None:
+        raise HTTPException(422, f"'{field}' requires store.ttl to be configured in aegra.json")
 
 
 def _normalize_namespace(value: str | list[str] | None) -> list[str]:

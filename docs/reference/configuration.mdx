@@ -292,6 +292,33 @@ Configure semantic store with vector embeddings.
 
 If `store` is not configured, Aegra operates in basic key-value mode.
 
+### `store.ttl`
+
+Expire store items. When a `ttl` block is present, a background sweeper deletes
+expired items on every Aegra instance, and requests can set a per-item TTL.
+
+```json
+{
+  "store": {
+    "ttl": {
+      "default_ttl": 10080,
+      "refresh_on_read": true,
+      "sweep_interval_minutes": 5
+    }
+  }
+}
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `ttl.default_ttl` | `number` | none | TTL in minutes for items written without their own `ttl`. Items never expire when unset. Must be greater than 0 |
+| `ttl.refresh_on_read` | `bool` | `true` | Reading an item (get or search) pushes its expiry out by its TTL again. A request can override this with `refresh_ttl` |
+| `ttl.sweep_interval_minutes` | `number` | `5` | How often the sweeper deletes expired items |
+
+An empty `"ttl": {}` turns on per-item TTLs and the sweeper without a default expiry. A malformed block (wrong type, a non-positive number or an unknown key) stops the server at startup.
+
+Without a `store.ttl` block, requests that set `ttl` or `refresh_ttl` get a `422` instead of being silently ignored. See the [store guide](/guides/store#expire-items-with-a-ttl) for the request fields.
+
 See [semantic store guide](/guides/semantic-store) for details.
 
 ## `checkpointer`

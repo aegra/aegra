@@ -1002,3 +1002,99 @@ class TestStoreIntegration:
         )
         assert search_resp.status_code == 200
         assert len(search_resp.json()["items"]) == 3
+
+
+class TestStoreTTL:
+    """store.ttl: per-item TTL on PUT and refresh_ttl on reads"""
+
+    @pytest.fixture
+    def ttl_store(self, mock_store):
+        """Store with an expiry policy configured"""
+        mock_store.ttl_config = {"refresh_on_read": True}
+        return mock_store
+
+    @pytest.fixture
+    def no_ttl_store(self, mock_store):
+        """Store without store.ttl in aegra.json"""
+        mock_store.ttl_config = None
+        return mock_store
+
+    def test_put_forwards_ttl(self, client, ttl_store):
+        resp = client.put(
+            "/store/items",
+            json={"namespace": ["ns"], "key": "k", "value": {"a": 1}, "ttl": 15},
+        )
+
+        assert resp.status_code == 204
+        assert ttl_store.aput.call_args.kwargs["ttl"] == 15
+
+    @pytest.mark.parametrize("body", [{}, {"ttl": None}])
+    def test_put_without_ttl_defers_to_the_store_default(self, client, ttl_store, body):
+        """Omitted/null must reach the store as NOT_PROVIDED so default_ttl applies"""
+        from langgraph.store.base import NOT_PROVIDED
+
+        resp = client.put("/store/items", json={"namespace": ["ns"], "key": "k", "value": {"a": 1}, **body})
+
+        assert resp.status_code == 204
+        assert ttl_store.aput.call_args.kwargs["ttl"] is NOT_PROVIDED
+
+    def test_put_without_ttl_succeeds_when_store_ttl_unconfigured(self, client, no_ttl_store):
+        resp = client.put("/store/items", json={"namespace": ["ns"], "key": "k", "value": {"a": 1}, "ttl": None})
+
+        assert resp.status_code == 204
+
+    @pytest.mark.parametrize("ttl", [0, -1, 10**12])
+    def test_put_rejects_out_of_range_ttl(self, client, ttl_store, ttl):
+        resp = client.put("/store/items", json={"namespace": ["ns"], "key": "k", "value": {"a": 1}, "ttl": ttl})
+
+        assert resp.status_code == 422
+        ttl_store.aput.assert_not_called()
+
+    def test_put_ttl_is_rejected_when_store_ttl_unconfigured(self, client, no_ttl_store):
+        resp = client.put("/store/items", json={"namespace": ["ns"], "key": "k", "value": {"a": 1}, "ttl": 5})
+
+        assert resp.status_code == 422
+        assert "store.ttl" in resp.json()["detail"]
+        no_ttl_store.aput.assert_not_called()
+
+    @pytest.mark.parametrize(
+        ("query", "expected"), [("", None), ("&refresh_ttl=true", True), ("&refresh_ttl=false", False)]
+    )
+    def test_get_forwards_refresh_ttl(self, client, ttl_store, query, expected):
+        ttl_store.aget.return_value = DummyStoreItem("k", {"a": 1}, ("ns",))
+
+        resp = client.get(f"/store/items?key=k&namespace=ns{query}")
+
+        assert resp.status_code == 200
+        assert ttl_store.aget.call_args.kwargs["refresh_ttl"] is expected
+
+    def test_get_refresh_ttl_is_rejected_when_store_ttl_unconfigured(self, client, no_ttl_store):
+        resp = client.get("/store/items?key=k&namespace=ns&refresh_ttl=true")
+
+        assert resp.status_code == 422
+        no_ttl_store.aget.assert_not_called()
+
+    def test_get_without_refresh_ttl_succeeds_when_store_ttl_unconfigured(self, client, no_ttl_store):
+        no_ttl_store.aget.return_value = DummyStoreItem("k", {"a": 1}, ("ns",))
+
+        resp = client.get("/store/items?key=k&namespace=ns")
+
+        assert resp.status_code == 200
+        assert no_ttl_store.aget.call_args.kwargs["refresh_ttl"] is None
+
+    @pytest.mark.parametrize(
+        ("body", "expected"), [({}, None), ({"refresh_ttl": None}, None), ({"refresh_ttl": False}, False)]
+    )
+    def test_search_forwards_refresh_ttl(self, client, ttl_store, body, expected):
+        ttl_store.asearch.return_value = []
+
+        resp = client.post("/store/items/search", json={"namespace_prefix": ["ns"], **body})
+
+        assert resp.status_code == 200
+        assert ttl_store.asearch.call_args.kwargs["refresh_ttl"] is expected
+
+    def test_search_refresh_ttl_is_rejected_when_store_ttl_unconfigured(self, client, no_ttl_store):
+        resp = client.post("/store/items/search", json={"namespace_prefix": ["ns"], "refresh_ttl": True})
+
+        assert resp.status_code == 422
+        no_ttl_store.asearch.assert_not_called()

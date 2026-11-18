@@ -5,10 +5,15 @@ from pathlib import Path
 from typing import TypedDict
 
 import structlog
+from langgraph.store.base import TTLConfig
+from pydantic import BaseModel, ConfigDict, Field, StrictBool, ValidationError
 
 from aegra_api.settings import settings
 
 logger = structlog.get_logger(__name__)
+
+# Same ceiling as thread TTLs: keeps `now() + interval` far from overflow.
+MAX_STORE_TTL_MINUTES = 1_000_000_000
 
 
 class CorsConfig(TypedDict, total=False):
@@ -86,11 +91,24 @@ class StoreIndexConfig(TypedDict, total=False):
     """
 
 
+class StoreTTLConfig(TypedDict, total=False):
+    """Expiry settings for store items, same shape as LangGraph's ``store.ttl`` block."""
+
+    refresh_on_read: bool
+    """Refresh an item's expiry on reads (get/search) unless the request says otherwise (default true)"""
+    default_ttl: float | None
+    """TTL in minutes for items written without one; items never expire when unset"""
+    sweep_interval_minutes: float | None
+    """How often the background sweep deletes expired items (default 5)"""
+
+
 class StoreConfig(TypedDict, total=False):
     """Store configuration options"""
 
     index: StoreIndexConfig | None
     """Vector index configuration for semantic search"""
+    ttl: StoreTTLConfig | None
+    """Item expiry policy. Expired items are deleted by a background sweep"""
     scopes: dict[str, list[str]]
     """Map of namespace prefix -> list of User attributes used for configurable store scoping."""
 
@@ -224,6 +242,40 @@ def load_store_config() -> StoreConfig | None:
         return store_config
 
     return None
+
+
+class _StoreTTLSettings(BaseModel):
+    """Validated ``store.ttl`` block; unknown keys are rejected so a typo cannot silently disable expiry."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    refresh_on_read: StrictBool = True
+    default_ttl: float | None = Field(None, gt=0, le=MAX_STORE_TTL_MINUTES, strict=True)
+    sweep_interval_minutes: float | None = Field(None, gt=0, le=MAX_STORE_TTL_MINUTES, strict=True)
+
+
+def parse_store_ttl_config(raw: object) -> TTLConfig | None:
+    """Validate the ``store.ttl`` block and return it as the store's ``TTLConfig``.
+
+    Returns None when no block is configured. A malformed block raises
+    ``ValueError`` so a broken retention policy fails at startup instead of
+    silently keeping (or never expiring) data.
+    """
+    if raw is None:
+        return None
+    if not isinstance(raw, dict):
+        raise ValueError(f"store.ttl must be a JSON object, got {type(raw).__name__}")
+    try:
+        parsed = _StoreTTLSettings.model_validate(raw)
+    except ValidationError as e:
+        raise ValueError(f"Invalid store.ttl configuration: {e}") from e
+
+    ttl_config: TTLConfig = {"refresh_on_read": parsed.refresh_on_read}
+    if parsed.default_ttl is not None:
+        ttl_config["default_ttl"] = parsed.default_ttl
+    if parsed.sweep_interval_minutes is not None:
+        ttl_config["sweep_interval_minutes"] = parsed.sweep_interval_minutes  # type: ignore[typeddict-item]
+    return ttl_config
 
 
 def load_checkpointer_config() -> CheckpointerConfig | None:

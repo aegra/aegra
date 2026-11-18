@@ -5,7 +5,12 @@ from pathlib import Path
 
 import pytest
 
-from aegra_api.config import load_checkpointer_config, load_http_config, load_store_config
+from aegra_api.config import (
+    load_checkpointer_config,
+    load_http_config,
+    load_store_config,
+    parse_store_ttl_config,
+)
 
 
 def test_load_http_config_from_aegra_json(tmp_path, monkeypatch):
@@ -156,6 +161,53 @@ def test_load_store_config_with_index(tmp_path, monkeypatch):
     assert config is not None
     assert config["index"]["dims"] == 1536
     assert config["index"]["embed"] == "openai:text-embedding-3-small"
+
+
+def test_load_store_config_with_ttl(tmp_path, monkeypatch):
+    """store.ttl is read from aegra.json alongside the other store keys"""
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "aegra.json").write_text(json.dumps({"store": {"ttl": {"default_ttl": 90, "refresh_on_read": False}}}))
+
+    config = load_store_config()
+
+    assert config is not None
+    assert config["ttl"] == {"default_ttl": 90, "refresh_on_read": False}
+
+
+def test_parse_store_ttl_config_absent_means_disabled():
+    assert parse_store_ttl_config(None) is None
+
+
+def test_parse_store_ttl_config_applies_defaults():
+    """An empty block enables per-item TTLs and the sweeper without a default expiry"""
+    assert parse_store_ttl_config({}) == {"refresh_on_read": True}
+
+
+def test_parse_store_ttl_config_passes_values_through():
+    config = parse_store_ttl_config({"refresh_on_read": False, "default_ttl": 1440, "sweep_interval_minutes": 10})
+
+    assert config == {"refresh_on_read": False, "default_ttl": 1440.0, "sweep_interval_minutes": 10.0}
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        "60",
+        [60],
+        {"default_ttl": 0},
+        {"default_ttl": -1},
+        {"default_ttl": "60"},
+        {"default_ttl": True},
+        {"default_ttl": 10**12},
+        {"sweep_interval_minutes": 0},
+        {"refresh_on_read": "yes"},
+        {"default_ttls": 60},
+    ],
+)
+def test_parse_store_ttl_config_rejects_invalid_blocks(raw):
+    """A broken retention policy must fail loudly instead of being ignored"""
+    with pytest.raises(ValueError, match="store.ttl"):
+        parse_store_ttl_config(raw)
 
 
 def test_load_store_config_no_config(tmp_path, monkeypatch):

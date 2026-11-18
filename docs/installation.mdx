@@ -70,11 +70,13 @@ If a newer release causes errors:
 
 Aegra uses PostgreSQL with the pgvector extension for persistence and vector search. The recommended image is `pgvector/pgvector:pg18`.
 
-When you use `aegra dev` or `aegra up`, PostgreSQL is started automatically via Docker. For `aegra serve`, you provide your own database via `DATABASE_URL` or `POSTGRES_*` environment variables.
+When you use `aegra dev` or `aegra up`, PostgreSQL starts through Compose. With `AEGRA_CONTAINER_RUNTIME` unset, that is a running Docker daemon, then Podman if it is installed, then Docker if it is installed but stopped. Set the variable to `docker` or `podman` to choose directly. For `aegra serve`, you provide your own database via `DATABASE_URL` or `POSTGRES_*` environment variables.
 
 ### Docker
 
-Docker is required for local development (`aegra dev` starts a PostgreSQL container). For production, you can either run everything in Docker (`aegra up`) or provide an external database and run with `aegra serve`.
+Docker is the default for local development (`aegra dev` starts a PostgreSQL container). For production, you can either run everything in Docker (`aegra up`) or provide an external database and run with `aegra serve`.
+
+Podman is an optional local runtime. Aegra uses `podman compose` with the same Compose file when you set `AEGRA_CONTAINER_RUNTIME=podman`, or when the variable is unset, Docker is not running, and Podman is installed. If that subcommand is missing, the CLI tells you to install the Podman Compose plugin. It does not call `podman-compose`.
 
 ### Windows
 

@@ -14,7 +14,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sse_starlette import EventSourceResponse
 
-from aegra_api.core.active_runs import active_runs
+from aegra_api.core.active_runs import active_runs, executing_runs
 from aegra_api.core.auth_deps import auth_dependency, get_current_user
 from aegra_api.core.auth_handlers import build_auth_context, handle_event
 from aegra_api.core.orm import Run as RunORM
@@ -36,6 +36,7 @@ from aegra_api.services.run_status import (
 )
 from aegra_api.services.run_waiters import TERMINAL_STATES, encode_output, heartbeat_wait_body, run_result_body
 from aegra_api.services.streaming_service import streaming_service
+from aegra_api.services.webhook_delivery import job_for_run
 from aegra_api.settings import settings
 from aegra_api.utils.status_compat import validate_run_status
 
@@ -126,9 +127,9 @@ async def _request_run_interruption(
             return
         run_orm = promoted
 
-    if active_runs.get(run_orm.run_id) is not None:
-        # Dev mode: the task in this process owns the row and writes ``interrupted`` when it has
-        # stopped, which keeps the thread occupied until then. Only ask it to stop here.
+    if run_orm.run_id in executing_runs:
+        # Its graph executes in this process: the task writes ``interrupted`` (and sends the webhook)
+        # once it has stopped, which keeps the thread occupied until then. Only ask it to stop here.
         if action == "interrupt":
             await streaming_service.interrupt_run(run_orm.run_id)
         else:
@@ -141,6 +142,7 @@ async def _request_run_interruption(
         run_orm.run_id,
         run_orm.thread_id,
         user_id=run_orm.user_id,
+        webhook_job=job_for_run(run_orm),
     )
 
     if reconciled:
@@ -745,6 +747,8 @@ async def delete_run(
     was_active = run_orm.status in (*ACTIVE_RUN_STATES, QUEUED_RUN_STATE)
     if force and was_active:
         logger.info(f"[delete_run] force-cancelling active run run_id={run_id}")
+        # The row is deleted only once the run is terminal, so whoever ended it has already sent
+        # its webhook; a worker never finds the row of a run it is still executing gone.
         await _request_run_interruption(session, run_orm, "cancel")
         # Best-effort: wait for the local task to settle, bounded like the row poll below so a task
         # that ignores its cancel cannot hold the request forever.

@@ -53,6 +53,8 @@ dependencies = [
     # Utils
     "structlog>=25.4.0",
     "asgi-correlation-id>=4.3.4",
+    # Run-completion webhook delivery
+    "httpx>=0.27.0",
 
     # Redis (optional broker backend for multi-instance streaming)
     "redis[hiredis]>=5.0.0",

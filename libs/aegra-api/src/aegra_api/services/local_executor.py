@@ -7,10 +7,9 @@ as background coroutines in the same event loop as the API server.
 import asyncio
 import contextlib
 from datetime import UTC, datetime
-from typing import Any, cast
 
 import structlog
-from sqlalchemy import CursorResult, and_, or_, select, update
+from sqlalchemy import and_, or_, select, update
 
 from aegra_api.core.active_runs import active_runs
 from aegra_api.core.orm import Run as RunORM
@@ -21,18 +20,23 @@ from aegra_api.observability.span_enrichment import make_run_trace_context
 from aegra_api.services.base_executor import BaseExecutor
 from aegra_api.services.run_status import (
     ACTIVE_RUN_STATES,
+    ENDED_RUN_COLUMNS,
     QUEUED_RUN_STATE,
     end_preempted_runs,
+    ended_run_from_row,
     finalize_overdue_preemptions,
     get_run_status,
     interrupt_requested_expr,
     queued_threads_stmt,
+    report_ended,
     set_thread_status_if_no_active_runs,
 )
+from aegra_api.services.webhook_delivery import RunOutcome
 
 logger = structlog.getLogger(__name__)
 
 _STRANDED_SWEEP_INTERVAL_SECONDS = 30
+_ORPHANED_ERROR = "Orphaned by server restart"
 _QUEUED_POLL_INTERVAL_SECONDS = 0.5
 
 
@@ -186,25 +190,29 @@ class LocalExecutor(BaseExecutor):
                     orphaned = (RunORM.thread_id == thread_id, *orphan)
                     # A pre-empted orphan ends interrupted, as the worker-mode reaper and drain end it.
                     preempted = await end_preempted_runs(session, *orphaned)
-                    result = cast(
-                        CursorResult[Any],
-                        await session.execute(
+                    errored = [
+                        ended_run_from_row(row)
+                        for row in await session.execute(
                             update(RunORM)
                             .where(*orphaned, interrupt_requested_expr().is_(None))
-                            .values(status="error", error_message="Orphaned by server restart", updated_at=now)
-                        ),
-                    )
-                    if owner is not None and (result.rowcount > 0 or preempted):
+                            .values(status="error", error_message=_ORPHANED_ERROR, updated_at=now)
+                            .returning(*ENDED_RUN_COLUMNS)
+                        )
+                    ]
+                    if owner is not None and (errored or preempted):
                         # The orphans' finalizes never ran: settle the thread as they would, only while it
                         # is still busy from them. Queued-only threads match nothing here, keeping a pause.
                         await set_thread_status_if_no_active_runs(
                             session,
                             [thread_id],
-                            "error" if result.rowcount > 0 else "idle",
+                            "error" if errored else "idle",
                             user_id=owner.user_id,
                             only_if_status="busy",
                         )
                     await session.commit()
+                # That commit ended the orphans; their finalizes, which would have reported them, never ran.
+                report_ended(errored, RunOutcome(status="error", error={"error": "Error", "message": _ORPHANED_ERROR}))
+                report_ended(preempted, RunOutcome(status="interrupted"))
                 await self.dispatch_next_for_thread(thread_id)
             except Exception:
                 # Per-thread isolation, as in the sweep: one bad thread must not abort the others.

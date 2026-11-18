@@ -240,13 +240,18 @@ class TestRecoverOrphanedQueue:
         statements: list[Any], *, preempted: list[tuple[str, str, str]], orphan_rowcount: int
     ) -> Any:
         """session.execute stand-in: the scan lists thread t1, the stamped-orphan UPDATE returns
-        ``preempted``, and the orphan-error UPDATE reports ``orphan_rowcount`` matched rows."""
+        ``preempted``, and the orphan-error UPDATE returns ``orphan_rowcount`` ended rows."""
 
         async def _exec(stmt: object, *a: object, **k: object) -> MagicMock:
             statements.append(stmt)
             result = MagicMock()
-            ends_preempted = "'interrupted'" in str(stmt.compile(compile_kwargs={"literal_binds": True}))  # type: ignore[attr-defined]
-            result.all.return_value = preempted if ends_preempted else [("t1",)]
+            sql = str(stmt.compile(compile_kwargs={"literal_binds": True}))  # type: ignore[attr-defined]
+            ends_preempted = "'interrupted'" in sql
+            # RETURNING of an ended run: run, thread, owner, execution_params, assistant, created_at.
+            ended = [(run_id, thread_id, user_id, None, "asst-1", None) for run_id, thread_id, user_id in preempted]
+            result.all.return_value = ended if ends_preempted else [("t1",)]
+            errored = [(f"orphan-{i}", "t1", "user-1", None, "asst-1", None) for i in range(orphan_rowcount)]
+            result.__iter__.return_value = iter(errored if sql.startswith("UPDATE runs") and "'error'" in sql else [])
             result.rowcount = orphan_rowcount
             return result
 
@@ -302,6 +307,20 @@ class TestRecoverOrphanedQueue:
         thread_updates = self._thread_updates(statements)
         assert len(thread_updates) == 1
         assert thread_updates[0].compile().params["status"] == "idle"
+
+    @pytest.mark.asyncio
+    async def test_recovered_orphans_are_reported(self) -> None:
+        # Their own finalizes never ran, so the recovery that ends them sends their webhooks.
+        with (
+            patch("aegra_api.services.run_status.job_for_webhook", return_value=MagicMock(name="job")),
+            patch("aegra_api.services.run_status.report_run") as mock_report,
+        ):
+            await self._recover(preempted=[("run-pre", "t1", "user-1")], orphan_rowcount=1)
+
+        reported = {(c.kwargs["run_id"], c.args[1].status) for c in mock_report.call_args_list}
+        assert reported == {("orphan-0", "error"), ("run-pre", "interrupted")}
+        error_outcome = next(c.args[1] for c in mock_report.call_args_list if c.kwargs["run_id"] == "orphan-0")
+        assert error_outcome.error == {"error": "Error", "message": "Orphaned by server restart"}
 
     @pytest.mark.asyncio
     async def test_start_records_the_start_time_and_the_recovery_outcome(self) -> None:

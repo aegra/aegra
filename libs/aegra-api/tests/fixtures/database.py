@@ -56,6 +56,16 @@ class DummyScalarResult:
         return self._rows[0] if self._rows else None
 
 
+class _DummySavepoint:
+    """What ``begin_nested()`` returns: a SAVEPOINT that commits or rolls back as a no-op."""
+
+    async def commit(self) -> None:
+        return None
+
+    async def rollback(self) -> None:
+        return None
+
+
 class DummySessionBase:
     """Minimal emulation of SQLAlchemy AsyncSession for testing
 
@@ -76,6 +86,10 @@ class DummySessionBase:
 
     async def commit(self):
         return None
+
+    async def begin_nested(self) -> _DummySavepoint:
+        """interrupt_unowned_run locks and updates inside a SAVEPOINT."""
+        return _DummySavepoint()
 
     async def refresh(self, _obj):
         return None

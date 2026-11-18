@@ -564,7 +564,12 @@ class TestDeleteThread:
 
                 class Result:
                     def all(self) -> list[tuple[str]]:
-                        return [("q1",)] if compiled.startswith("UPDATE runs") else []
+                        # The drop RETURNs a full ended-run row: run, thread, owner, params, assistant, created.
+                        return (
+                            [("q1", "test-thread-123", "test-user", None, "a1", None)]
+                            if compiled.startswith("UPDATE runs")
+                            else []
+                        )
 
                 return Result()
 

@@ -21,15 +21,20 @@ from aegra_api.observability.metrics import REAPER_RECOVERED_RUNS
 from aegra_api.services.executor import executor
 from aegra_api.services.run_status import (
     ACTIVE_RUN_STATES,
+    EndedRun,
     finalize_overdue_preemptions,
     interrupt_requested,
     queued_threads_stmt,
+    report_ended,
     settle_threads_of,
     with_thread_status,
 )
+from aegra_api.services.webhook_delivery import RunOutcome, job_for_webhook
 from aegra_api.settings import settings
 
 logger = structlog.getLogger(__name__)
+
+_MAX_RETRIES_ERROR = "Max retries exceeded after repeated worker failures"
 
 
 class LeaseReaper:
@@ -183,8 +188,8 @@ class LeaseReaper:
         max_retries = settings.worker.BG_JOB_MAX_RETRIES
         retryable: list[str] = []
         exhausted: list[str] = []
-        preempted: list[tuple[str, str, str]] = []
-        exhausted_rows: list[tuple[str, str, str]] = []
+        preempted: list[EndedRun] = []
+        exhausted_rows: list[EndedRun] = []
 
         maker = _get_session_maker()
         async with maker() as session:
@@ -194,6 +199,8 @@ class LeaseReaper:
                     RunORM.thread_id,
                     RunORM.user_id,
                     RunORM.execution_params,
+                    RunORM.assistant_id,
+                    RunORM.created_at,
                 )
                 .where(
                     RunORM.run_id.in_(run_ids),
@@ -203,7 +210,7 @@ class LeaseReaper:
                 .with_for_update(skip_locked=True)
             )
 
-            for run_id, thread_id, user_id, execution_params in locked_result.fetchall():
+            for run_id, thread_id, user_id, execution_params, assistant_id, created_at in locked_result.fetchall():
                 params = dict(execution_params or {})
                 is_preempted = interrupt_requested(params)
                 retry_count = params.get("_retry_count", 0) + (0 if is_preempted else 1)
@@ -223,7 +230,7 @@ class LeaseReaper:
                 elif is_exhausted:
                     values.update(
                         status="error",
-                        error_message="Max retries exceeded after repeated worker failures",
+                        error_message=_MAX_RETRIES_ERROR,
                     )
                 else:
                     values["status"] = "pending"
@@ -242,12 +249,15 @@ class LeaseReaper:
                 if update_result.scalar_one_or_none() is None:
                     continue
 
+                job = job_for_webhook(
+                    params, run_id=run_id, thread_id=thread_id, assistant_id=assistant_id, created_at=created_at
+                )
                 if is_preempted:
-                    preempted.append((run_id, thread_id, user_id))
+                    preempted.append(EndedRun(run_id, thread_id, user_id, job))
                     logger.info("Pre-empted run's worker died; run ends interrupted", run_id=run_id)
                 elif is_exhausted:
                     exhausted.append(run_id)
-                    exhausted_rows.append((run_id, thread_id, user_id))
+                    exhausted_rows.append(EndedRun(run_id, thread_id, user_id, job))
                     logger.error(
                         "Run exceeded max retries, marking as permanently failed",
                         run_id=run_id,
@@ -264,6 +274,11 @@ class LeaseReaper:
                     )
 
             await session.commit()
+        # That commit made the exhausted and pre-empted runs terminal, so their reports come from here.
+        report_ended(
+            exhausted_rows, RunOutcome(status="error", error={"error": "Error", "message": _MAX_RETRIES_ERROR})
+        )
+        report_ended(preempted, RunOutcome(status="interrupted"))
 
         if preempted:
             REAPER_RECOVERED_RUNS.labels(outcome="crashed_preempted").inc(len(preempted))

@@ -176,6 +176,27 @@ class TestApplyMultitaskStrategy:
         assert queued.status == "interrupted"  # the stale double-text is dropped, not run later
 
     @pytest.mark.asyncio
+    async def test_gate_collects_only_the_runs_it_ends_itself(self) -> None:
+        # The parked and the never-started runs end with the gate's commit, so the caller reports them
+        # (their webhooks); the live one is reported by its own finalize once its task has stopped.
+        live = _fake_run(run_id="r1", status="running", live=True)
+        queued = _fake_run(run_id="q1", status="queued")
+        session = _session_with_active([live, queued])
+        ended: list[Any] = []
+
+        await _apply_multitask_strategy(session, "thread-1", "interrupt", _USER, ended=ended)
+
+        assert [run.run_id for run in ended] == ["q1"]
+
+        never_started = _fake_run(run_id="p1", status="pending")
+        ended = []
+        await _apply_multitask_strategy(
+            _session_with_active([never_started]), "thread-1", "interrupt", _USER, ended=ended
+        )
+
+        assert [run.run_id for run in ended] == ["p1"]
+
+    @pytest.mark.asyncio
     async def test_rollback_targets_running_not_queued(self) -> None:
         running = _fake_run(run_id="r1", status="running", live=True)
         queued = _fake_run(run_id="q1", status="queued")
@@ -889,7 +910,9 @@ class TestFinalizeRunGuard:
             patch("aegra_api.services.run_status._get_session_maker", return_value=_make_session_maker(session)),
             patch("aegra_api.services.run_status.dispatch_next_queued_run", new_callable=AsyncMock),
         ):
-            assert await finalize_run("run-1", "thread-1", user_id="u", status="success", thread_status="idle")
+            assert await finalize_run(
+                "run-1", "thread-1", user_id="u", status="success", thread_status="idle", webhook_job=None
+            )
 
         run_update = next(s for s in captured if s.startswith("UPDATE runs"))
         assert "runs.status IN" in run_update
@@ -914,7 +937,9 @@ class TestFinalizeRunGuard:
             patch("aegra_api.services.run_status._get_session_maker", return_value=_make_session_maker(session)),
             patch("aegra_api.services.run_status.dispatch_next_queued_run", new_callable=AsyncMock) as dispatched,
         ):
-            finalized = await finalize_run("run-1", "thread-1", user_id="u", status="success", thread_status="idle")
+            finalized = await finalize_run(
+                "run-1", "thread-1", user_id="u", status="success", thread_status="idle", webhook_job=None
+            )
 
         assert finalized is False
         assert not any(s.startswith("UPDATE thread") for s in executed)  # thread not clobbered (table is singular)
@@ -925,7 +950,8 @@ class TestFinalizeRunGuard:
 
 def _capturing_session(*, rowcount: int = 1, returning: object = "row") -> tuple[AsyncMock, list[str]]:
     """Mock session whose execute() records compiled statements; ``returning`` feeds
-    ``.scalar_one_or_none()`` for the ``UPDATE ... RETURNING`` guards (None = no match)."""
+    ``.scalar_one_or_none()`` for the ``UPDATE ... RETURNING`` guards (None = no match), and
+    ``.first()`` gets a full ended-run row (run_id, thread_id, user_id, params, assistant, created)."""
     captured: list[str] = []
     session = AsyncMock()
 
@@ -934,6 +960,7 @@ def _capturing_session(*, rowcount: int = 1, returning: object = "row") -> tuple
         result = MagicMock()
         result.rowcount = rowcount
         result.scalar_one_or_none.return_value = returning
+        result.first.return_value = None if returning is None else (returning, "thread-1", "u", {}, "asst", None)
         return result
 
     session.execute = _exec
@@ -968,8 +995,18 @@ class TestCancelQueuedRun:
     @pytest.mark.asyncio
     async def test_queued_run_is_dropped_and_queue_dispatched(self) -> None:
         session, captured = _capturing_session(returning="run-1")
-        with patch("aegra_api.services.run_status.dispatch_next_queued_run", new_callable=AsyncMock) as dispatched:
+        order: list[str] = []
+        session.commit = AsyncMock(side_effect=lambda: order.append("commit"))
+        with (
+            patch("aegra_api.services.run_status.dispatch_next_queued_run", new_callable=AsyncMock) as dispatched,
+            patch("aegra_api.services.run_status.job_for_webhook", return_value=MagicMock(name="job")),
+            patch(
+                "aegra_api.services.run_status.report_run",
+                side_effect=lambda job, outcome, *, run_id: order.append(f"report {run_id} {outcome.status}"),
+            ),
+        ):
             assert await cancel_queued_run(session, "run-1", "thread-1", user_id="u") is True
+        assert order == ["commit", "report run-1 interrupted"]  # nothing executes it: the cancel reports it
 
         assert "'queued'" in captured[0]  # guarded flip, only a still-queued run matches
         assert "user_id = 'u'" in captured[0]  # tenant-scoped like every run write
@@ -998,7 +1035,7 @@ class TestInterruptUnownedRunDispatch:
         # the caller knows whether a local task still executes the run (dev never sets claimed_by).
         session, captured = _capturing_session(returning="run-1")
         with patch("aegra_api.services.run_status.dispatch_next_queued_run", new_callable=AsyncMock) as dispatched:
-            assert await interrupt_unowned_run(session, "run-1", "thread-1", user_id="u") is True
+            assert await interrupt_unowned_run(session, "run-1", "thread-1", user_id="u", webhook_job=None) is True
 
         assert captured[0].startswith("SELECT thread") and "FOR UPDATE" in captured[0]
         session.commit.assert_awaited_once()
@@ -1010,7 +1047,7 @@ class TestInterruptUnownedRunDispatch:
         # the thread lock at once: the worker's finalize takes that lock first.
         session, captured = _capturing_session(returning=None)
         with patch("aegra_api.services.run_status.dispatch_next_queued_run", new_callable=AsyncMock) as dispatched:
-            assert await interrupt_unowned_run(session, "run-1", "thread-1", user_id="u") is False
+            assert await interrupt_unowned_run(session, "run-1", "thread-1", user_id="u", webhook_job=None) is False
 
         assert "FOR UPDATE" in captured[0]
         # Released via the savepoint, never session.rollback(): that would expire the caller's
@@ -1163,7 +1200,7 @@ class TestLockStatementPinning:
             patch("aegra_api.services.run_status._get_session_maker", return_value=_make_session_maker(session)),
             patch("aegra_api.services.executor.executor", MagicMock(dispatch_next_for_thread=AsyncMock())),
         ):
-            await finalize_run("r", "t", user_id="u", status="success", thread_status="idle")
+            await finalize_run("r", "t", user_id="u", status="success", thread_status="idle", webhook_job=None)
 
         assert "FOR UPDATE" in captured[0]
         assert captured[0].startswith("SELECT thread")  # thread row locked before the run CAS

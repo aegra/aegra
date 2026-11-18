@@ -8,7 +8,7 @@ dependency where service code imported from the API module.
 
 from collections.abc import Collection, Iterable
 from datetime import UTC, datetime, timedelta
-from typing import Any, cast
+from typing import Any, NamedTuple, cast
 
 import structlog
 from sqlalchemy import TIMESTAMP, ColumnElement, CursorResult, Select, exists, or_, select, update
@@ -19,6 +19,8 @@ from aegra_api.core.orm import Run as RunORM
 from aegra_api.core.orm import Thread as ThreadORM
 from aegra_api.core.orm import _get_session_maker
 from aegra_api.core.serializers import GeneralSerializer
+from aegra_api.models.run_job import RunJob
+from aegra_api.services.webhook_delivery import RunOutcome, job_for_run, job_for_webhook, report_run
 from aegra_api.settings import settings
 from aegra_api.utils.status_compat import validate_run_status, validate_thread_status
 
@@ -52,6 +54,45 @@ def interrupt_requested(execution_params: dict[str, Any] | None) -> bool:
     return bool((execution_params or {}).get(INTERRUPT_REQUESTED_KEY))
 
 
+class EndedRun(NamedTuple):
+    """A run a recovery path or the admission gate just made terminal, with the job its webhook needs."""
+
+    run_id: str
+    thread_id: str
+    user_id: str
+    job: RunJob | None
+
+
+# RETURNING columns for a bulk terminal UPDATE: enough to settle the thread and rebuild the webhook job.
+ENDED_RUN_COLUMNS = (
+    RunORM.run_id,
+    RunORM.thread_id,
+    RunORM.user_id,
+    RunORM.execution_params,
+    RunORM.assistant_id,
+    RunORM.created_at,
+)
+
+
+def ended_run_from_row(row: Any) -> EndedRun:
+    run_id, thread_id, user_id, params, assistant_id, created_at = row
+    job = job_for_webhook(params, run_id=run_id, thread_id=thread_id, assistant_id=assistant_id, created_at=created_at)
+    return EndedRun(run_id, thread_id, user_id, job)
+
+
+def ended_run_of(run: RunORM) -> EndedRun:
+    """An ``EndedRun`` for a row the caller holds, read before its terminal write is committed."""
+    return EndedRun(run.run_id, run.thread_id, run.user_id, job_for_run(run))
+
+
+def report_ended(ended: Iterable[EndedRun], outcome: RunOutcome) -> None:
+    """Report runs whose terminal status the caller has just committed; that guarded update was the
+    only one to win for each run, so this is its only report (a run executing here is sent by its executor)."""
+    for run in ended:
+        if run.job is not None:  # no webhook asked for, nothing to send (as the reaper does on main)
+            report_run(run.job, outcome, run_id=run.run_id)
+
+
 async def settle_threads_of(session: AsyncSession, ended: Iterable[tuple[str, str, str, str]]) -> None:
     """Set the thread of each ended ``(run_id, thread_id, user_id, thread_status)`` row where nothing is
     active any more; one statement per user and status, since the predicate is tenant-scoped. Does not commit."""
@@ -75,21 +116,21 @@ async def settle_threads_of(session: AsyncSession, ended: Iterable[tuple[str, st
         await set_thread_status_if_no_active_runs(session, thread_ids, status, user_id=user_id, only_if_status="busy")
 
 
-def with_thread_status(rows: Iterable[tuple[str, str, str]], status: str) -> list[tuple[str, str, str, str]]:
-    """``end_preempted_runs`` rows tagged with the thread status ``settle_threads_of`` should apply."""
-    return [(run_id, thread_id, user_id, status) for run_id, thread_id, user_id in rows]
+def with_thread_status(rows: Iterable[EndedRun], status: str) -> list[tuple[str, str, str, str]]:
+    """Ended runs tagged with the thread status ``settle_threads_of`` should apply."""
+    return [(row.run_id, row.thread_id, row.user_id, status) for row in rows]
 
 
-async def end_preempted_runs(session: AsyncSession, *where: ColumnElement[bool]) -> list[tuple[str, str, str]]:
+async def end_preempted_runs(session: AsyncSession, *where: ColumnElement[bool]) -> list[EndedRun]:
     """End the pre-empted (stamped) runs matching ``where`` as ``interrupted`` with their lease cleared.
-    Returns their ``(run_id, thread_id, user_id)``; the caller commits, then settles the threads."""
+    The caller commits, then reports them (``report_ended``) and settles their threads."""
     result = await session.execute(
         update(RunORM)
         .where(interrupt_requested_expr().isnot(None), *where)
         .values(status="interrupted", claimed_by=None, lease_expires_at=None, updated_at=datetime.now(UTC))
-        .returning(RunORM.run_id, RunORM.thread_id, RunORM.user_id)
+        .returning(*ENDED_RUN_COLUMNS)
     )
-    return [(run_id, thread_id, user_id) for run_id, thread_id, user_id in result.all()]
+    return [ended_run_from_row(row) for row in result.all()]
 
 
 async def finalize_overdue_preemptions(session: AsyncSession) -> list[tuple[str, str]]:
@@ -105,10 +146,11 @@ async def finalize_overdue_preemptions(session: AsyncSession) -> list[tuple[str,
         return []
     # Run rows first, thread rows in a second transaction: the gate and finalize lock thread-then-run.
     await session.commit()
+    report_ended(rows, RunOutcome(status="interrupted"))
     await settle_threads_of(session, with_thread_status(rows, "idle"))
     await session.commit()
-    logger.warning("Pre-empted runs ignored cancellation past the timeout", run_ids=[row[0] for row in rows])
-    return [(run_id, thread_id) for run_id, thread_id, _user_id in rows]
+    logger.warning("Pre-empted runs ignored cancellation past the timeout", run_ids=[row.run_id for row in rows])
+    return [(row.run_id, row.thread_id) for row in rows]
 
 
 def queued_threads_stmt() -> Select[tuple[str]]:
@@ -224,8 +266,9 @@ async def interrupt_unowned_run(
     thread_id: str,
     *,
     user_id: str,
+    webhook_job: RunJob | None,
 ) -> bool:
-    """Interrupt an active run only when it has no live database owner.
+    """Interrupt an active run only when it has no live database owner, and report it.
 
     The ownership predicate is checked in the UPDATE so a worker that renews
     or claims the run concurrently cannot be overwritten by the API process.
@@ -268,6 +311,7 @@ async def interrupt_unowned_run(
 
     await set_thread_status_if_no_active_runs(session, [thread_id], "idle", user_id=user_id)
     await session.commit()
+    report_run(webhook_job, RunOutcome(status="interrupted"), run_id=run_id)
     logger.info("Interrupted unowned run", run_id=run_id, thread_id=thread_id)
     return True
 
@@ -290,11 +334,13 @@ async def cancel_queued_run(
             RunORM.status == QUEUED_RUN_STATE,
         )
         .values(status="interrupted", updated_at=datetime.now(UTC))
-        .returning(RunORM.run_id)
+        .returning(*ENDED_RUN_COLUMNS)
     )
-    if result.scalar_one_or_none() is None:
+    row = result.first()
+    if row is None:
         return False
     await session.commit()
+    report_ended([ended_run_from_row(row)], RunOutcome(status="interrupted"))
     logger.info("Cancelled queued run", run_id=run_id, thread_id=thread_id)
     await dispatch_next_queued_run(thread_id)
     return True
@@ -318,13 +364,14 @@ async def drop_queued_runs(session: AsyncSession, thread_id: str, *, user_id: st
             RunORM.status == QUEUED_RUN_STATE,
         )
         .values(status="interrupted", updated_at=datetime.now(UTC))
-        .returning(RunORM.run_id)
+        .returning(*ENDED_RUN_COLUMNS)
     )
-    dropped = [row[0] for row in result.all()]
+    dropped = [ended_run_from_row(row) for row in result.all()]
     if dropped:
         await session.commit()
-        logger.info("Dropped queued runs", thread_id=thread_id, run_ids=dropped)
-    return dropped
+        report_ended(dropped, RunOutcome(status="interrupted"))
+        logger.info("Dropped queued runs", thread_id=thread_id, run_ids=[run.run_id for run in dropped])
+    return [run.run_id for run in dropped]
 
 
 async def finalize_run(
@@ -334,13 +381,16 @@ async def finalize_run(
     user_id: str,
     status: str,
     thread_status: str,
+    webhook_job: RunJob | None,
     output: Any = None,
     error: str | None = None,
+    error_type: str = "Error",
 ) -> bool:
-    """Conditionally update run and thread status in one transaction.
+    """Conditionally update run and thread status in one transaction, then report the run.
 
     Returns false when another actor has already made the run terminal (a reconciled
-    cancellation or a multitask pre-emption). Dispatches the next queued run either way.
+    cancellation or a multitask pre-emption) and leaves the run's webhook to that actor, so
+    every run is reported once. Dispatches the next queued run either way.
     """
     validated_run = validate_run_status(status)
     validated_thread = validate_thread_status(thread_status)
@@ -380,6 +430,8 @@ async def finalize_run(
             )
             await session.commit()
             finalized = True
+            webhook_error = {"error": error_type, "message": error} if error is not None else None
+            report_run(webhook_job, RunOutcome(status=validated_run, error=webhook_error), run_id=run_id)
 
     if finalized:
         logger.info("Finalized run", run_id=run_id, status=validated_run, thread_status=validated_thread)
@@ -397,6 +449,22 @@ async def dispatch_next_queued_run(thread_id: str) -> None:
         await executor.dispatch_next_for_thread(thread_id)
     except Exception:  # intentionally broad — ANY failure here must not clobber the committed status
         logger.exception("Failed to dispatch next queued run", thread_id=thread_id)
+
+
+async def interrupt_run_before_delete(run: RunORM) -> None:
+    """Commit the cancel of an active run whose row is about to be deleted, so it is still reported.
+
+    A worker in another process would find the row gone and could neither finalize nor report the run.
+    """
+    await finalize_run(
+        run.run_id,
+        run.thread_id,
+        user_id=run.user_id,
+        status="interrupted",
+        thread_status="idle",
+        output={},
+        webhook_job=job_for_run(run),
+    )
 
 
 def _safe_serialize(output: Any, run_id: str) -> Any:

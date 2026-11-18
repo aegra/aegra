@@ -483,13 +483,14 @@ class TestCancelDispatchDecision:
         mock_dispatch.assert_awaited_once_with("test-thread-123")
 
     def test_local_task_defers_dispatch_to_its_exit(self, mock_dispatch: AsyncMock) -> None:
-        # Dev mode: the task is right here and still running. The row is left to it (its exit
-        # writes interrupted and promotes the queue); this request only asks it to stop.
+        # Dev mode: the graph is executing right here. The row is left to its task (its exit
+        # writes interrupted, reports the run and promotes the queue); this request only asks it to stop.
         client = self._client_with(_run_row(status="running"))
         with (
             patch("aegra_api.api.runs.streaming_service") as mock_streaming,
             patch("aegra_api.api.runs.interrupt_unowned_run", new_callable=AsyncMock) as reconcile,
             patch("aegra_api.api.runs.active_runs", {"test-run-123": MagicMock()}),
+            patch("aegra_api.api.runs.executing_runs", {"test-run-123"}),
         ):
             mock_streaming.cancel_run = AsyncMock()
             mock_streaming.signal_run_cancelled = AsyncMock()
@@ -497,6 +498,22 @@ class TestCancelDispatchDecision:
         mock_streaming.cancel_run.assert_awaited_once_with("test-run-123")
         reconcile.assert_not_awaited()
         mock_dispatch.assert_not_awaited()
+
+    def test_task_not_yet_executing_is_reconciled_and_dispatched(self, mock_dispatch: AsyncMock) -> None:
+        # Listed in active_runs but not executing yet (a worker lists it before taking the lease, a dev
+        # task has not started): nothing writes for it, and its start CAS fails once this commits.
+        client = self._client_with(_run_row(status="pending"))
+        with (
+            patch("aegra_api.api.runs.streaming_service") as mock_streaming,
+            patch("aegra_api.api.runs.interrupt_unowned_run", new_callable=AsyncMock, return_value=True) as reconcile,
+            patch("aegra_api.api.runs.active_runs", {"test-run-123": MagicMock()}),
+            patch("aegra_api.api.runs.executing_runs", set()),
+        ):
+            mock_streaming.cancel_run = AsyncMock()
+            mock_streaming.signal_run_cancelled = AsyncMock()
+            assert client.post("/threads/test-thread-123/runs/test-run-123/cancel").status_code == 200
+        reconcile.assert_awaited_once()
+        mock_dispatch.assert_awaited_once_with("test-thread-123")
 
     def test_claimed_run_defers_dispatch_to_the_worker(self, mock_dispatch: AsyncMock) -> None:
         # Lease lapsed but the row was claimed: the worker may be slow rather than dead. Its

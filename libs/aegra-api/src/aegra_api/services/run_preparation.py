@@ -33,11 +33,16 @@ from aegra_api.services.langgraph_service import get_langgraph_service
 from aegra_api.services.run_status import (
     ACTIVE_RUN_STATES,
     QUEUED_RUN_STATE,
+    EndedRun,
+    ended_run_of,
     has_live_executor,
     mark_interrupt_requested,
+    report_ended,
     set_thread_status,
 )
 from aegra_api.services.streaming_service import streaming_service
+from aegra_api.services.webhook_delivery import RunOutcome
+from aegra_api.services.webhook_policy import ensure_webhook_allowed
 from aegra_api.settings import settings
 from aegra_api.utils.assistants import resolve_assistant_id
 from aegra_api.utils.jsonb import jsonb_patch, jsonb_shallow_merge
@@ -296,9 +301,11 @@ async def _apply_multitask_strategy(
     *,
     is_resume: bool = False,
     may_run_on_pause: bool = False,
+    ended: list[EndedRun] | None = None,
 ) -> tuple[bool, list[str], str | None]:
     """Resolve a new run against the thread's in-flight runs under thread-then-run ``FOR UPDATE``
-    locks (matching finalize_run); returns ``(should_run, cancel_ids, rollback_target_run_id)``."""
+    locks (matching finalize_run); returns ``(should_run, cancel_ids, rollback_target_run_id)``.
+    Runs it makes terminal itself are appended to ``ended`` for the caller to report after commit."""
     await session.execute(
         select(ThreadORM.thread_id)
         .where(ThreadORM.thread_id == thread_id, ThreadORM.user_id == user.identity)
@@ -357,6 +364,8 @@ async def _apply_multitask_strategy(
             # the queue so it does not execute after the new run (stale double-text).
             run.status = "interrupted"
             run.updated_at = now
+            if ended is not None:
+                ended.append(ended_run_of(run))
             continue
         if _is_resume_run(run):
             # Cancelling an in-flight resume and running fresh input would land the new
@@ -381,6 +390,8 @@ async def _apply_multitask_strategy(
         run.claimed_by = None
         run.lease_expires_at = None
         run.updated_at = now
+        if ended is not None:
+            ended.append(ended_run_of(run))
     return not wait_for_running, cancel_ids, rollback_target
 
 
@@ -425,13 +436,18 @@ async def _prepare_run(
     *,
     initial_status: str,
     event_streaming_v2: bool = False,
+    validate_webhook: bool = True,
 ) -> tuple[str, Run, RunJob]:
     """Shared run-creation logic used by create, stream, and wait endpoints.
 
     Validates inputs, resolves the assistant, persists the RunORM record,
     builds a RunJob, submits it to the executor, and returns the triple
-    ``(run_id, run_model, job)``.
+    ``(run_id, run_model, job)``. Cron fires pass ``validate_webhook=False``:
+    their webhook passed at cron create/update and is re-checked before each call,
+    so a later policy change skips the call instead of blocking the run.
     """
+    if validate_webhook:
+        await ensure_webhook_allowed(request.webhook)
     await _validate_resume_command(session, thread_id, request.command, user)
 
     run_id = str(uuid4())
@@ -483,6 +499,7 @@ async def _prepare_run(
     # interrupt/rollback the active run. None defaults to enqueue.
     strategy = request.multitask_strategy or MULTITASK_DEFAULT
     is_resume = request.command is not None and "resume" in request.command
+    ended_by_gate: list[EndedRun] = []
     should_run, cancel_ids, rollback_target = await _apply_multitask_strategy(
         session,
         thread_id,
@@ -490,6 +507,7 @@ async def _prepare_run(
         user,
         is_resume=is_resume,
         may_run_on_pause=_command_may_run_on_pause(request.command),
+        ended=ended_by_gate,
     )
     run_status = initial_status if should_run else "queued"
     if should_run:
@@ -511,8 +529,15 @@ async def _prepare_run(
     )
 
     # Build the RunJob before persisting so we can store execution_params
+    now = datetime.now(UTC)
     job = RunJob(
-        identity=RunIdentity(run_id=run_id, thread_id=thread_id, graph_id=assistant.graph_id),
+        identity=RunIdentity(
+            run_id=run_id,
+            thread_id=thread_id,
+            graph_id=assistant.graph_id,
+            assistant_id=resolved_assistant_id,
+            created_at=now,
+        ),
         user=user,
         execution=RunExecution(
             input_data=request.input,  # preserve None so LangGraph resumes from checkpoint
@@ -530,6 +555,7 @@ async def _prepare_run(
             interrupt_after=request.interrupt_after,
             multitask_strategy=request.multitask_strategy,
             subgraphs=request.stream_subgraphs or False,
+            webhook=request.webhook or None,
         ),
         run_metadata=request.metadata or {},
     )
@@ -545,7 +571,6 @@ async def _prepare_run(
         "graph_id": assistant.graph_id,
     }
 
-    now = datetime.now(UTC)
     run_orm = RunORM(
         run_id=run_id,
         thread_id=thread_id,
@@ -563,6 +588,8 @@ async def _prepare_run(
     )
     session.add(run_orm)
     await session.commit()
+    # This commit ended the runs the gate interrupted itself (parked, never started, executor gone).
+    report_ended(ended_by_gate, RunOutcome(status="interrupted"))
 
     run = Run.model_validate(run_orm)
 

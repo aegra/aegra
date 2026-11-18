@@ -297,6 +297,25 @@ class TestFireCron:
             mock_session.commit.assert_awaited_once()
 
     @pytest.mark.asyncio
+    async def test_skipped_occurrence_rolls_back_pre_gate_writes(self) -> None:
+        # _prepare_run updates the thread before the admission gate refuses the run; the
+        # advance commit must not carry those writes along.
+        scheduler = CronScheduler()
+        cron = _make_cron_orm(payload={"input": {"msg": "hi"}}, end_time=None)
+        cron.end_time = None
+        mock_session = AsyncMock()
+
+        with patch(
+            "aegra_api.services.cron_scheduler._prepare_run",
+            new_callable=AsyncMock,
+            side_effect=HTTPException(status_code=409, detail="busy"),
+        ):
+            await scheduler._fire_cron(mock_session, cron)
+
+        mock_session.rollback.assert_awaited_once()
+        mock_session.execute.assert_awaited_once()  # the occurrence is still advanced, not retried
+        mock_session.commit.assert_awaited_once()
+
     async def test_fires_without_revalidating_the_webhook(self) -> None:
         # Validated at cron create/update; a later policy change skips the call at delivery instead.
         cron = _make_cron_orm(payload={"input": {"msg": "hi"}, "webhook": "https://hooks.example.com/cron"})
@@ -627,3 +646,22 @@ class TestSchedulerLoop:
             await scheduler._loop()
 
         assert call_count == 2
+
+
+class TestBuildRunCreateMultitask:
+    """_build_run_create must neutralize legacy/invalid stored strategies."""
+
+    def test_coerces_invalid_multitask_strategy_to_none(self) -> None:
+        cron = _make_cron_orm(payload={"input": {"m": "x"}, "multitask_strategy": "legacy_bad"})
+        rc = _build_run_create(cron)
+        assert rc.multitask_strategy is None
+
+    def test_keeps_valid_multitask_strategy(self) -> None:
+        cron = _make_cron_orm(payload={"input": {"m": "x"}, "multitask_strategy": "reject"})
+        rc = _build_run_create(cron)
+        assert rc.multitask_strategy == "reject"
+
+    def test_none_when_strategy_absent(self) -> None:
+        cron = _make_cron_orm(payload={"input": {"m": "x"}})
+        rc = _build_run_create(cron)
+        assert rc.multitask_strategy is None

@@ -55,9 +55,10 @@ def run_result_body(run_orm: RunORM | None, run_id: str, *, timed_out: bool = Fa
     # Non-terminal: the run is still going and the wait stopped first.
     if timed_out:
         return error_envelope("TimeoutError", f"Run '{run_id}' did not finish within the wait timeout")
+    wire_status = "pending" if run_orm.status == "queued" else run_orm.status  # queued is internal
     return error_envelope(
         "IncompleteRun",
-        f"Wait ended before run '{run_id}' completed (status: {run_orm.status})",
+        f"Wait ended before run '{run_id}' completed (status: {wire_status})",
     )
 
 

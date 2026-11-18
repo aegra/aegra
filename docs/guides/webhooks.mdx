@@ -42,12 +42,12 @@ Each run schedules one webhook delivery, after its final status is saved:
 | `status` | When |
 |:--|:--|
 | `success` | The graph finished. |
-| `interrupted` | The graph paused for human input, or the run was cancelled while running. |
-| `error` | The graph raised, the run hit `BG_JOB_TIMEOUT_SECS`, or workers kept crashing until `BG_JOB_MAX_RETRIES` ran out. |
+| `interrupted` | The graph paused for human input, the run was cancelled, or a later `interrupt`/`rollback` run pre-empted it or dropped it from the thread's queue (see [Double-texting](/guides/double-texting)). |
+| `error` | The graph raised, the run hit `BG_JOB_TIMEOUT_SECS`, workers kept crashing until `BG_JOB_MAX_RETRIES` ran out, or (dev mode) the server restarted while it was executing. |
 
-Whoever saves the final status schedules the delivery, so two processes never both report the same run. Delivery itself is [best effort](#delivery): it can be dropped, and a retry after a timeout can reach a receiver that already handled the first attempt, so deduplicate by `run_id`. A run that a worker hands back (lease loss, shutdown drain) fires when it finishes on the worker that completes it. A run cancelled while it executes reports the state it reached and its `run_started_at`. A run cancelled before it started, or whose worker stopped renewing its lease, fires `interrupted` from the cancel request with `values` and `run_started_at` set to `null`.
+Whoever saves the final status schedules the delivery, so two processes never both report the same run. Delivery itself is [best effort](#delivery): it can be dropped, and a retry after a timeout can reach a receiver that already handled the first attempt, so deduplicate by `run_id`. A run that a worker hands back (lease loss, shutdown drain) fires when it finishes on the worker that completes it; one a double-text had pre-empted is not handed back but ended `interrupted` by the reaper or the drain, which fire its webhook. A run cancelled while it executes reports the state it reached and its `run_started_at`. A run cancelled before it started, or whose worker stopped renewing its lease, fires `interrupted` from the cancel request with `values` and `run_started_at` set to `null`.
 
-Deleting a thread, or a run with `force=1`, cancels its active runs first, so each of them fires `interrupted` before its row is removed. When the run executes in another server process, that webhook comes from the delete request with `values` and `run_started_at` set to `null`.
+Deleting a thread cancels its active runs first, so each of them fires `interrupted` before its row is removed. When the run executes in another server process, that webhook comes from the delete request with `values` and `run_started_at` set to `null`. Deleting a run with `force=1` removes the row only once the run has stopped, so its webhook comes from whoever ended it, as for a cancel; a run still executing after the wait answers `409` and is not deleted.
 
 <Note>
 Deleting an assistant removes its runs without cancelling them, so an assistant's runs that are still active when it is deleted send no webhook. Cancel them first if you need their results.

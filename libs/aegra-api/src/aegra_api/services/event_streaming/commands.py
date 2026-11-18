@@ -9,6 +9,7 @@ identical; only the transport differs.
 
 from __future__ import annotations
 
+import asyncio
 import re
 from typing import Any
 from uuid import UUID
@@ -21,10 +22,16 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from aegra_api.core.orm import Run as RunORM
 from aegra_api.core.orm import Thread as ThreadORM
+from aegra_api.core.orm import _get_session_maker
 from aegra_api.models import User
+from aegra_api.models.enums import MULTITASK_STRATEGIES
 from aegra_api.models.runs import RunCreate
 from aegra_api.services.event_streaming.protocol import ErrorCode, build_error, build_success
-from aegra_api.services.run_preparation import _prepare_run
+from aegra_api.services.run_preparation import (
+    _RESUME_SETTLE_ATTEMPTS,
+    _RESUME_SETTLE_INTERVAL_SECONDS,
+    _prepare_run,
+)
 
 logger = structlog.getLogger(__name__)
 
@@ -83,8 +90,6 @@ async def handle_command(
 
     return build_error(command_id, "unknown_command", f"Unknown command {method!r}."), None
 
-
-_MULTITASK_STRATEGIES = frozenset({"reject", "rollback", "interrupt", "enqueue"})
 
 # Protocol keys plus Aegra extensions per handler. Unknown keys are logged, never
 # silently dropped (#452); test_spec_params.py pins these against the spec.
@@ -165,7 +170,7 @@ async def _run_start(
         return build_error(command_id, "invalid_argument", "run.start requires a string assistant_id."), None
 
     multitask = params.get("multitaskStrategy", params.get("multitask_strategy"))
-    if multitask is not None and multitask not in _MULTITASK_STRATEGIES:
+    if multitask is not None and multitask not in MULTITASK_STRATEGIES:
         return build_error(command_id, "invalid_argument", f"Unknown multitaskStrategy {multitask!r}."), None
 
     context, error_message = _context_from_params(params)
@@ -181,7 +186,7 @@ async def _run_start(
     # would discard the pending tasks.
     input_data = params.get("input")
     command: dict[str, Any] | None = None
-    if input_data is not None and await _thread_is_interrupted(session, thread_id, user):
+    if input_data is not None and await _thread_interrupted_with_settle(session, thread_id, user):
         command = {"resume": input_data}
         input_data = None
 
@@ -212,6 +217,37 @@ async def _thread_is_interrupted(session: AsyncSession, thread_id: str, user: Us
         select(ThreadORM.status).where(ThreadORM.thread_id == thread_id, ThreadORM.user_id == user.identity)
     )
     return status == "interrupted"
+
+
+async def _thread_interrupted_with_settle(session: AsyncSession, thread_id: str, user: User) -> bool:
+    """Interrupt check that waits for an in-flight run to settle: the interrupt event reaches the
+    client before finalize_run commits, so an instant resume would otherwise classify as fresh input."""
+    if await _thread_is_interrupted(session, thread_id, user):
+        return True
+    in_flight = await session.scalar(
+        select(RunORM.run_id)
+        .where(
+            RunORM.thread_id == thread_id,
+            RunORM.user_id == user.identity,
+            RunORM.status.in_(("running", "pending")),
+        )
+        .limit(1)
+    )
+    if in_flight is None:
+        return False
+    maker = _get_session_maker()
+    thread_stmt = select(ThreadORM.status).where(ThreadORM.thread_id == thread_id, ThreadORM.user_id == user.identity)
+    for _ in range(_RESUME_SETTLE_ATTEMPTS):
+        await asyncio.sleep(_RESUME_SETTLE_INTERVAL_SECONDS)
+        async with maker() as fresh:
+            status = await fresh.scalar(thread_stmt)
+        if status == "interrupted":
+            return True
+        if status != "busy":
+            # Settled to idle/error: the in-flight run finished without pausing,
+            # so this input is a genuine fresh turn.
+            return False
+    return False
 
 
 # langgraph interrupt ids are xxh3-128 hexdigests; a resume map is only

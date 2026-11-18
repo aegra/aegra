@@ -90,6 +90,55 @@ pytest -v
 pytest --cov=src/agent_server --cov-report=html
 ```
 
+## Reproducing pre-emption overlap
+
+These regression tests intentionally fail until cancellation-in-progress retains
+thread occupancy. Run the commands below from the repository root with the
+existing `.venv` and the standard local `.env` configuration.
+
+The service tests use a live asyncio task held in cancellation cleanup and mocked
+database queries. They cover third-request admission and queue promotion for both
+`interrupt` and `rollback`; all four new cases should fail on the affected code.
+
+```bash
+DEBUG=false .venv/bin/pytest -q \
+  libs/aegra-api/tests/unit/test_services/test_multitask_strategy.py \
+  -k TestPreemptionWhileCancellationInProgress
+```
+
+The E2E tests use real HTTP requests, Postgres, and the existing LLM-free
+`stress_test` graph. The tests opt into its `_cancellation_probe` input option to
+write node entry/exit markers to the persistent store and hold A's cancellation until
+the test releases it, including when the worker heartbeat cancels it again.
+A successor records whether A had exited when it entered
+its node, so assertions do not rely on the prematurely terminal run status.
+The fixture releases A and removes its test thread and store records on failure.
+
+For dev mode (two third-request failures):
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d --wait
+DEBUG=false SERVER_URL=http://localhost:2026 .venv/bin/pytest -q -s \
+  libs/aegra-api/tests/e2e/test_runs/test_preemption_serialization_e2e.py \
+  -m "not prod_only"
+docker compose -f docker-compose.yml -f docker-compose.dev.yml down
+```
+
+For worker mode (four failures: third-request admission and reaper promotion):
+
+```bash
+docker compose up -d --wait
+DEBUG=false SERVER_URL=http://localhost:2026 .venv/bin/pytest -q -s \
+  libs/aegra-api/tests/e2e/test_runs/test_preemption_serialization_e2e.py
+docker compose down
+```
+
+Worker mode needs at least two execution slots and `REAPER_INTERVAL_SECONDS <= 15`
+(the defaults satisfy both). No model API keys are used by the probe. The failure
+should say `Run B/C entered its graph before cancelled run A exited`, with
+`predecessor_exited: false` in the captured lifecycle record. Connection errors,
+missing graphs, or marker timeouts indicate a setup or fixture problem instead.
+
 ## Test Markers
 
 Tests can be marked with pytest markers for categorization:

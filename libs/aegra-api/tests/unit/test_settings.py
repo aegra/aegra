@@ -10,7 +10,9 @@ from aegra_api.settings import (
     AppSettings,
     CronSettings,
     DatabaseSettings,
+    MultitaskSettings,
     RedisSettings,
+    Settings,
     ThreadTTLSettings,
     WorkerSettings,
 )
@@ -712,3 +714,20 @@ class TestMaxSearchLimit:
         monkeypatch.setenv("MAX_SEARCH_LIMIT", "-1")
         with pytest.raises(ValidationError):
             AppSettings(_env_file=None)
+
+
+class TestMultitaskPreemptTimeout:
+    def test_must_be_positive(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("MULTITASK_PREEMPT_TIMEOUT_SECONDS", "0")
+        with pytest.raises(ValidationError):
+            MultitaskSettings()
+
+    def test_must_exceed_the_heartbeat_interval(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # Otherwise the reaper can cut a pre-empted run loose before its worker's heartbeat ever
+        # delivers the fallback cancel, and the replacement overlaps it even when nothing was lost.
+        monkeypatch.setenv("HEARTBEAT_INTERVAL_SECONDS", "10")
+        monkeypatch.setenv("MULTITASK_PREEMPT_TIMEOUT_SECONDS", "10")
+        with pytest.raises(ValueError, match="MULTITASK_PREEMPT_TIMEOUT_SECONDS"):
+            Settings()
+        monkeypatch.setenv("MULTITASK_PREEMPT_TIMEOUT_SECONDS", "11")
+        assert Settings().multitask.MULTITASK_PREEMPT_TIMEOUT_SECONDS == 11

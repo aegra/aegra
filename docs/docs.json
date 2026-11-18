@@ -52,6 +52,7 @@
               "guides/streaming",
               "guides/human-in-the-loop",
               "guides/cron",
+              "guides/double-texting",
               "guides/webhooks"
             ]
           },

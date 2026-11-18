@@ -187,15 +187,18 @@ class TestCancelledRunWebhook:
 
         override_session_dependency(app, Session)
         client = make_client(app)
+        executing = {"test-run-123"} if executing_here else set()
 
         with (
             patch("aegra_api.api.runs.streaming_service") as mock_streaming,
+            patch("aegra_api.api.runs.dispatch_next_queued_run", new_callable=AsyncMock),
             patch("aegra_api.services.webhook_delivery.notify_run_finished") as mock_notify,
             patch.dict(
                 "aegra_api.api.runs.active_runs",
                 {"test-run-123": MagicMock()} if executing_here or listed_in_active_runs else {},
             ),
-            patch("aegra_api.services.webhook_delivery.executing_runs", {"test-run-123"} if executing_here else set()),
+            patch("aegra_api.services.webhook_delivery.executing_runs", executing),
+            patch("aegra_api.api.runs.executing_runs", executing),
             patch("aegra_api.services.webhook_delivery._reports_for_executor", kept if kept is not None else {}),
         ):
             mock_streaming.cancel_run = AsyncMock()
@@ -204,6 +207,7 @@ class TestCancelledRunWebhook:
             resp = client.post("/threads/test-thread-123/runs/test-run-123/cancel")
 
         assert resp.status_code == 200
+        mock_notify.cancel_requested = mock_streaming.cancel_run.await_count
         return mock_notify
 
     def test_cancel_that_reconciles_the_run_reports_interrupted(self) -> None:
@@ -224,13 +228,16 @@ class TestCancelledRunWebhook:
         assert self._cancel(reconciled=True, webhook=None).call_count == 0
 
     def test_cancel_of_a_run_executing_in_this_process_hands_the_report_to_its_executor(self) -> None:
-        # The executor has the streamed values and start time; the endpoint would report neither.
+        # The executor has the streamed values and start time, and it writes ``interrupted`` itself once
+        # its task has stopped (a parked successor must not start while it still runs): the endpoint only
+        # asks it to stop, and commits and reports nothing.
         kept: dict[str, RunOutcome] = {}
 
         mock_notify = self._cancel(reconciled=True, executing_here=True, kept=kept)
 
         mock_notify.assert_not_called()
-        assert kept["test-run-123"].status == "interrupted"
+        assert kept == {}
+        assert mock_notify.cancel_requested == 1
 
     def test_cancel_before_the_worker_enters_execution_is_reported_by_the_endpoint(self) -> None:
         # A worker lists the run in active_runs before taking its lease; after this cancel it never executes it.
@@ -314,25 +321,29 @@ class TestDeletedRunWebhook:
             async def execute(self, _stmt: Any) -> None:
                 events.append("delete run")
 
+        async def _interrupt(_session: Any, run_orm: Any, action: str) -> None:
+            # Stands in for the committed cancel (which reports the run): the row reads terminal after it.
+            events.append(f"{action} {run_orm.run_id}")
+            run_orm.status = "interrupted"
+
         override_session_dependency(app, Session)
         client = make_client(app)
-        mock_interrupt, mock_cancel = TestDeletedRunWebhook._recorders(events)
+        mock_interrupt = AsyncMock(side_effect=_interrupt)
 
-        with (
-            patch("aegra_api.api.runs.interrupt_run_before_delete", mock_interrupt),
-            patch("aegra_api.api.runs.streaming_service.cancel_run", mock_cancel),
-        ):
+        with patch("aegra_api.api.runs._request_run_interruption", mock_interrupt):
             resp = client.delete("/threads/test-thread-123/runs/test-run-123?force=1")
         return resp.status_code, mock_interrupt, run
 
     def test_forced_delete_of_an_active_run_commits_its_cancel_before_deleting(self) -> None:
+        # The row is deleted only once the run is terminal, so whoever ended it has reported it and a
+        # worker never finds the row of a run it is still executing gone.
         events: list[str] = []
 
         status_code, mock_interrupt, run = self._delete_run("running", events)
 
         assert status_code == 204
-        mock_interrupt.assert_awaited_once_with(run)
-        assert events == ["interrupt test-run-123", "cancel test-run-123", "delete run"]
+        assert mock_interrupt.await_args.args[1] is run
+        assert events == ["cancel test-run-123", "delete run"]
 
     def test_deleting_a_finished_run_reports_nothing(self) -> None:
         events: list[str] = []

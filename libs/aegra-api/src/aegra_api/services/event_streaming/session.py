@@ -100,6 +100,10 @@ class ThreadEventSession:
         while True:
             progressed = False
             for run_id, run_status, graph_name in await self._fresh_runs():
+                if run_status == "queued":
+                    # A parked double-text publishes no broker events, so draining it would wedge;
+                    # defer it until it is promoted or dropped.
+                    continue
                 async for envelope in self._drain_run(run_id, run_status, graph_name):
                     progressed = True
                     yield envelope

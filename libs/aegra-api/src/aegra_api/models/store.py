@@ -4,7 +4,7 @@ from typing import Any
 
 from pydantic import BaseModel, Field, field_validator
 
-from aegra_api.config import MAX_STORE_TTL_MINUTES
+from aegra_api.config import MAX_STORE_TTL_MINUTES, require_whole_minutes
 from aegra_api.models.search_limit import (
     resolve_search_limit,
     search_limit_json_schema_extra,
@@ -26,6 +26,12 @@ class StorePutRequest(BaseModel):
             "and the item never expires when that is unset too. Requires `store.ttl` in aegra.json."
         ),
     )
+
+    @field_validator("ttl")
+    @classmethod
+    def validate_ttl_is_whole_minutes(cls, v: float | None) -> float | None:
+        """Fractional minutes would be rounded down to 0 by the store when a read refreshes the item."""
+        return require_whole_minutes(v)
 
     @field_validator("value", mode="before")
     @classmethod

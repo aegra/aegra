@@ -199,6 +199,7 @@ def test_parse_store_ttl_config_passes_values_through():
         {"default_ttl": "60"},
         {"default_ttl": True},
         {"default_ttl": 10**12},
+        {"default_ttl": 0.5},
         {"sweep_interval_minutes": 0},
         {"refresh_on_read": "yes"},
         {"default_ttls": 60},

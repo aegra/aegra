@@ -6,7 +6,7 @@ from typing import TypedDict
 
 import structlog
 from langgraph.store.base import TTLConfig
-from pydantic import BaseModel, ConfigDict, Field, StrictBool, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, StrictBool, ValidationError, field_validator
 
 from aegra_api.settings import settings
 
@@ -14,6 +14,14 @@ logger = structlog.get_logger(__name__)
 
 # Same ceiling as thread TTLs: keeps `now() + interval` far from overflow.
 MAX_STORE_TTL_MINUTES = 1_000_000_000
+
+
+def require_whole_minutes(value: float | None) -> float | None:
+    """Reject fractional item TTLs: the store persists ``ttl_minutes`` as an INT, so a read refresh would round
+    a value like 0.1 down to 0 and expire the item immediately."""
+    if value is not None and not float(value).is_integer():
+        raise ValueError("TTL must be a whole number of minutes")
+    return value
 
 
 class CorsConfig(TypedDict, total=False):
@@ -252,6 +260,11 @@ class _StoreTTLSettings(BaseModel):
     refresh_on_read: StrictBool = True
     default_ttl: float | None = Field(None, gt=0, le=MAX_STORE_TTL_MINUTES, strict=True)
     sweep_interval_minutes: float | None = Field(None, gt=0, le=MAX_STORE_TTL_MINUTES, strict=True)
+
+    @field_validator("default_ttl")
+    @classmethod
+    def validate_default_ttl_is_whole_minutes(cls, v: float | None) -> float | None:
+        return require_whole_minutes(v)
 
 
 def parse_store_ttl_config(raw: object) -> TTLConfig | None:

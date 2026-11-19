@@ -1043,7 +1043,7 @@ class TestStoreTTL:
 
         assert resp.status_code == 204
 
-    @pytest.mark.parametrize("ttl", [0, -1, 10**12])
+    @pytest.mark.parametrize("ttl", [0, -1, 10**12, 0.5])
     def test_put_rejects_out_of_range_ttl(self, client, ttl_store, ttl):
         resp = client.put("/store/items", json={"namespace": ["ns"], "key": "k", "value": {"a": 1}, "ttl": ttl})
 

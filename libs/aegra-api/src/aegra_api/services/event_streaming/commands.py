@@ -24,7 +24,7 @@ from aegra_api.core.orm import Thread as ThreadORM
 from aegra_api.models import User
 from aegra_api.models.runs import RunCreate
 from aegra_api.services.event_streaming.protocol import ErrorCode, build_error, build_success
-from aegra_api.services.run_preparation import _prepare_run
+from aegra_api.services.run_preparation import _apply_create_run_auth, _prepare_run
 
 logger = structlog.getLogger(__name__)
 
@@ -336,6 +336,7 @@ async def _thread_assistant_id(session: AsyncSession, thread_id: str, user: User
 
 async def _start(session: AsyncSession, thread_id: str, request: RunCreate, user: User) -> str:
     """Persist + enqueue a run via the shared preparation path (native v3 stream)."""
+    await _apply_create_run_auth(user, thread_id, request)
     run_id, _run, _job = await _prepare_run(
         session, thread_id, request, user, initial_status="pending", event_streaming_v2=True
     )

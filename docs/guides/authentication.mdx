@@ -241,6 +241,12 @@ several resources still checks each one: creating a cron authorizes
 layer. Creating a run likewise authorizes `threads.create_run`, then
 `assistants.read` for the assistant it uses.
 
+The v2 `run.start` and `input.respond` commands authorize the same way: the
+`threads.create_run` handler gets the run fields (`assistant_id`, `input`,
+`config`, `context`) at the top level of `value`, not the command envelope, and
+any `config` or `context` it returns is applied to the run. A denied command
+returns a `permission_denied` error envelope.
+
 Handlers may also inject data by mutating `value` in place. Setting
 `value["metadata"]["team_id"]` in an `@auth.on.threads.create` handler stores
 that metadata on the new thread.

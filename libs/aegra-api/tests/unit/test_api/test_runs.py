@@ -9,7 +9,6 @@ from fastapi import HTTPException
 from redis import RedisError
 
 from aegra_api.api.runs import (
-    _apply_create_run_auth,
     _request_run_interruption,
     create_run,
     get_run,
@@ -21,6 +20,7 @@ from aegra_api.core.orm import Assistant as AssistantORM
 from aegra_api.core.orm import Run as RunORM
 from aegra_api.core.orm import Thread as ThreadORM
 from aegra_api.models import Run, RunCreate, RunStatus, User
+from aegra_api.services.run_preparation import _apply_create_run_auth
 
 
 class TestRunsEndpoints:
@@ -569,7 +569,7 @@ class TestApplyCreateRunAuth:
             value["config"] = {"injected_via_value": True}
             return {}
 
-        with patch("aegra_api.api.runs.handle_event", new_callable=AsyncMock, side_effect=_handler):
+        with patch("aegra_api.services.run_preparation.handle_event", new_callable=AsyncMock, side_effect=_handler):
             await _apply_create_run_auth(mock_user, "t", request)
 
         assert request.config == {"original": "kept"}
@@ -583,7 +583,7 @@ class TestApplyCreateRunAuth:
             value["config"] = {"injected_via_value": True}
             return None
 
-        with patch("aegra_api.api.runs.handle_event", new_callable=AsyncMock, side_effect=_handler):
+        with patch("aegra_api.services.run_preparation.handle_event", new_callable=AsyncMock, side_effect=_handler):
             await _apply_create_run_auth(mock_user, "t", request)
 
         assert request.config == {"original": "kept", "injected_via_value": True}
@@ -594,7 +594,7 @@ class TestApplyCreateRunAuth:
         request = RunCreate(assistant_id="a", input={}, config={"original": "kept"})
 
         with patch(
-            "aegra_api.api.runs.handle_event",
+            "aegra_api.services.run_preparation.handle_event",
             new_callable=AsyncMock,
             return_value={"config": {"injected": True}, "context": {"injected_ctx": 2}},
         ):

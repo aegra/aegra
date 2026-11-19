@@ -506,6 +506,30 @@ class TestDevCommand:
                 assert call_args[listen_idx + 1] == "5678"
                 assert "not-a-valid-host:5678" not in " ".join(map(str, call_args))
 
+    @pytest.mark.parametrize("debug_host", ["", "local", "host"])
+    def test_dev_with_partial_localhost_debug_host_warns_and_falls_back_to_loopback(
+        self, cli_runner: CliRunner, tmp_path: Path, debug_host: str
+    ) -> None:
+        """An empty host binds debugpy to all interfaces; only the exact name is localhost."""
+        with cli_runner.isolated_filesystem(temp_dir=tmp_path):
+            Path("aegra.json").write_text('{"graphs": {}}')
+
+            with (
+                patch("importlib.util.find_spec", return_value=object()),
+                patch("aegra_cli.cli.subprocess.Popen") as mock_popen,
+            ):
+                mock_popen.return_value = create_mock_popen(0)
+                result = cli_runner.invoke(
+                    cli,
+                    ["dev", "--no-db-check", "--debug-port", "5678", "--debug-host", debug_host],
+                )
+
+                assert result.exit_code == 0
+                assert "Invalid debug host specified" in result.output
+                call_args = mock_popen.call_args[0][0]
+                listen_idx = call_args.index("--listen")
+                assert call_args[listen_idx + 1] == "5678"
+
     def test_dev_debug_host_non_loopback_warns(self, cli_runner: CliRunner, tmp_path: Path) -> None:
         """Test that using a non-loopback --debug-host prints a warning panel."""
         with cli_runner.isolated_filesystem(temp_dir=tmp_path):

@@ -4,6 +4,7 @@ from typing import Any
 
 from pydantic import BaseModel, Field, field_validator
 
+from aegra_api.config import MAX_STORE_TTL_MINUTES, require_whole_minutes
 from aegra_api.models.search_limit import (
     resolve_search_limit,
     search_limit_json_schema_extra,
@@ -16,6 +17,21 @@ class StorePutRequest(BaseModel):
     namespace: list[str] = Field(..., description="Storage namespace")
     key: str = Field(..., description="Item key")
     value: dict[str, Any] = Field(..., description="Item value (must be a JSON object)")
+    ttl: float | None = Field(
+        None,
+        gt=0,
+        le=MAX_STORE_TTL_MINUTES,
+        description=(
+            "Time to live in minutes. Omitted or null uses `store.ttl.default_ttl`, "
+            "and the item never expires when that is unset too. Requires `store.ttl` in aegra.json."
+        ),
+    )
+
+    @field_validator("ttl")
+    @classmethod
+    def validate_ttl_is_whole_minutes(cls, v: float | None) -> float | None:
+        """Fractional minutes would be rounded down to 0 by the store when a read refreshes the item."""
+        return require_whole_minutes(v)
 
     @field_validator("value", mode="before")
     @classmethod
@@ -53,6 +69,13 @@ class StoreSearchRequest(BaseModel):
         json_schema_extra=search_limit_json_schema_extra,
     )
     offset: int | None = Field(0, ge=0, description="Results offset")
+    refresh_ttl: bool | None = Field(
+        None,
+        description=(
+            "Whether this search extends the TTL of the items it returns. Omitted or null uses "
+            "`store.ttl.refresh_on_read`. Requires `store.ttl` in aegra.json."
+        ),
+    )
 
     @field_validator("limit")
     @classmethod

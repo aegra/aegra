@@ -3043,6 +3043,24 @@
               "title": "Namespace"
             },
             "description": "Namespace path. Use dot-separated string or repeated query params."
+          },
+          {
+            "name": "refresh_ttl",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Whether this read extends the item's TTL. Omitted uses `store.ttl.refresh_on_read`. Requires `store.ttl` in aegra.json.",
+              "title": "Refresh Ttl"
+            },
+            "description": "Whether this read extends the item's TTL. Omitted uses `store.ttl.refresh_on_read`. Requires `store.ttl` in aegra.json."
           }
         ],
         "responses": {
@@ -5390,6 +5408,20 @@
             "type": "object",
             "title": "Value",
             "description": "Item value (must be a JSON object)"
+          },
+          "ttl": {
+            "anyOf": [
+              {
+                "type": "number",
+                "maximum": 1000000000.0,
+                "exclusiveMinimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ttl",
+            "description": "Time to live in minutes. Omitted or null uses `store.ttl.default_ttl`, and the item never expires when that is unset too. Requires `store.ttl` in aegra.json."
           }
         },
         "type": "object",
@@ -5464,6 +5496,18 @@
             "title": "Offset",
             "description": "Results offset",
             "default": 0
+          },
+          "refresh_ttl": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Refresh Ttl",
+            "description": "Whether this search extends the TTL of the items it returns. Omitted or null uses `store.ttl.refresh_on_read`. Requires `store.ttl` in aegra.json."
           }
         },
         "type": "object",

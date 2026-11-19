@@ -289,7 +289,7 @@ def test_store_get_normalizes_handler_returned_namespace(monkeypatch: pytest.Mon
     seen: list[tuple[str, ...]] = []
 
     class _RecordingStore:
-        async def aget(self, namespace: tuple[str, ...], key: str) -> None:
+        async def aget(self, namespace: tuple[str, ...], key: str, *, refresh_ttl: bool | None = None) -> None:
             seen.append(namespace)
             return None
 

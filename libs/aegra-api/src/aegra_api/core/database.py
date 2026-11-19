@@ -7,7 +7,7 @@ from psycopg.rows import dict_row
 from psycopg_pool import AsyncConnectionPool
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 
-from aegra_api.config import load_store_config
+from aegra_api.config import load_store_config, parse_store_ttl_config
 from aegra_api.settings import settings
 
 logger = structlog.get_logger(__name__)
@@ -91,8 +91,20 @@ class DatabaseManager:
         store_config = load_store_config()
         index_config = store_config.get("index") if store_config else None
 
-        self._store = AsyncPostgresStore(conn=self.lg_pool, index=index_config)
-        await self._store.setup()  # Ensure tables exist
+        # Validated before the store exists so a bad block fails the boot.
+        ttl_config = parse_store_ttl_config(store_config.get("ttl") if store_config else None)
+
+        self._store = AsyncPostgresStore(conn=self.lg_pool, index=index_config, ttl=ttl_config)
+        await self._store.setup()  # Ensure tables exist (including the TTL columns)
+
+        if ttl_config is not None:
+            # The store only deletes expired items while its sweeper runs; close() stops it.
+            await self._store.start_ttl_sweeper()
+            logger.info(
+                "Store TTL enabled",
+                default_ttl_minutes=ttl_config.get("default_ttl"),
+                sweep_interval_minutes=ttl_config.get("sweep_interval_minutes") or 5,
+            )
 
         if index_config:
             embed_model = index_config.get("embed", "unknown")
@@ -102,7 +114,7 @@ class DatabaseManager:
 
     async def close(self) -> None:
         """Close database connections"""
-        engine, pool = self.engine, self.lg_pool
+        engine, pool, store = self.engine, self.lg_pool, self._store
         # Cleared up front so a failed close cannot leave initialize() short-circuiting on a stale engine.
         self.engine = None
         self.lg_pool = None
@@ -110,8 +122,13 @@ class DatabaseManager:
         self._store = None
 
         try:
-            if engine:
-                await engine.dispose()
+            try:
+                # Stopped before the pool closes: a sweep in flight would otherwise hit a closed pool.
+                if store:
+                    await store.stop_ttl_sweeper()
+            finally:
+                if engine:
+                    await engine.dispose()
         finally:
             if pool:
                 await pool.close()

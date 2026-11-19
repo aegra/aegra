@@ -114,7 +114,7 @@ class TestDatabaseManager:
         mock_db_deps["saver_instance"].setup.assert_awaited_once()
 
         # Store is initialized with index=None when no store config is provided
-        mock_db_deps["store_cls"].assert_called_with(conn=mock_db_deps["pool_instance"], index=None)
+        mock_db_deps["store_cls"].assert_called_with(conn=mock_db_deps["pool_instance"], index=None, ttl=None)
         mock_db_deps["store_instance"].setup.assert_awaited_once()
 
         # 4. Verify internal state
@@ -212,7 +212,7 @@ class TestDatabaseManager:
 
         # --- ASSERTIONS ---
         # Store should be initialized with the index config
-        mock_db_deps["store_cls"].assert_called_with(conn=mock_db_deps["pool_instance"], index=index_config)
+        mock_db_deps["store_cls"].assert_called_with(conn=mock_db_deps["pool_instance"], index=index_config, ttl=None)
         mock_db_deps["store_instance"].setup.assert_awaited_once()
 
     @pytest.mark.asyncio
@@ -226,8 +226,54 @@ class TestDatabaseManager:
 
         # --- ASSERTIONS ---
         # Store should be initialized with index=None
-        mock_db_deps["store_cls"].assert_called_with(conn=mock_db_deps["pool_instance"], index=None)
+        mock_db_deps["store_cls"].assert_called_with(conn=mock_db_deps["pool_instance"], index=None, ttl=None)
         mock_db_deps["store_instance"].setup.assert_awaited_once()
+
+    async def test_initialize_enables_store_ttl_and_starts_sweeper(
+        self, db_manager: DatabaseManager, mock_db_deps: dict[str, Any]
+    ) -> None:
+        store = mock_db_deps["store_instance"]
+        mock_db_deps["load_store_config"].return_value = {"ttl": {"default_ttl": 60, "sweep_interval_minutes": 2}}
+
+        await db_manager.initialize()
+
+        ttl = {"refresh_on_read": True, "default_ttl": 60.0, "sweep_interval_minutes": 2.0}
+        mock_db_deps["store_cls"].assert_called_with(conn=mock_db_deps["pool_instance"], index=None, ttl=ttl)
+        store.start_ttl_sweeper.assert_awaited_once_with()
+
+    async def test_initialize_does_not_start_sweeper_without_store_ttl(
+        self, db_manager: DatabaseManager, mock_db_deps: dict[str, Any]
+    ) -> None:
+        store = mock_db_deps["store_instance"]
+        mock_db_deps["load_store_config"].return_value = {"index": None}
+
+        await db_manager.initialize()
+
+        store.start_ttl_sweeper.assert_not_awaited()
+
+    async def test_initialize_rejects_invalid_store_ttl_and_releases_resources(
+        self, db_manager: DatabaseManager, mock_db_deps: dict[str, Any]
+    ) -> None:
+        mock_db_deps["load_store_config"].return_value = {"ttl": {"default_ttl": -5}}
+
+        with pytest.raises(ValueError, match="Invalid store.ttl configuration"):
+            await db_manager.initialize()
+
+        self._assert_released(db_manager, mock_db_deps)
+
+    async def test_close_stops_store_sweeper_before_closing_pool(
+        self, db_manager: DatabaseManager, mock_db_deps: dict[str, Any]
+    ) -> None:
+        order: list[str] = []
+        store = mock_db_deps["store_instance"]
+        store.stop_ttl_sweeper.side_effect = lambda: order.append("sweeper")
+        mock_db_deps["pool_instance"].close.side_effect = lambda: order.append("pool")
+        mock_db_deps["load_store_config"].return_value = {"ttl": {}}
+        await db_manager.initialize()
+
+        await db_manager.close()
+
+        assert order == ["sweeper", "pool"]
 
     @staticmethod
     def _assert_released(manager: DatabaseManager, deps: dict[str, Any]) -> None:

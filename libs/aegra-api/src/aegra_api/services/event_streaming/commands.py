@@ -178,10 +178,10 @@ async def _run_start(
 
     # run.start with input on an interrupted thread means "answer the pending
     # interrupt" — resume with the input instead of starting a fresh turn that
-    # would discard the pending tasks.
+    # would discard the pending tasks. A fork (checkpoint_id) is always a new run.
     input_data = params.get("input")
     command: dict[str, Any] | None = None
-    if input_data is not None and await _thread_is_interrupted(session, thread_id, user):
+    if input_data is not None and checkpoint_id is None and await _thread_is_interrupted(session, thread_id, user):
         command = {"resume": input_data}
         input_data = None
 

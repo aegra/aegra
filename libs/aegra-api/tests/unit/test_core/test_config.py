@@ -1,11 +1,13 @@
 """Unit tests for HTTP and store configuration loading"""
 
 import json
+import sys
 from pathlib import Path
 
 import pytest
 
-from aegra_api.config import load_checkpointer_config, load_http_config, load_store_config
+from aegra_api.config import load_checkpointer_config, load_http_config, load_store_config, setup_dependencies
+from aegra_api.settings import settings
 
 
 def test_load_http_config_from_aegra_json(tmp_path, monkeypatch):
@@ -250,3 +252,30 @@ def test_load_checkpointer_config_no_config(tmp_path: Path, monkeypatch: pytest.
     config = load_checkpointer_config()
 
     assert config is None
+
+
+def test_setup_dependencies_resolves_paths_against_config_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Relative dependencies resolve against the config file's directory, and a missing one is skipped."""
+    project = tmp_path / "project"
+    (project / "shared").mkdir(parents=True)
+    (project / "aegra.json").write_text(json.dumps({"dependencies": ["./shared", "./missing"]}))
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(settings.app, "AEGRA_CONFIG", str(project / "aegra.json"))
+    monkeypatch.setattr(sys, "path", list(sys.path))
+
+    setup_dependencies()
+
+    assert sys.path[0] == str((project / "shared").resolve())
+    assert str((project / "missing").resolve()) not in sys.path
+
+
+def test_setup_dependencies_without_config_leaves_sys_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Without a config file there are no dependencies to add."""
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(settings.app, "AEGRA_CONFIG", "")
+    monkeypatch.setattr(sys, "path", list(sys.path))
+    before = list(sys.path)
+
+    setup_dependencies()
+
+    assert sys.path == before

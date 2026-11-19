@@ -465,6 +465,48 @@ class TestNamespaceFilter:
         events = await _collect(_make_session("t1", channels={"values"}, run_ids=("run-1",), depth=1))
         assert [e["params"]["data"] for e in events] == [{"top": 1}]
 
+    async def test_depth_is_relative_to_the_namespace_prefix(self, manager: BrokerManager) -> None:
+        """depth counts levels below each requested prefix, not the absolute namespace length."""
+        await _seed(
+            manager,
+            "run-1",
+            [
+                ("values", _protocol_event("values", {"self": 1}, namespace=["sub_a:9f3c-1"])),
+                ("values", _protocol_event("values", {"child": 2}, namespace=["sub_a:9f3c-1", "inner:7e1a-2"])),
+                ("values", _protocol_event("values", {"deep": 3}, namespace=["sub_a:9f3c-1", "inner:7e1a-2", "leaf"])),
+                ("values", _protocol_event("values", {"other": 4}, namespace=["sub_b"])),
+                ("end", {"status": "success"}),
+            ],
+        )
+        events = await _collect(
+            _make_session("t1", channels={"values"}, run_ids=("run-1",), namespaces=[["sub_a"]], depth=1)
+        )
+        assert [e["params"]["data"] for e in events] == [{"self": 1}, {"child": 2}]
+
+    async def test_depth_zero_keeps_each_prefix_namespace_itself(self, manager: BrokerManager) -> None:
+        """depth=0 selects exactly the requested namespaces, whatever each prefix's length."""
+        await _seed(
+            manager,
+            "run-1",
+            [
+                ("values", _protocol_event("values", {"a": 1}, namespace=["sub_a"])),
+                ("values", _protocol_event("values", {"a_child": 2}, namespace=["sub_a", "inner"])),
+                ("values", _protocol_event("values", {"b": 3}, namespace=["sub_b"])),
+                ("values", _protocol_event("values", {"b_inner": 4}, namespace=["sub_b", "inner"])),
+                ("end", {"status": "success"}),
+            ],
+        )
+        events = await _collect(
+            _make_session(
+                "t1",
+                channels={"values"},
+                run_ids=("run-1",),
+                namespaces=[["sub_a"], ["sub_b", "inner"]],
+                depth=0,
+            )
+        )
+        assert [e["params"]["data"] for e in events] == [{"a": 1}, {"b_inner": 4}]
+
     async def test_thread_level_events_always_pass_the_filter(self, manager: BrokerManager) -> None:
         """Lifecycle (empty namespace) is not subgraph-scoped; a namespace filter must not drop it."""
         await _seed(manager, "run-1", [("end", {"status": "success"})])

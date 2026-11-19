@@ -1718,7 +1718,7 @@
           "Thread Runs"
         ],
         "summary": "List Runs",
-        "description": "List runs for a thread.\n\nReturns runs ordered by creation time (newest first). Use `status` to\nfilter and `limit`/`offset` to paginate.",
+        "description": "List runs for a thread.\n\nReturns runs ordered by creation time (newest first). Use `status` to\nfilter, `limit`/`offset` to paginate and `select` to return only some fields.",
         "operationId": "list_runs_threads__thread_id__runs_get",
         "parameters": [
           {
@@ -1773,6 +1773,41 @@
               "title": "Status"
             },
             "description": "Filter by run status (e.g. pending, running, success, error, interrupted)"
+          },
+          {
+            "name": "select",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "array",
+                  "items": {
+                    "enum": [
+                      "run_id",
+                      "thread_id",
+                      "assistant_id",
+                      "status",
+                      "input",
+                      "output",
+                      "error_message",
+                      "config",
+                      "context",
+                      "user_id",
+                      "created_at",
+                      "updated_at"
+                    ],
+                    "type": "string"
+                  }
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Run fields to return. Omit to return every field. Leave out `output` to skip loading each run's final state.",
+              "title": "Select"
+            },
+            "description": "Run fields to return. Omit to return every field. Leave out `output` to skip loading each run's final state."
           }
         ],
         "responses": {

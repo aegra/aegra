@@ -525,6 +525,8 @@ If no auth is configured, Aegra runs in no-auth mode:
 
 This is the default for local development and testing. Every caller shares the `anonymous` user and its data, so don't expose a server without auth to the internet.
 
+No-auth mode applies only when `auth.path` is not set. If `auth.path` is set and the module cannot be loaded (the file is missing, the import raises, or the variable is not an `Auth` instance), the server stops at startup with the error instead of serving requests as `anonymous`.
+
 ## Configuration options
 
 | Option | Type | Default | Description |

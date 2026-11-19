@@ -31,6 +31,10 @@ from aegra_api.settings import settings
 logger = structlog.getLogger(__name__)
 
 
+class AuthLoadError(RuntimeError):
+    """``auth.path`` is set but cannot be loaded. Serving as anonymous would drop all access control."""
+
+
 class LangGraphUser(BaseUser):
     """
     User wrapper that implements Starlette's BaseUser interface
@@ -82,45 +86,19 @@ class LangGraphAuthBackend(AuthenticationBackend):
             )
 
     def _load_auth_instance(self) -> Auth | None:
-        """Load the auth instance from config or fallback to hardcoded candidates.
-
-        Resolution order:
-        1. Load from aegra.json auth.path config
-        2. If no auth file found, returns None (noop handled directly in authenticate())
-
-        Returns:
-            Auth instance or None if not found (noop handled in authenticate() method)
-        """
-        # 1. Try loading from config
-        try:
-            auth_config = load_auth_config()
-            if auth_config and "path" in auth_config:
-                auth_path = auth_config["path"]
-                logger.info(f"Loading auth from config path: {auth_path}")
-                auth_instance = self._load_from_path(auth_path)
-                if auth_instance:
-                    return auth_instance
-                logger.warning(f"Failed to load auth from config path: {auth_path}")
-        except Exception as e:
-            logger.warning(f"Error loading auth config: {e}")
-
-        logger.debug("No auth instance found from config")
-        return None
-
-    def _load_from_path(self, path: str) -> Auth | None:
-        """Load auth instance from path in format './file.py:var' or 'module:var'.
-
-        Relative paths are resolved from the config file directory.
-
-        Args:
-            path: Import path in format './file.py:variable' or 'module.path:variable'
-
-        Returns:
-            Auth instance or None if loading fails
-        """
-        if ":" not in path:
-            logger.error(f"Invalid auth path format (missing ':'): {path}")
+        """The Auth instance from ``auth.path``, or None when no path is configured."""
+        auth_config = load_auth_config()
+        if not auth_config or "path" not in auth_config:
+            logger.debug("No auth path configured")
             return None
+        auth_path = auth_config["path"]
+        logger.info(f"Loading auth from config path: {auth_path}")
+        return self._load_from_path(auth_path)
+
+    def _load_from_path(self, path: str) -> Auth:
+        """Load auth from './file.py:var' or 'module:var'. Relative paths resolve from the config directory."""
+        if ":" not in path:
+            raise AuthLoadError(f"Invalid auth path format (missing ':'): {path}")
 
         module_path, var_name = path.rsplit(":", 1)
 
@@ -143,76 +121,49 @@ class LangGraphAuthBackend(AuthenticationBackend):
         # Handle module format: module.path
         return self._load_from_module(module_path, var_name)
 
-    def _load_from_file(self, file_path: Path, var_name: str) -> Auth | None:
-        """Load auth instance from a file path.
+    def _load_from_file(self, file_path: Path, var_name: str) -> Auth:
+        if not file_path.exists():
+            raise AuthLoadError(f"Auth file not found: {file_path}")
 
-        Args:
-            file_path: Path to the Python file
-            var_name: Name of the variable to load
+        if not file_path.is_file():
+            raise AuthLoadError(f"Auth path is not a file: {file_path}")
 
-        Returns:
-            Auth instance or None if loading fails
-        """
+        # Create a unique module name based on the file path
+        module_name = f"auth_module_{file_path.stem}"
+
+        spec = importlib.util.spec_from_file_location(module_name, str(file_path))
+        if spec is None or spec.loader is None:
+            raise AuthLoadError(f"Could not load auth module from {file_path}")
+
+        auth_module = importlib.util.module_from_spec(spec)
+        sys.modules[module_name] = auth_module
+        # User code can raise anything at import time.
         try:
-            if not file_path.exists():
-                logger.warning(f"Auth file not found: {file_path}")
-                return None
-
-            if not file_path.is_file():
-                logger.warning(f"Auth path is not a file: {file_path} (is directory: {file_path.is_dir()})")
-                return None
-
-            # Create a unique module name based on the file path
-            module_name = f"auth_module_{file_path.stem}"
-
-            spec = importlib.util.spec_from_file_location(module_name, str(file_path))
-            if spec is None or spec.loader is None:
-                logger.error(f"Could not load auth module from {file_path}")
-                return None
-
-            auth_module = importlib.util.module_from_spec(spec)
-            sys.modules[module_name] = auth_module
             spec.loader.exec_module(auth_module)
-
-            auth_instance = getattr(auth_module, var_name, None)
-            if not isinstance(auth_instance, Auth):
-                logger.error(f"Variable '{var_name}' in {file_path} is not an Auth instance")
-                return None
-
-            logger.info(f"Successfully loaded auth instance from {file_path}:{var_name}")
-            return auth_instance
-
         except Exception as e:
-            logger.error(f"Error loading auth from {file_path}: {e}", exc_info=True)
-            return None
+            sys.modules.pop(module_name, None)
+            raise AuthLoadError(f"Error loading auth from {file_path}: {e}") from e
 
-    def _load_from_module(self, module_path: str, var_name: str) -> Auth | None:
-        """Load auth instance from an installed module.
+        auth_instance = getattr(auth_module, var_name, None)
+        if not isinstance(auth_instance, Auth):
+            raise AuthLoadError(f"Variable '{var_name}' in {file_path} is not an Auth instance")
 
-        Args:
-            module_path: Dotted module path (e.g., 'mypackage.auth')
-            var_name: Name of the variable to load
+        logger.info(f"Successfully loaded auth instance from {file_path}:{var_name}")
+        return auth_instance
 
-        Returns:
-            Auth instance or None if loading fails
-        """
+    def _load_from_module(self, module_path: str, var_name: str) -> Auth:
+        # User code can raise anything at import time, not only ImportError.
         try:
             module = importlib.import_module(module_path)
-            auth_instance = getattr(module, var_name, None)
-
-            if not isinstance(auth_instance, Auth):
-                logger.error(f"Variable '{var_name}' in module {module_path} is not an Auth instance")
-                return None
-
-            logger.info(f"Successfully loaded auth instance from {module_path}:{var_name}")
-            return auth_instance
-
-        except ImportError as e:
-            logger.error(f"Could not import module {module_path}: {e}")
-            return None
         except Exception as e:
-            logger.error(f"Error loading auth from {module_path}: {e}", exc_info=True)
-            return None
+            raise AuthLoadError(f"Error loading auth from module {module_path}: {e}") from e
+
+        auth_instance = getattr(module, var_name, None)
+        if not isinstance(auth_instance, Auth):
+            raise AuthLoadError(f"Variable '{var_name}' in module {module_path} is not an Auth instance")
+
+        logger.info(f"Successfully loaded auth instance from {module_path}:{var_name}")
+        return auth_instance
 
     async def authenticate(self, conn: HTTPConnection) -> tuple[AuthCredentials, BaseUser] | None:
         """

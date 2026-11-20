@@ -195,6 +195,8 @@ Once retries are exhausted, the reaper marks the run `error`, clears ownership, 
 
 The reaper also re-enqueues `pending` runs older than `STUCK_PENDING_THRESHOLD_SECONDS`, but only when they are missing from the job queue. A run still in the queue is waiting for a free worker and is left alone.
 
+The same path covers a run whose queue push fails at creation time with a connection, timeout or operating-system error. The run row is committed before the push, so the server logs a warning and answers as usual: create returns the `pending` run, stream returns its SSE response (streaming events still needs Redis), and wait waits for the final output or an error. The reaper re-enqueues the run at its first scan after the run is older than `STUCK_PENDING_THRESHOLD_SECONDS`; Redis availability and free worker capacity can add more delay, and workers that have lost Redis pick it up through their Postgres poll. Returning an error after saving the run would invite a client retry that creates a second run.
+
 <a href="https://mermaid.live/view#pako:eNptk09PwkAQxb_K2FOJiCbeGjVpocIBpRZJLyZm3Y6wge7W_aMkxO_uLK2CQE9N9r3fezPtbgKuSgwiCAx-OJQcB4LNNateJNBTM20FFzWTFooYmIFC6SVqiI_Ps6E_z5Sxc43Tp_GxIkdWk5dU7VuoJCSdE8JGUwpzokayVyN5kY2iiC_u7rJhBP0VExVoJyFcITN4K9XX-fWV6ezpijiCdI3cWQSatV70er0DzAgp8g2ZhRDXFmUJW1rnN-9RkVd9UgUP6-fxdAThZPJwuRSrVeeUZkc0VtXmGORjxz4EcF0LjQZIa333X22ztbbhNB2n_WcoRmmeEpJZZ25pbCnkHOLHQdMXboDmD9tC2ZC8DSSCe-Voqiaq9As7OxEyywbx8x--pj0Qvguc4LpJODDlEeTZjJZBwFdRQqjxAiX9WW63uyJphMk4m2St33-VJGpdezJfIuYfjkqCxK_9zO25N-VoXIXwrlUFfIF8WSsh7QHk_yTGcY7GBF0IKtQVEyVdgU1gF1htL0PJ9DL4_v4BvGz9cA==" target="_blank" rel="noopener">View fullscreen ↗</a>
 
 ```mermaid

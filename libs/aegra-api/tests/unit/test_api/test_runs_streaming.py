@@ -7,6 +7,7 @@ from uuid import uuid4
 
 import pytest
 from fastapi import HTTPException
+from redis import ConnectionError as RedisConnectionError
 from redis import RedisError
 
 from aegra_api.api.runs import create_and_stream_run, stream_run
@@ -114,6 +115,49 @@ class TestRunsStreamingEndpoints:
 
             # Verify background execution submission
             mock_submit.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_create_and_stream_run_streams_when_dispatch_fails_after_commit(
+        self,
+        mock_user: User,
+        mock_session: AsyncMock,
+        sample_assistant: AssistantORM,
+    ) -> None:
+        """A committed run is dispatched later by the reaper, so the client still gets its stream."""
+        thread_id = "test-thread-123"
+        run_id = str(uuid4())
+        request = RunCreate(assistant_id="test-assistant", input={"message": "stream me"})
+
+        with (
+            patch("aegra_api.services.run_preparation._validate_resume_command", new_callable=AsyncMock),
+            patch("aegra_api.services.run_preparation.get_langgraph_service") as mock_lg_service,
+            patch("aegra_api.services.run_preparation.resolve_assistant_id", return_value="test-assistant"),
+            patch("aegra_api.services.run_preparation.update_thread_metadata", new_callable=AsyncMock),
+            patch("aegra_api.services.run_preparation.set_thread_status", new_callable=AsyncMock),
+            patch("aegra_api.services.run_preparation.uuid4", return_value=run_id),
+            patch(
+                "aegra_api.services.run_preparation.executor.submit",
+                new_callable=AsyncMock,
+                side_effect=RedisConnectionError("Connection lost"),
+            ),
+            patch("aegra_api.api.runs.active_runs", {}),
+            patch("aegra_api.api.runs.streaming_service.stream_run_execution") as mock_stream_exec,
+            patch("aegra_api.api.runs._get_session_maker", return_value=_make_session_maker(mock_session)),
+        ):
+            mock_lg_service.return_value.list_graphs.return_value = ["test-graph"]
+            mock_session.scalar.side_effect = [None, sample_assistant]
+
+            async def mock_generator() -> AsyncGenerator:
+                yield "data"
+
+            mock_stream_exec.return_value = mock_generator()
+
+            response = await create_and_stream_run(thread_id, request, mock_user)
+
+        assert response.status_code == 200
+        assert f"/runs/{run_id}" in response.headers["Location"]
+        mock_session.commit.assert_called_once()
+        mock_stream_exec.assert_called_once()
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(

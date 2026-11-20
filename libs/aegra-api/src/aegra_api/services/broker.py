@@ -6,7 +6,7 @@ The broker handles both live event broadcast (via queue) and replay storage
 
 import asyncio
 import contextlib
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator
 from typing import Any
 
 import structlog
@@ -55,7 +55,7 @@ class RunBroker(BaseRunBroker):
         if isinstance(payload, tuple) and len(payload) >= 1 and payload[0] == "end":
             self.mark_finished()
 
-    async def aiter(self) -> AsyncIterator[tuple[str, Any]]:
+    async def aiter(self) -> AsyncGenerator[tuple[str, Any], None]:
         queue: asyncio.Queue[tuple[str, Any]] = asyncio.Queue()
         # Register, then replay the buffer into this iterator: any event put
         # between a caller's separate replay() and this registration is still in
@@ -132,7 +132,7 @@ class BrokerManager(BaseBrokerManager):
             logger.debug(f"Created new broker for run {run_id}")
         return self._brokers[run_id]
 
-    def get_broker(self, run_id: str) -> RunBroker | None:
+    def get_broker(self, run_id: str, *, for_replay: bool = False) -> RunBroker | None:
         return self._brokers.get(run_id)
 
     def cleanup_broker(self, run_id: str) -> None:

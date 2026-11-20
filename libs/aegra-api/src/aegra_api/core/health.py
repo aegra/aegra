@@ -1,7 +1,5 @@
 """Health check endpoints"""
 
-import contextlib
-
 import structlog
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
@@ -82,8 +80,7 @@ async def health_check(_request: Request) -> HealthResponse:
     try:
         checkpointer = db_manager.get_checkpointer()
         # probe - will raise if connection is bad; tuple may not exist which is fine
-        with contextlib.suppress(Exception):
-            await checkpointer.aget_tuple({"configurable": {"thread_id": "health-check"}})
+        await checkpointer.aget_tuple({"configurable": {"thread_id": "health-check"}})
         health_status["langgraph_checkpointer"] = "connected"
     except Exception as e:
         health_status["langgraph_checkpointer"] = f"error: {str(e)}"
@@ -92,8 +89,7 @@ async def health_check(_request: Request) -> HealthResponse:
     # LangGraph store (lazy-init)
     try:
         store = db_manager.get_store()
-        with contextlib.suppress(Exception):
-            await store.aget(("health",), "check")
+        await store.aget(("health",), "check")
         health_status["langgraph_store"] = "connected"
     except Exception as e:
         health_status["langgraph_store"] = f"error: {str(e)}"
@@ -130,10 +126,8 @@ async def readiness_check(_request: Request) -> dict[str, str]:
         checkpointer = db_manager.get_checkpointer()
         store = db_manager.get_store()
         # lightweight probes
-        with contextlib.suppress(Exception):
-            await checkpointer.aget_tuple({"configurable": {"thread_id": "ready-check"}})
-        with contextlib.suppress(Exception):
-            await store.aget(("ready",), "check")
+        await checkpointer.aget_tuple({"configurable": {"thread_id": "ready-check"}})
+        await store.aget(("ready",), "check")
     except Exception as e:
         logger.warning("readiness check failed: components", exc_info=True)
         raise HTTPException(

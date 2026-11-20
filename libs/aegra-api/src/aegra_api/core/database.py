@@ -1,8 +1,14 @@
 """Database manager with LangGraph integration"""
 
+import asyncio
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
+from typing import LiteralString
+
 import structlog
 from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 from langgraph.store.postgres.aio import AsyncPostgresStore
+from psycopg import AsyncConnection, IsolationLevel
 from psycopg.rows import dict_row
 from psycopg_pool import AsyncConnectionPool
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
@@ -11,6 +17,39 @@ from aegra_api.config import load_store_config
 from aegra_api.settings import settings
 
 logger = structlog.get_logger(__name__)
+
+# Keep the keys literal: a bound parameter uses the extended protocol, which keeps
+# an xmin that setup()'s CREATE INDEX CONCURRENTLY would then wait on forever.
+_LANGGRAPH_SETUP_LOCK_SQL: LiteralString = (
+    "SELECT pg_try_advisory_xact_lock(44650, 2), set_config('idle_in_transaction_session_timeout', '0', true)"
+)
+_LANGGRAPH_SETUP_LOCK_RETRY_SECONDS: float = 0.1
+
+
+@asynccontextmanager
+async def _langgraph_setup_lock() -> AsyncIterator[None]:
+    """Let one process at a time run LangGraph's setup() on this database."""
+    # A transaction lock on its own connection: setup() runs in autocommit, and
+    # a session lock would not survive PgBouncer transaction pooling.
+    conn = await AsyncConnection.connect(settings.db.database_url_sync, prepare_threshold=None)
+    try:
+        # A database default of repeatable read would pin the snapshot for the whole setup().
+        await conn.set_isolation_level(IsolationLevel.READ_COMMITTED)
+        waiting = False
+        while True:
+            cursor = await conn.execute(_LANGGRAPH_SETUP_LOCK_SQL)
+            row = await cursor.fetchone()
+            if row is not None and row[0]:
+                break
+            if not waiting:
+                logger.info("waiting for another process to finish LangGraph setup")
+                waiting = True
+            # Poll: a blocking lock call holds a snapshot that CREATE INDEX CONCURRENTLY waits on.
+            await conn.rollback()
+            await asyncio.sleep(_LANGGRAPH_SETUP_LOCK_RETRY_SECONDS)
+        yield
+    finally:
+        await conn.close()
 
 
 class DatabaseManager:
@@ -85,14 +124,16 @@ class DatabaseManager:
         logger.info(f"Initializing LangGraph components with shared pool (max {lg_max} conns)...")
 
         self._checkpointer = AsyncPostgresSaver(conn=self.lg_pool)
-        await self._checkpointer.setup()  # Ensure tables exist
 
         # Load store configuration for semantic search (if configured)
         store_config = load_store_config()
         index_config = store_config.get("index") if store_config else None
 
         self._store = AsyncPostgresStore(conn=self.lg_pool, index=index_config)
-        await self._store.setup()  # Ensure tables exist
+
+        async with _langgraph_setup_lock():
+            await self._checkpointer.setup()  # Ensure tables exist
+            await self._store.setup()  # Ensure tables exist
 
         if index_config:
             embed_model = index_config.get("embed", "unknown")

@@ -198,6 +198,8 @@ By default, Aegra runs `alembic upgrade head` during FastAPI's lifespan startup.
 
 For single-pod and dev setups (`aegra dev`, `aegra up`, single docker-compose service) this is what you want and you do not need to run migrations manually.
 
+LangGraph's checkpoint and store tables are not part of Alembic: every process creates or upgrades them at startup, also with `RUN_MIGRATIONS_ON_STARTUP=false`. Processes on the same database take turns through an advisory lock for this step, so replicas can boot together once `aegra db upgrade` has run. The lock uses one extra connection per process while setup runs, so through PgBouncer in transaction mode the step needs two free server connections.
+
 ### Multi-pod (Kubernetes, etc.)
 
 When several replicas boot at the same time and a real upgrade is pending, every pod queues on Alembic's advisory lock. Liveness or readiness probes can time out before pods finish startup, causing restart loops. To avoid this, run migrations out-of-band and disable the startup hook on app pods:

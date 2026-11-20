@@ -7,6 +7,7 @@ handling message accumulation, event processing, and multiple stream modes.
 import uuid
 from collections.abc import AsyncIterator, Callable
 from contextlib import aclosing
+from copy import copy
 from typing import Any, cast
 
 import structlog
@@ -27,6 +28,7 @@ from langgraph.errors import (
     GraphRecursionError,
     InvalidUpdateError,
 )
+from langgraph.pregel import Pregel
 from langgraph.pregel.debug import CheckpointPayload, TaskResultPayload
 from pydantic import ValidationError
 from pydantic.v1 import ValidationError as ValidationErrorLegacy
@@ -201,6 +203,13 @@ async def stream_graph_events(
 
     # Stream execution using appropriate method
     if use_astream_events:
+        if interrupt_kwargs and not is_js_graph and isinstance(graph, Pregel):
+            # Pregel's v2 events drop interrupt kwargs; per-run defaults reach its astream.
+            # Shallow copying preserves compiled attributes without rebuilding shared channels.
+            graph = copy(graph)
+            for key, value in interrupt_kwargs.items():
+                attribute = f"{key}_nodes"
+                setattr(graph, attribute, value or getattr(graph, attribute))
         async with aclosing(
             graph.astream_events(
                 input_data,

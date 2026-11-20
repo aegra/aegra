@@ -87,13 +87,15 @@ namespaces = await client.store.list_namespaces(
 
 ### Namespace scoping
 
-All store operations are automatically scoped to the authenticated user's namespace under `["users", <user_id>]`. This means:
+Store operations are scoped to the authenticated user's namespace under `["users", <identity>]` only when no configured `store.scopes` prefix matches the namespace. A namespace starting with a configured prefix instead uses that scope's prefix followed by the required user attribute values; those values define its isolation or sharing boundary. For the default per-user scope:
 
-- An empty namespace defaults to `["users", <user_id>]`
+- An empty namespace defaults to `["users", <identity>]`
 - A namespace already under your user prefix (e.g. `["users", "alice", "docs"]`) passes through unchanged
-- Any other namespace (e.g. `["configs"]`) is automatically prefixed to `["users", <user_id>, "configs"]`
+- Any other namespace (e.g. `["configs"]`) is automatically prefixed to `["users", <identity>, "configs"]`
 
-This ensures users can never access each other's data, even if they craft a request with another user's namespace.
+Under the default per-user scope, users cannot access each other's data, even if they craft a request with another user's namespace. Configured scopes instead isolate or share data according to their required attribute values.
+
+Scoping applies only to the REST API; a graph writes whatever namespace it asks for. See [Deep Agents and StoreBackend](#deep-agents-and-storebackend).
 
 ### Configurable scoping
 
@@ -132,7 +134,7 @@ A configured scope follows the same rule as user scoping (using the `"orgs"` →
 - Any namespace not fully qualified with your own `org_id` (including a foreign org id) is buried under `["orgs", <org_id>, ...]`, so members can never reach another organization's data.
 - A request using the `"orgs"` prefix when the user has no `org_id` returns **403 Forbidden**.
 
-An empty or unconfigured prefix always defaults to user scope — a configured scope is never applied implicitly.
+An empty namespace or a namespace without a matching configured prefix defaults to user scope — a configured scope is used only when the namespace starts with its prefix.
 
 #### Partitioning by multiple attributes
 
@@ -220,3 +222,43 @@ def my_node(state, *, store: BaseStore):
 ```
 
 Add the node to your graph as usual — LangGraph injects the `store` parameter automatically when the graph is compiled with a store backend (which Aegra provides).
+
+### Deep Agents and StoreBackend
+
+A `StoreBackend` namespace must be fully qualified for its scope: the REST API buries anything not already headed by `["users", <identity>]` for the default per-user scope, or by a configured `store.scopes` prefix followed by the matching attribute values (see [namespace scoping](#namespace-scoping)).
+
+```python
+from deepagents import create_deep_agent
+from deepagents.backends import CompositeBackend, StateBackend, StoreBackend
+
+graph = create_deep_agent(
+    model=model,
+    backend=CompositeBackend(
+        default=StateBackend(),
+        routes={
+            "/memories/": StoreBackend(
+                namespace=lambda rt: ("users", rt.server_info.user.identity, "filesystem")
+            )
+        },
+    ),
+)
+```
+
+`("users", <identity>, ...)` passes through default per-user scoping unchanged, so `client.store.*` addresses the same rows. For a configured scope, use that scope's prefix and matching attribute values instead. Keys are paths inside the routed directory (`/memories/` is stripped) and values use the backend's file shape:
+
+```python
+await client.store.search_items(["users", "alice", "filesystem"])
+await client.store.list_namespaces(["users", "alice"])
+await client.store.get_item(["users", "alice", "filesystem"], "/pref.txt")
+await client.store.put_item(
+    ["users", "alice", "filesystem"],
+    "/pref.txt",
+    {"content": "Answer concisely.", "encoding": "utf-8"},
+)
+```
+
+<Note>
+  With a [configured scope](#configurable-scoping), qualify with that scope's prefix and your own attribute values instead — `("orgs", <your org_id>, "filesystem")` for a `"orgs": ["org_id"]` scope. Scopes are opt-in, so an unqualified namespace never resolves to one: it always falls back to per-user scope.
+</Note>
+
+Qualifying the namespace doesn't weaken the [isolation](#namespace-scoping): under the default per-user scope, Bob's requests are buried under `["users", "bob", ...]`, so he never sees Alice's items. In a configured scope, access is instead bounded by the matching attribute values, and sharing occurs only between users with the same values.

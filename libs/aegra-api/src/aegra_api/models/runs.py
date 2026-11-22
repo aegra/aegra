@@ -232,6 +232,23 @@ class Run(BaseModel):
         return validate_run_status(v)
 
 
+# Every Run field; a drift test keeps this in step with the model.
+RunSelectField = Literal[
+    "run_id",
+    "thread_id",
+    "assistant_id",
+    "status",
+    "input",
+    "output",
+    "error_message",
+    "config",
+    "context",
+    "user_id",
+    "created_at",
+    "updated_at",
+]
+
+
 class RunStatus(BaseModel):
     """Simple run status response"""
 

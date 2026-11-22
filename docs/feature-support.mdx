@@ -39,6 +39,7 @@ description: "What Aegra supports today, what's coming soon, and what's not yet 
 | Streaming (7 SSE modes) | Supported | values, updates, messages, messages-tuple, custom, events, and debug. |
 | SSE reconnection | Supported | Resume interrupted streams from where they left off. |
 | Sync wait | Supported | Block until run completes and return final output. |
+| List runs with `select` | Supported | `GET /threads/{thread_id}/runs` filters by `status`, pages with `limit`/`offset`, and returns only the fields named in `select`. Leave `output` out of `select` to list long threads cheaply. `select` takes the fields of Aegra's `Run` (`run_id`, `status`, `input`, `output`, `config`, `context`, ...); `metadata`, `kwargs` and `multitask_strategy` are not `Run` fields here and return `422`. |
 | Subgraph streaming | Supported | Stream events from nested subgraphs. |
 | Stateless runs | Supported | Execute without persisting thread state. |
 | Checkpoint durability | Supported | `durability` (`sync`, `async`, `exit`) per run or cron, deprecated `checkpoint_during` alias, server default via `checkpointer.durability` or `AEGRA_CHECKPOINT_DURABILITY`. |

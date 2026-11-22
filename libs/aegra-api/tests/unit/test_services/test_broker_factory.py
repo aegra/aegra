@@ -3,10 +3,10 @@
 from pathlib import Path
 from unittest.mock import patch
 
-from aegra_api.services import redis_broker
 from aegra_api.services.base_broker import REPLAY_RETENTION_SECONDS
 from aegra_api.services.broker import BrokerManager, _create_broker_manager
 from aegra_api.services.redis_broker import RedisBrokerManager
+from aegra_api.settings import RedisSettings
 
 
 class TestBrokerFactory:
@@ -32,8 +32,8 @@ class TestBrokerFactory:
 class TestReplayRetentionIsShared:
     """Dev and prod drifted to 3600s vs 600s once; pin them to one constant."""
 
-    def test_redis_backend_uses_the_shared_retention(self) -> None:
-        assert redis_broker._REPLAY_TTL_SECONDS == REPLAY_RETENTION_SECONDS
+    def test_redis_backend_default_ttl_matches_the_shared_retention(self) -> None:
+        assert RedisSettings(_env_file=None).REDIS_REPLAY_TTL_SECONDS == REPLAY_RETENTION_SECONDS
 
     def test_documented_window_matches_the_constant(self) -> None:
         doc = Path(__file__).parents[5] / "docs" / "guides" / "streaming.mdx"

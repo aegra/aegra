@@ -67,6 +67,12 @@ def _backoff_delay(attempt: int) -> float:
     return delay + jitter
 
 
+def _counter_ttl_seconds() -> int:
+    # The counter must outlive the run: expiring on the replay TTL could restart
+    # event ids after a silent gap, and live dedup would drop the rest of the run.
+    return max(settings.redis.REDIS_REPLAY_TTL_SECONDS, settings.worker.BG_JOB_TIMEOUT_SECS)
+
+
 class RedisRunBroker(BaseRunBroker):
     """Broker for a single run backed by Redis pub/sub + Redis Lists.
 
@@ -139,7 +145,7 @@ class RedisRunBroker(BaseRunBroker):
         pipe.ltrim(self._cache_key, -settings.redis.REDIS_REPLAY_MAX_EVENTS, -1)
         pipe.expire(self._cache_key, settings.redis.REDIS_REPLAY_TTL_SECONDS)
         pipe.incr(self._counter_key)
-        pipe.expire(self._counter_key, settings.redis.REDIS_REPLAY_TTL_SECONDS)
+        pipe.expire(self._counter_key, _counter_ttl_seconds())
         await pipe.execute()
 
     async def _publish_event(self, message: str) -> None:
@@ -258,7 +264,9 @@ class RedisRunBroker(BaseRunBroker):
     async def replay(self, last_event_id: str | None) -> list[tuple[str, Any]]:
         try:
             client = redis_manager.get_client()
-            raw_messages = await client.lrange(self._cache_key, 0, settings.redis.REDIS_REPLAY_MAX_EVENTS - 1)  # type: ignore[invalid-await]
+            # Newest N: a list written under a higher cap still yields its end
+            # event after the cap is lowered (oldest-first reads would drop it).
+            raw_messages = await client.lrange(self._cache_key, -settings.redis.REDIS_REPLAY_MAX_EVENTS, -1)  # type: ignore[invalid-await]
         except RedisError as e:
             logger.error(f"Redis replay failed for run {self.run_id}: {e}")
             return []
@@ -416,7 +424,7 @@ class RedisBrokerManager(BaseBrokerManager):
         try:
             client = redis_manager.get_client()
             seq = await client.incr(counter_key)
-            await client.expire(counter_key, settings.redis.REDIS_REPLAY_TTL_SECONDS)
+            await client.expire(counter_key, _counter_ttl_seconds())
             return generate_event_id(run_id, int(seq))
         except RedisError as e:
             logger.warning(f"Failed to allocate event_id for run {run_id}: {e}")

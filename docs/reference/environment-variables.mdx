@@ -129,7 +129,7 @@ Aegra uses two connection pools: one for SQLAlchemy (metadata) and one for LangG
 | `REDIS_URL` | `redis://localhost:6379/0` | Redis connection URL |
 | `REDIS_CHANNEL_PREFIX` | `aegra:run:` | Prefix for Redis pub/sub channels |
 | `REDIS_MAX_CONNECTIONS` | `250` | Maximum Redis connection pool size |
-| `REDIS_REPLAY_TTL_SECONDS` | `600` | How long a run's replay buffer is kept after its last event. Bounds how long a reconnecting client can resume from `Last-Event-ID` |
+| `REDIS_REPLAY_TTL_SECONDS` | `600` | How long a run's replay buffer is kept after its last event. Bounds how long a reconnecting client can resume from `Last-Event-ID`. The event sequence counter lives for at least `BG_JOB_TIMEOUT_SECS`, so a short replay TTL cannot interrupt an active stream |
 | `REDIS_REPLAY_MAX_EVENTS` | `10000` | Maximum events kept in a run's replay buffer. With `values` stream mode each event holds the whole graph state, so lower this to bound Redis memory |
 
 ## Workers

@@ -323,6 +323,37 @@ def test_store_delete_handler_receives_namespace_and_key(monkeypatch: pytest.Mon
     assert seen[0].get("key") == "k1", f"handler saw {seen[0]}, losing the request body"
 
 
+def test_store_search_ignores_global_handler_value_filters(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A global @auth.on returning {"owner": ...} must not filter store search by value (#761).
+
+    Isolation comes from namespace scoping; put/get/delete ignore such keys, so
+    applying them only on search returned nothing while get kept working.
+    """
+    auth = Auth()
+
+    @auth.on
+    async def owner_filter(ctx: Any, value: Any) -> dict[str, Any]:
+        return {"owner": "user:alice"}
+
+    app = _build_app(auth, monkeypatch)
+    seen: list[Any] = []
+
+    class _RecordingStore:
+        async def asearch(self, namespace_prefix: tuple[str, ...], **kwargs: Any) -> list[Any]:
+            seen.append((namespace_prefix, kwargs.get("filter")))
+            return []
+
+    monkeypatch.setattr(db_manager, "get_store", lambda: _RecordingStore())
+
+    with TestClient(app) as client:
+        response = client.post("/store/items/search", json={"namespace_prefix": ["notes"]})
+
+    assert response.status_code == 200, response.text
+    assert seen == [(("users", "test-user", "notes"), None)], (
+        f"store saw {seen}; handler value filters must not apply to search"
+    )
+
+
 def test_run_create_authorizes_the_assistant(monkeypatch: pytest.MonkeyPatch) -> None:
     """Creating a run consults @auth.on.assistants for the assistant it uses.
 

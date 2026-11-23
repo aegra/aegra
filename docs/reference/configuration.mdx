@@ -432,7 +432,9 @@ Aegra calls it once for every thread it deletes, after the delete commits, on ev
 
 Nothing is called for a delete that did not happen: a missing thread (`404`), a failed delete, a skipped thread, or a `keep_latest` prune, which keeps the thread.
 
-The call runs in the background, so it never delays the response or the sweep, and an exception it raises is logged with the thread ID and owner and leaves the delete in place. Delivery is at most once, with no retry: a crash between the commit and the call loses it, and so does a call still running when shutdown has waited out the drain period it shares with [webhook delivery](/guides/webhooks). Make the function idempotent and give it its own timeout if it calls out to another service.
+The call runs in the background, so it never delays the response or the sweep, and an exception it raises is logged with the thread ID and owner and leaves the delete in place. Delivery is at most once, with no retry. At shutdown Aegra waits, within the drain period it shares with [webhook delivery](/guides/webhooks), for the calls still running and for the stateless cleanup still deleting threads, so those threads get their call too. A crash between the commit and the call loses it, and so does a call still running when the drain period ends, or a delete that commits after it. Make the function idempotent and give it its own timeout if it calls out to another service.
+
+Each deleted thread gets its own call, and calls for threads deleted together, such as one TTL sweep or one prune, run concurrently with no limit on how many. A function that calls out to another service should bound its own concurrent requests.
 
 A file path loads as a module of its own, separate from the same file imported elsewhere. A value that does not load, a function that is not `async`, or an unknown key under `hooks` stops the server at startup. This key is specific to Aegra.
 

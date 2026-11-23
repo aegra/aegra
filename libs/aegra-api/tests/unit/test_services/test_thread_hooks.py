@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+import structlog
 from structlog.testing import capture_logs
 
 from aegra_api.services import run_cleanup, thread_hooks
@@ -32,8 +33,10 @@ def _write_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, hooks: object
 
 
 @pytest.fixture
-def logs() -> Iterator[list[MutableMapping[str, Any]]]:
+def logs(monkeypatch: pytest.MonkeyPatch) -> Iterator[list[MutableMapping[str, Any]]]:
     with capture_logs() as captured:
+        # An earlier test's logging setup may have bound the module logger; a fresh one binds under the capture.
+        monkeypatch.setattr(thread_hooks, "logger", structlog.get_logger(thread_hooks.__name__))
         yield captured
 
 

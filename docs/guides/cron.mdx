@@ -134,7 +134,7 @@ def send_report(state: State, config: RunnableConfig) -> dict[str, Any]:
     ...
 ```
 
-The same two keys, together with a copy of the cron's `metadata`, are set as the run's metadata, so the traces of scheduled runs carry the cron's tags (see [Observability](/guides/observability#run-metadata)) and so does the `metadata` field of each run's [webhook](/guides/webhooks) payload. The cron's metadata cannot override the two server keys.
+The same two keys, together with a copy of the cron's `metadata`, are set as the run's metadata, so the traces of scheduled runs carry the cron's tags (see [Observability](/guides/observability#run-metadata)) and so does the `metadata` field of each run's [webhook](/guides/webhooks) payload. The cron's metadata cannot override the two server keys. Only string, number, and boolean values of the cron's metadata become trace attributes; other JSON values stay in the run's metadata and its webhook payload, and the traces leave them out with a warning. Cron metadata is not held to the key and value limits of a run's `metadata`.
 
 The immediate first run that cron creation triggers is not a schedule occurrence; its `cron_scheduled_time` is the cron's `created_at`.
 

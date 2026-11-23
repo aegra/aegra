@@ -4,7 +4,7 @@ from datetime import UTC, datetime
 from typing import Any, Literal
 from urllib.parse import urlparse
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from aegra_api.models.runs import Durability
 from aegra_api.settings import settings
@@ -22,8 +22,8 @@ OnRunCompleted = Literal["delete", "keep"]
 def _validate_webhook_url(value: str | None) -> str | None:
     """Reject malformed or non-http(s) webhook URLs at the API boundary.
 
-    The cron record stores ``webhook`` verbatim. When a future runtime wires
-    webhook delivery this is the SSRF entry point, so we constrain it now.
+    The cron record stores ``webhook`` verbatim and every fired run calls it.
+    The server's webhooks.url policy is applied on top, in CronService.
     """
     if value is None:
         return None
@@ -69,9 +69,10 @@ class CronCreate(BaseModel):
     # NOTE: stream_resumable is NOT exposed here because RunCreate has no matching
     # field yet. Accepting it silently drops the value at firing time.
 
+    _check_webhook = field_validator("webhook")(_validate_webhook_url)
+
     @model_validator(mode="after")
     def _check(self) -> "CronCreate":
-        self.webhook = _validate_webhook_url(self.webhook)
         if isinstance(self.stream_mode, str) and len(self.stream_mode) > _STREAM_MODE_MAX_LEN:
             raise ValueError("stream_mode is too long")
         if self.end_time is not None:
@@ -124,9 +125,12 @@ class CronUpdate(BaseModel):
     durability: Durability | None = None
     # See CronCreate: stream_resumable omitted until RunCreate gains a matching field.
 
+    # A field validator, unlike assigning in _check, keeps "webhook" out of model_fields_set when it
+    # was omitted, so update_cron can tell an omitted webhook from an explicit null that removes it.
+    _check_webhook = field_validator("webhook")(_validate_webhook_url)
+
     @model_validator(mode="after")
     def _check(self) -> "CronUpdate":
-        self.webhook = _validate_webhook_url(self.webhook)
         if isinstance(self.stream_mode, str) and len(self.stream_mode) > _STREAM_MODE_MAX_LEN:
             raise ValueError("stream_mode is too long")
         if self.end_time is not None:

@@ -125,6 +125,8 @@ SELF_DISPATCHING: Final[frozenset[tuple[str, str]]] = frozenset(
         ("POST", "/threads/{thread_id}/runs"),
         ("POST", "/threads/{thread_id}/runs/stream"),
         ("POST", "/threads/{thread_id}/runs/wait"),
+        # Authorized per command from the parsed RunCreate, not the JSON-RPC envelope.
+        ("POST", "/threads/{thread_id}/commands"),
         ("GET", "/threads/{thread_id}/runs/{run_id}"),
         ("DELETE", "/threads/{thread_id}/runs/{run_id}"),
         ("POST", "/runs"),

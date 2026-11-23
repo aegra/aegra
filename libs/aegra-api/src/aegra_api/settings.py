@@ -314,6 +314,7 @@ class ObservabilitySettings(EnvBase):
     OTEL_SERVICE_NAME: str = "aegra-backend"
     OTEL_TARGETS: str = ""  # Comma-separated: "LANGFUSE,PHOENIX"
     OTEL_CONSOLE_EXPORT: bool = False  # For local debugging
+    OTEL_TRACE_ID_FROM_RUN_ID: bool = True
 
     # --- Generic OTLP Target (Default/Custom) ---
     OTEL_EXPORTER_OTLP_ENDPOINT: str | None = None

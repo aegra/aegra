@@ -65,6 +65,10 @@ def _build_run_create(cron: CronORM) -> RunCreate:
         multitask_strategy=payload.get("multitask_strategy"),
         durability=payload.get("durability"),
         checkpoint_during=payload.get("checkpoint_during"),
+        webhook=payload.get("webhook"),
+        # The cron's metadata reaches the fired run through its trigger (see _build_trigger),
+        # so the RunCreate carries none of its own.
+        metadata=None,
     )
 
 
@@ -208,6 +212,7 @@ class CronScheduler:
                 user,
                 initial_status="pending",
                 trigger=trigger,
+                validate_webhook=False,
             )
             run_created = True
             logger.info("Cron fired run", cron_id=cron.cron_id, run_id=_run_id, thread_id=thread_id)

@@ -1316,6 +1316,36 @@ class TestUpdateThread:
         assert data["metadata"]["status"] == "draft"  # did not change
         assert data["metadata"]["count"] == 2  # updated
 
+    def test_update_thread_keeps_metadata_a_handler_injects(self) -> None:
+        """A threads.update handler's in-place metadata edit must reach the stored thread"""
+        app = create_test_app(include_runs=False, include_threads=True)
+        thread = _thread_row("thread-update-4", metadata={"status": "draft"})
+
+        class Session(DummySessionBase):
+            async def scalar(self, _stmt: Any) -> Any:
+                return thread
+
+            async def execute(self, stmt: Any, *args: Any, **kwargs: Any) -> None:
+                apply_thread_metadata_merge(stmt, thread)
+
+            async def commit(self) -> None:
+                pass
+
+            async def refresh(self, obj: Any) -> None:
+                pass
+
+        async def inject(_ctx: Any, value: dict[str, Any]) -> None:
+            value["metadata"]["team_id"] = "team999"
+
+        app.dependency_overrides[core_get_session] = override_get_session_dep(Session)
+        client = make_client(app)
+
+        with patch("aegra_api.api.threads.handle_event", side_effect=inject):
+            resp = client.patch("/threads/thread-update-4", json={"metadata": {"count": 2}})
+
+        assert resp.status_code == 200
+        assert resp.json()["metadata"] == {"status": "draft", "count": 2, "team_id": "team999"}
+
     def test_update_thread_not_found(self):
         """Test updating a non-existent thread"""
         app = create_test_app(include_runs=False, include_threads=True)

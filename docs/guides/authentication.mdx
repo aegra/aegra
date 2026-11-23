@@ -249,7 +249,14 @@ returns a `permission_denied` error envelope.
 
 Handlers may also inject data by mutating `value` in place. Setting
 `value["metadata"]["team_id"]` in an `@auth.on.threads.create` handler stores
-that metadata on the new thread.
+that metadata on the new thread. `@auth.on.crons.create` and
+`@auth.on.crons.update` handlers inject `metadata`, `config`, and `context` the
+same way: the cron stores them, and every scheduled run uses the stored `config`
+and `context`. A cron handler's edit to `webhook` is not applied; the cron keeps
+the URL the client sent. A thread or cron handler can also return the field it
+sets in a dict; the returned field wins over an in-place edit. On cron update, a
+field (`metadata`, `config`, or `context`) the client did not send merges onto
+the stored value instead of replacing it.
 
 <Note>
 Route-to-handler mapping lives in `core/auth_registry.py`. A route that is not

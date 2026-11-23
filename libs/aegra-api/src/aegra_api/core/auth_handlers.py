@@ -5,11 +5,13 @@ allowing users to define fine-grained access control rules using @auth.on.*
 decorators in their auth.py files.
 """
 
+from collections.abc import Iterable, Mapping
 from typing import Any
 
 from fastapi import HTTPException
 from langgraph_sdk import Auth
 from langgraph_sdk.auth.types import AuthContext as LangGraphAuthContext
+from pydantic import BaseModel
 
 from aegra_api.core.auth_middleware import get_auth_instance
 from aegra_api.models.auth import User
@@ -156,6 +158,41 @@ async def handle_event(
         status_code=500,
         detail=f"Auth handler returned invalid type: {type(result)}. Expected dict, None, True, or False.",
     )
+
+
+def apply_handler_edits(
+    request: BaseModel,
+    filters: Mapping[str, Any] | None,
+    value: Mapping[str, Any],
+    fields: Iterable[str],
+) -> set[str]:
+    """Fold what an authorization handler set under ``fields`` into ``request``.
+
+    A handler edits a field by returning it in a dict or by mutating ``value`` in
+    place; the returned entry wins. The edit is merged over the request's own value,
+    so a handler adds to what the client sent.
+
+    Args:
+        request: The request model the route persists.
+        filters: What ``handle_event`` returned for this dispatch.
+        value: The dict the handler was given.
+        fields: Dict-valued request fields a handler may edit.
+
+    Returns:
+        The fields the handler filled that the client left unset, so an update can
+        merge them onto the stored value instead of replacing it.
+    """
+    unset: set[str] = set()
+    for field in fields:
+        source = filters if filters is not None and field in filters else value
+        edit = source.get(field)
+        if not edit or not isinstance(edit, dict):
+            continue
+        current = getattr(request, field)
+        if current is None:
+            unset.add(field)
+        setattr(request, field, {**(current or {}), **edit})
+    return unset
 
 
 def _get_handler(

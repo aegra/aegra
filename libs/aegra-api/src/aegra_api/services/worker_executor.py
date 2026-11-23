@@ -594,9 +594,9 @@ async def _heartbeat_loop(
         await asyncio.sleep(interval)
         try:
             new_expiry = datetime.now(UTC) + timedelta(seconds=duration)
-            # One statement extends the lease and reads the run's status, so the cancel
-            # follows the lease loss without another wait in which the job could finish
-            # and save its result over the worker that now owns the run.
+            # One statement extends the lease and reads the run's status, so no second read
+            # stands between the lease loss and the cancel; a job that finished during such
+            # a read could save its result over the worker that now owns the run.
             extension = (
                 update(RunORM)
                 .where(RunORM.run_id == run_id, RunORM.claimed_by == worker_name)

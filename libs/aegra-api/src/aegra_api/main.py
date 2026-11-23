@@ -44,6 +44,7 @@ from aegra_api.services.executor import executor
 from aegra_api.services.langgraph_service import get_langgraph_service
 from aegra_api.services.lease_reaper import lease_reaper
 from aegra_api.services.run_preparation import get_default_durability
+from aegra_api.services.thread_hooks import load_thread_deleted_hook, thread_hook_dispatcher
 from aegra_api.services.thread_ttl import get_thread_ttl_config, thread_ttl_sweeper
 from aegra_api.services.webhook_delivery import webhook_dispatcher
 from aegra_api.services.webhook_policy import get_webhook_settings
@@ -151,6 +152,9 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
 
         # Registered before the executor so it drains after it: runs finalized while draining queue webhooks.
         stack.push_async_callback(webhook_dispatcher.stop)
+        # Loaded after the graphs so a module path under `dependencies` resolves; a bad path stops the boot.
+        thread_hook_dispatcher.configure(load_thread_deleted_hook())
+        stack.push_async_callback(thread_hook_dispatcher.stop)
 
         # Start executor (spawns worker coroutines when Redis is enabled)
         await executor.start()

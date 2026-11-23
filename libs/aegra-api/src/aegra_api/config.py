@@ -131,6 +131,13 @@ class AuthConfig(TypedDict, total=False):
     """Disable authentication for LangGraph Studio connections"""
 
 
+class HooksConfig(TypedDict, total=False):
+    """Deployment code Aegra calls on server events."""
+
+    thread_deleted: str
+    """Async function called after a thread is deleted, as './file.py:name' or 'module:name'."""
+
+
 def _resolve_config_path() -> Path | None:
     """Resolve config file path using standard resolution order.
 
@@ -287,6 +294,17 @@ def load_auth_config() -> AuthConfig | None:
         return auth_config
 
     return None
+
+
+def load_hooks_config() -> HooksConfig | None:
+    """Load the hooks block from aegra.json or langgraph.json, unvalidated.
+
+    Any value other than a missing key is returned as written, so the hook loader can reject it.
+    """
+    config = load_config()
+    if config is None:
+        return None
+    return config.get("hooks")
 
 
 def get_config_dir() -> Path | None:

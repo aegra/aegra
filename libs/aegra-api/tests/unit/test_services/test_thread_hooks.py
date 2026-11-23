@@ -418,6 +418,30 @@ class TestShutdownWithDeletesInFlight:
         await _cancel(live)
 
     @pytest.mark.asyncio
+    async def test_cleanup_past_its_run_wait_is_waited_for(
+        self, runs: _FakeRuns, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(thread_hooks, "SHUTDOWN_DRAIN_SECONDS", 1.0)
+        received: list[str] = []
+
+        async def hook(event: ThreadDeletedEvent) -> None:
+            received.append(event["thread_id"])
+
+        runs.ended.set()
+        runs.delete_released.clear()
+        thread_hook_dispatcher.configure(hook, pending_deletes=run_cleanup.cleanup_tasks_for_shutdown)
+        cleanup = run_cleanup.schedule_background_cleanup("r-1", "t-1", "owner-1")
+        await runs.deleting.wait()
+        # The delete finishes after shutdown has started; a cleanup this far needs no run check.
+        asyncio.get_running_loop().call_later(0.05, runs.delete_released.set)
+
+        await asyncio.wait_for(thread_hook_dispatcher.stop(), timeout=2)
+
+        assert received == ["t-1"]
+        assert cleanup.done()
+        assert runs.checks == []
+
+    @pytest.mark.asyncio
     async def test_cleanup_deleting_when_the_period_ends_is_not_cancelled(
         self, runs: _FakeRuns, monkeypatch: pytest.MonkeyPatch
     ) -> None:

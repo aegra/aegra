@@ -165,7 +165,7 @@ class Run(Base):
     # If migrations add this column later, it's already represented here.
     config: Mapped[dict | None] = mapped_column(JsonbSafe, nullable=True)
     context: Mapped[dict | None] = mapped_column(JsonbSafe, nullable=True)
-    output: Mapped[dict | None] = mapped_column(JsonbSafe)
+    output: Mapped[Any | None] = mapped_column(JsonbSafe)
     error_message: Mapped[str | None] = mapped_column(Text)
     user_id: Mapped[str] = mapped_column(Text, nullable=False)
     created_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), server_default=text("now()"))

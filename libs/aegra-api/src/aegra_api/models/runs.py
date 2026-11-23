@@ -271,8 +271,8 @@ class Run(BaseModel):
         "pending", description="Current run status: pending, running, error, success, timeout, or interrupted."
     )
     input: Any = Field(None, description="Input provided to the run: any JSON value. None for checkpoint-only resume.")
-    output: dict[str, Any] | None = Field(
-        None, description="Final output produced by the run, or null if not yet complete."
+    output: Any = Field(
+        None, description="Final output produced by the run: any JSON value, or null if not yet complete."
     )
     error_message: str | None = Field(None, description="Error message if the run failed.")
     config: dict[str, Any] | None = Field(

@@ -1241,3 +1241,24 @@ class TestRunFieldContract:
         assert resp.status_code == 200
         mock_executor.submit.assert_awaited_once()
         assert {"model": "RunCreate", "keys": ["not_a_real_field"], "count": 1} in logged
+
+
+class TestGetRunWithNonObjectOutput:
+    """A finished run whose graph returned a list or a scalar must be readable, not a 500."""
+
+    @pytest.mark.parametrize("output", [["a", "b"], "done", 7])
+    def test_get_run_returns_the_stored_output(self, output: Any) -> None:
+        app = create_test_app(include_runs=True, include_threads=False)
+        run = _run_row(status="success", input_data=["x"], output_data=output)
+
+        class Session(DummySessionBase):
+            async def scalar(self, _stmt: Any) -> Any:
+                return run
+
+        override_session_dependency(app, Session)
+
+        resp = make_client(app).get("/threads/test-thread-123/runs/test-run-123")
+
+        assert resp.status_code == 200
+        assert resp.json()["output"] == output
+        assert resp.json()["input"] == ["x"]

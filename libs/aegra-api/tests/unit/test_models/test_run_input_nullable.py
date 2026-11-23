@@ -45,3 +45,23 @@ def test_run_returns_any_json_input(value: Any) -> None:
     )
 
     assert run.model_dump()["input"] == value
+
+
+@pytest.mark.parametrize("value", [["a", "b"], "done", 7, False, {"count": 2}])
+def test_run_returns_any_json_output(value: Any) -> None:
+    """A graph may return a list or a scalar; the run row stores it, so the response must carry it."""
+    now = datetime.now(UTC)
+
+    run = Run(
+        run_id="r-1",
+        thread_id="t-1",
+        assistant_id="agent",
+        status="success",
+        input=None,
+        output=value,
+        user_id="u-1",
+        created_at=now,
+        updated_at=now,
+    )
+
+    assert run.model_dump()["output"] == value

@@ -42,7 +42,7 @@ description: "What Aegra supports today, what's coming soon, and what's not yet 
 | List runs with `select` | Supported | `GET /threads/{thread_id}/runs` filters by `status`, pages with `limit`/`offset`, and returns only the fields named in `select`. Leave `output` out of `select` to list long threads cheaply. `select` takes the fields of Aegra's `Run` (`run_id`, `status`, `input`, `output`, `config`, `context`, ...); `metadata`, `kwargs` and `multitask_strategy` are not `Run` fields here and return `422`. |
 | Subgraph streaming | Supported | Stream events from nested subgraphs. |
 | Stateless runs | Supported | Execute without persisting thread state. |
-| Any JSON run input | Supported | `input` takes any JSON value (object, list, string, number, boolean), for graphs whose input is not an object. The `Run` response returns it as sent. |
+| Any JSON run input | Supported | `input` takes any JSON value (object, list, string, number, boolean), for graphs whose input is not an object. The `Run` response returns it as sent, and returns a non-object `output` the same way. |
 | Missing-thread behavior (`if_not_exists`) | Supported | `create` (the default) creates the thread, `reject` returns `404`. LangGraph Platform defaults to `reject`. A stateless run always gets its own thread, so the field has no effect there. |
 | Delayed runs (`after_seconds`) | Coming soon | Runs start at once. A value above `0` returns `422` instead of being ignored. Tracked in [#574](https://github.com/aegra/aegra/issues/574). |
 | Unknown run and cron fields | Supported | A request field Aegra does not declare is dropped and logged at warning level with its name, so a client sending something the server does not act on shows up in the log. |

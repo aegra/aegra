@@ -6,10 +6,12 @@ literal restriction.
 """
 
 from datetime import UTC, datetime, timedelta
+from typing import Any
 
 import pytest
 from pydantic import ValidationError
 
+from aegra_api.models import runs as runs_models
 from aegra_api.models.crons import CronCreate, CronUpdate
 from aegra_api.models.runs import Durability
 
@@ -175,3 +177,53 @@ class TestDurability:
     def test_update_rejects_unknown_mode(self) -> None:
         with pytest.raises(ValidationError, match="durability"):
             CronUpdate.model_validate({"durability": "eventually"})
+
+
+class TestStreamResumable:
+    """The SDK sends ``stream_resumable`` on cron create and update; replay is always on."""
+
+    def test_create_accepts_stream_resumable(self) -> None:
+        req = CronCreate(input={"q": 1}, assistant_id="a", schedule="* * * * *", stream_resumable=True)
+
+        assert req.stream_resumable is True
+
+    def test_update_accepts_stream_resumable(self) -> None:
+        assert CronUpdate(stream_resumable=False).stream_resumable is False
+
+    def test_update_leaves_an_omitted_stream_resumable_unset(self) -> None:
+        assert "stream_resumable" not in CronUpdate.model_validate({"enabled": False}).model_fields_set
+
+
+class TestUnknownKeys:
+    """An undeclared key is still dropped, but the drop is logged with its name."""
+
+    @pytest.fixture
+    def logged_warnings(self, monkeypatch: pytest.MonkeyPatch) -> list[dict[str, Any]]:
+        recorded: list[dict[str, Any]] = []
+
+        def record(event: str, **fields: Any) -> None:
+            recorded.append({"event": event, **fields})
+
+        monkeypatch.setattr(runs_models.logger, "warning", record)
+        return recorded
+
+    def test_create_logs_the_unknown_key_names(self, logged_warnings: list[dict[str, Any]]) -> None:
+        CronCreate.model_validate({"input": {"q": 1}, "assistant_id": "a", "schedule": "* * * * *", "after_seconds": 5})
+
+        assert logged_warnings == [
+            {"event": "Ignoring unknown request fields", "model": "CronCreate", "keys": ["after_seconds"], "count": 1}
+        ]
+
+    def test_update_logs_the_unknown_key_names(self, logged_warnings: list[dict[str, Any]]) -> None:
+        CronUpdate.model_validate({"enabled": False, "assistant_id": "a"})
+
+        assert logged_warnings == [
+            {"event": "Ignoring unknown request fields", "model": "CronUpdate", "keys": ["assistant_id"], "count": 1}
+        ]
+
+    def test_declared_keys_log_nothing(self, logged_warnings: list[dict[str, Any]]) -> None:
+        CronCreate.model_validate(
+            {"input": {"q": 1}, "assistant_id": "a", "schedule": "* * * * *", "stream_resumable": False}
+        )
+
+        assert logged_warnings == []

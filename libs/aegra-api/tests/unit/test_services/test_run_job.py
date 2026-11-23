@@ -1,6 +1,7 @@
 """Tests for RunJob Pydantic model and serialization."""
 
 from datetime import UTC, datetime
+from typing import Any
 
 import pytest
 from pydantic import ValidationError
@@ -209,6 +210,27 @@ class TestRunJob:
             execution_params = params
 
         assert RunJob.from_run_orm(FakeORM()).execution.durability == "exit"
+
+    @pytest.mark.parametrize("input_data", [["a", "b"], "hello", 7, False])
+    def test_non_dict_input_survives_the_worker_round_trip(self, input_data: Any) -> None:
+        """Run input is any JSON value, and Redis workers rebuild it from execution_params."""
+        job = RunJob(
+            identity=RunIdentity(run_id="r1", thread_id="t1", graph_id="g1"),
+            user=User(identity="u1"),
+            execution=RunExecution(input_data=input_data),
+        )
+
+        class FakeORM:
+            run_id = "r1"
+            thread_id = "t1"
+            assistant_id = None
+            created_at = None
+            execution_params = job.to_execution_params()
+
+        restored = RunJob.from_run_orm(FakeORM()).execution.input_data
+
+        assert restored == input_data
+        assert type(restored) is type(input_data)
 
     def test_webhook_survives_the_worker_round_trip(self) -> None:
         """Redis workers deliver the completion webhook, so the URL must be in execution_params."""

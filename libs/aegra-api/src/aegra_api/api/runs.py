@@ -88,6 +88,18 @@ async def _request_run_interruption(
         await streaming_service.cancel_run(run_orm.run_id)
 
 
+async def _ensure_thread_usable(session: AsyncSession, thread_id: str, request: RunCreate, user: User) -> None:
+    """404 for another user's thread, and for a missing one when the run sets if_not_exists='reject'.
+
+    Any other missing thread is created by ``_prepare_run``.
+    """
+    thread = await session.scalar(select(ThreadORM).where(ThreadORM.thread_id == thread_id))
+    if thread is None and request.if_not_exists != "reject":
+        return
+    if thread is None or thread.user_id != user.identity:
+        raise HTTPException(404, f"Thread '{thread_id}' not found")
+
+
 @router.post("/threads/{thread_id}/runs", response_model=Run, responses={**NOT_FOUND, **CONFLICT})
 async def create_run(
     thread_id: str,
@@ -102,9 +114,7 @@ async def create_run(
     endpoint to follow progress. Provide either `input` or `command` (for
     human-in-the-loop resumption) but not both.
     """
-    existing_thread = await session.scalar(select(ThreadORM).where(ThreadORM.thread_id == thread_id))
-    if existing_thread and existing_thread.user_id != user.identity:
-        raise HTTPException(404, f"Thread '{thread_id}' not found")
+    await _ensure_thread_usable(session, thread_id, request, user)
 
     await _apply_create_run_auth(user, thread_id, request)
 
@@ -135,9 +145,7 @@ async def create_and_stream_run(
     """
     maker = _get_session_maker()
     async with maker() as session:
-        existing_thread = await session.scalar(select(ThreadORM).where(ThreadORM.thread_id == thread_id))
-        if existing_thread and existing_thread.user_id != user.identity:
-            raise HTTPException(404, f"Thread '{thread_id}' not found")
+        await _ensure_thread_usable(session, thread_id, request, user)
 
         await _apply_create_run_auth(user, thread_id, request)
 
@@ -380,9 +388,7 @@ async def wait_for_run(
 
     # Session block: all pre-execution DB work (validate, create run, submit)
     async with maker() as session:
-        existing_thread = await session.scalar(select(ThreadORM).where(ThreadORM.thread_id == thread_id))
-        if existing_thread and existing_thread.user_id != user.identity:
-            raise HTTPException(404, f"Thread '{thread_id}' not found")
+        await _ensure_thread_usable(session, thread_id, request, user)
 
         await _apply_create_run_auth(user, thread_id, request)
 

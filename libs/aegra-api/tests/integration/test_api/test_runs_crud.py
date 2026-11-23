@@ -7,6 +7,8 @@ import pytest
 from fastapi.testclient import TestClient
 
 from aegra_api.core.orm import Run as RunORM
+from aegra_api.core.orm import Thread as ThreadORM
+from aegra_api.models import runs as runs_models
 from tests.fixtures.clients import create_test_app, make_client
 from tests.fixtures.database import DummyScalarResult, DummySessionBase
 from tests.fixtures.session_fixtures import BasicSession, override_session_dependency
@@ -1109,3 +1111,133 @@ class TestCreateRunDurability:
         )
 
         assert resp.status_code == 422
+
+
+_RUN_CREATE_PATHS = [
+    "/threads/test-thread-123/runs",
+    "/threads/test-thread-123/runs/stream",
+    "/threads/test-thread-123/runs/wait",
+]
+
+
+class TestRunFieldContract:
+    """Every SDK run field changes behavior, returns 422, or is a documented no-op (#503)."""
+
+    @staticmethod
+    def _post(
+        body: dict[str, Any],
+        *,
+        path: str = "/threads/test-thread-123/runs",
+        thread_exists: bool = True,
+        run_may_start: bool = True,
+    ) -> tuple[Any, MagicMock, list[Any]]:
+        app = create_test_app(include_runs=True, include_threads=False)
+        thread = _thread_row() if thread_exists else None
+        assistant = _assistant_row()
+        added: list[Any] = []
+
+        class Session(DummySessionBase):
+            async def scalar(self, stmt: Any) -> Any:
+                stmt_str = str(stmt).lower()
+                if "from thread" in stmt_str:
+                    return thread
+                if "from assistant" in stmt_str:
+                    return assistant
+                return None
+
+            def add(self, obj: Any) -> None:
+                added.append(obj)
+
+            async def execute(self, _stmt: Any) -> Any:
+                return MagicMock(rowcount=1)
+
+        override_session_dependency(app, Session)
+        client = make_client(app)
+        mock_executor = MagicMock()
+        # A started stream or wait run would block on a run that never finishes; fail instead.
+        started = None if run_may_start else AssertionError("the run must not start")
+        mock_executor.submit = AsyncMock(return_value=None, side_effect=started)
+
+        with (
+            patch("aegra_api.api.runs._get_session_maker", return_value=_make_session_maker(Session())),
+            patch("aegra_api.services.run_preparation.executor", mock_executor),
+            patch("aegra_api.services.run_preparation.get_langgraph_service") as mock_service,
+            patch("aegra_api.services.run_preparation.get_default_durability", return_value=None),
+        ):
+            mock_service.return_value.list_graphs.return_value = ["test-graph"]
+            resp = client.post(path, json={"assistant_id": "test-assistant-123", "input": {"message": "test"}, **body})
+        return resp, mock_executor, added
+
+    @pytest.mark.parametrize("path", _RUN_CREATE_PATHS)
+    def test_reject_on_a_missing_thread_is_404(self, path: str) -> None:
+        resp, mock_executor, added = self._post(
+            {"if_not_exists": "reject"}, path=path, thread_exists=False, run_may_start=False
+        )
+
+        assert resp.status_code == 404
+        assert "test-thread-123" in resp.text
+        mock_executor.submit.assert_not_awaited()
+        assert added == []
+
+    @pytest.mark.parametrize("body", [{}, {"if_not_exists": "create"}])
+    def test_a_missing_thread_is_created_by_default(self, body: dict[str, Any]) -> None:
+        resp, mock_executor, added = self._post(body, thread_exists=False)
+
+        assert resp.status_code == 200
+        assert [obj.thread_id for obj in added if isinstance(obj, ThreadORM)] == ["test-thread-123"]
+        mock_executor.submit.assert_awaited_once()
+
+    def test_reject_on_an_existing_thread_starts_the_run(self) -> None:
+        resp, mock_executor, _added = self._post({"if_not_exists": "reject"})
+
+        assert resp.status_code == 200
+        mock_executor.submit.assert_awaited_once()
+
+    def test_unknown_if_not_exists_is_422(self) -> None:
+        resp, mock_executor, _added = self._post({"if_not_exists": "ignore"})
+
+        assert resp.status_code == 422
+        mock_executor.submit.assert_not_awaited()
+
+    @pytest.mark.parametrize("after_seconds", [1, 3600])
+    def test_delayed_start_is_422(self, after_seconds: int) -> None:
+        resp, mock_executor, _added = self._post({"after_seconds": after_seconds})
+
+        assert resp.status_code == 422
+        assert "after_seconds is not supported" in resp.text
+        mock_executor.submit.assert_not_awaited()
+
+    def test_after_seconds_zero_starts_the_run(self) -> None:
+        resp, mock_executor, _added = self._post({"after_seconds": 0})
+
+        assert resp.status_code == 200
+        mock_executor.submit.assert_awaited_once()
+
+    @pytest.mark.parametrize("value", [["a", "b"], "hello", 7, True])
+    def test_non_dict_input_is_queued_stored_and_returned(self, value: Any) -> None:
+        resp, mock_executor, added = self._post({"input": value})
+
+        assert resp.status_code == 200
+        assert resp.json()["input"] == value
+        assert mock_executor.submit.await_args.args[0].execution.input_data == value
+        run_orm = next(obj for obj in added if isinstance(obj, RunORM))
+        assert run_orm.input == value
+        assert run_orm.execution_params["execution"]["input_data"] == value
+
+    def test_inert_sdk_fields_are_accepted(self) -> None:
+        resp, mock_executor, _added = self._post(
+            {"stream_resumable": True, "feedback_keys": ["quality"], "langsmith_tracer": {"project_name": "p"}}
+        )
+
+        assert resp.status_code == 200
+        mock_executor.submit.assert_awaited_once()
+
+    def test_unknown_key_starts_the_run_and_is_logged(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        logged: list[dict[str, Any]] = []
+        monkeypatch.setattr(runs_models.logger, "warning", lambda event, **fields: logged.append(fields))
+
+        resp, mock_executor, _added = self._post({"not_a_real_field": True})
+
+        assert resp.status_code == 200
+        mock_executor.submit.assert_awaited_once()
+        assert {"model": "RunCreate", "keys": ["not_a_real_field"], "count": 1} in logged

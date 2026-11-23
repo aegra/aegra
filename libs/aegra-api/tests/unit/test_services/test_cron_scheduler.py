@@ -72,6 +72,11 @@ class TestBuildRunCreate:
     def test_cron_without_webhook_fires_runs_without_one(self) -> None:
         assert _build_run_create(_make_cron_orm(payload={"input": {"msg": "tick"}})).webhook is None
 
+    def test_forwards_stream_resumable(self) -> None:
+        cron = _make_cron_orm(payload={"input": {"msg": "tick"}, "stream_resumable": True})
+
+        assert _build_run_create(cron).stream_resumable is True
+
 
 # ---------------------------------------------------------------------------
 # Lifecycle: start / stop

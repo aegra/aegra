@@ -5,6 +5,7 @@ from datetime import datetime
 from typing import Any, Literal, Self
 from uuid import UUID
 
+import structlog
 from pydantic import (
     BaseModel,
     ConfigDict,
@@ -14,6 +15,8 @@ from pydantic import (
 )
 
 from aegra_api.utils.status_compat import validate_run_status
+
+logger = structlog.getLogger(__name__)
 
 # Constraints for ``RunCreate.metadata`` keys/values, enforced at request
 # time so the OpenAPI schema is honest about what reaches OTEL.  Without
@@ -31,14 +34,33 @@ _METADATA_MAX_VALUE_LEN = 512
 # not shift when a langgraph upgrade adds a mode.
 Durability = Literal["sync", "async", "exit"]
 
+# Key names are caller-controlled, so the warning carries a bounded sample of them.
+_UNKNOWN_KEYS_LOGGED = 20
+_UNKNOWN_KEY_LOG_LEN = 64
+
+
+def warn_unknown_keys(model: type[BaseModel], data: Any) -> None:
+    """Log request keys ``model`` does not declare; Pydantic drops them without an error."""
+    if not isinstance(data, dict):
+        return
+    unknown = sorted(str(key) for key in data if key not in model.model_fields)
+    if not unknown:
+        return
+    logger.warning(
+        "Ignoring unknown request fields",
+        model=model.__name__,
+        keys=[key[:_UNKNOWN_KEY_LOG_LEN] for key in unknown[:_UNKNOWN_KEYS_LOGGED]],
+        count=len(unknown),
+    )
+
 
 class RunCreate(BaseModel):
     """Request model for creating runs"""
 
     assistant_id: str = Field(..., description="Assistant to execute")
-    input: dict[str, Any] | None = Field(
+    input: Any = Field(
         None,
-        description="Input data for the run. Optional when resuming from a checkpoint.",
+        description="Input for the graph: any JSON value. Optional when resuming from a checkpoint.",
     )
     config: dict[str, Any] | None = Field(default_factory=dict, description="Execution config")
     context: dict[str, Any] | None = Field(default_factory=dict, description="Execution context")
@@ -85,6 +107,34 @@ class RunCreate(BaseModel):
             "returns 422."
         ),
     )
+    if_not_exists: Literal["create", "reject"] | None = Field(
+        None,
+        description=(
+            "What to do when the thread does not exist: 'create' (default) creates it, 'reject' returns 404. "
+            "LangGraph Platform defaults to 'reject'. A stateless run always gets its own thread, so the field "
+            "has no effect there."
+        ),
+    )
+    after_seconds: int | None = Field(
+        None,
+        ge=0,
+        description="Delayed start is not supported yet: runs start at once, and a value above 0 returns 422.",
+    )
+    stream_resumable: bool | None = Field(
+        None,
+        description=(
+            "Accepted for SDK compatibility and changes nothing: every stream can be rejoined with Last-Event-ID "
+            "while the server keeps the run's replay buffer."
+        ),
+    )
+    feedback_keys: list[str] | None = Field(
+        None,
+        description="Accepted and ignored: LangSmith feedback keys. Aegra traces through OpenTelemetry.",
+    )
+    langsmith_tracer: dict[str, Any] | None = Field(
+        None,
+        description="Accepted and ignored: LangSmith project routing. Aegra traces through OpenTelemetry.",
+    )
 
     # Human-in-the-loop fields (core HITL functionality)
     command: dict[str, Any] | None = Field(
@@ -125,6 +175,20 @@ class RunCreate(BaseModel):
             "sub-agent type) rather than payload data."
         ),
     )
+
+    @model_validator(mode="before")
+    @classmethod
+    def warn_on_unknown_keys(cls, data: Any) -> Any:
+        warn_unknown_keys(cls, data)
+        return data
+
+    @field_validator("after_seconds", mode="after")
+    @classmethod
+    def reject_delayed_start(cls, after_seconds: int | None) -> int | None:
+        """A delay the server would not honor is an error, not a run that starts at once."""
+        if after_seconds:
+            raise ValueError("after_seconds is not supported yet: runs start immediately. Omit it or send 0.")
+        return after_seconds
 
     @field_validator("metadata", mode="after")
     @classmethod
@@ -206,9 +270,7 @@ class Run(BaseModel):
     status: str = Field(
         "pending", description="Current run status: pending, running, error, success, timeout, or interrupted."
     )
-    input: dict[str, Any] | None = Field(
-        None, description="Input data provided to the run. None for checkpoint-only resume."
-    )
+    input: Any = Field(None, description="Input provided to the run: any JSON value. None for checkpoint-only resume.")
     output: dict[str, Any] | None = Field(
         None, description="Final output produced by the run, or null if not yet complete."
     )

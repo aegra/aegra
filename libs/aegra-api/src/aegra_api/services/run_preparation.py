@@ -100,7 +100,7 @@ def _resolve_content_text(content: Any) -> str:
     return ""
 
 
-def _extract_thread_name(input_data: dict[str, Any]) -> str:
+def _extract_thread_name(input_data: Any) -> str:
     """Derive a thread name from the first human message in the run input.
 
     Supports the common ``{"messages": [{"role": "human", "content": "..."}]}``
@@ -108,6 +108,8 @@ def _extract_thread_name(input_data: dict[str, Any]) -> str:
     Also handles list-of-blocks content from OpenAI-compatible APIs.
     Returns an empty string when no suitable message is found.
     """
+    if not isinstance(input_data, dict):
+        return ""
     messages = input_data.get("messages")
     if not isinstance(messages, list) or not messages:
         return ""
@@ -144,7 +146,7 @@ async def update_thread_metadata(
     graph_id: str,
     *,
     user_id: str | None = None,
-    input_data: dict[str, Any] | None = None,
+    input_data: Any = None,
 ) -> None:
     """Update thread metadata with assistant and graph information.
 
@@ -158,7 +160,7 @@ async def update_thread_metadata(
     # written here (or have its own dropped).
     thread = await session.scalar(select(ThreadORM).where(ThreadORM.thread_id == thread_id))
 
-    thread_name = _extract_thread_name(input_data or {})
+    thread_name = _extract_thread_name(input_data)
 
     if not thread:
         # Auto-create thread if it doesn't exist

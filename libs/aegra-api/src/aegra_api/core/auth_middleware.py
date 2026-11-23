@@ -10,6 +10,7 @@ import importlib
 import importlib.util
 import sys
 from pathlib import Path
+from types import ModuleType
 from typing import Any
 
 import structlog
@@ -33,6 +34,91 @@ logger = structlog.getLogger(__name__)
 
 class AuthLoadError(RuntimeError):
     """``auth.path`` is set but cannot be loaded. Serving as anonymous would drop all access control."""
+
+
+def split_import_path(path: str) -> tuple[Path | str, str]:
+    """Split an ``auth`` import path into its target and variable name.
+
+    The target is the resolved file of a ``./file.py:var`` path, relative paths
+    resolving from the config directory, or the dotted module of ``module:var``.
+
+    Raises:
+        ValueError: If the path has no ``:`` before the variable name
+    """
+    if ":" not in path:
+        raise ValueError(f"Invalid import path format (missing ':'): {path}")
+
+    module_path, var_name = path.rsplit(":", 1)
+    is_file_path = module_path.endswith(".py") or module_path.startswith("./") or module_path.startswith("../")
+    if not is_file_path:
+        return module_path, var_name
+
+    file_path = Path(module_path)
+    if not file_path.is_absolute():
+        # Fallback to CWD if no config found
+        file_path = (get_config_dir() or Path.cwd()) / file_path
+    return file_path.resolve(), var_name
+
+
+def import_auth_target(target: Path | str) -> ModuleType:
+    """Import the module or file an ``auth`` path names, once per process.
+
+    The auth handler and the cron user resolver often share a file. They see
+    one module and its state when both paths name it by path, give it the same
+    module name, or name it once by path and once as a module: a file the
+    ``auth`` config also names as a module is imported as that module.
+    """
+    if isinstance(target, str):
+        return importlib.import_module(target)
+    module_name = _module_naming(target)
+    if module_name is not None:
+        return importlib.import_module(module_name)
+    return _import_file(target)
+
+
+def _module_naming(file_path: Path) -> str | None:
+    """Return the module an ``auth`` config path names that imports from ``file_path``."""
+    auth_config = load_auth_config() or {}
+    for path in (auth_config.get("path"), auth_config.get("cron_user")):
+        target = split_import_path(path)[0] if path and ":" in path else None
+        if isinstance(target, str) and _module_file(target) == file_path:
+            return target
+    return None
+
+
+def _module_file(module_name: str) -> Path | None:
+    """Return the file ``module_name`` imports from, or None when Python cannot find one."""
+    try:
+        spec = importlib.util.find_spec(module_name)
+    except Exception as e:
+        # Finding it runs its parent packages; the loader of the path naming it reports the failure.
+        logger.warning(f"Could not find module {module_name} named in the auth config: {e}")
+        return None
+    if spec is None or spec.origin is None:
+        return None
+    return Path(spec.origin).resolve()
+
+
+def _import_file(file_path: Path) -> ModuleType:
+    """Import ``file_path`` once per process under a name derived from its stem."""
+    module_name = f"auth_module_{file_path.stem}"
+    loaded = sys.modules.get(module_name)
+    if loaded is not None and getattr(loaded, "__file__", None) == str(file_path):
+        return loaded
+
+    spec = importlib.util.spec_from_file_location(module_name, str(file_path))
+    if spec is None or spec.loader is None:
+        raise ImportError(f"Could not load module from {file_path}")
+
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[module_name] = module
+    # User code can raise anything at import time; a later load must not find the partial module.
+    try:
+        spec.loader.exec_module(module)
+    except Exception:
+        sys.modules.pop(module_name, None)
+        raise
+    return module
 
 
 class LangGraphUser(BaseUser):
@@ -97,29 +183,14 @@ class LangGraphAuthBackend(AuthenticationBackend):
 
     def _load_from_path(self, path: str) -> Auth:
         """Load auth from './file.py:var' or 'module:var'. Relative paths resolve from the config directory."""
-        if ":" not in path:
-            raise AuthLoadError(f"Invalid auth path format (missing ':'): {path}")
+        try:
+            target, var_name = split_import_path(path)
+        except ValueError as e:
+            raise AuthLoadError(f"Invalid auth path format (missing ':'): {path}") from e
 
-        module_path, var_name = path.rsplit(":", 1)
-
-        # Handle file path format: ./file.py or ./path/to/file.py or ../file.py
-        is_file_path = module_path.endswith(".py") or module_path.startswith("./") or module_path.startswith("../")
-        if is_file_path:
-            file_path = Path(module_path)
-
-            # Resolve relative paths from config directory
-            if not file_path.is_absolute():
-                config_dir = get_config_dir()
-                if config_dir:
-                    file_path = (config_dir / file_path).resolve()
-                else:
-                    # Fallback to CWD if no config found
-                    file_path = (Path.cwd() / file_path).resolve()
-
-            return self._load_from_file(file_path, var_name)
-
-        # Handle module format: module.path
-        return self._load_from_module(module_path, var_name)
+        if isinstance(target, Path):
+            return self._load_from_file(target, var_name)
+        return self._load_from_module(target, var_name)
 
     def _load_from_file(self, file_path: Path, var_name: str) -> Auth:
         if not file_path.exists():
@@ -128,20 +199,10 @@ class LangGraphAuthBackend(AuthenticationBackend):
         if not file_path.is_file():
             raise AuthLoadError(f"Auth path is not a file: {file_path}")
 
-        # Create a unique module name based on the file path
-        module_name = f"auth_module_{file_path.stem}"
-
-        spec = importlib.util.spec_from_file_location(module_name, str(file_path))
-        if spec is None or spec.loader is None:
-            raise AuthLoadError(f"Could not load auth module from {file_path}")
-
-        auth_module = importlib.util.module_from_spec(spec)
-        sys.modules[module_name] = auth_module
         # User code can raise anything at import time.
         try:
-            spec.loader.exec_module(auth_module)
+            auth_module = import_auth_target(file_path)
         except Exception as e:
-            sys.modules.pop(module_name, None)
             raise AuthLoadError(f"Error loading auth from {file_path}: {e}") from e
 
         auth_instance = getattr(auth_module, var_name, None)

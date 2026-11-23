@@ -32,7 +32,8 @@ aegra dev
   },
   "auth": {
     "path": "./my_auth.py:auth",
-    "disable_studio_auth": false
+    "disable_studio_auth": false,
+    "cron_user": "./my_auth.py:cron_user"
   },
   "http": {
     "app": "./custom_routes.py:app",
@@ -218,7 +219,8 @@ Configure authentication and authorization.
 {
   "auth": {
     "path": "./my_auth.py:auth",
-    "disable_studio_auth": false
+    "disable_studio_auth": false,
+    "cron_user": "./my_auth.py:cron_user"
   }
 }
 ```
@@ -227,8 +229,9 @@ Configure authentication and authorization.
 |-------|------|---------|-------------|
 | `path` | `string` | — | Import path to your auth handler (`./file.py:variable`) |
 | `disable_studio_auth` | `bool` | `false` | Disable auth for LangGraph Studio connections |
+| `cron_user` | `string` | — | Import path to an async function that returns the user a scheduled cron firing runs as, or `None` to disable the cron. See [the cron guide](/guides/cron#the-user-a-scheduled-firing-runs-as) |
 
-The `path` supports multiple formats:
+`path` and `cron_user` support multiple formats:
 - `./auth.py:auth` — Load from a file relative to the config
 - `./src/auth/jwt.py:auth` — Nested path
 - `mypackage.auth:auth` — Load from an installed package

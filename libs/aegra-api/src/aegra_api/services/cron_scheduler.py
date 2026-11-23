@@ -22,6 +22,7 @@ from fastapi import HTTPException
 from sqlalchemy import update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from aegra_api.core.cron_user import CronUserResolver, load_cron_user_resolver
 from aegra_api.core.orm import Cron as CronORM
 from aegra_api.core.orm import _get_session_maker
 from aegra_api.models import RunCreate, User
@@ -71,16 +72,11 @@ def _build_run_create(cron: CronORM) -> RunCreate:
     )
 
 
-async def _validate_cron_user(user_id: str) -> bool:
-    """Liveness check called before constructing a forged ``User`` for a fire.
-
-    Default implementation accepts any non-empty user id. Operators that
-    integrate a real identity store can monkey-patch this symbol to
-    deactivate or revoke firing for users that no longer exist. Returning
-    False from this hook causes the scheduler to log a warning, disable the
-    cron, and skip the firing.
-    """
-    return bool(user_id)
+async def _scheduler_user(identity: str) -> User | None:
+    """Run a firing under the owner's bare identity when ``auth.cron_user`` names no resolver."""
+    if not identity:
+        return None
+    return User(identity=identity, display_name="cron-scheduler", is_authenticated=True)
 
 
 class CronScheduler:
@@ -90,9 +86,11 @@ class CronScheduler:
         """Initialize the scheduler state for the background polling loop."""
         self._task: asyncio.Task[None] | None = None
         self._running = False
+        self._cron_user: CronUserResolver = _scheduler_user
 
     async def start(self) -> None:
-        """Start the background polling task if the scheduler is enabled."""
+        """Load the configured cron user resolver, then start the background polling task."""
+        self._cron_user = load_cron_user_resolver() or _scheduler_user
         self._running = True
         self._task = asyncio.create_task(self._loop())
         logger.info(
@@ -165,17 +163,29 @@ class CronScheduler:
         """Return enabled crons whose next_run_date has passed."""
         return await CronService(session).get_due_crons(now)
 
-    @staticmethod
-    async def _fire_cron(session: AsyncSession, cron: CronORM) -> None:
+    async def _firing_user(self, cron: CronORM) -> User | None:
+        """Resolve the user a firing runs as; it must carry the cron owner's identity."""
+        resolved = await self._cron_user(cron.user_id)
+        if resolved is None:
+            return None
+        user = User.model_validate(resolved)
+        if user.identity != cron.user_id:
+            raise ValueError(f"Cron user resolver returned identity {user.identity!r} for owner {cron.user_id!r}")
+        # A request defaults display_name to the identity (auth_deps._to_user_model); a firing matches it.
+        if user.display_name is None:
+            user.display_name = user.identity
+        return user
+
+    async def _fire_cron(self, session: AsyncSession, cron: CronORM) -> None:
         """Create a run from the cron's payload and advance next_run_date."""
         now = datetime.now(UTC)
         should_delete_thread = should_delete_stateless_thread(cron)
         run_created = False
 
-        # Liveness check: refuse to forge a User for a deleted/revoked identity.
-        if not await _validate_cron_user(cron.user_id):
+        user = await self._firing_user(cron)
+        if user is None:
             logger.warning(
-                "Disabling cron because the owning user failed liveness check",
+                "Disabling cron because no user resolved for its owner",
                 cron_id=cron.cron_id,
                 user_id=cron.user_id,
             )
@@ -189,11 +199,6 @@ class CronScheduler:
 
         run_request = _build_run_create(cron)
         thread_id = cron.thread_id or str(uuid4())
-        user = User(
-            identity=cron.user_id,
-            display_name="cron-scheduler",
-            is_authenticated=True,
-        )
 
         try:
             _run_id, _run, _job = await _prepare_run(

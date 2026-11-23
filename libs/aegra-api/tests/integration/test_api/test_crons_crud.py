@@ -853,6 +853,14 @@ async def _return_edits(ctx: AuthContextWrapper, value: dict[str, Any]) -> dict[
     return {"metadata": {"team": "a"}, "config": {"tags": ["scheduled"]}}
 
 
+async def _redirect_webhook(ctx: AuthContextWrapper, value: dict[str, Any]) -> dict[str, Any] | None:
+    """A crons handler that tries to point the cron's webhook elsewhere, in place and in its return."""
+    if ctx.resource != "crons":
+        return None
+    value["webhook"] = "https://handler.example.com/in-place"
+    return {"webhook": "https://handler.example.com/returned"}
+
+
 _CREATE_BODY: dict[str, Any] = {
     "input": {"q": 1},
     "assistant_id": "asst-001",
@@ -900,6 +908,17 @@ class TestCreateKeepsHandlerEdits:
         assert request.metadata == {"client": "sent"}
         assert request.context is None
 
+    @pytest.mark.parametrize("path", ["/runs/crons", "/threads/t-001/runs/crons"])
+    def test_a_webhook_edit_is_not_stored(self, client: TestClient, mock_cron_service: AsyncMock, path: str) -> None:
+        mock_cron_service.create_cron.return_value = AsyncMock()
+
+        with patch("aegra_api.api.crons.handle_event", side_effect=_redirect_webhook):
+            resp = client.post(path, json={**_CREATE_BODY, "webhook": "https://client.example.com/cb"})
+
+        assert resp.status_code == 200, resp.text
+        request = mock_cron_service.create_cron.await_args.args[0]
+        assert request.webhook == "https://client.example.com/cb"
+
 
 class TestUpdateKeepsHandlerEdits:
     """A crons.update handler's edits must reach the service, marked when only the handler set them."""
@@ -931,6 +950,17 @@ class TestUpdateKeepsHandlerEdits:
         assert args.args[1].metadata == {"owner": "test-user"}
         assert args.args[1].context == {"tier": "gold"}
         assert args.kwargs["merge_fields"] == {"metadata", "context"}
+
+    def test_a_webhook_edit_is_not_applied(self, client: TestClient, mock_cron_service: AsyncMock) -> None:
+        mock_cron_service.update_cron.return_value = _cron_response()
+
+        with patch("aegra_api.api.crons.handle_event", side_effect=_redirect_webhook):
+            resp = client.patch("/runs/crons/cron-001", json={"webhook": "https://client.example.com/cb"})
+
+        assert resp.status_code == 200, resp.text
+        args = mock_cron_service.update_cron.await_args
+        assert args.args[1].webhook == "https://client.example.com/cb"
+        assert args.kwargs["merge_fields"] == set()
 
     def test_no_handler_edit_marks_nothing(self, client: TestClient, mock_cron_service: AsyncMock) -> None:
         mock_cron_service.update_cron.return_value = _cron_response()

@@ -215,7 +215,7 @@ Several keys in one dict must all match.
 - assistants: `graph_id`, `name`
 - threads: `status`
 
-A column key takes a plain string or `{"$eq": "..."}`. To filter a metadata key that shares its name with a column, put it inside `metadata`, for example `{"metadata": {"name": "x"}}`. On threads, `graph_id` and `assistant_id` are metadata keys that Aegra writes when a run starts, so they filter as metadata.
+A column key takes a plain string or `{"$eq": "..."}`. To filter a metadata key that shares its name with a column, put it inside `metadata`, for example `{"metadata": {"name": "x"}}`; this also works inside `$or` and `$and` branches. On threads, `graph_id` and `assistant_id` are metadata keys that Aegra writes when a run starts, so they filter as metadata.
 
 ```python
 @auth.on.assistants.search

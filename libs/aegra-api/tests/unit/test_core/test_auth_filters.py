@@ -193,3 +193,24 @@ class TestColumnRouting:
 
         assert exc.value.status_code == 500
         assert next(iter(bad)) in exc.value.detail
+
+    def test_metadata_envelope_inside_an_or_branch(self) -> None:
+        """The envelope reaches a metadata key named like a column in a boolean filter too."""
+        sql, params = _sql({"$or": [{"name": "current"}, {"metadata": {"name": "legacy"}}]})
+
+        assert "assistant.name = " in sql
+        assert " OR " in sql
+        assert "current" in params.values()
+        assert {"name": "legacy"} in params.values()
+
+    @pytest.mark.parametrize("op", ["$or", "$and"])
+    def test_branch_with_only_an_empty_envelope_does_not_collapse_to_true(self, op: str) -> None:
+        """An empty envelope compiles to nothing; as an $or branch that would match every row."""
+        with pytest.raises(HTTPException) as exc:
+            build_metadata_filter(COL, {op: [{"metadata": {}}, {"owner": "u1"}]})
+
+        assert exc.value.status_code == 500
+        assert "empty" in exc.value.detail.lower()
+
+    def test_empty_top_level_envelope_is_no_filter(self) -> None:
+        assert build_metadata_filter(COL, {"metadata": {}}) is None

@@ -61,23 +61,20 @@ def build_metadata_filter(
     (see examples/jwt_mock_auth_example.py). Its fields are compiled together
     with any sibling flat constraints, so ``{"metadata": {"team_id": "t"}}`` and
     ``{"team_id": "t"}`` filter the same way. Inside the envelope every key is
-    a metadata key, including one that shares its name with a column.
+    a metadata key, including one that shares its name with a column. The
+    envelope is read at the top level and in each ``$or`` / ``$and`` branch.
     """
     if not filters:
         return None
     columns = _FILTER_COLUMNS.get(column.class_, _NO_COLUMNS)
-    envelope, top_level = _split_metadata_envelope(filters, columns)
-    clauses = [
-        *_compile(column, envelope, depth=0, columns=_NO_COLUMNS),
-        *_compile(column, top_level, depth=0, columns=columns),
-    ]
+    clauses = _compile(column, filters, depth=0, columns=columns)
     if not clauses:
         return None
     return and_(*clauses) if len(clauses) > 1 else clauses[0]
 
 
 def _split_metadata_envelope(filters: dict[str, Any], columns: _Columns) -> tuple[dict[str, Any], dict[str, Any]]:
-    """Return ``(envelope fields, other keys)`` for a top-level ``metadata`` envelope.
+    """Return ``(envelope fields, other keys)`` for the ``metadata`` envelope of one filter object.
 
     A sibling key replaces the same key in the envelope, unless the sibling
     filters a column: then the two constrain different things and both apply.
@@ -85,12 +82,27 @@ def _split_metadata_envelope(filters: dict[str, Any], columns: _Columns) -> tupl
     envelope = filters.get("metadata")
     if not isinstance(envelope, dict):
         return {}, filters
-    top_level = {k: v for k, v in filters.items() if k != "metadata"}
-    metadata_fields = {k: v for k, v in envelope.items() if k not in top_level or k in columns}
-    return metadata_fields, top_level
+    other_keys = {k: v for k, v in filters.items() if k != "metadata"}
+    metadata_fields = {k: v for k, v in envelope.items() if k not in other_keys or k in columns}
+    return metadata_fields, other_keys
 
 
 def _compile(
+    column: InstrumentedAttribute[Any],
+    filters: dict[str, Any],
+    *,
+    depth: int,
+    columns: _Columns,
+) -> list[ColumnElement[bool]]:
+    """Compile one filter object: its envelope as metadata keys, the rest with column routing."""
+    envelope, other_keys = _split_metadata_envelope(filters, columns)
+    return [
+        *_compile_keys(column, envelope, depth=depth, columns=_NO_COLUMNS),
+        *_compile_keys(column, other_keys, depth=depth, columns=columns),
+    ]
+
+
+def _compile_keys(
     column: InstrumentedAttribute[Any],
     filters: dict[str, Any],
     *,
@@ -137,7 +149,17 @@ def _compile_bool_op(
                 f"Auth handler filter '{op}' contains an empty or non-dict branch. "
                 "Check the filter returned by your auth handler.",
             )
-    compiled = [and_(*_compile(column, b, depth=depth + 1, columns=columns)) for b in branches]
+    compiled: list[ColumnElement[bool]] = []
+    for branch in branches:
+        clauses = _compile(column, branch, depth=depth + 1, columns=columns)
+        # A branch holding only an empty metadata envelope compiles to nothing: TRUE again.
+        if not clauses:
+            raise HTTPException(
+                500,
+                f"Auth handler filter '{op}' contains an empty or non-dict branch. "
+                "Check the filter returned by your auth handler.",
+            )
+        compiled.append(and_(*clauses))
     return or_(*compiled) if op == "$or" else and_(*compiled)
 
 

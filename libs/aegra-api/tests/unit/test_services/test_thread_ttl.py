@@ -223,6 +223,17 @@ class TestClaimQuery:
         assert "LIMIT" in sql
         assert "runs" in sql  # active-run guard subquery
 
+    def test_claim_selects_the_columns_the_batch_unpacks(self) -> None:
+        stmt = _expired_claim_stmt(now=datetime.now(UTC), limit=10)
+
+        assert [str(column) for column in stmt.selected_columns] == [
+            "thread_ttl.thread_id",
+            "thread_ttl.strategy",
+            "thread_ttl.ttl_minutes",
+            "thread.user_id",
+            "thread.metadata_json",
+        ]
+
     def test_exclude_ids_renders_not_in(self) -> None:
         stmt = _expired_claim_stmt(now=datetime.now(UTC), limit=10, exclude_ids={"failed-1"})
         sql = str(stmt.compile(dialect=postgresql.dialect()))
@@ -533,7 +544,14 @@ class TestPruneById:
         ):
             await prune_threads_by_id(session, thread_ids=["t-1"], strategy="delete", user_id="u-1")
 
-        sql = str(session.execute.await_args_list[0].args[0].compile(dialect=postgresql.dialect()))
+        claim = session.execute.await_args_list[0].args[0]
+        sql = str(claim.compile(dialect=postgresql.dialect()))
+        # The rows are unpacked as (thread_id, owner, metadata) into the hook payload.
+        assert [str(column) for column in claim.selected_columns] == [
+            "thread.thread_id",
+            "thread.user_id",
+            "thread.metadata_json",
+        ]
         assert "thread.user_id = " in sql
         assert "NOT (EXISTS" in sql
         assert "FOR UPDATE OF thread SKIP LOCKED" in sql

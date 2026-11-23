@@ -1359,3 +1359,48 @@ class TestUpdateThread:
         data = resp.json()
         # Data should not have changed
         assert data["metadata"]["initial"] is True
+
+
+class TestHandlerColumnFilter:
+    """A handler filter keyed on a thread column narrows by that column, not by metadata (#360)."""
+
+    @staticmethod
+    def _list_threads_sql(monkeypatch: pytest.MonkeyPatch, handler_filter: dict[str, Any]) -> tuple[int, str]:
+        app = create_test_app(include_runs=False, include_threads=True)
+        statements: list[Any] = []
+
+        class Session(DummySessionBase):
+            async def scalars(self, stmt: Any = None) -> DummyScalarResult:
+                statements.append(stmt)
+                return DummyScalarResult([])
+
+        app.dependency_overrides[core_get_session] = override_get_session_dep(Session)
+        monkeypatch.setattr(threads_module, "handle_event", AsyncMock(return_value=handler_filter))
+
+        resp = make_client(app).get("/threads")
+
+        return resp.status_code, str(statements[0].compile(dialect=postgresql.dialect()))
+
+    def test_status_from_a_handler_filters_the_status_column(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        status_code, sql = self._list_threads_sql(monkeypatch, {"status": "idle"})
+
+        assert status_code == 200
+        assert "thread.status = " in sql
+        assert "@>" not in sql
+
+    def test_other_handler_keys_still_filter_metadata(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        status_code, sql = self._list_threads_sql(monkeypatch, {"team_id": "t1"})
+
+        assert status_code == 200
+        assert "thread.metadata_json @> " in sql
+        assert "thread.status = " not in sql
+
+    def test_column_filter_with_an_unsupported_operator_is_500(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        app = create_test_app(include_runs=False, include_threads=True)
+        app.dependency_overrides[core_get_session] = override_get_session_dep(DummySessionBase)
+        monkeypatch.setattr(threads_module, "handle_event", AsyncMock(return_value={"status": {"$contains": "idle"}}))
+
+        resp = make_client(app).get("/threads")
+
+        assert resp.status_code == 500
+        assert "'status' column" in resp.text

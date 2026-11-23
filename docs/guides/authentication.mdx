@@ -195,6 +195,36 @@ async def filter_by_team(ctx, value):
     return {"metadata": {"team_id": ctx.user.team_id}}
 ```
 
+### Filter shapes
+
+A filter dict narrows the queries the handler covers. It is combined with the request's own filters using AND, so a handler can only narrow what the caller sees.
+
+| Filter | Matches |
+|--------|---------|
+| `{"team_id": "t1"}` | Rows whose metadata has `team_id` equal to `t1` |
+| `{"team_id": {"$eq": "t1"}}` | The same, written with the operator |
+| `{"tags": {"$contains": "x"}}` | Rows whose metadata `tags` array contains `x`. Pass a list to require several values |
+| `{"metadata": {"team_id": "t1"}}` | The same as the flat form: every key inside `metadata` is a metadata key |
+| `{"$or": [f1, f2]}`, `{"$and": [f1, f2]}` | Any, or all, of two or more filters, nested at most two levels |
+| `{"graph_id": "support-agent"}` | Rows whose `graph_id` **column** has that value (see column keys below) |
+
+Several keys in one dict must all match.
+
+**Column keys.** Most keys are looked up in the resource's metadata. A few name a real column and filter that column instead:
+
+- assistants: `graph_id`, `name`
+- threads: `status`
+
+A column key takes a plain string or `{"$eq": "..."}`. To filter a metadata key that shares its name with a column, put it inside `metadata`, for example `{"metadata": {"name": "x"}}`. On threads, `graph_id` and `assistant_id` are metadata keys that Aegra writes when a run starts, so they filter as metadata.
+
+```python
+@auth.on.assistants.search
+async def only_support_agent(ctx, value):
+    return {"graph_id": "support-agent"}
+```
+
+A filter that cannot be compiled (an unknown operator, `$contains` on a column key, an `$or` with a single branch) returns `500` instead of matching the wrong rows. It means the handler returned an invalid filter.
+
 ### Handler context
 
 The `ctx` parameter provides:

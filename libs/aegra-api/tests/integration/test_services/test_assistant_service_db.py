@@ -5,7 +5,7 @@ These tests verify service interactions with real database operations.
 
 from datetime import UTC, datetime
 from types import SimpleNamespace
-from unittest.mock import Mock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 from fastapi import HTTPException
@@ -15,6 +15,7 @@ from sqlalchemy.dialects import postgresql
 from aegra_api.core.orm import AssistantVersion as AssistantVersionORM
 from aegra_api.models import Assistant, AssistantCreate, AssistantUpdate
 from aegra_api.models.auth import User
+from aegra_api.services import authenticated
 from aegra_api.services.assistant_service import AssistantService
 from tests.fixtures.database import DummyScalarResult, DummySessionBase, echo_inserted_row
 
@@ -516,3 +517,36 @@ class TestAssistantServiceDatabase:
         assert result.description == special_description
         assert result.metadata["unicode"] == "测试"
         assert result.metadata["emoji"] == "🎉"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("handler_filter", [{"graph_id": "agent-v2"}, {"graph_id": {"$eq": "agent-v2"}}])
+    async def test_list_assistants_with_column_filter(
+        self, assistant_service: AssistantService, monkeypatch: pytest.MonkeyPatch, handler_filter: dict
+    ) -> None:
+        """A handler filter on graph_id narrows by the graph_id column; as a metadata
+        predicate it matched nothing, because assistants do not mirror graph_id there (#360)."""
+        mock_result = Mock()
+        mock_result.all.return_value = []
+        assistant_service.session.scalars.return_value = mock_result
+        monkeypatch.setattr(authenticated, "handle_event", AsyncMock(return_value=handler_filter))
+
+        await assistant_service.list_assistants()
+
+        compiled = str(assistant_service.session.scalars.call_args.args[0].compile(dialect=postgresql.dialect()))
+        assert "assistant.graph_id = " in compiled
+        assert "@>" not in compiled
+
+    @pytest.mark.asyncio
+    async def test_get_assistant_applies_the_column_filter(
+        self, assistant_service: AssistantService, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A by-id read honors the same column filter as listing, so it cannot leak a filtered-out row."""
+        assistant_service.session.scalar.return_value = None
+        monkeypatch.setattr(authenticated, "handle_event", AsyncMock(return_value={"name": "Support bot"}))
+
+        with pytest.raises(HTTPException) as exc:
+            await assistant_service.get_assistant("asst-1")
+
+        assert exc.value.status_code == 404
+        compiled = str(assistant_service.session.scalar.call_args.args[0].compile(dialect=postgresql.dialect()))
+        assert "assistant.name = " in compiled

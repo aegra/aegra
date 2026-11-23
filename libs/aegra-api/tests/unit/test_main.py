@@ -9,7 +9,7 @@ import pytest
 import aegra_api.main as main_module
 from aegra_api.core import auth_middleware
 from aegra_api.observability.base import get_observability_manager
-from aegra_api.services import run_preparation, thread_hooks, webhook_policy
+from aegra_api.services import run_cleanup, run_preparation, thread_hooks, webhook_policy
 
 
 @pytest.mark.unit
@@ -296,6 +296,9 @@ def lifespan_events(monkeypatch: pytest.MonkeyPatch) -> list[str]:
     dispatcher = MagicMock()
     dispatcher.stop = _recording(events, "webhooks.stop")
     monkeypatch.setattr(main_module, "webhook_dispatcher", dispatcher)
+    hooks = MagicMock()
+    hooks.stop = _recording(events, "hooks.stop")
+    monkeypatch.setattr(main_module, "thread_hook_dispatcher", hooks)
 
     graph_service = MagicMock()
     graph_service.initialize = _recording(events, "graphs.initialize")
@@ -403,6 +406,7 @@ async def test_stops_components_in_reverse_start_order_on_shutdown(lifespan_even
         "cron.stop",
         "reaper.stop",
         "executor.stop",
+        "hooks.stop",
         "webhooks.stop",
         "broker.stop",
         "redis.close",
@@ -431,6 +435,7 @@ async def test_unwinds_started_components_when_executor_start_fails(
         "redis.initialize",
         "broker.start",
         "executor.start",
+        "hooks.stop",
         "webhooks.stop",
         "broker.stop",
         "redis.close",
@@ -466,6 +471,7 @@ async def test_keeps_stopping_remaining_components_when_one_stop_fails(
         "cron.stop",
         "reaper.stop",
         "executor.stop",
+        "hooks.stop",
         "webhooks.stop",
         "broker.stop",
         "redis.close",
@@ -531,6 +537,7 @@ async def test_lifespan_configures_and_drains_the_thread_deleted_hook(
         async with main_module.lifespan(MagicMock()):
             hook = dispatcher.configure.call_args.args[0]
             assert hook.__qualname__ == "on_deleted"
+            assert dispatcher.configure.call_args.kwargs["pending_deletes"] is run_cleanup.pending_cleanup_tasks
             dispatcher.stop.assert_not_awaited()
 
         dispatcher.stop.assert_awaited_once()
@@ -553,4 +560,4 @@ async def test_lifespan_without_hooks_key_configures_no_hook(monkeypatch: pytest
     ):
         dispatcher.stop = AsyncMock()
         async with main_module.lifespan(MagicMock()):
-            dispatcher.configure.assert_called_once_with(None)
+            dispatcher.configure.assert_called_once_with(None, pending_deletes=run_cleanup.pending_cleanup_tasks)

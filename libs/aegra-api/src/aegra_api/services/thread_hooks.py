@@ -3,8 +3,8 @@
 ``hooks.thread_deleted`` in aegra.json names an async function. Aegra calls it
 once per deleted thread, after the delete commits, in a background task that
 never delays, fails or undoes the delete. Delivery is at most once: a crash
-between the commit and the call, or a call still running past the shutdown
-grace, is lost.
+between the commit and the call, a call still running past the shutdown
+grace, and a delete that commits after the grace ends are lost.
 """
 
 import asyncio
@@ -121,10 +121,18 @@ class ThreadHookDispatcher:
     def __init__(self) -> None:
         self._hook: ThreadDeletedHook | None = None
         self._tasks: dict[asyncio.Task[None], str] = {}
+        self._pending_deletes: Callable[[], Iterable[asyncio.Task[Any]]] | None = None
         self._stopped = False
 
-    def configure(self, hook: ThreadDeletedHook | None) -> None:
+    def configure(
+        self,
+        hook: ThreadDeletedHook | None,
+        *,
+        pending_deletes: Callable[[], Iterable[asyncio.Task[Any]]] | None = None,
+    ) -> None:
+        """Set the hook, and what returns the deletes still in flight that shutdown waits for."""
         self._hook = hook
+        self._pending_deletes = pending_deletes
         self._stopped = False
 
     def submit(self, event: ThreadDeletedEvent) -> None:
@@ -140,16 +148,22 @@ class ThreadHookDispatcher:
         task.add_done_callback(self._discard)
 
     async def stop(self) -> None:
-        """Wait out the drain grace for running calls, then cancel the rest.
+        """Wait out the drain grace for running calls and deletes still in flight, then cancel the calls left.
 
-        Submissions are still accepted while waiting: stateless cleanup can delete threads during shutdown.
+        While a hook is configured, the deletes ``pending_deletes`` returns are waited for under the same
+        deadline and never cancelled: stateless cleanup goes on deleting when shutdown ends its run, and the
+        call its delete submits is accepted and waited for too. A crash, a call outliving the grace, and a
+        delete that commits after the grace ends still lose their call.
         """
         loop = asyncio.get_running_loop()
         deadline = loop.time() + SHUTDOWN_DRAIN_SECONDS
-        while (pending := [task for task in self._tasks if not task.done()]) and (
-            remaining := deadline - loop.time()
-        ) > 0:
-            await asyncio.wait(pending, timeout=remaining)
+        while (remaining := deadline - loop.time()) > 0:
+            waiting: list[asyncio.Task[Any]] = [task for task in self._tasks if not task.done()]
+            if self._hook is not None and self._pending_deletes is not None:
+                waiting.extend(task for task in self._pending_deletes() if not task.done())
+            if not waiting:
+                break
+            await asyncio.wait(waiting, timeout=remaining, return_when=asyncio.FIRST_COMPLETED)
         self._stopped = True
         pending = [task for task in self._tasks if not task.done()]
         if not pending:

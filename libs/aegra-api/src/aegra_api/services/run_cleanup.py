@@ -98,6 +98,11 @@ async def cleanup_after_background_run(run_id: str, thread_id: str, user_id: str
         logger.exception("Failed to delete ephemeral thread", thread_id=thread_id, run_id=run_id)
 
 
+def pending_cleanup_tasks() -> list[asyncio.Task[None]]:
+    """Cleanup tasks not done yet; shutdown waits for them so the threads they delete still reach the hook."""
+    return [task for task in _background_cleanup_tasks if not task.done()]
+
+
 def schedule_background_cleanup(run_id: str, thread_id: str, user_id: str) -> asyncio.Task[None]:
     """Fire-and-forget background cleanup, strong ref held until done."""
     task = asyncio.create_task(cleanup_after_background_run(run_id, thread_id, user_id))

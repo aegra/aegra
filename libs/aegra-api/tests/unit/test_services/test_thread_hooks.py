@@ -11,7 +11,7 @@ from typing import Any
 import pytest
 from structlog.testing import capture_logs
 
-from aegra_api.services import thread_hooks
+from aegra_api.services import run_cleanup, thread_hooks
 from aegra_api.services.thread_hooks import (
     HookLoadError,
     ThreadDeletedEvent,
@@ -19,6 +19,7 @@ from aegra_api.services.thread_hooks import (
     load_thread_deleted_hook,
     notify_threads_deleted,
     thread_deleted_event,
+    thread_hook_dispatcher,
 )
 
 _HOOK_SOURCE = "async def on_thread_deleted(event):\n    pass\n\ndef sync_hook(event):\n    pass\n\nvalue = 1\n"
@@ -256,6 +257,76 @@ class TestThreadHookDispatcher:
         assert calls == []
         assert dispatcher._tasks == {}
         assert "t-after" in _text(logs)
+
+
+class TestShutdownWithDeletesInFlight:
+    """A stateless run's cleanup goes on deleting when shutdown ends the run; its thread still reaches the hook."""
+
+    @pytest.fixture
+    def run_ended(self, monkeypatch: pytest.MonkeyPatch) -> Iterator[asyncio.Event]:
+        ended = asyncio.Event()
+
+        class Executor:
+            async def wait_for_completion(self, run_id: str, timeout: float) -> None:
+                await ended.wait()
+
+        async def delete_thread_by_id(thread_id: str, user_id: str) -> None:
+            await asyncio.sleep(0.01)
+            notify_threads_deleted([thread_deleted_event(thread_id, user_id, {"k": "v"})])
+
+        monkeypatch.setattr(run_cleanup, "executor", Executor())
+        monkeypatch.setattr(run_cleanup, "delete_thread_by_id", delete_thread_by_id)
+        yield ended
+        thread_hook_dispatcher.configure(None)
+
+    @pytest.mark.asyncio
+    async def test_thread_deleted_by_cleanup_during_shutdown_reaches_the_hook(self, run_ended: asyncio.Event) -> None:
+        received: list[ThreadDeletedEvent] = []
+
+        async def hook(event: ThreadDeletedEvent) -> None:
+            received.append(event)
+
+        thread_hook_dispatcher.configure(hook, pending_deletes=run_cleanup.pending_cleanup_tasks)
+        cleanup = run_cleanup.schedule_background_cleanup("r-1", "t-1", "owner-1")
+        await asyncio.sleep(0)
+        # The executor stops before the dispatcher: the run ends and its cleanup moves on to the delete.
+        run_ended.set()
+        await thread_hook_dispatcher.stop()
+
+        assert received == [{"thread_id": "t-1", "user_id": "owner-1", "metadata": {"k": "v"}}]
+        assert cleanup.done()
+
+    @pytest.mark.asyncio
+    async def test_without_a_hook_stop_does_not_wait_for_cleanup(self) -> None:
+        cleanup = asyncio.create_task(asyncio.Event().wait())
+        dispatcher = ThreadHookDispatcher()
+        dispatcher.configure(None, pending_deletes=lambda: [cleanup])
+
+        await asyncio.wait_for(dispatcher.stop(), timeout=1)
+
+        assert not cleanup.done()
+        cleanup.cancel()
+
+    @pytest.mark.asyncio
+    async def test_cleanup_still_running_after_the_grace_is_not_cancelled(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(thread_hooks, "SHUTDOWN_DRAIN_SECONDS", 0.01)
+        calls: list[str] = []
+
+        async def hook(event: ThreadDeletedEvent) -> None:
+            calls.append(event["thread_id"])
+
+        cleanup = asyncio.create_task(asyncio.Event().wait())
+        dispatcher = ThreadHookDispatcher()
+        dispatcher.configure(hook, pending_deletes=lambda: [cleanup])
+
+        await asyncio.wait_for(dispatcher.stop(), timeout=1)
+        await asyncio.sleep(0)
+
+        assert not cleanup.done()
+        assert calls == []
+        cleanup.cancel()
 
 
 class TestNotifyThreadsDeleted:

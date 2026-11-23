@@ -43,6 +43,7 @@ from aegra_api.services.cron_scheduler import cron_scheduler
 from aegra_api.services.executor import executor
 from aegra_api.services.langgraph_service import get_langgraph_service
 from aegra_api.services.lease_reaper import lease_reaper
+from aegra_api.services.run_cleanup import pending_cleanup_tasks
 from aegra_api.services.run_preparation import get_default_durability
 from aegra_api.services.thread_hooks import load_thread_deleted_hook, thread_hook_dispatcher
 from aegra_api.services.thread_ttl import get_thread_ttl_config, thread_ttl_sweeper
@@ -114,7 +115,8 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
         raise
 
     # Each cleanup is registered once its step has started; they run in reverse start order
-    # on shutdown (ttl sweeper → cron → reaper → executor drains jobs → webhooks → broker → Redis → DB).
+    # on shutdown (ttl sweeper → cron → reaper → executor drains jobs → thread-deleted hooks → webhooks
+    # → broker → Redis → DB).
     async with AsyncExitStack() as stack:
         stack.push_async_callback(db_manager.close)
 
@@ -153,7 +155,8 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
         # Registered before the executor so it drains after it: runs finalized while draining queue webhooks.
         stack.push_async_callback(webhook_dispatcher.stop)
         # Loaded after the graphs so a module path under `dependencies` resolves; a bad path stops the boot.
-        thread_hook_dispatcher.configure(load_thread_deleted_hook())
+        # Its stop also waits for stateless cleanup still deleting threads, so their hook calls are made.
+        thread_hook_dispatcher.configure(load_thread_deleted_hook(), pending_deletes=pending_cleanup_tasks)
         stack.push_async_callback(thread_hook_dispatcher.stop)
 
         # Start executor (spawns worker coroutines when Redis is enabled)

@@ -18,6 +18,7 @@ from sqlalchemy import ColumnElement, case, func, literal_column, or_, select, u
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from aegra_api.config import load_checkpointer_config
+from aegra_api.core.auth_handlers import build_auth_context, handle_event
 from aegra_api.core.orm import Assistant as AssistantORM
 from aegra_api.core.orm import Run as RunORM
 from aegra_api.core.orm import Thread as ThreadORM
@@ -245,6 +246,31 @@ def _resolve_durability(request: RunCreate) -> Durability | None:
     if request.checkpoint_during is not None:
         return "async" if request.checkpoint_during else "exit"
     return get_default_durability()
+
+
+async def _apply_create_run_auth(user: User, thread_id: str, request: RunCreate) -> None:
+    """Authorize threads.create_run and merge config/context overrides into request.
+
+    Handler-returned filter dict wins; otherwise fall back to in-place value mutations.
+    """
+    ctx = build_auth_context(user, "threads", "create_run")
+    value = {**request.model_dump(), "thread_id": thread_id}
+    filters = await handle_event(ctx, value)
+
+    source = filters if filters is not None else value
+    config_overrides = source.get("config")
+    if isinstance(config_overrides, dict):
+        request.config = {**(request.config or {}), **config_overrides}
+    context_overrides = source.get("context")
+    if isinstance(context_overrides, dict):
+        request.context = {**(request.context or {}), **context_overrides}
+
+    # Creating a run also reads its assistant, so per-assistant handler rules
+    # apply here exactly as they do in the cron-create chain.
+    await handle_event(
+        build_auth_context(user, "assistants", "read"),
+        {"assistant_id": request.assistant_id},
+    )
 
 
 async def _prepare_run(

@@ -456,7 +456,7 @@ def dev(
                     listen = f"[{debug_host}]:{debug_port}"
                 is_loopback = address.is_loopback
             except ValueError:
-                if debug_host in ("localhost"):
+                if debug_host == "localhost":
                     listen = f"{debug_host}:{debug_port}"
                 else:
                     console.print(

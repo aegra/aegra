@@ -5,7 +5,6 @@ import os
 import sys
 from collections.abc import Iterator
 from pathlib import Path
-from typing import Any
 from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
@@ -14,8 +13,8 @@ from starlette.authentication import AuthCredentials, AuthenticationError
 from starlette.requests import HTTPConnection
 from starlette.responses import JSONResponse
 
-from aegra_api.core import auth_middleware
 from aegra_api.core.auth_middleware import (
+    AuthLoadError,
     LangGraphAuthBackend,
     LangGraphUser,
     get_auth_backend,
@@ -155,83 +154,70 @@ class TestLangGraphAuthBackend:
 
             assert backend.auth_instance == mock_auth_instance
 
-    def test_load_auth_instance_file_not_found(self):
-        """Test auth instance loading when file doesn't exist - returns None, noop handled in authenticate()"""
+    def test_no_auth_path_configured_returns_none(self) -> None:
+        with patch("aegra_api.core.auth_middleware.load_auth_config", return_value={"disable_studio_auth": True}):
+            backend = LangGraphAuthBackend()
+
+        assert backend.auth_instance is None
+
+    def test_loads_auth_instance_from_configured_file(self, tmp_path: Path) -> None:
+        (tmp_path / "my_auth.py").write_text("from langgraph_sdk import Auth; auth = Auth()")
+
         with (
-            patch("pathlib.Path.exists", return_value=False),
-            patch("pathlib.Path.cwd", return_value=Path("/test")),
-            patch("aegra_api.core.auth_middleware.load_auth_config", return_value=None),
+            patch("aegra_api.core.auth_middleware.load_auth_config", return_value={"path": "./my_auth.py:auth"}),
+            patch("aegra_api.core.auth_middleware.get_config_dir", return_value=tmp_path),
         ):
             backend = LangGraphAuthBackend()
 
-            # Should return None (noop handled directly in authenticate method)
-            assert backend.auth_instance is None
+        assert isinstance(backend.auth_instance, Auth)
 
-    def test_load_auth_instance_spec_failure(self):
-        """Test auth instance loading when spec creation fails"""
-        with (
-            patch("pathlib.Path.exists", return_value=True),
-            patch("pathlib.Path.cwd", return_value=Path("/test")),
-            patch("importlib.util.spec_from_file_location", return_value=None),
-        ):
-            backend = LangGraphAuthBackend()
-
-            assert backend.auth_instance is None
-
-    def test_load_auth_instance_no_auth_attribute(self):
-        """Test auth instance loading when module has no auth attribute"""
-        mock_module = Mock()
-        mock_module.auth = None
-
-        with (
-            patch("pathlib.Path.exists", return_value=True),
-            patch("pathlib.Path.cwd", return_value=Path("/test")),
-            patch("importlib.util.spec_from_file_location") as mock_spec,
-            patch("importlib.util.module_from_spec", return_value=mock_module),
-            patch("sys.modules", {}),
-        ):
-            mock_spec.return_value = Mock()
-            mock_spec.return_value.loader = Mock()
-
-            backend = LangGraphAuthBackend()
-
-            assert backend.auth_instance is None
-
-    def test_load_auth_instance_invalid_auth_type(self):
-        """Test auth instance loading when auth is not Auth instance"""
-        mock_module = Mock()
-        mock_module.auth = "not_an_auth_instance"
+    @pytest.mark.parametrize(
+        ("auth_path", "source", "match"),
+        [
+            ("./missing.py:auth", None, "Auth file not found"),
+            ("./my_auth.py:auth", "raise RuntimeError('boom')", "boom"),
+            ("./my_auth.py:auth", "import a_package_that_is_not_installed", "a_package_that_is_not_installed"),
+            ("./my_auth.py:auth", "x = 1", "not an Auth instance"),
+            ("./my_auth.py:auth", "auth = 'not auth'", "not an Auth instance"),
+            ("./my_auth.py", "x = 1", "missing ':'"),
+            ("a_package_that_is_not_installed.auth:auth", None, "a_package_that_is_not_installed"),
+            ("json:auth", None, "not an Auth instance"),
+        ],
+    )
+    def test_configured_auth_that_cannot_load_raises_instead_of_serving_anonymous(
+        self, tmp_path: Path, auth_path: str, source: str | None, match: str
+    ) -> None:
+        if source is not None:
+            (tmp_path / "my_auth.py").write_text(source)
 
         with (
-            patch("pathlib.Path.exists", return_value=True),
-            patch("pathlib.Path.cwd", return_value=Path("/test")),
-            patch("importlib.util.spec_from_file_location") as mock_spec,
-            patch("importlib.util.module_from_spec", return_value=mock_module),
-            patch("sys.modules", {}),
+            patch("aegra_api.core.auth_middleware.load_auth_config", return_value={"path": auth_path}),
+            patch("aegra_api.core.auth_middleware.get_config_dir", return_value=tmp_path),
+            pytest.raises(AuthLoadError, match=match),
         ):
-            mock_spec.return_value = Mock()
-            mock_spec.return_value.loader = Mock()
+            LangGraphAuthBackend()
 
-            backend = LangGraphAuthBackend()
+    def test_failed_file_import_does_not_leave_a_partial_module(self, tmp_path: Path) -> None:
+        (tmp_path / "broken_auth.py").write_text("raise RuntimeError('boom')")
 
-            assert backend.auth_instance is None
-
-    def test_load_auth_instance_exception(self):
-        """Test auth instance loading when exception occurs - returns None, noop handled in authenticate()"""
-        # Test that exceptions during config loading are handled gracefully
-        # noop is handled directly in authenticate method, not here
         with (
-            patch(
-                "aegra_api.core.auth_middleware.load_auth_config",
-                side_effect=Exception("Test config error"),
-            ),
-            patch("pathlib.Path.exists", return_value=False),  # Fallback also finds nothing
-            patch("pathlib.Path.cwd", return_value=Path("/test")),
+            patch("aegra_api.core.auth_middleware.load_auth_config", return_value={"path": "./broken_auth.py:auth"}),
+            patch("aegra_api.core.auth_middleware.get_config_dir", return_value=tmp_path),
+            pytest.raises(AuthLoadError),
         ):
-            backend = LangGraphAuthBackend()
+            LangGraphAuthBackend()
 
-            # Should return None (noop handled directly in authenticate method)
-            assert backend.auth_instance is None
+        assert "auth_module_broken_auth" not in sys.modules
+
+    def test_get_auth_backend_does_not_cache_a_failed_load(self, tmp_path: Path) -> None:
+        """Every later caller must hit the error too, never a cached anonymous backend."""
+        with (
+            patch("aegra_api.core.auth_middleware.load_auth_config", return_value={"path": "./missing.py:auth"}),
+            patch("aegra_api.core.auth_middleware.get_config_dir", return_value=tmp_path),
+        ):
+            for _ in range(2):
+                with pytest.raises(AuthLoadError):
+                    get_auth_backend()
 
     @pytest.mark.asyncio
     async def test_authenticate_noop_when_no_auth_instance(self):
@@ -417,7 +403,7 @@ class TestLangGraphAuthBackend:
 
 
 class TestAuthPathForms:
-    """``auth.path`` names a module or a file, and needs a variable name after ``:``."""
+    """``auth.path`` can name an installed module as well as a file."""
 
     @pytest.fixture(autouse=True)
     def restore_sys_modules(self) -> Iterator[None]:
@@ -440,22 +426,6 @@ class TestAuthPathForms:
 
         assert isinstance(backend.auth_instance, Auth)
         assert backend.auth_instance is sys.modules["path_form_auth"].auth
-
-    def test_logs_and_skips_a_path_without_a_variable_name(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        self._configure(tmp_path, "./path_form_auth.py", monkeypatch)
-        errors: list[str] = []
-
-        def record_error(msg: str, *args: Any, **kwargs: Any) -> None:
-            errors.append(msg)
-
-        monkeypatch.setattr(auth_middleware.logger, "error", record_error)
-
-        backend = LangGraphAuthBackend()
-
-        assert backend.auth_instance is None
-        assert errors == ["Invalid auth path format (missing ':'): ./path_form_auth.py"]
 
 
 class TestGetAuthBackend:

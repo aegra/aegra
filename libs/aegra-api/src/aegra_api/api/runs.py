@@ -3,14 +3,16 @@
 import asyncio
 import contextlib
 from collections.abc import AsyncGenerator, MutableMapping
-from typing import Any
+from typing import Annotated, Any
 
 import structlog
 from fastapi import APIRouter, Depends, Header, HTTPException, Query
-from fastapi.responses import StreamingResponse
+from fastapi.encoders import jsonable_encoder
+from fastapi.responses import JSONResponse, StreamingResponse
 from redis import RedisError
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import load_only
 from sse_starlette import EventSourceResponse
 
 from aegra_api.core.active_runs import active_runs
@@ -23,8 +25,9 @@ from aegra_api.core.sse import create_end_event, get_sse_headers, make_sse_respo
 from aegra_api.models import Run, RunCreate, RunsCancel, RunStatus, User
 from aegra_api.models.enums import RunCancellationAction
 from aegra_api.models.errors import CONFLICT, NOT_FOUND, SSE_RESPONSE
+from aegra_api.models.runs import RunSelectField
 from aegra_api.services.broker import broker_manager
-from aegra_api.services.run_preparation import _prepare_run
+from aegra_api.services.run_preparation import _apply_create_run_auth, _prepare_run
 from aegra_api.services.run_status import interrupt_run_before_delete, interrupt_unowned_run
 from aegra_api.services.run_waiters import TERMINAL_STATES, encode_output, heartbeat_wait_body, run_result_body
 from aegra_api.services.streaming_service import streaming_service
@@ -83,31 +86,6 @@ async def _request_run_interruption(
         await streaming_service.interrupt_run(run_orm.run_id)
     else:
         await streaming_service.cancel_run(run_orm.run_id)
-
-
-async def _apply_create_run_auth(user: User, thread_id: str, request: RunCreate) -> None:
-    """Authorize threads.create_run and merge config/context overrides into request.
-
-    Handler-returned filter dict wins; otherwise fall back to in-place value mutations.
-    """
-    ctx = build_auth_context(user, "threads", "create_run")
-    value = {**request.model_dump(), "thread_id": thread_id}
-    filters = await handle_event(ctx, value)
-
-    source = filters if filters is not None else value
-    config_overrides = source.get("config")
-    if isinstance(config_overrides, dict):
-        request.config = {**(request.config or {}), **config_overrides}
-    context_overrides = source.get("context")
-    if isinstance(context_overrides, dict):
-        request.context = {**(request.context or {}), **context_overrides}
-
-    # Creating a run also reads its assistant, so per-assistant handler rules
-    # apply here exactly as they do in the cron-create chain.
-    await handle_event(
-        build_auth_context(user, "assistants", "read"),
-        {"assistant_id": request.assistant_id},
-    )
 
 
 @router.post("/threads/{thread_id}/runs", response_model=Run, responses={**NOT_FOUND, **CONFLICT})
@@ -239,13 +217,21 @@ async def list_runs(
     status: str | None = Query(
         None, description="Filter by run status (e.g. pending, running, success, error, interrupted)"
     ),
+    fields: Annotated[
+        list[RunSelectField] | None,
+        Query(
+            alias="select",
+            description="Run fields to return. Omit to return every field. "
+            "Leave out `output` to skip loading each run's final state.",
+        ),
+    ] = None,
     user: User = Depends(get_current_user),
     session: AsyncSession = Depends(get_session),
-) -> list[Run]:
+) -> list[Run] | JSONResponse:
     """List runs for a thread.
 
     Returns runs ordered by creation time (newest first). Use `status` to
-    filter and `limit`/`offset` to paginate.
+    filter, `limit`/`offset` to paginate and `select` to return only some fields.
     """
     stmt = (
         select(RunORM)
@@ -258,12 +244,17 @@ async def list_runs(
         .offset(offset)
         .order_by(RunORM.created_at.desc())
     )
+    names = list(dict.fromkeys(fields)) if fields else None
+    if names:
+        # Unselected columns stay out of the query: one run's output can be the whole thread history.
+        stmt = stmt.options(load_only(*(getattr(RunORM, name) for name in names)))
     logger.info(f"[list_runs] querying DB thread_id={thread_id} user={user.identity}")
     result = await session.scalars(stmt)
     rows = result.all()
-    runs = [Run.model_validate(r) for r in rows]
-    logger.info(f"[list_runs] total={len(runs)} user={user.identity} thread_id={thread_id}")
-    return runs
+    logger.info(f"[list_runs] total={len(rows)} user={user.identity} thread_id={thread_id}")
+    if names:
+        return JSONResponse(jsonable_encoder([{name: getattr(row, name) for name in names} for row in rows]))
+    return [Run.model_validate(r) for r in rows]
 
 
 @router.patch("/threads/{thread_id}/runs/{run_id}", response_model=Run, responses={**NOT_FOUND})

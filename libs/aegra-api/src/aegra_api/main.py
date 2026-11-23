@@ -25,6 +25,7 @@ from aegra_api.config import CorsConfig, HttpConfig, get_config_dir, load_http_c
 from aegra_api.core.app_loader import load_custom_app
 from aegra_api.core.auth_deps import require_auth
 from aegra_api.core.auth_enforcement import apply_auth_enforcement
+from aegra_api.core.auth_middleware import get_auth_backend
 from aegra_api.core.database import db_manager
 from aegra_api.core.health import router as health_router
 from aegra_api.core.migrations import run_migrations_async
@@ -90,6 +91,8 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     get_default_durability()
     # Same for webhooks: a bad URL policy or an unset header variable fails the boot.
     get_webhook_settings()
+    # A configured auth.path that cannot load must stop the boot; it never falls back to anonymous.
+    get_auth_backend()
 
     # Multi-pod K8s: set RUN_MIGRATIONS_ON_STARTUP=false + run `aegra db upgrade`
     # out-of-band. See docs/guides/deployment.mdx.

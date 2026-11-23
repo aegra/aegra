@@ -592,6 +592,43 @@ class TestRunWithInput:
         assert resp.status_code != 422
 
 
+class TestListRunsSelect:
+    """GET /threads/{thread_id}/runs?select=..."""
+
+    def _client(self) -> TestClient:
+        app = create_test_app(include_runs=True, include_threads=False)
+        runs = [_run_row("run-1", status="success", output_data={"messages": ["big"]})]
+
+        class Session(DummySessionBase):
+            async def scalars(self, _stmt: Any) -> Any:
+                class Result:
+                    def all(self) -> list[Any]:
+                        return runs
+
+                return Result()
+
+        override_session_dependency(app, Session)
+        return make_client(app)
+
+    def test_select_returns_only_the_requested_fields(self) -> None:
+        resp = self._client().get("/threads/test-thread-123/runs?select=run_id&select=status")
+
+        assert resp.status_code == 200
+        assert resp.json() == [{"run_id": "run-1", "status": "success"}]
+
+    def test_without_select_rows_keep_every_field(self) -> None:
+        resp = self._client().get("/threads/test-thread-123/runs")
+
+        assert resp.status_code == 200
+        assert resp.json()[0]["output"] == {"messages": ["big"]}
+
+    @pytest.mark.parametrize("field", ["kwargs", "metadata", "not_a_field", ""])
+    def test_unknown_select_field_returns_422(self, field: str) -> None:
+        resp = self._client().get(f"/threads/test-thread-123/runs?select=run_id&select={field}")
+
+        assert resp.status_code == 422
+
+
 class TestRunStatuses:
     """Test filtering runs by status"""
 

@@ -7,7 +7,6 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from redis import ConnectionError as RedisConnectionError
 from redis import TimeoutError as RedisTimeoutError
-from sqlalchemy.exc import TimeoutError as SQLAlchemyTimeoutError
 
 from aegra_api.core.active_runs import active_runs, explicit_run_cancellations
 from aegra_api.core.orm import Run as RunORM
@@ -210,7 +209,9 @@ class TestHeartbeatLoop:
     @pytest.mark.asyncio
     async def test_extends_lease_on_each_iteration(self) -> None:
         session = AsyncMock()
-        session.execute = AsyncMock()
+        extended = MagicMock()
+        extended.one.return_value = (True, "running")
+        session.execute = AsyncMock(return_value=extended)
         session.commit = AsyncMock()
         maker = _make_session_maker(session)
 
@@ -268,31 +269,26 @@ class TestHeartbeatLoop:
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
-        ("row_status", "row_claimed_by", "expected_reason"),
+        ("row_status", "expected_reason"),
         [
-            ("running", "worker-1", "lease_lost"),
-            ("pending", None, "lease_lost"),
-            ("interrupted", None, "cancel"),
-            (None, None, "cancel"),
+            ("running", "lease_lost"),
+            ("pending", "lease_lost"),
+            ("interrupted", "cancel"),
+            (None, "cancel"),
         ],
         ids=["claimed-by-another-worker", "requeued-by-the-reaper", "interrupted-by-the-api", "deleted"],
     )
     async def test_lost_lease_names_lease_lost_only_while_the_run_stays_active(
-        self, row_status: str | None, row_claimed_by: str | None, expected_reason: str
+        self, row_status: str | None, expected_reason: str
     ) -> None:
         """The job task's CancelledError says lease_lost only when another instance resumes
         the run; a run that ended or was deleted while the lease was expired says cancel."""
         run_id = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
-        row: MagicMock | None = None
-        if row_status is not None:
-            row = _make_run_orm(run_id=run_id, status=row_status)
-            row.claimed_by = row_claimed_by
         session = AsyncMock()
         lost = MagicMock()
-        lost.rowcount = 0
+        lost.one.return_value = (False, row_status)
         session.execute = AsyncMock(return_value=lost)
         session.commit = AsyncMock()
-        session.scalar = AsyncMock(return_value=row)
         maker = _make_session_maker(session)
         seen: list[tuple[object, ...]] = []
 
@@ -309,7 +305,7 @@ class TestHeartbeatLoop:
         with (
             patch(f"{MODULE}._get_session_maker", return_value=maker),
             patch(f"{MODULE}.settings") as mock_settings,
-            patch(f"{MODULE}.asyncio.sleep", new_callable=AsyncMock),
+            patch(f"{MODULE}.asyncio.sleep", side_effect=[None, asyncio.CancelledError()]),
         ):
             mock_settings.worker.HEARTBEAT_INTERVAL_SECONDS = 1
             mock_settings.worker.LEASE_DURATION_SECONDS = 30
@@ -319,48 +315,44 @@ class TestHeartbeatLoop:
                 _lease_loss_cancellations.discard(run_id)
         await asyncio.gather(job_task, return_exceptions=True)
 
+        assert session.execute.await_count == 1
         assert job_task.cancelled()
         assert seen == [(expected_reason,)]
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize(
-        "read_error",
-        [
-            TimeoutError(),
-            ConnectionRefusedError(),
-            SQLAlchemyTimeoutError("QueuePool limit of size 5 overflow 10 reached"),
-        ],
-        ids=["asyncpg-checkout-timeout", "connection-refused", "pool-queue-timeout"],
-    )
-    async def test_lost_lease_still_cancels_as_lease_lost_when_the_status_read_fails(
-        self, read_error: Exception
-    ) -> None:
-        """A failed read must not leave running a job that another worker may already own."""
+    async def test_lost_lease_cancels_before_the_job_can_finish(self) -> None:
+        """A job that would finish on the next loop turn after the lease is found lost never
+        reaches its own result, so it cannot save it over the worker that now owns the run."""
         run_id = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+        job_may_finish = asyncio.Event()
         session = AsyncMock()
         lost = MagicMock()
         lost.rowcount = 0
-        session.execute = AsyncMock(return_value=lost)
+        lost.one.return_value = (False, "running")
+
+        async def _lose_lease(*_args: object) -> MagicMock:
+            job_may_finish.set()
+            return lost
+
+        async def _one_loop_turn(*_args: object) -> None:
+            turn = asyncio.get_running_loop().create_future()
+            asyncio.get_running_loop().call_soon(turn.set_result, None)
+            await turn
+
+        session.execute = AsyncMock(side_effect=_lose_lease)
         session.commit = AsyncMock()
-        # asyncpg's checkout timeout and a refused connection arrive unwrapped;
-        # the pool's own queue timeout arrives as SQLAlchemy's TimeoutError.
-        session.scalar = AsyncMock(side_effect=read_error)
+        session.scalar = AsyncMock(side_effect=_one_loop_turn)
         maker = _make_session_maker(session)
         seen: list[tuple[object, ...]] = []
-        sleeps = 0
+        finished: list[bool] = []
 
         async def _job() -> None:
             try:
-                await asyncio.Event().wait()
+                await job_may_finish.wait()
             except asyncio.CancelledError as exc:
                 seen.append(exc.args)
                 raise
-
-        async def counting_sleep(delay: float) -> None:
-            nonlocal sleeps
-            sleeps += 1
-            if sleeps >= 2:
-                raise asyncio.CancelledError
+            finished.append(True)
 
         job_task = asyncio.create_task(_job())
         await asyncio.sleep(0)
@@ -368,7 +360,7 @@ class TestHeartbeatLoop:
         with (
             patch(f"{MODULE}._get_session_maker", return_value=maker),
             patch(f"{MODULE}.settings") as mock_settings,
-            patch(f"{MODULE}.asyncio.sleep", side_effect=counting_sleep),
+            patch(f"{MODULE}.asyncio.sleep", side_effect=[None, asyncio.CancelledError()]),
         ):
             mock_settings.worker.HEARTBEAT_INTERVAL_SECONDS = 1
             mock_settings.worker.LEASE_DURATION_SECONDS = 30
@@ -379,29 +371,23 @@ class TestHeartbeatLoop:
                 _lease_loss_cancellations.discard(run_id)
         await asyncio.gather(job_task, return_exceptions=True)
 
-        assert sleeps == 1
+        assert finished == []
         assert marked_lost
         assert job_task.cancelled()
         assert seen == [("lease_lost",)]
 
     @pytest.mark.asyncio
-    async def test_lost_lease_cancels_as_lease_lost_when_the_status_read_hangs(self) -> None:
-        """A read waiting in the pool's queue for a connection must not hold the cancel past one heartbeat."""
+    async def test_failed_lease_statement_leaves_the_job_running_until_the_next_heartbeat(self) -> None:
+        """A heartbeat whose statement fails learns nothing about the lease, so it cancels nothing and tries again."""
         run_id = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
         session = AsyncMock()
         lost = MagicMock()
-        lost.rowcount = 0
-        session.execute = AsyncMock(return_value=lost)
+        lost.one.return_value = (False, "running")
+        session.execute = AsyncMock(side_effect=[ConnectionRefusedError(), lost])
         session.commit = AsyncMock()
-        never_set = asyncio.Event()
-
-        async def _hung_read(*_args: object) -> None:
-            await never_set.wait()
-
-        session.scalar = AsyncMock(side_effect=_hung_read)
         maker = _make_session_maker(session)
         seen: list[tuple[object, ...]] = []
-        sleeps = 0
+        running_at_second_heartbeat: list[bool] = []
 
         async def _job() -> None:
             try:
@@ -411,9 +397,9 @@ class TestHeartbeatLoop:
                 raise
 
         async def counting_sleep(delay: float) -> None:
-            nonlocal sleeps
-            sleeps += 1
-            if sleeps >= 2:
+            if session.execute.await_count == 1:
+                running_at_second_heartbeat.append(not job_task.done())
+            if session.execute.await_count >= 2:
                 raise asyncio.CancelledError
 
         job_task = asyncio.create_task(_job())
@@ -424,17 +410,16 @@ class TestHeartbeatLoop:
             patch(f"{MODULE}.settings") as mock_settings,
             patch(f"{MODULE}.asyncio.sleep", side_effect=counting_sleep),
         ):
-            mock_settings.worker.HEARTBEAT_INTERVAL_SECONDS = 0.05
+            mock_settings.worker.HEARTBEAT_INTERVAL_SECONDS = 1
             mock_settings.worker.LEASE_DURATION_SECONDS = 30
             try:
-                await asyncio.wait_for(_heartbeat_loop(run_id, "worker-0", job_task=job_task), timeout=5)
-                marked_lost = run_id in _lease_loss_cancellations
+                await _heartbeat_loop(run_id, "worker-0", job_task=job_task)
             finally:
                 _lease_loss_cancellations.discard(run_id)
         await asyncio.gather(job_task, return_exceptions=True)
 
-        assert sleeps == 1
-        assert marked_lost
+        assert running_at_second_heartbeat == [True]
+        assert session.execute.await_count == 2
         assert job_task.cancelled()
         assert seen == [("lease_lost",)]
 

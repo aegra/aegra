@@ -19,7 +19,7 @@ from datetime import UTC, datetime, timedelta
 import structlog
 from asgi_correlation_id import correlation_id
 from redis import RedisError
-from sqlalchemy import select, update
+from sqlalchemy import exists, select, update
 
 from aegra_api.core.active_runs import active_runs, explicit_run_cancellations
 from aegra_api.core.orm import Run as RunORM
@@ -61,19 +61,14 @@ def _forced_cancel_reason(run_id: str) -> CancelReason:
     return "cancel"
 
 
-async def _lease_loss_reason(run_id: str) -> CancelReason:
-    """A run that ended while this worker's lease was expired, or whose row is gone, ends here; an active one resumes.
+def _lease_lost_reason(extended: bool, status: str | None) -> CancelReason | None:
+    """Name the reason to cancel a job whose lease extension touched no row, or ``None`` when it was extended.
 
-    A failed read falls back to ``lease_lost``, since a run another worker resumes must keep its resources.
+    A run that ended while this worker's lease was expired, or whose row is gone, ends here; an active one resumes.
     """
-    try:
-        ended = await asyncio.wait_for(_is_run_terminal(run_id), timeout=settings.worker.HEARTBEAT_INTERVAL_SECONDS)
-    except Exception:
-        # A connection checkout failure arrives unwrapped (OSError, asyncpg errors), and any escape here
-        # would reach the heartbeat's own handler and skip the cancel.
-        logger.exception("Lease-loss status read failed or timed out, cancelling as lease_lost", run_id=run_id)
-        return "lease_lost"
-    if ended:
+    if extended:
+        return None
+    if status is None or status in _TERMINAL_STATUSES:
         return "cancel"
     return "lease_lost"
 
@@ -599,15 +594,22 @@ async def _heartbeat_loop(
         await asyncio.sleep(interval)
         try:
             new_expiry = datetime.now(UTC) + timedelta(seconds=duration)
+            # One statement extends the lease and reads the run's status, so the cancel
+            # follows the lease loss without another wait in which the job could finish
+            # and save its result over the worker that now owns the run.
+            extension = (
+                update(RunORM)
+                .where(RunORM.run_id == run_id, RunORM.claimed_by == worker_name)
+                .values(lease_expires_at=new_expiry)
+                .returning(RunORM.run_id)
+                .cte("extension")
+            )
+            status = select(RunORM.status).where(RunORM.run_id == run_id).scalar_subquery()
             async with maker() as session:
-                result = await session.execute(
-                    update(RunORM)
-                    .where(RunORM.run_id == run_id, RunORM.claimed_by == worker_name)
-                    .values(lease_expires_at=new_expiry)
-                )
+                extended, run_status = (await session.execute(select(exists(extension.select()), status))).one()
                 await session.commit()
-            if result.rowcount == 0:  # type: ignore[union-attr]
-                reason = await _lease_loss_reason(run_id)
+            reason = _lease_lost_reason(extended, run_status)
+            if reason is not None:
                 logger.warning(
                     "Lease lost, cancelling job to prevent double execution",
                     run_id=run_id,

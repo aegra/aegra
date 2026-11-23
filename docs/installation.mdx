@@ -53,15 +53,30 @@ docker compose up
 
 Aegra requires Python 3.12+ for both the API server and the CLI.
 
+### LangGraph
+
+`aegra-api` requires `langgraph>=1.2.16`, and projects created with `aegra init` start on the same minimum. Only a minimum is set, so a fresh install (`pip install aegra-cli`, or a project without a lock file) gets the newest LangGraph release. A project with a `uv.lock` keeps the versions in that lock file until you run `uv lock --upgrade`.
+
+Each Aegra release is tested against the exact versions in the repository's `uv.lock` at that release tag. A nightly CI job also runs the test suite against the newest releases of every dependency, so a breaking LangGraph release is caught soon after it ships.
+
+If a newer release causes errors:
+
+1. Find your Aegra version with `pip show aegra-api`.
+2. Open `uv.lock` at that release tag, for example `https://github.com/aegra/aegra/blob/v0.11.0/uv.lock`.
+3. Pin `langgraph`, `langgraph-checkpoint` and `langchain-core` to the versions in that file.
+4. [Open an issue](https://github.com/aegra/aegra/issues) with the LangGraph version that fails.
+
 ### PostgreSQL
 
 Aegra uses PostgreSQL with the pgvector extension for persistence and vector search. The recommended image is `pgvector/pgvector:pg18`.
 
-When you use `aegra dev` or `aegra up`, PostgreSQL is started automatically via Docker. For `aegra serve`, you provide your own database via `DATABASE_URL` or `POSTGRES_*` environment variables.
+When you use `aegra dev` or `aegra up`, PostgreSQL starts through Compose. With `AEGRA_CONTAINER_RUNTIME` unset, that is a running Docker daemon, then Podman if it is installed, then Docker if it is installed but stopped. Set the variable to `docker` or `podman` to choose directly. For `aegra serve`, you provide your own database via `DATABASE_URL` or `POSTGRES_*` environment variables.
 
 ### Docker
 
-Docker is required for local development (`aegra dev` starts a PostgreSQL container). For production, you can either run everything in Docker (`aegra up`) or provide an external database and run with `aegra serve`.
+Docker is the default for local development (`aegra dev` starts a PostgreSQL container). For production, you can either run everything in Docker (`aegra up`) or provide an external database and run with `aegra serve`.
+
+Podman is an optional local runtime. Aegra uses `podman compose` with the same Compose file when you set `AEGRA_CONTAINER_RUNTIME=podman`, or when the variable is unset, Docker is not running, and Podman is installed. If that subcommand is missing, the CLI tells you to install the Podman Compose plugin. It does not call `podman-compose`.
 
 ### Windows
 

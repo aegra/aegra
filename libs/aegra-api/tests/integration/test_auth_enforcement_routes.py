@@ -11,8 +11,10 @@ correctly returned 403.
 from __future__ import annotations
 
 import inspect
-from collections.abc import Iterator
+from collections.abc import AsyncIterator, Iterator
+from contextlib import asynccontextmanager
 from typing import Any
+from unittest.mock import AsyncMock
 
 import pytest
 from fastapi import FastAPI
@@ -28,6 +30,7 @@ from aegra_api.core.auth_enforcement import (
 )
 from aegra_api.core.database import db_manager
 from aegra_api.models.auth import User
+from aegra_api.services.event_streaming import commands as v2_commands
 from tests.fixtures.session_fixtures import ThreadSession, override_session_dependency
 
 
@@ -87,7 +90,6 @@ PREVIOUSLY_UNPROTECTED = [
     ("PATCH", "/threads/t-1/runs/r-1", {}),
     ("POST", "/threads/t-1/runs/r-1/cancel", None),
     ("POST", "/threads/t-1/stream/events", {}),
-    ("POST", "/threads/t-1/commands", {}),
 ]
 
 
@@ -443,3 +445,122 @@ def test_no_auth_configured_still_allows_requests(monkeypatch: pytest.MonkeyPatc
         response = client.get("/assistants")
 
     assert response.status_code != 403
+
+
+@pytest.fixture
+def v2_command_route(monkeypatch: pytest.MonkeyPatch) -> AsyncMock:
+    """Stub the DB-touching steps of POST /threads/{id}/commands; returns the _prepare_run mock."""
+    from aegra_api.api import event_streaming
+
+    @asynccontextmanager
+    async def _session() -> AsyncIterator[AsyncMock]:
+        yield AsyncMock()
+
+    monkeypatch.setattr(event_streaming, "_require_v2_enabled", lambda: None)
+    monkeypatch.setattr(event_streaming, "_get_session_maker", lambda: _session)
+    monkeypatch.setattr(event_streaming, "_verify_thread_owned_or_new", AsyncMock())
+    monkeypatch.setattr(v2_commands, "_thread_is_interrupted", AsyncMock(return_value=False))
+    monkeypatch.setattr(v2_commands, "_thread_assistant_id", AsyncMock(return_value="agent"))
+    prepare = AsyncMock(return_value=("run-1", object(), object()))
+    monkeypatch.setattr(v2_commands, "_prepare_run", prepare)
+    return prepare
+
+
+def _run_start(assistant_id: str) -> dict[str, Any]:
+    return {"id": 1, "method": "run.start", "params": {"assistant_id": assistant_id, "input": {"messages": []}}}
+
+
+def test_v2_run_start_authorizes_like_v1_run_create(
+    monkeypatch: pytest.MonkeyPatch, v2_command_route: AsyncMock
+) -> None:
+    """The create_run handler sees the run fields, not the JSON-RPC envelope, and the assistant is read-checked."""
+    auth = Auth()
+    seen: list[tuple[str, str, Any]] = []
+
+    @auth.on
+    async def record(ctx: Any, value: Any) -> bool:
+        seen.append((ctx.resource, ctx.action, value.get("assistant_id")))
+        return True
+
+    app = _build_app(auth, monkeypatch)
+
+    with TestClient(app) as client:
+        response = client.post("/threads/t-1/commands", json=_run_start("restricted-agent"))
+
+    assert response.json()["type"] == "success"
+    assert seen == [("threads", "create_run", "restricted-agent"), ("assistants", "read", "restricted-agent")]
+
+
+def test_v2_run_start_denied_by_create_run_handler_starts_no_run(
+    monkeypatch: pytest.MonkeyPatch, v2_command_route: AsyncMock
+) -> None:
+    auth = Auth()
+
+    @auth.on.threads.create_run
+    async def deny_restricted(ctx: Any, value: Any) -> bool:
+        return value.get("assistant_id") != "restricted-agent"
+
+    app = _build_app(auth, monkeypatch)
+
+    with TestClient(app) as client:
+        response = client.post("/threads/t-1/commands", json=_run_start("restricted-agent"))
+
+    assert response.json()["type"] == "error"
+    assert response.json()["error"] == "permission_denied"
+    v2_command_route.assert_not_awaited()
+
+
+def test_v2_run_start_denied_by_assistant_handler_starts_no_run(
+    monkeypatch: pytest.MonkeyPatch, v2_command_route: AsyncMock
+) -> None:
+    auth = Auth()
+
+    @auth.on.assistants.read
+    async def deny(ctx: Any, value: Any) -> bool:
+        return False
+
+    app = _build_app(auth, monkeypatch)
+
+    with TestClient(app) as client:
+        response = client.post("/threads/t-1/commands", json=_run_start("agent"))
+
+    assert response.json()["error"] == "permission_denied"
+    v2_command_route.assert_not_awaited()
+
+
+def test_v2_run_start_keeps_create_run_handler_overrides(
+    monkeypatch: pytest.MonkeyPatch, v2_command_route: AsyncMock
+) -> None:
+    auth = Auth()
+
+    @auth.on.threads.create_run
+    async def inject(ctx: Any, value: Any) -> dict[str, Any]:
+        return {"config": {"configurable": {"tenant": "acme"}}, "context": {"tenant": "acme"}}
+
+    app = _build_app(auth, monkeypatch)
+
+    with TestClient(app) as client:
+        client.post("/threads/t-1/commands", json=_run_start("agent"))
+
+    request = v2_command_route.call_args.args[2]
+    assert request.config["configurable"]["tenant"] == "acme"
+    assert request.context == {"tenant": "acme"}
+
+
+def test_v2_input_respond_authorizes_the_resumed_assistant(
+    monkeypatch: pytest.MonkeyPatch, v2_command_route: AsyncMock
+) -> None:
+    auth = Auth()
+    seen: list[tuple[str, str, Any]] = []
+
+    @auth.on
+    async def record(ctx: Any, value: Any) -> bool:
+        seen.append((ctx.resource, ctx.action, value.get("assistant_id")))
+        return True
+
+    app = _build_app(auth, monkeypatch)
+
+    with TestClient(app) as client:
+        client.post("/threads/t-1/commands", json={"id": 2, "method": "input.respond", "params": {"response": "ok"}})
+
+    assert seen == [("threads", "create_run", "agent"), ("assistants", "read", "agent")]

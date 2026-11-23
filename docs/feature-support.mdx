@@ -29,7 +29,7 @@ description: "What Aegra supports today, what's coming soon, and what's not yet 
 | Thread CRUD | Supported | Create, read, update, delete, and search threads. |
 | State persistence | Supported | PostgreSQL checkpoints via LangGraph. |
 | Thread state inspection | Supported | Get current state, values, and next nodes for any thread. |
-| Thread history | Supported | Full checkpoint history with replay capability. |
+| Thread history | Supported | Full checkpoint history with replay capability and metadata filtering. |
 
 ### Runs and execution
 
@@ -39,10 +39,12 @@ description: "What Aegra supports today, what's coming soon, and what's not yet 
 | Streaming (7 SSE modes) | Supported | values, updates, messages, messages-tuple, custom, events, and debug. |
 | SSE reconnection | Supported | Resume interrupted streams from where they left off. |
 | Sync wait | Supported | Block until run completes and return final output. |
+| List runs with `select` | Supported | `GET /threads/{thread_id}/runs` filters by `status`, pages with `limit`/`offset`, and returns only the fields named in `select`. Leave `output` out of `select` to list long threads cheaply. `select` takes the fields of Aegra's `Run` (`run_id`, `status`, `input`, `output`, `config`, `context`, ...); `metadata`, `kwargs` and `multitask_strategy` are not `Run` fields here and return `422`. |
 | Subgraph streaming | Supported | Stream events from nested subgraphs. |
 | Stateless runs | Supported | Execute without persisting thread state. |
 | Checkpoint durability | Supported | `durability` (`sync`, `async`, `exit`) per run or cron, deprecated `checkpoint_during` alias, server default via `checkpointer.durability` or `AEGRA_CHECKPOINT_DURABILITY`. |
 | Cron / scheduled jobs | Supported | Create, read, update, delete, search, and count scheduled jobs, including metadata filtering. Standard and seconds-level cron expressions. IANA timezone support. |
+| Webhooks | Supported | `webhook` on runs and crons: a POST with the finished run, its final values, and any error. LangGraph `webhooks` config (`url` policy, `headers`, `env_prefix`, `allowed_fields`) and `http.disable_webhooks`. Relative (loopback) webhook URLs return `422`. See [Webhooks](/guides/webhooks). |
 
 ### Scaling and reliability
 
@@ -105,7 +107,8 @@ description: "What Aegra supports today, what's coming soon, and what's not yet 
 
 | Feature | Status | Notes |
 |:--|:--|:--|
-| Docker / Docker Compose | Supported | `aegra up` or `docker compose up`. |
+| Docker / Docker Compose | Supported | `aegra up` or `docker compose up`. Docker is the default local runtime. |
+| Podman | Supported | Local Compose through `podman compose` for `aegra dev`, `aegra up`, and `aegra down`. Set `AEGRA_CONTAINER_RUNTIME=podman` to choose it directly. With the variable unset, it is used when Docker is not running and Podman is installed. |
 | PaaS deployment | Supported | Railway, Render, Fly.io — any platform that runs Docker. |
 | Kubernetes | Supported | Helm chart or raw manifests. |
 | Dev server with hot reload | Supported | `aegra dev` with auto-reload and managed PostgreSQL. |
@@ -125,7 +128,6 @@ description: "What Aegra supports today, what's coming soon, and what's not yet 
 |:--|:--|:--|
 | RemoteGraph | Not yet planned | Call remote graphs as local subgraphs. |
 | Encryption at rest | Not yet planned | Database-level encryption. Use Postgres TDE or volume encryption. |
-| Webhook callbacks | Not yet planned | Notify external services on run completion. |
 | Rate limiting | Not yet planned | Per-user or per-key request throttling. |
 | Multi-org workspaces | Not yet planned | Tenant isolation within a single deployment. |
 

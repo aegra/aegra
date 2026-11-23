@@ -35,6 +35,21 @@ class TestWebhookValidation:
         req = CronCreate(input={"q": 1}, assistant_id="a", schedule="* * * * *", webhook=url)
         assert req.webhook == url
 
+    def test_update_rejects_non_http_scheme(self) -> None:
+        with pytest.raises(ValidationError):
+            CronUpdate(webhook="ftp://example.com/hook")
+
+    def test_update_marks_an_explicit_null_webhook_as_set(self) -> None:
+        req = CronUpdate.model_validate({"webhook": None})
+
+        assert "webhook" in req.model_fields_set
+        assert req.webhook is None
+
+    def test_update_leaves_an_omitted_webhook_unset(self) -> None:
+        req = CronUpdate.model_validate({"enabled": False})
+
+        assert "webhook" not in req.model_fields_set
+
 
 class TestEndTimeMustBeFuture:
     def test_rejects_past_end_time_on_create(self) -> None:
@@ -54,6 +69,17 @@ class TestEndTimeMustBeFuture:
     def test_rejects_past_end_time_on_update(self) -> None:
         with pytest.raises(ValidationError, match="future"):
             CronUpdate(end_time=datetime.now(UTC) - timedelta(days=365))
+
+    def test_update_accepts_null_end_time_and_marks_it_set(self) -> None:
+        req = CronUpdate.model_validate({"end_time": None})
+
+        assert req.end_time is None
+        assert "end_time" in req.model_fields_set
+
+    def test_update_leaves_an_omitted_end_time_unset(self) -> None:
+        req = CronUpdate.model_validate({"enabled": False})
+
+        assert "end_time" not in req.model_fields_set
 
 
 class TestPayloadSizeCap:

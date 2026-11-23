@@ -42,7 +42,7 @@ class TestJsonbShallowMerge:
     def test_non_object_metadata_starts_from_an_empty_object(self) -> None:
         """``'[1,2]'::jsonb || '{"a":1}'::jsonb`` appends instead of merging."""
         sql = _compile(jsonb_shallow_merge(ThreadORM.metadata_json, jsonb_patch({"a": 1}, "metadata_patch")))
-        assert "CASE WHEN (jsonb_typeof(thread.metadata_json) = %(jsonb_typeof_1)s)" in sql
+        assert "CASE WHEN (jsonb_typeof(thread.metadata_json) = %(jsonb_typeof_1)s" in sql
         assert "ELSE '{}'::jsonb END" in sql
 
     def test_later_patches_are_applied_last(self) -> None:

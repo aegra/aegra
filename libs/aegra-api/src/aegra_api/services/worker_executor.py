@@ -121,7 +121,7 @@ class WorkerExecutor(BaseExecutor):
 
     async def wait_for_completion(self, run_id: str, *, timeout: float = 300.0) -> None:
         """Wait for a run to finish by polling a Redis done-key with DB fallback."""
-        done_key = f"{settings.redis.REDIS_CHANNEL_PREFIX}done:{run_id}"
+        done_key = _done_key(run_id)
         client = redis_manager.get_client()
         loop = asyncio.get_running_loop()
         deadline = loop.time() + timeout
@@ -141,7 +141,7 @@ class WorkerExecutor(BaseExecutor):
 
     async def is_finished(self, run_id: str) -> bool:
         """The check ``wait_for_completion`` polls: the run's done key, else its row in a terminal state."""
-        done_key = f"{settings.redis.REDIS_CHANNEL_PREFIX}done:{run_id}"
+        done_key = _done_key(run_id)
         return await _done_key_set(redis_manager.get_client(), done_key) or await _is_run_terminal(run_id)
 
     # ------------------------------------------------------------------
@@ -595,6 +595,11 @@ async def _heartbeat_loop(
             logger.debug("Lease extended", run_id=run_id, worker=worker_name)
         except Exception:
             logger.warning("Heartbeat lease extension failed", run_id=run_id, worker=worker_name)
+
+
+def _done_key(run_id: str) -> str:
+    """The Redis key the worker sets once the run has finished."""
+    return f"{settings.redis.REDIS_CHANNEL_PREFIX}done:{run_id}"
 
 
 async def _done_key_set(client: Any, done_key: str) -> bool:

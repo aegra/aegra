@@ -1388,11 +1388,13 @@ class TestDeleteThreadHook:
         monkeypatch.setattr(threads_module, "notify_threads_deleted", record)
         return calls
 
-    def _client(self, thread: object, committed: list[bool]) -> TestClient:
+    def _client(self, thread: object, committed: list[bool], statements: list[object] | None = None) -> TestClient:
         app = create_test_app(include_runs=False, include_threads=True)
 
         class Session(DummySessionBase):
-            async def scalar(self, _stmt: object) -> object:
+            async def scalar(self, stmt: object) -> object:
+                if statements is not None:
+                    statements.append(stmt)
                 return thread
 
             async def delete(self, obj: object) -> None:
@@ -1408,11 +1410,16 @@ class TestDeleteThreadHook:
         self, mock_checkpointer: AsyncMock, committed: list[bool], hook_calls: list[tuple[list[Any], bool]]
     ) -> None:
         thread = _thread_row("test-123", metadata={"box": "1"}, user_id="test-user")
+        statements: list[object] = []
 
-        resp = self._client(thread, committed).delete("/threads/test-123")
+        resp = self._client(thread, committed, statements).delete("/threads/test-123")
 
         assert resp.status_code == 200
         assert hook_calls == [([{"thread_id": "test-123", "user_id": "test-user", "metadata": {"box": "1"}}], True)]
+        deletes = [stmt for stmt in statements if isinstance(stmt, Delete)]
+        assert len(deletes) == 1
+        # Only a returned row tells this delete from a concurrent one that committed first.
+        assert str(deletes[0].compile(dialect=postgresql.dialect())).endswith("RETURNING thread.thread_id")
 
     def test_delete_that_removed_no_row_notifies_nothing(
         self, mock_checkpointer: AsyncMock, committed: list[bool], hook_calls: list[tuple[list[Any], bool]]

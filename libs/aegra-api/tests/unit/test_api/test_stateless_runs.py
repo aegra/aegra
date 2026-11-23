@@ -129,6 +129,8 @@ class TestDeleteThreadById:
         mock_checkpointer.adelete_thread.assert_awaited_once_with(thread_id)
         delete_sql = str(mock_session.scalar.await_args_list[-1].args[0].compile(dialect=postgresql.dialect()))
         assert delete_sql.startswith("DELETE FROM thread")
+        # Only a returned row tells this delete from a concurrent one that committed first.
+        assert delete_sql.endswith("RETURNING thread.thread_id")
         mock_session.commit.assert_called_once()
 
     @pytest.mark.asyncio

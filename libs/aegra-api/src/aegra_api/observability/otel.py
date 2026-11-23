@@ -13,7 +13,8 @@ from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import BatchSpanProcessor, ConsoleSpanExporter
 
 from aegra_api.observability.base import ObservabilityProvider
-from aegra_api.observability.span_enrichment import SpanEnrichmentProcessor
+from aegra_api.observability.sampling import is_trace_id_from_run_id_enabled
+from aegra_api.observability.span_enrichment import RunIdAwareIdGenerator, SpanEnrichmentProcessor
 from aegra_api.observability.targets import (
     BaseOtelTarget,
     GenericOtelTarget,
@@ -97,7 +98,12 @@ class OpenTelemetryProvider(ObservabilityProvider):
             }
         )
 
-        self._tracer_provider = TracerProvider(resource=resource)
+        is_trace_id_from_run_id_enabled()
+
+        self._tracer_provider = TracerProvider(
+            resource=resource,
+            id_generator=RunIdAwareIdGenerator(),
+        )
         self._tracer_provider.add_span_processor(SpanEnrichmentProcessor())
         processors_count = 0
 
@@ -130,6 +136,16 @@ class OpenTelemetryProvider(ObservabilityProvider):
             self.setup()
         return []
 
+    def force_flush(self, *, timeout_millis: int = 10_000) -> bool:
+        """Flush pending spans so BSP doesn't silently drop the root span."""
+        if self._tracer_provider is None:
+            return True
+        try:
+            return self._tracer_provider.force_flush(timeout_millis=timeout_millis)
+        except (RuntimeError, TimeoutError, OSError):
+            logger.warning("TracerProvider force_flush failed (best-effort)", exc_info=True)
+            return False
+
     def get_metadata(self, run_id: str, thread_id: str, user_identity: str | None = None) -> dict[str, Any]:
         if not self.is_enabled():
             return {}
@@ -153,3 +169,8 @@ class OpenTelemetryProvider(ObservabilityProvider):
 
 
 otel_provider = OpenTelemetryProvider()
+
+
+def flush_otel_spans(*, timeout_millis: int = 10_000) -> bool:
+    """Convenience wrapper so callers don't depend on the singleton directly."""
+    return otel_provider.force_flush(timeout_millis=timeout_millis)

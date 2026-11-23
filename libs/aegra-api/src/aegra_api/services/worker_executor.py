@@ -19,7 +19,6 @@ from datetime import UTC, datetime, timedelta
 import structlog
 from asgi_correlation_id import correlation_id
 from redis import RedisError
-from redis import TimeoutError as RedisTimeoutError
 from sqlalchemy import select, update
 
 from aegra_api.core.active_runs import active_runs, explicit_run_cancellations
@@ -27,15 +26,17 @@ from aegra_api.core.orm import Run as RunORM
 from aegra_api.core.orm import _get_session_maker
 from aegra_api.core.redis_manager import redis_manager
 from aegra_api.models.run_job import RunJob
-from aegra_api.observability.span_enrichment import merge_run_metadata, set_trace_context
+from aegra_api.observability.span_enrichment import merge_run_metadata, prepare_run_otel_trace, set_trace_context
 from aegra_api.services.base_executor import BaseExecutor
 from aegra_api.services.run_executor import (
+    _TIMEOUT_ERROR,
     _lease_loss_cancellations,
     _shutdown_cancellations,
     _timeout_cancellations,
     execute_run,
 )
 from aegra_api.services.run_status import finalize_run
+from aegra_api.services.webhook_delivery import job_for_run
 from aegra_api.settings import settings
 
 logger = structlog.getLogger(__name__)
@@ -72,6 +73,7 @@ async def _cleanup_cancelled_execution(run_id: str, execution_task: asyncio.Task
             status="interrupted",
             thread_status="idle",
             output={},
+            webhook_job=await _load_webhook_job(run_id),
         )
     except Exception:
         logger.exception("Failed to persist explicit run cancellation", run_id=run_id)
@@ -299,7 +301,9 @@ class WorkerExecutor(BaseExecutor):
                         user_id=user_id,
                         status="error",
                         thread_status="error",
-                        error="Job exceeded maximum execution time",
+                        error=_TIMEOUT_ERROR,
+                        error_type="TimeoutError",
+                        webhook_job=await _load_webhook_job(run_id),
                     )
                 await _release_lease(run_id, worker_name)
         except asyncio.CancelledError:
@@ -321,17 +325,16 @@ class WorkerExecutor(BaseExecutor):
     # ------------------------------------------------------------------
 
     async def _dequeue(self) -> str | None:
-        """BLPOP with 5s timeout. Falls back to Postgres polling if Redis is down."""
+        """BLPOP on the blocking client. Any Redis error, timeout included, falls back to Postgres:
+        the block may have popped a run whose reply never arrived."""
         try:
-            client = redis_manager.get_client()
-            result = await client.blpop(settings.worker.WORKER_QUEUE_KEY, timeout=5)  # type: ignore[arg-type]
+            client = redis_manager.get_blocking_client()
+            result = await client.blpop(  # type: ignore[arg-type]
+                settings.worker.WORKER_QUEUE_KEY, timeout=settings.worker.BLPOP_TIMEOUT_SECONDS
+            )
             if result is None:
                 return None
             return result[1]
-        except RedisTimeoutError:
-            # Idle expiry: a blocking BLPOP hit the socket timeout with no jobs.
-            # Normal when the queue is empty, not a connectivity failure — re-loop.
-            return None
         except RedisError as exc:
             logger.warning("Redis BLPOP failed, falling back to Postgres poll", error=str(exc))
             await asyncio.sleep(settings.worker.POSTGRES_POLL_INTERVAL_SECONDS)
@@ -403,6 +406,17 @@ class WorkerExecutor(BaseExecutor):
 # ------------------------------------------------------------------
 # Helpers
 # ------------------------------------------------------------------
+
+
+async def _load_webhook_job(run_id: str) -> RunJob | None:
+    """The run's job when it has a webhook, read before the wrapper finalizes it.
+
+    Once the run is terminal, stateless cleanup may delete its row, so a later read could find nothing.
+    """
+    maker = _get_session_maker()
+    async with maker() as session:
+        run = await session.scalar(select(RunORM).where(RunORM.run_id == run_id))
+    return job_for_run(run) if run is not None else None
 
 
 async def _get_run_identity(run_id: str) -> tuple[str, str] | None:
@@ -603,6 +617,8 @@ def _restore_trace_context(run_id: str, job: RunJob, trace: dict[str, str]) -> N
     original_request_id = trace.get("correlation_id", "")
     if original_request_id:
         correlation_id.set(original_request_id)
+
+    prepare_run_otel_trace(run_id)
 
     system_metadata: dict[str, str | int | float | bool] = {
         "run_id": run_id,

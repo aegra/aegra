@@ -65,7 +65,7 @@ aegra/
 │           ├── cli.py                # Main CLI entry point
 │           ├── env.py                # .env file loading
 │           ├── commands/             # Command implementations (init)
-│           ├── utils/                # Docker utilities
+│           ├── utils/                # Container runtime utilities (Docker, Podman)
 │           └── templates/            # Project templates for `aegra init`
 │
 ├── examples/                         # Example agents and configs
@@ -324,6 +324,7 @@ Supported factory signatures: 0-arg (called once at startup), config-only (`dict
 - Include tests for new functionality
 - Update migrations if modifying database schema
 - Title format: Conventional Commits (`type(scope): subject`), e.g. `fix(api): raise search limit cap`
+- Add `!` after the type when the PR changes behavior a client can see (`fix(api)!: ...`). Release notes group by PR title, so without it the change ships under Fixes.
 
 ### Documentation Updates (STRICT)
 - **EVERY code change that affects user-facing behavior MUST include corresponding documentation updates.** This is NOT optional — treat docs as part of the implementation, not a follow-up task.

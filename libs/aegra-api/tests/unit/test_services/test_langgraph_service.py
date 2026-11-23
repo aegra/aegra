@@ -3,14 +3,21 @@
 import json
 import sys
 from pathlib import Path
+from typing import Any
 from unittest.mock import Mock, mock_open, patch
 
 import pytest
+from langchain_core.callbacks import BaseCallbackHandler, CallbackManager
+from langgraph.checkpoint.memory import InMemorySaver
+from langgraph.graph import START, MessagesState, StateGraph
+from langgraph.pregel import Pregel
 
 # Import the settings singleton directly to patch it
 from aegra_api import config as config_module
+from aegra_api.core import database as dbmod
 from aegra_api.services.langgraph_service import (
     LangGraphService,
+    _copy_graph_config,
     create_run_config,
     create_thread_config,
     inject_user_context,
@@ -187,6 +194,88 @@ class TestLangGraphServiceConfig:
         service.config = {}
 
         assert service.get_dependencies() == []
+
+
+class TestLoadGraphRegistry:
+    """Tests for supported graph configuration forms and validation."""
+
+    def test_loads_legacy_string_entry(self) -> None:
+        service = LangGraphService()
+        service.config = {"graphs": {"agent": "./graphs/agent.py:graph"}}
+
+        service._load_graph_registry()
+
+        assert service._graph_registry["agent"] == {
+            "file_path": "./graphs/agent.py",
+            "export_name": "graph",
+        }
+
+    def test_loads_object_entry_with_description(self) -> None:
+        service = LangGraphService()
+        service.config = {
+            "graphs": {
+                "agent": {
+                    "path": "./graphs/agent.py:graph",
+                    "description": "ReAct agent with tools",
+                }
+            }
+        }
+
+        service._load_graph_registry()
+
+        assert service._graph_registry["agent"] == {
+            "file_path": "./graphs/agent.py",
+            "export_name": "graph",
+            "description": "ReAct agent with tools",
+        }
+
+    def test_loads_object_entry_without_description(self) -> None:
+        service = LangGraphService()
+        service.config = {"graphs": {"agent": {"path": "./graphs/agent.py:graph"}}}
+
+        service._load_graph_registry()
+
+        assert service._graph_registry["agent"] == {
+            "file_path": "./graphs/agent.py",
+            "export_name": "graph",
+        }
+
+    def test_treats_null_description_as_absent(self) -> None:
+        service = LangGraphService()
+        service.config = {"graphs": {"agent": {"path": "./graphs/agent.py:graph", "description": None}}}
+
+        service._load_graph_registry()
+
+        assert service._graph_registry["agent"] == {
+            "file_path": "./graphs/agent.py",
+            "export_name": "graph",
+        }
+
+    @pytest.mark.parametrize(
+        ("graph_config", "message"),
+        [
+            ({"description": "Missing path"}, "missing required 'path'"),
+            ({"path": 42}, "field 'path' must be a string"),
+            ({"path": "./agent.py:graph", "description": 42}, "field 'description' must be a string"),
+            (42, "configuration must be a string or object"),
+            ({"path": "./agent.py"}, "Invalid graph path format"),
+            ({"path": ":graph"}, "Invalid graph path format"),
+            ({"path": "./agent.py:"}, "Invalid graph path format"),
+        ],
+    )
+    def test_rejects_invalid_graph_entry(self, graph_config: object, message: str) -> None:
+        service = LangGraphService()
+        service.config = {"graphs": {"broken": graph_config}}
+
+        with pytest.raises(ValueError, match=message):
+            service._load_graph_registry()
+
+    def test_rejects_non_object_graphs_section(self) -> None:
+        service = LangGraphService()
+        service.config = {"graphs": ["./graphs/agent.py:graph"]}
+
+        with pytest.raises(ValueError, match="field 'graphs' must be an object"):
+            service._load_graph_registry()
 
 
 class TestLangGraphServiceGraphs:
@@ -882,6 +971,64 @@ async def test_get_graph_context_manager_injects_checkpointer(monkeypatch):
 
     async with service.get_graph("g2") as graph:
         assert graph == "copied:cp2:store2"
+
+
+class _NoDeepcopyHandler(BaseCallbackHandler):
+    """Stands in for handlers like Langfuse's, whose clients deepcopy cannot rebuild."""
+
+    def __deepcopy__(self, memo: dict[int, Any]) -> "_NoDeepcopyHandler":
+        raise TypeError("handler cannot be deep-copied")
+
+
+def _compiled_graph() -> Pregel:
+    builder = StateGraph(MessagesState)
+    builder.add_node("noop", lambda state: {})
+    builder.add_edge(START, "noop")
+    return builder.compile()
+
+
+@pytest.mark.asyncio
+async def test_get_graph_keeps_persistence_when_config_has_non_copyable_callback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    handler = _NoDeepcopyHandler()
+    base = _compiled_graph().with_config(callbacks=[handler], metadata={"team": "a"})
+    service = LangGraphService()
+    service._graph_registry["cb"] = {"file_path": "f", "export_name": "g"}
+    service._base_graph_cache["cb"] = base
+    checkpointer = InMemorySaver()
+
+    class FakeDBManager:
+        def get_checkpointer(self) -> InMemorySaver:
+            return checkpointer
+
+        def get_store(self) -> None:
+            return None
+
+    monkeypatch.setattr(dbmod, "db_manager", FakeDBManager())
+
+    async with service.get_graph("cb") as graph:
+        assert graph.checkpointer is checkpointer
+        assert graph.config["callbacks"][0] is handler
+        assert graph.config["metadata"] == {"team": "a"}
+        assert graph.config["metadata"] is not base.config["metadata"]
+
+
+def test_copy_graph_config_copies_callback_manager_but_shares_its_handlers() -> None:
+    handler = _NoDeepcopyHandler()
+    inheritable = _NoDeepcopyHandler()
+    manager = CallbackManager(handlers=[handler], inheritable_handlers=[inheritable], tags=["a"])
+
+    copied = _copy_graph_config({"callbacks": manager})
+
+    assert copied is not None
+    copied_manager = copied["callbacks"]
+    assert isinstance(copied_manager, CallbackManager)
+    assert copied_manager is not manager
+    assert copied_manager.handlers[0] is handler
+    assert copied_manager.inheritable_handlers[0] is inheritable
+    copied_manager.add_tags(["b"])
+    assert manager.tags == ["a"]
 
 
 class TestSetupDependencies:

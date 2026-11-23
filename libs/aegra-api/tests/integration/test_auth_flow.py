@@ -9,10 +9,12 @@ These tests validate:
 
 import json
 from pathlib import Path
+from typing import Annotated
 from unittest.mock import Mock, patch
 
 import pytest
-from fastapi import Request
+from fastapi import Depends, FastAPI, Request
+from fastapi.testclient import TestClient
 from starlette.authentication import AuthCredentials, AuthenticationError
 from starlette.requests import HTTPConnection
 
@@ -348,3 +350,27 @@ class TestUserModelCustomFields:
             # Verify request scope was set
             assert mock_request.scope["user"] is not None
             assert mock_request.scope["auth"] is not None
+
+
+class TestBrokenAuthModule:
+    """A configured auth.path that cannot load must never turn into no-auth mode."""
+
+    @pytest.mark.parametrize("auth_header", [{}, {"Authorization": "Bearer forged"}])
+    def test_protected_route_errors_instead_of_serving_anonymous(
+        self, tmp_path: Path, auth_header: dict[str, str]
+    ) -> None:
+        (tmp_path / "my_auth.py").write_text("raise RuntimeError('boom')")
+        app = FastAPI()
+
+        @app.post("/threads")
+        async def create_thread(user: Annotated[User, Depends(require_auth)]) -> dict[str, str]:
+            return {"owner": user.identity}
+
+        with (
+            patch("aegra_api.core.auth_middleware.load_auth_config", return_value={"path": "./my_auth.py:auth"}),
+            patch("aegra_api.core.auth_middleware.get_config_dir", return_value=tmp_path),
+        ):
+            response = TestClient(app, raise_server_exceptions=False).post("/threads", headers=auth_header)
+
+        assert response.status_code == 500
+        assert "anonymous" not in response.text

@@ -3,7 +3,7 @@ name: E2E Tests
 on:
   push:
     branches: [main]
-  # Allow manual trigger
+  # Manual runs must target main: the e2e environment only allows main.
   workflow_dispatch:
 
 # Workflow-level so pytest steps inherit them: tests that read the database
@@ -19,6 +19,7 @@ jobs:
   e2e-dev-mode:
     name: E2E (Dev Mode — LocalExecutor)
     runs-on: ubuntu-latest
+    environment: e2e
     permissions:
       contents: read
 
@@ -62,9 +63,15 @@ jobs:
           POSTGRES_DB: "aegra"
         run: uv run alembic upgrade head
 
+      # The webhook E2E tests run their receiver on 127.0.0.1, which the shipped
+      # aegra.json rightly refuses to call. Allow loopback for this server only.
+      - name: Write E2E config (loopback webhooks allowed)
+        run: |
+          jq '.webhooks = {"url": {"require_https": false, "disable_loopback": false}}' aegra.json > aegra.e2e.json
+
       - name: Start Aegra server (dev mode — no Redis)
         env:
-          AEGRA_CONFIG: ${{ github.workspace }}/aegra.json
+          AEGRA_CONFIG: ${{ github.workspace }}/aegra.e2e.json
           POSTGRES_USER: "user"
           POSTGRES_PASSWORD: "password"
           POSTGRES_HOST: "localhost"
@@ -118,6 +125,7 @@ jobs:
   e2e-prod-mode:
     name: E2E (Prod Mode — WorkerExecutor + Redis)
     runs-on: ubuntu-latest
+    environment: e2e
     permissions:
       contents: read
 
@@ -171,9 +179,13 @@ jobs:
           POSTGRES_DB: "aegra"
         run: uv run alembic upgrade head
 
+      - name: Write E2E config (loopback webhooks allowed)
+        run: |
+          jq '.webhooks = {"url": {"require_https": false, "disable_loopback": false}}' aegra.json > aegra.e2e.json
+
       - name: Start Aegra server (prod mode — Redis workers)
         env:
-          AEGRA_CONFIG: ${{ github.workspace }}/aegra.json
+          AEGRA_CONFIG: ${{ github.workspace }}/aegra.e2e.json
           POSTGRES_USER: "user"
           POSTGRES_PASSWORD: "password"
           POSTGRES_HOST: "localhost"
@@ -230,6 +242,7 @@ jobs:
   e2e-auth:
     name: E2E (Auth Enabled)
     runs-on: ubuntu-latest
+    environment: e2e
     permissions:
       contents: read
 

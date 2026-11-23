@@ -47,6 +47,34 @@ class TestLangGraphServiceRealFiles:
                 assert service.get_dependencies() == ["dep1", "dep2"]
 
     @pytest.mark.asyncio
+    async def test_initialize_with_object_graph_config(self) -> None:
+        config_data = {
+            "graphs": {
+                "test_graph": {
+                    "path": "./graphs/test.py:graph",
+                    "description": "Graph loaded from an object entry",
+                }
+            }
+        }
+
+        with TemporaryDirectory() as temp_dir:
+            config_path = Path(temp_dir) / "aegra.json"
+            config_path.write_text(json.dumps(config_data))
+
+            with (
+                patch("aegra_api.services.langgraph_service.LangGraphService._ensure_default_assistants"),
+                patch("aegra_api.services.langgraph_service.LangGraphService._load_all_graph_modules"),
+            ):
+                service = LangGraphService(str(config_path))
+                await service.initialize()
+
+        assert service._graph_registry["test_graph"] == {
+            "file_path": "./graphs/test.py",
+            "export_name": "graph",
+            "description": "Graph loaded from an object entry",
+        }
+
+    @pytest.mark.asyncio
     async def test_initialize_env_var_with_real_file(self, monkeypatch):
         """Test initialization with AEGRA_CONFIG pointing to real file"""
         config_data = {"graphs": {"env_graph": "./graphs/env.py:graph"}}

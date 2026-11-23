@@ -218,6 +218,7 @@ jobs:
       (inputs.package == 'aegra-cli' || needs.publish-api.result == 'success') &&
       (inputs.package == 'aegra-api' || needs.publish-cli.result == 'success')
     runs-on: ubuntu-latest
+    environment: discord
     continue-on-error: true  # a Discord outage must not mark a published release as failed
 
     steps:

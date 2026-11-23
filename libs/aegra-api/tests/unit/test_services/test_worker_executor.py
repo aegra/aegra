@@ -9,8 +9,10 @@ from redis import ConnectionError as RedisConnectionError
 from redis import TimeoutError as RedisTimeoutError
 
 from aegra_api.core.active_runs import active_runs, explicit_run_cancellations
+from aegra_api.core.orm import Run as RunORM
 from aegra_api.models.auth import User
 from aegra_api.models.run_job import RunBehavior, RunExecution, RunIdentity, RunJob
+from aegra_api.observability.span_enrichment import _run_trace_id
 from aegra_api.services.run_executor import _shutdown_cancellations, _timeout_cancellations
 from aegra_api.services.worker_executor import (
     WorkerExecutor,
@@ -18,11 +20,13 @@ from aegra_api.services.worker_executor import (
     _heartbeat_loop,
     _is_run_terminal,
     _is_valid_run_id,
+    _load_webhook_job,
     _LoadedRun,
     _release_lease,
     _requeue_drained_runs,
     _restore_trace_context,
 )
+from aegra_api.settings import settings
 
 MODULE = "aegra_api.services.worker_executor"
 
@@ -62,6 +66,8 @@ def _make_run_orm(
     orm = MagicMock()
     orm.run_id = run_id
     orm.thread_id = thread_id
+    orm.assistant_id = "assistant-1"
+    orm.created_at = None
     orm.status = status
     orm.execution_params = execution_params or {
         "graph_id": "test-graph",
@@ -345,11 +351,20 @@ class TestIsRunTerminal:
 
 
 class TestRestoreTraceContext:
+    def setup_method(self) -> None:
+        _run_trace_id.set(None)
+
+    def teardown_method(self) -> None:
+        _run_trace_id.set(None)
+
     def test_sets_structlog_context_vars(self) -> None:
         job = _make_run_job()
         trace = {"correlation_id": "req-abc"}
 
-        with patch(f"{MODULE}.set_trace_context") as mock_set_trace:
+        with (
+            patch(f"{MODULE}.prepare_run_otel_trace"),
+            patch(f"{MODULE}.set_trace_context") as mock_set_trace,
+        ):
             _restore_trace_context("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee", job, trace)
 
         mock_set_trace.assert_called_once()
@@ -365,6 +380,10 @@ class TestRestoreTraceContext:
 
         with (
             patch(f"{MODULE}.structlog.contextvars.clear_contextvars", side_effect=lambda: call_order.append("clear")),
+            patch(
+                f"{MODULE}.prepare_run_otel_trace",
+                side_effect=lambda _run_id: call_order.append("prepare"),
+            ),
             patch(f"{MODULE}.set_trace_context", side_effect=lambda **kw: call_order.append("set_trace")),
             patch(
                 f"{MODULE}.structlog.contextvars.bind_contextvars", side_effect=lambda **kw: call_order.append("bind")
@@ -373,7 +392,22 @@ class TestRestoreTraceContext:
         ):
             _restore_trace_context("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee", job, trace)
 
-        assert call_order == ["clear", "set_trace", "bind"]
+        assert call_order == ["clear", "prepare", "set_trace", "bind"]
+
+    def test_prepares_deterministic_otel_trace_from_run_id(self) -> None:
+        job = _make_run_job()
+        run_id = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+
+        with (
+            patch(f"{MODULE}.prepare_run_otel_trace") as mock_prepare,
+            patch(f"{MODULE}.set_trace_context"),
+            patch(f"{MODULE}.structlog.contextvars.clear_contextvars"),
+            patch(f"{MODULE}.structlog.contextvars.bind_contextvars"),
+            patch(f"{MODULE}.correlation_id"),
+        ):
+            _restore_trace_context(run_id, job, {"correlation_id": "req-abc"})
+
+        mock_prepare.assert_called_once_with(run_id)
 
     def test_user_metadata_merged_with_system_keys(self) -> None:
         """job.run_metadata is merged into the trace context metadata."""
@@ -635,14 +669,16 @@ class TestExecuteAndRelease:
                 new_callable=AsyncMock,
                 return_value=(thread_id, "user-1"),
             ),
-            patch(f"{MODULE}.finalize_run", new_callable=AsyncMock) as mock_finalize,
+            patch(f"{MODULE}.finalize_run", new_callable=AsyncMock, return_value=True) as mock_finalize,
             patch(f"{MODULE}._release_lease") as mock_release,
+            patch(f"{MODULE}._load_webhook_job", new_callable=AsyncMock) as mock_load,
         ):
             mock_settings.worker.BG_JOB_TIMEOUT_SECS = 0.01  # Very short timeout
             mock_release.return_value = None
 
             await executor._execute_and_release(run_id, "worker-0", semaphore)
 
+        mock_load.assert_awaited_once_with(run_id)
         mock_finalize.assert_awaited_once_with(
             run_id,
             thread_id,
@@ -650,6 +686,8 @@ class TestExecuteAndRelease:
             status="error",
             thread_status="error",
             error="Job exceeded maximum execution time",
+            error_type="TimeoutError",
+            webhook_job=mock_load.return_value,
         )
         mock_release.assert_awaited_once_with(run_id, "worker-0")
         assert timeout_marker_seen is True
@@ -658,6 +696,38 @@ class TestExecuteAndRelease:
         # Cleaned up
         assert run_id not in active_runs
         assert run_id not in _timeout_cancellations
+
+    @pytest.mark.asyncio
+    async def test_explicit_cancel_reads_the_job_before_its_finalize_lets_cleanup_delete_the_row(self) -> None:
+        # Stateless cleanup may delete the run as soon as it is terminal, so the job must be read first.
+        run_id = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+        semaphore = asyncio.Semaphore(1)
+        await semaphore.acquire()
+        executor = WorkerExecutor()
+        executor._execute_with_lease = AsyncMock(side_effect=asyncio.CancelledError)  # type: ignore[method-assign]
+        explicit_run_cancellations.add(run_id)
+        calls: list[str] = []
+
+        async def _load(rid: str) -> object:
+            calls.append("load")
+            return "job"
+
+        async def _finalize(*_args: object, **_kwargs: object) -> bool:
+            calls.append("finalize")
+            return True
+
+        with (
+            patch(f"{MODULE}.settings") as mock_settings,
+            patch(f"{MODULE}._get_run_identity", new_callable=AsyncMock, return_value=("thread-1", "user-1")),
+            patch(f"{MODULE}._load_webhook_job", new_callable=AsyncMock, side_effect=_load),
+            patch(f"{MODULE}.finalize_run", new_callable=AsyncMock, side_effect=_finalize) as mock_finalize,
+        ):
+            mock_settings.worker.BG_JOB_TIMEOUT_SECS = 60
+            with pytest.raises(asyncio.CancelledError):
+                await executor._execute_and_release(run_id, "worker-0", semaphore)
+
+        assert calls == ["load", "finalize"]
+        assert mock_finalize.await_args.kwargs["webhook_job"] == "job"
 
     @pytest.mark.asyncio
     async def test_explicit_cancel_before_execution_reconciles_database(self) -> None:
@@ -677,6 +747,7 @@ class TestExecuteAndRelease:
                 return_value=(thread_id, "user-1"),
             ),
             patch(f"{MODULE}.finalize_run", new_callable=AsyncMock, return_value=True) as mock_finalize,
+            patch(f"{MODULE}._load_webhook_job", new_callable=AsyncMock) as mock_load,
         ):
             mock_settings.worker.BG_JOB_TIMEOUT_SECS = 60
             with pytest.raises(asyncio.CancelledError):
@@ -689,6 +760,7 @@ class TestExecuteAndRelease:
             status="interrupted",
             thread_status="idle",
             output={},
+            webhook_job=mock_load.return_value,
         )
         assert run_id not in explicit_run_cancellations
         assert run_id not in active_runs
@@ -773,6 +845,7 @@ class TestExecuteAndRelease:
                 new_callable=AsyncMock,
                 side_effect=delayed_finalize,
             ) as mock_finalize,
+            patch(f"{MODULE}._load_webhook_job", new_callable=AsyncMock) as mock_load,
         ):
             mock_settings.worker.BG_JOB_TIMEOUT_SECS = 60
             task = asyncio.create_task(executor._execute_and_release(run_id, "worker-0", semaphore))
@@ -796,6 +869,7 @@ class TestExecuteAndRelease:
             status="interrupted",
             thread_status="idle",
             output={},
+            webhook_job=mock_load.return_value,
         )
         assert run_id not in explicit_run_cancellations
         assert run_id not in active_runs
@@ -859,40 +933,42 @@ class TestDequeue:
         blpop = AsyncMock(return_value=("aegra:worker:queue", "run-123"))
         executor = self._make_executor_with_blpop(blpop)
 
-        with patch(f"{MODULE}.redis_manager.get_client", return_value=self._client):
+        with patch(f"{MODULE}.redis_manager.get_blocking_client", return_value=self._client):
             result = await executor._dequeue()
 
         assert result == "run-123"
         executor._poll_postgres.assert_not_awaited()
+        blpop.assert_awaited_once()
+        assert blpop.await_args.kwargs["timeout"] == settings.worker.BLPOP_TIMEOUT_SECONDS
 
     @pytest.mark.asyncio
     async def test_returns_none_when_blpop_returns_none(self) -> None:
         blpop = AsyncMock(return_value=None)
         executor = self._make_executor_with_blpop(blpop)
 
-        with patch(f"{MODULE}.redis_manager.get_client", return_value=self._client):
+        with patch(f"{MODULE}.redis_manager.get_blocking_client", return_value=self._client):
             result = await executor._dequeue()
 
         assert result is None
         executor._poll_postgres.assert_not_awaited()
 
     @pytest.mark.asyncio
-    async def test_idle_socket_timeout_returns_none_without_fallback(self) -> None:
-        """A blocking BLPOP that hits the socket timeout raises redis TimeoutError
-        (a RedisError subclass). That is a normal idle expiry, not a connectivity
-        failure: it must return None silently, never poll Postgres (GH #bug)."""
+    async def test_socket_timeout_falls_back_to_postgres(self) -> None:
+        """The blocking read timeout outlasts the block, so a timeout is a stall, not an idle
+        queue: the BLPOP may have popped a run whose reply was lost, so poll Postgres for it."""
         blpop = AsyncMock(side_effect=RedisTimeoutError("Timeout reading from redis:6379"))
         executor = self._make_executor_with_blpop(blpop)
 
         with (
-            patch(f"{MODULE}.redis_manager.get_client", return_value=self._client),
+            patch(f"{MODULE}.redis_manager.get_blocking_client", return_value=self._client),
+            patch(f"{MODULE}.asyncio.sleep", new_callable=AsyncMock),
             patch(f"{MODULE}.logger.warning") as mock_warning,
         ):
             result = await executor._dequeue()
 
-        assert result is None
-        executor._poll_postgres.assert_not_awaited()
-        mock_warning.assert_not_called()
+        assert result == "from-postgres"
+        executor._poll_postgres.assert_awaited_once()
+        mock_warning.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_connection_error_falls_back_to_postgres(self) -> None:
@@ -902,7 +978,7 @@ class TestDequeue:
         executor = self._make_executor_with_blpop(blpop)
 
         with (
-            patch(f"{MODULE}.redis_manager.get_client", return_value=self._client),
+            patch(f"{MODULE}.redis_manager.get_blocking_client", return_value=self._client),
             patch(f"{MODULE}.asyncio.sleep", new_callable=AsyncMock),
             patch(f"{MODULE}.logger.warning") as mock_warning,
         ):
@@ -1135,3 +1211,48 @@ class TestStopRequeuesDrainedRuns:
 
         mock_push_back.assert_awaited_once_with(run_id)
         assert not executor._job_tasks
+
+
+def _session_maker_returning(run: RunORM | None) -> MagicMock:
+    session = AsyncMock()
+    session.scalar.return_value = run
+    maker = MagicMock()
+    maker.return_value.__aenter__ = AsyncMock(return_value=session)
+    maker.return_value.__aexit__ = AsyncMock(return_value=False)
+    return maker
+
+
+def _stored_run(webhook: str | None) -> RunORM:
+    job = RunJob(
+        identity=RunIdentity(run_id="run-1", thread_id="thread-1", graph_id="graph-1"),
+        user=User(identity="user-1"),
+        behavior=RunBehavior(webhook=webhook),
+    )
+    return RunORM(
+        run_id="run-1",
+        thread_id="thread-1",
+        assistant_id="asst-1",
+        user_id="user-1",
+        status="interrupted",
+        execution_params=job.to_execution_params(),
+    )
+
+
+class TestLoadWebhookJob:
+    @pytest.mark.asyncio
+    async def test_rebuilds_the_stored_runs_job(self) -> None:
+        with patch(
+            f"{MODULE}._get_session_maker", return_value=_session_maker_returning(_stored_run("https://h.example/x"))
+        ):
+            job = await _load_webhook_job("run-1")
+
+        assert job is not None
+        assert job.identity.run_id == "run-1"
+        assert job.identity.assistant_id == "asst-1"
+        assert job.behavior.webhook == "https://h.example/x"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("run", [None, _stored_run(None)], ids=["row deleted", "no webhook"])
+    async def test_returns_none_without_a_stored_webhook(self, run: RunORM | None) -> None:
+        with patch(f"{MODULE}._get_session_maker", return_value=_session_maker_returning(run)):
+            assert await _load_webhook_job("run-1") is None

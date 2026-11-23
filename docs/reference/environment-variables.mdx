@@ -14,9 +14,10 @@ cp .env.example .env
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `PROJECT_NAME` | `Aegra` | Application name |
-| `VERSION` | `0.10.8` | Application version |
+| `VERSION` | `0.12.0` | Application version |
 | `DEBUG` | `false` | Enable debug mode |
 | `AEGRA_CONFIG` | `aegra.json` | Path to the configuration file |
+| `AEGRA_CONTAINER_RUNTIME` | unset | Container CLI for `aegra dev`, `aegra up`, and `aegra down`: `docker` or `podman`. Unset prefers a running Docker daemon, then Podman if it is installed, then Docker if it is installed but stopped. `aegra down` first targets runtimes that still have the project's containers. |
 | `MAX_SEARCH_LIMIT` | `1000` | Max `limit` for `POST /threads/search` and `POST /store/items/search`. Omitted or null `limit` uses `min(20, MAX_SEARCH_LIMIT)`. Default cap matches LangGraph Platform threads.search (`1..1000`). |
 
 ## Database
@@ -146,6 +147,8 @@ In dev mode (`REDIS_BROKER_ENABLED=false`), runs execute as in-process asyncio t
 | `HEARTBEAT_INTERVAL_SECONDS` | `10` | How often workers extend their lease |
 | `REAPER_INTERVAL_SECONDS` | `15` | How often the reaper scans for expired leases |
 | `POSTGRES_POLL_INTERVAL_SECONDS` | `5` | Fallback poll interval when Redis is unavailable |
+| `BLPOP_TIMEOUT_SECONDS` | `5` | Server-side block time of each job-queue `BLPOP`. Must be positive (`0` would block forever) |
+| `BLOCKING_SOCKET_TIMEOUT_SECONDS` | `15.0` | Read timeout of the dedicated Redis connections that issue `BLPOP`. Must exceed `BLPOP_TIMEOUT_SECONDS` by at least 5s, or a job popped at the end of the block can be lost. Takes precedence over a `socket_timeout` in `REDIS_URL` |
 | `WORKER_DRAIN_TIMEOUT` | `30.0` | Graceful shutdown wait time (seconds) |
 
 Total capacity per instance = `WORKER_COUNT` x `N_JOBS_PER_WORKER` (default: 30 concurrent runs).
@@ -202,6 +205,17 @@ AEGRA_CHECKPOINT_DURABILITY=exit
 
 An invalid value stops the server at startup. See [checkpoint durability](/guides/threads-and-state#checkpoint-durability) for the trade-offs.
 
+## Webhook headers
+
+Webhooks have no environment variables of their own; they are configured in the [`webhooks`](/reference/configuration#webhooks) block of `aegra.json`. Header values there can read secrets from the environment, but only variables whose names start with `webhooks.env_prefix` (default `LG_WEBHOOK_`):
+
+```bash
+# Referenced from aegra.json as "Authorization": "Bearer ${{ env.LG_WEBHOOK_TOKEN }}"
+LG_WEBHOOK_TOKEN=change-me
+```
+
+A referenced variable that is not set stops the server at startup. See [webhooks](/guides/webhooks#secure-the-receiver).
+
 ## Prometheus metrics
 
 | Variable | Default | Description |
@@ -217,6 +231,7 @@ When enabled, a `/metrics` endpoint serves standard HTTP request metrics (reques
 | `OTEL_SERVICE_NAME` | `aegra-backend` | Service name for traces |
 | `OTEL_TARGETS` | `""` | Comma-separated list: `LANGFUSE`, `PHOENIX`, `GENERIC` |
 | `OTEL_CONSOLE_EXPORT` | `false` | Log traces to console |
+| `OTEL_TRACE_ID_FROM_RUN_ID` | `true` | Seed OTEL `trace_id` from `run_id` (auto-disabled for ratio samplers) |
 
 ### Langfuse
 

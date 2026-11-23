@@ -32,6 +32,32 @@ class HttpConfig(TypedDict, total=False):
     """Apply Aegra authentication dependency to custom routes (uses FastAPI dependencies, not middleware)"""
     cors: CorsConfig | None
     """Custom CORS configuration"""
+    disable_webhooks: bool
+    """Stop run-completion webhook calls; requests that set a webhook get a 422"""
+
+
+class WebhookUrlPolicyConfig(TypedDict, total=False):
+    """Which user-supplied webhook URLs the server agrees to call."""
+
+    require_https: bool
+    allowed_domains: list[str]
+    allowed_ports: list[int]
+    max_url_length: int
+    disable_loopback: bool
+    disable_private_ips: bool
+
+
+class WebhooksConfig(TypedDict, total=False):
+    """Run-completion webhook settings, same shape as LangGraph's ``webhooks`` block."""
+
+    env_prefix: str
+    """Required prefix for env vars referenced from header templates (default LG_WEBHOOK_)"""
+    url: WebhookUrlPolicyConfig
+    """URL policy applied when a webhook is accepted and again before each call"""
+    headers: dict[str, str]
+    """Static headers sent with every call; values may contain ${{ env.VAR }} templates"""
+    allowed_fields: list[str]
+    """Top-level payload keys to send; all keys when unset"""
 
 
 class StoreIndexConfig(TypedDict, total=False):
@@ -217,6 +243,27 @@ def load_checkpointer_config() -> CheckpointerConfig | None:
         config_path = _resolve_config_path()
         logger.info(f"Loaded checkpointer config from {config_path}")
         return checkpointer_config
+
+    return None
+
+
+def load_webhooks_config() -> WebhooksConfig | None:
+    """Load webhooks config from aegra.json or langgraph.json.
+
+    Uses standard config resolution order.
+
+    Returns:
+        Webhooks configuration dict or None if not found
+    """
+    config = load_config()
+    if config is None:
+        return None
+
+    webhooks_config = config.get("webhooks")
+    if webhooks_config:
+        config_path = _resolve_config_path()
+        logger.info(f"Loaded webhooks config from {config_path}")
+        return webhooks_config
 
     return None
 

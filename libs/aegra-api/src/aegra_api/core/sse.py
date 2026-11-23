@@ -37,11 +37,12 @@ def heartbeat_factory() -> ServerSentEvent:
 # We decode them back in two passes: surrogate pairs first to avoid lone surrogates that
 # cannot be encoded to UTF-8, then remaining non-ASCII, non-surrogate code points.
 # ASCII control characters (< 0x80) are left intact to preserve JSON validity.
+# (?<!\\) skips a doubled backslash: that is an escaped backslash in the content, not an escape.
 _SURROGATE_PAIR_RE = re.compile(
-    r"\\\\u(D[89AB][0-9a-fA-F]{2})\\\\u(D[C-F][0-9a-fA-F]{2})",
+    r"(?<!\\)\\\\u(D[89AB][0-9a-fA-F]{2})\\\\u(D[C-F][0-9a-fA-F]{2})",
     re.IGNORECASE,
 )
-_NONASCII_ESCAPE_RE = re.compile(r"\\\\u([0-9a-fA-F]{4})")
+_NONASCII_ESCAPE_RE = re.compile(r"(?<!\\)\\\\u([0-9a-fA-F]{4})")
 
 
 def _decode_literal_unicode_escapes(data_str: str) -> str:

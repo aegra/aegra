@@ -196,6 +196,35 @@ def test_get_history_basic(client: TestClient, mock_langgraph):
         assert s["checkpoint"]["checkpoint_ns"] == "nsB"
 
 
+def test_history_metadata_reaches_langgraph_as_filter(client: TestClient) -> None:
+    """A metadata filter (the SDK's getHistory({metadata})) reaches LangGraph as `filter`."""
+    filters: list[dict[str, Any] | None] = []
+
+    class SignatureAgent(FakeAgent):
+        # Pregel.aget_state_history's keyword-only signature, with no **kwargs:
+        # an argument LangGraph doesn't take fails here as it does in a real graph.
+        async def aget_state_history(  # type: ignore[override]
+            self,
+            config: dict[str, Any],
+            *,
+            filter: dict[str, Any] | None = None,
+            before: dict[str, Any] | None = None,
+            limit: int | None = None,
+        ) -> AsyncIterator[Any]:
+            filters.append(filter)
+            return
+            yield  # intentional — presence of `yield` makes this an async generator
+
+    with patch_langgraph_service(agent=SignatureAgent(snapshots=[])):
+        thread_id = _ensure_thread(client)
+        post = client.post(f"/threads/{thread_id}/history", json={"limit": 1, "metadata": {"step": 2}})
+        get = client.get(f"/threads/{thread_id}/history", params={"metadata": json.dumps({"step": 3})})
+
+    assert post.status_code == 200, post.text
+    assert get.status_code == 200, get.text
+    assert filters == [{"step": 2}, {"step": 3}]
+
+
 def test_history_invalid_limit(client: TestClient, mock_langgraph):
     thread_id = _ensure_thread(client)
 

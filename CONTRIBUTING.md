@@ -86,13 +86,14 @@ git commit -m "Fix bug"
 
 ### Breaking Changes
 
-If your change breaks backward compatibility, add `BREAKING CHANGE:` in the footer:
+If your change breaks backward compatibility or changes behavior a client can see, add `!` after the type in the **PR title**. Release notes are built from PR titles, so this is what puts the change under "Breaking" when it ships:
 
-```bash
-git commit -m "feat(api): redesign authentication flow
-
-BREAKING CHANGE: The authentication endpoint now requires a different payload structure."
+```text
+feat(api)!: redesign authentication flow
+fix(api)!: return 422 for unsupported thread search select
 ```
+
+Explain what changes for users in the PR description.
 
 ## 🔍 Code Quality Standards
 

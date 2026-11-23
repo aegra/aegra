@@ -1,5 +1,7 @@
 """Tests for RunJob Pydantic model and serialization."""
 
+from datetime import UTC, datetime
+
 import pytest
 from pydantic import ValidationError
 
@@ -91,6 +93,8 @@ class TestRunJob:
         class FakeORM:
             run_id = "run-1"
             thread_id = "thread-1"
+            assistant_id = None
+            created_at = None
             execution_params = sample_job.to_execution_params()
 
         restored = RunJob.from_run_orm(FakeORM())
@@ -117,6 +121,8 @@ class TestRunJob:
         class FakeORM:
             run_id = "r1"
             thread_id = "t1"
+            assistant_id = None
+            created_at = None
             execution_params = params
 
         restored = RunJob.from_run_orm(FakeORM())
@@ -145,6 +151,8 @@ class TestRunJob:
         class FakeORM:
             run_id = "r1"
             thread_id = "t1"
+            assistant_id = None
+            created_at = None
             execution_params = params
 
         restored = RunJob.from_run_orm(FakeORM())
@@ -156,6 +164,8 @@ class TestRunJob:
         class LegacyORM:
             run_id = "r1"
             thread_id = "t1"
+            assistant_id = None
+            created_at = None
             execution_params = {
                 "graph_id": "g1",
                 "user": {"identity": "u1", "is_authenticated": True, "permissions": []},
@@ -194,6 +204,42 @@ class TestRunJob:
         class FakeORM:
             run_id = "r1"
             thread_id = "t1"
+            assistant_id = None
+            created_at = None
             execution_params = params
 
         assert RunJob.from_run_orm(FakeORM()).execution.durability == "exit"
+
+    def test_webhook_survives_the_worker_round_trip(self) -> None:
+        """Redis workers deliver the completion webhook, so the URL must be in execution_params."""
+        created_at = datetime(2026, 10, 1, 12, 0, tzinfo=UTC)
+        job = RunJob(
+            identity=RunIdentity(run_id="r1", thread_id="t1", graph_id="g1"),
+            user=User(identity="u1"),
+            behavior=RunBehavior(webhook="https://hooks.example.com/runs?token=t"),
+        )
+        params = job.to_execution_params()
+
+        class FakeORM:
+            run_id = "r1"
+            thread_id = "t1"
+            assistant_id = "a1"
+            created_at = datetime(2026, 10, 1, 12, 0, tzinfo=UTC)
+            execution_params = params
+
+        restored = RunJob.from_run_orm(FakeORM())
+
+        assert params["behavior"]["webhook"] == "https://hooks.example.com/runs?token=t"
+        assert restored.behavior.webhook == "https://hooks.example.com/runs?token=t"
+        # Row columns, not copies in the JSONB.
+        assert restored.identity.assistant_id == "a1"
+        assert restored.identity.created_at == created_at
+        assert "assistant_id" not in params
+        assert "created_at" not in params
+
+    def test_rows_queued_before_webhooks_have_none(self) -> None:
+        behavior = RunBehavior.model_validate(
+            {"interrupt_before": None, "interrupt_after": None, "multitask_strategy": None, "subgraphs": False}
+        )
+
+        assert behavior.webhook is None

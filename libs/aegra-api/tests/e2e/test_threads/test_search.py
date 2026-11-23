@@ -232,3 +232,20 @@ async def test_search_returns_422_when_limit_exceeds_cap_e2e() -> None:
         )
     assert resp.status_code == 422, resp.text
     assert "limit" in resp.text
+
+
+@pytest.mark.e2e
+@pytest.mark.asyncio
+async def test_search_returns_422_for_unsupported_select_e2e() -> None:
+    """select must fail explicitly until thread projection is implemented."""
+    async with AsyncClient(base_url=settings.app.SERVER_URL, timeout=30.0) as http_client:
+        resp = await http_client.post(
+            "/threads/search",
+            json={
+                "status": "interrupted",
+                "limit": 10,
+                "select": ["thread_id", "status", "interrupts"],
+            },
+        )
+    assert resp.status_code == 422, resp.text
+    assert "select projection is not supported" in resp.text

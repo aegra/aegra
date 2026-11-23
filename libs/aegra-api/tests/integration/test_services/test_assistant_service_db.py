@@ -5,6 +5,7 @@ These tests verify service interactions with real database operations.
 
 from datetime import UTC, datetime
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import AsyncMock, Mock
 
 import pytest
@@ -550,3 +551,70 @@ class TestAssistantServiceDatabase:
         assert exc.value.status_code == 404
         compiled = str(assistant_service.session.scalar.call_args.args[0].compile(dialect=postgresql.dialect()))
         assert "assistant.name = " in compiled
+
+    @staticmethod
+    def _answer_like_a_database(session: Any, before_update: list[Any], after_update: Any, predicate: str) -> None:
+        """Make ``session.scalar`` lose the row for any read that still carries ``predicate`` after the UPDATE."""
+        pending = iter(before_update)
+
+        async def scalar(stmt: Any) -> Any:
+            if not session.execute.called:
+                return next(pending)
+            sql = str(stmt.compile(dialect=postgresql.dialect()))
+            return None if predicate in sql else after_update
+
+        session.scalar.side_effect = scalar
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("handler_filter", "predicate"),
+        [({"name": "Original Assistant"}, "assistant.name = "), ({"metadata": {"team": "a"}}, "@>")],
+    )
+    async def test_update_that_leaves_the_handler_filter_returns_the_updated_assistant(
+        self,
+        assistant_service: AssistantService,
+        monkeypatch: pytest.MonkeyPatch,
+        handler_filter: dict,
+        predicate: str,
+    ) -> None:
+        """The filter authorizes the update against the stored row. Re-applying it to the saved row
+        lost an assistant that was renamed away from the filtered value, and the commit ended in a 500."""
+        original = await assistant_service.create_assistant(
+            AssistantCreate(name="Original Assistant", graph_id="test-graph", metadata={"team": "a"})
+        )
+        stored_row = SimpleNamespace(**original.model_dump(by_alias=True))
+        renamed = original.model_copy(update={"name": "Renamed", "metadata": {"team": "b"}})
+        self._answer_like_a_database(assistant_service.session, [stored_row, 1], renamed, predicate)
+        monkeypatch.setattr(authenticated, "handle_event", AsyncMock(return_value=handler_filter))
+
+        result = await assistant_service.update_assistant(
+            original.assistant_id, AssistantUpdate(name="Renamed", metadata={"team": "b"})
+        )
+
+        assert result.name == "Renamed"
+
+    @pytest.mark.asyncio
+    async def test_set_latest_that_leaves_the_handler_filter_returns_the_assistant(
+        self, assistant_service: AssistantService, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        assistant = await assistant_service.create_assistant(
+            AssistantCreate(name="Versioned Assistant", graph_id="test-graph")
+        )
+        version_two = AssistantVersionORM(
+            assistant_id=assistant.assistant_id,
+            version=2,
+            name="Version 2",
+            description=None,
+            graph_id="test-graph",
+            config={},
+            context={},
+            metadata_dict={},
+            created_at=datetime.now(UTC),
+        )
+        restored = assistant.model_copy(update={"name": "Version 2"})
+        self._answer_like_a_database(assistant_service.session, [assistant, version_two], restored, "assistant.name = ")
+        monkeypatch.setattr(authenticated, "handle_event", AsyncMock(return_value={"name": "Versioned Assistant"}))
+
+        result = await assistant_service.set_assistant_latest(assistant.assistant_id, 2)
+
+        assert result.name == "Version 2"

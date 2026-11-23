@@ -81,7 +81,7 @@ By default, each stateless cron run deletes its ephemeral thread after the run c
 
 Stateless crons create a fresh thread for every execution. Control what happens to that thread after the run finishes with `on_run_completed`:
 
-- `"delete"` (default) deletes the ephemeral thread automatically after the run completes.
+- `"delete"` (default) deletes the ephemeral thread automatically after the run completes. A configured [`hooks.thread_deleted`](/reference/configuration#hooks) runs for it.
 - `"keep"` preserves the thread so you can inspect its state or runs later.
 
 ```python

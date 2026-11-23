@@ -3,7 +3,7 @@ title: "Configuration"
 description: "Complete reference for the aegra.json configuration file."
 ---
 
-Aegra uses a JSON configuration file (`aegra.json`) to define graphs, authentication, HTTP settings, the semantic store, checkpointer settings (thread TTL and the default checkpoint durability), and run-completion webhooks.
+Aegra uses a JSON configuration file (`aegra.json`) to define graphs, authentication, HTTP settings, the semantic store, checkpointer settings (thread TTL and the default checkpoint durability), run-completion webhooks, and a hook that runs after a thread is deleted.
 
 ## Config file resolution
 
@@ -58,6 +58,9 @@ aegra dev
       "sweep_limit": 10000
     },
     "durability": "async"
+  },
+  "hooks": {
+    "thread_deleted": "./hooks.py:on_thread_deleted"
   }
 }
 ```
@@ -394,6 +397,44 @@ Configure the POST Aegra sends when a run with `webhook` set finishes. The keys 
 | `allowed_fields` | `list[str]` | all fields | Top-level payload keys to send |
 
 The policy applies when a run or cron is created (a violation returns `422`) and again before every call. A header that references an unset variable, an unknown key, or an invalid value stops the server at startup. See [webhooks](/guides/webhooks) for the payload, retries, and the addresses that are always blocked.
+
+## `hooks`
+
+Run your own code after Aegra deletes a thread, for example to release a container, a volume, or another resource you keyed by thread ID.
+
+```json
+{
+  "hooks": {
+    "thread_deleted": "./hooks.py:on_thread_deleted"
+  }
+}
+```
+
+`thread_deleted` names an async function as `./path/to/file.py:name` (resolved from the directory of `aegra.json`) or `module.path:name` (importable, for example from a directory listed in `dependencies`). The function receives one dict:
+
+```python
+from typing import Any
+
+
+async def on_thread_deleted(event: dict[str, Any]) -> None:
+    thread_id = event["thread_id"]  # the deleted thread
+    user_id = event["user_id"]  # its owner's identity
+    metadata = event["metadata"]  # a copy of its metadata at deletion
+    ...
+```
+
+Aegra calls it once for every thread it deletes, after the delete commits, on every path that deletes one:
+
+- `DELETE /threads/{thread_id}`
+- `POST /threads/prune`, with or without `thread_ids`, for each thread it deletes
+- the [thread TTL](/guides/threads-and-state#thread-ttl) sweep with the `delete` strategy
+- the cleanup of a stateless run's thread, a stateless cron firing included
+
+Nothing is called for a delete that did not happen: a missing thread (`404`), a failed delete, a skipped thread, or a `keep_latest` prune, which keeps the thread.
+
+The call runs in the background, so it never delays the response or the sweep, and an exception it raises is logged with the thread ID and owner and leaves the delete in place. Delivery is at most once, with no retry: a crash between the commit and the call loses it, and so does a call still running when shutdown has waited out the drain period it shares with [webhook delivery](/guides/webhooks). Make the function idempotent and give it its own timeout if it calls out to another service.
+
+A file path loads as a module of its own, separate from the same file imported elsewhere. A value that does not load, a function that is not `async`, or an unknown key under `hooks` stops the server at startup. This key is specific to Aegra.
 
 ## Common configurations
 

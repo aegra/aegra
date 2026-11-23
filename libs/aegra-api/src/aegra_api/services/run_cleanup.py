@@ -20,6 +20,7 @@ from aegra_api.core.orm import _get_session_maker
 from aegra_api.services.executor import executor
 from aegra_api.services.run_status import interrupt_run_before_delete
 from aegra_api.services.streaming_service import streaming_service
+from aegra_api.services.thread_hooks import notify_threads_deleted, thread_deleted_event
 
 logger = structlog.getLogger(__name__)
 
@@ -70,8 +71,10 @@ async def delete_thread_by_id(thread_id: str, user_id: str) -> None:
         if thread:
             # Checkpoints first — same ordering rationale as the delete_thread route.
             await db_manager.get_checkpointer().adelete_thread(thread_id)
+            event = thread_deleted_event(thread.thread_id, thread.user_id, thread.metadata_json)
             await session.delete(thread)
             await session.commit()
+            notify_threads_deleted([event])
 
 
 async def cleanup_after_background_run(run_id: str, thread_id: str, user_id: str) -> None:

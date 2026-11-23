@@ -17,7 +17,7 @@ import json
 from collections.abc import Collection, Sequence
 from datetime import UTC, datetime, timedelta
 from functools import cache
-from typing import Literal
+from typing import Any, Literal
 
 import structlog
 from psycopg import Error as PsycopgError
@@ -33,6 +33,7 @@ from aegra_api.core.orm import ThreadTTL as ThreadTTLORM
 from aegra_api.core.orm import _get_session_maker
 from aegra_api.models.threads import MAX_TTL_MINUTES
 from aegra_api.observability.metrics import THREAD_TTL_SWEPT
+from aegra_api.services.thread_hooks import ThreadDeletedEvent, notify_threads_deleted, thread_deleted_event
 from aegra_api.settings import settings
 
 logger = structlog.getLogger(__name__)
@@ -121,7 +122,7 @@ def _expired_claim_stmt(
     user_id: str | None = None,
     auth_filter: ColumnElement[bool] | None = None,
     exclude_ids: Collection[str] = (),
-) -> Select[tuple[str, str, float]]:
+) -> Select[tuple[str, str, float, str, dict[str, Any]]]:
     """Claim query for expired thread_ttl rows, locking thread_ttl AND thread.
 
     ``skip_locked`` partitions work across instances (and between the sweeper
@@ -140,7 +141,13 @@ def _expired_claim_stmt(
         .exists()
     )
     stmt = (
-        select(ThreadTTLORM.thread_id, ThreadTTLORM.strategy, ThreadTTLORM.ttl_minutes)
+        select(
+            ThreadTTLORM.thread_id,
+            ThreadTTLORM.strategy,
+            ThreadTTLORM.ttl_minutes,
+            ThreadORM.user_id,
+            ThreadORM.metadata_json,
+        )
         .join(ThreadORM, ThreadORM.thread_id == ThreadTTLORM.thread_id)
         .where(
             ThreadTTLORM.expires_at <= now,
@@ -163,7 +170,7 @@ def _expired_claim_stmt(
 
 
 async def _process_expired_batch(
-    session: AsyncSession, stmt: Select[tuple[str, str, float]], now: datetime
+    session: AsyncSession, stmt: Select[tuple[str, str, float, str, dict[str, Any]]], now: datetime
 ) -> tuple[int, int, int, list[str]]:
     """Claim and process one batch in a single transaction.
 
@@ -178,7 +185,8 @@ async def _process_expired_batch(
     deleted = 0
     pruned = 0
     failed_ids: list[str] = []
-    for thread_id, strategy, ttl_minutes in rows:
+    deleted_events: list[ThreadDeletedEvent] = []
+    for thread_id, strategy, ttl_minutes, user_id, metadata in rows:
         try:
             outcome = await _apply_strategy(
                 session, thread_id=thread_id, strategy=strategy, ttl_minutes=ttl_minutes, now=now
@@ -192,11 +200,13 @@ async def _process_expired_batch(
             continue
         if outcome == "deleted":
             deleted += 1
+            deleted_events.append(thread_deleted_event(thread_id, user_id, metadata))
         else:
             pruned += 1
         THREAD_TTL_SWEPT.labels(outcome=outcome).inc()
 
     await session.commit()
+    notify_threads_deleted(deleted_events)
     return len(rows), deleted, pruned, failed_ids
 
 
@@ -247,19 +257,21 @@ async def prune_threads_by_id(
         .where(RunORM.thread_id == ThreadORM.thread_id, RunORM.status.in_(("pending", "running")))
         .exists()
     )
-    stmt = select(ThreadORM.thread_id).where(
+    stmt = select(ThreadORM.thread_id, ThreadORM.user_id, ThreadORM.metadata_json).where(
         ThreadORM.thread_id.in_(thread_ids), ThreadORM.user_id == user_id, ~active_runs_exist
     )
     if auth_filter is not None:
         stmt = stmt.where(auth_filter)
     # SKIP LOCKED: a thread mid run-creation holds a key-share lock; waiting on it would
     # recheck active runs against a stale snapshot and cascade-delete the new run.
-    owned = list((await session.scalars(stmt.with_for_update(skip_locked=True, of=ThreadORM))).all())
+    rows = (await session.execute(stmt.with_for_update(skip_locked=True, of=ThreadORM))).all()
+    owned = [thread_id for thread_id, _owner, _metadata in rows]
 
     if strategy == "delete":
         await db_manager.get_checkpointer().aprune(owned, strategy="delete")
         await session.execute(delete(ThreadORM).where(ThreadORM.thread_id.in_(owned)))
         await session.commit()
+        notify_threads_deleted(thread_deleted_event(*row) for row in rows)
         return len(owned)
 
     pruned = 0

@@ -2,7 +2,7 @@
 
 import asyncio
 import contextlib
-from collections.abc import AsyncIterator, Iterator
+from collections.abc import AsyncIterator, Iterable, Iterator
 from datetime import UTC, datetime
 from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
@@ -28,6 +28,7 @@ from aegra_api.services.run_cleanup import (
 from aegra_api.services.run_cleanup import (
     delete_thread_by_id as _delete_thread_by_id,
 )
+from aegra_api.services.thread_hooks import ThreadDeletedEvent
 
 
 class _RaisingIter:
@@ -1128,3 +1129,64 @@ class TestStatelessCreateRun:
             await stateless_create_run(request, mock_user, mock_session)
 
         mock_delete.assert_called_once_with("eph-thread-err", mock_user.identity)
+
+
+class TestDeleteThreadByIdHook:
+    """The stateless and cron cleanup reaches the thread-deleted hook once its delete commits."""
+
+    @staticmethod
+    def _session_maker(session: AsyncMock) -> MagicMock:
+        maker = MagicMock()
+        maker.return_value.__aenter__ = AsyncMock(return_value=session)
+        maker.return_value.__aexit__ = AsyncMock(return_value=False)
+        return maker
+
+    @staticmethod
+    def _session(thread: ThreadORM | None) -> AsyncMock:
+        session = AsyncMock()
+        no_runs = MagicMock()
+        no_runs.all.return_value = []
+        session.scalars.return_value = no_runs
+        session.scalar.return_value = thread
+        session.delete = AsyncMock()
+        return session
+
+    @pytest.mark.asyncio
+    async def test_notifies_hook_after_commit(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        thread_id = str(uuid4())
+        thread = ThreadORM(thread_id=thread_id, user_id="owner-a", status="idle", metadata_json={"box": "1"})
+        session = self._session(thread)
+        calls: list[tuple[list[ThreadDeletedEvent], int]] = []
+
+        def record(events: Iterable[ThreadDeletedEvent]) -> None:
+            calls.append((list(events), session.commit.await_count))
+
+        monkeypatch.setattr("aegra_api.services.run_cleanup.notify_threads_deleted", record)
+        db = MagicMock()
+        db.get_checkpointer.return_value = AsyncMock()
+
+        with (
+            patch("aegra_api.services.run_cleanup._get_session_maker", return_value=self._session_maker(session)),
+            patch("aegra_api.services.run_cleanup.db_manager", db),
+        ):
+            await _delete_thread_by_id(thread_id, "owner-a")
+
+        assert calls == [([{"thread_id": thread_id, "user_id": "owner-a", "metadata": {"box": "1"}}], 1)]
+
+    @pytest.mark.asyncio
+    async def test_thread_already_gone_notifies_nothing(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        session = self._session(None)
+        calls: list[list[ThreadDeletedEvent]] = []
+
+        def record(events: Iterable[ThreadDeletedEvent]) -> None:
+            calls.append(list(events))
+
+        monkeypatch.setattr("aegra_api.services.run_cleanup.notify_threads_deleted", record)
+
+        with (
+            patch("aegra_api.services.run_cleanup._get_session_maker", return_value=self._session_maker(session)),
+            patch("aegra_api.services.run_cleanup.db_manager", MagicMock()),
+        ):
+            await _delete_thread_by_id(str(uuid4()), "owner-a")
+
+        assert calls == []

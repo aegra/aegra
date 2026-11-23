@@ -193,6 +193,16 @@ class TestStorage:
 
         assert await _pending_ids(_reader(thread_id, run_id)) == ["m1"]
 
+    async def test_an_identical_repeat_with_a_nul_character_is_one_message(self, sessions: SessionFactory) -> None:
+        thread_id = await _thread(sessions)
+        run_id = await _run(sessions, thread_id)
+
+        assert await _store(sessions, thread_id, "m1", "a\x00b")
+        assert await _store(sessions, thread_id, "m1", "a\x00b")
+
+        items = await _reader(thread_id, run_id).pending()
+        assert [item.message["content"] for item in items] == ["ab"]
+
     async def test_a_reused_id_with_a_different_body_is_refused(self, sessions: SessionFactory) -> None:
         thread_id = await _thread(sessions)
         run_id = await _run(sessions, thread_id)

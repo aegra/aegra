@@ -298,11 +298,16 @@ async def store_message(
         .on_conflict_do_nothing(index_elements=["thread_id", "message_id"])
         .returning(RunInputORM.seq)
     )
-    existing = None
+    same = True
     if inserted is None:
-        existing = await session.scalar(select(RunInputORM.message).where(*owned, RunInputORM.message_id == message_id))
+        # Compared in the database, so the column type cleans the repeat as it cleaned the stored copy.
+        same = bool(
+            await session.scalar(
+                select(exists().where(*owned, RunInputORM.message_id == message_id, RunInputORM.message == message))
+            )
+        )
     await session.commit()
-    return inserted is not None or existing == message
+    return same
 
 
 async def mark_delivered(*, run_id: str, thread_id: str, user_id: str) -> None:

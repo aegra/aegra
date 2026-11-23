@@ -14,6 +14,7 @@ from fastapi import HTTPException
 from aegra_api.models.run_job import CronTrigger, RunJob
 from aegra_api.services.cron_scheduler import CronScheduler, _build_run_create
 from aegra_api.services.run_executor import _build_run_config
+from aegra_api.services.webhook_delivery import RunOutcome, build_run_payload
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -713,6 +714,18 @@ class TestFiredRunProvenance:
         job = await _fire_through_prepare_run(self._due_cron())
 
         assert job.run_metadata["team"] == "research"
+
+    @pytest.mark.asyncio
+    async def test_fired_run_webhook_metadata_carries_cron_metadata_and_keys(self) -> None:
+        job = await _fire_through_prepare_run(self._due_cron())
+
+        payload = build_run_payload(job, RunOutcome(status="success"))
+
+        assert payload["metadata"] == {
+            "team": "research",
+            "cron_id": "cron-9",
+            "cron_scheduled_time": "2026-01-01T09:00:00+00:00",
+        }
 
     @pytest.mark.asyncio
     async def test_fired_run_config_pins_cron_id_and_scheduled_time(self) -> None:

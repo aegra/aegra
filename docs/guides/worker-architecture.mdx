@@ -236,7 +236,7 @@ On SIGTERM (rolling deploy, pod reschedule, node drain) the executor waits up to
 - If Redis is unreachable during the hand-off, the rows are already `pending` and unclaimed, so a surviving instance's reaper re-enqueues them after `STUCK_PENDING_THRESHOLD_SECONDS`.
 - Drain hand-offs do not consume the crash retry budget (`BG_JOB_MAX_RETRIES`).
 
-Set your orchestrator's grace period a few seconds above `WORKER_DRAIN_TIMEOUT` (on Kubernetes: `terminationGracePeriodSeconds`), so the requeue completes before the pod is killed. Runs longer than the drain window survive the deploy either way; the timeout only decides how long the old pod waits before handing them off.
+Set your orchestrator's grace period (on Kubernetes: `terminationGracePeriodSeconds`) a few seconds above `WORKER_DRAIN_TIMEOUT` plus the drain periods that follow it, webhook delivery's and, when one is configured, the `thread_deleted` hook's, so the requeue and those drains complete before the pod is killed. Runs longer than the drain window survive the deploy either way; the timeout only decides how long the old pod waits before handing them off.
 
 ## Cross-instance cancellation
 

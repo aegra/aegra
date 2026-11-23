@@ -902,6 +902,7 @@ class TestExecuteAndRelease:
                 new_callable=AsyncMock,
                 return_value=("tttttttt-tttt-tttt-tttt-tttttttttttt", "user-1"),
             ),
+            patch(f"{MODULE}._load_webhook_job", new_callable=AsyncMock, return_value=None),
             patch(f"{MODULE}.finalize_run", new_callable=AsyncMock),
             patch(f"{MODULE}._release_lease", new_callable=AsyncMock),
         ):
@@ -953,6 +954,7 @@ class TestExecuteAndRelease:
                 new_callable=AsyncMock,
                 return_value=("tttttttt-tttt-tttt-tttt-tttttttttttt", "user-1"),
             ),
+            patch(f"{MODULE}._load_webhook_job", new_callable=AsyncMock, return_value=None),
             patch(f"{MODULE}.finalize_run", new_callable=AsyncMock, return_value=True),
         ):
             mock_settings.worker.BG_JOB_TIMEOUT_SECS = 60

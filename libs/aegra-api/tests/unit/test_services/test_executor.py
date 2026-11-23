@@ -98,6 +98,41 @@ class TestLocalExecutor:
         await executor.wait_for_completion("nonexistent", timeout=1.0)
 
     @pytest.mark.asyncio
+    async def test_is_finished_for_a_missing_run(self) -> None:
+        assert await LocalExecutor().is_finished("nonexistent") is True
+
+    @pytest.mark.asyncio
+    async def test_is_finished_for_a_done_run(self) -> None:
+        task = asyncio.create_task(asyncio.sleep(0))
+        await task
+        active_runs["run-finished"] = task
+        try:
+            assert await LocalExecutor().is_finished("run-finished") is True
+        finally:
+            active_runs.pop("run-finished", None)
+
+    @pytest.mark.asyncio
+    async def test_is_finished_for_a_cancelled_run(self) -> None:
+        task = asyncio.create_task(asyncio.sleep(9999))
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        active_runs["run-cancelled"] = task
+        try:
+            assert await LocalExecutor().is_finished("run-cancelled") is True
+        finally:
+            active_runs.pop("run-cancelled", None)
+
+    @pytest.mark.asyncio
+    async def test_is_finished_for_a_running_run(self) -> None:
+        task = asyncio.create_task(asyncio.sleep(9999))
+        active_runs["run-running"] = task
+        try:
+            assert await LocalExecutor().is_finished("run-running") is False
+        finally:
+            task.cancel()
+            active_runs.pop("run-running", None)
+
+    @pytest.mark.asyncio
     async def test_stop_cancels_active_tasks(self) -> None:
         executor = LocalExecutor()
 

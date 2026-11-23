@@ -229,7 +229,7 @@ Deletion is permanent. When a cron is bound to a thread and that thread is delet
 
 ## Authorization handlers
 
-A `crons.create` or `crons.update` handler can add to the cron's `metadata`, `config`, and `context`, either by mutating `value` in place or by returning those fields in a dict. The cron stores what the handler adds, and every firing runs with the stored `config` and `context`.
+A `crons.create` or `crons.update` handler can add to the cron's `metadata`, `config`, and `context`, either by mutating `value` in place or by returning those fields in a dict. The cron stores what the handler adds, and every firing runs with the stored `config` and `context`. `webhook` is not one of those fields: the cron keeps the URL the client sent, whatever the handler does with `value["webhook"]`.
 
 ```python
 @auth.on.crons.create

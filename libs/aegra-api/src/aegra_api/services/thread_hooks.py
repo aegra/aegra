@@ -4,7 +4,8 @@
 once per deleted thread, after the delete commits, in a background task that
 never delays, fails or undoes the delete. Delivery is at most once: a crash
 between the commit and the call, a call still running past the shutdown
-grace, and a delete that commits after the grace ends are lost.
+grace, a delete that commits after the grace ends, and a thread whose
+stateless run was still running when shutdown checked it are lost.
 """
 
 import asyncio
@@ -121,16 +122,16 @@ class ThreadHookDispatcher:
     def __init__(self) -> None:
         self._hook: ThreadDeletedHook | None = None
         self._tasks: dict[asyncio.Task[None], str] = {}
-        self._pending_deletes: Callable[[], Iterable[asyncio.Task[Any]]] | None = None
+        self._pending_deletes: Callable[[], Awaitable[Iterable[asyncio.Task[Any]]]] | None = None
         self._stopped = False
 
     def configure(
         self,
         hook: ThreadDeletedHook | None,
         *,
-        pending_deletes: Callable[[], Iterable[asyncio.Task[Any]]] | None = None,
+        pending_deletes: Callable[[], Awaitable[Iterable[asyncio.Task[Any]]]] | None = None,
     ) -> None:
-        """Set the hook, and what returns the deletes still in flight that shutdown waits for."""
+        """Set the hook, and the coroutine function returning the deletes in flight that shutdown waits for."""
         self._hook = hook
         self._pending_deletes = pending_deletes
         self._stopped = False
@@ -151,16 +152,21 @@ class ThreadHookDispatcher:
         """Wait out the drain grace for running calls and deletes still in flight, then cancel the calls left.
 
         While a hook is configured, the deletes ``pending_deletes`` returns are waited for under the same
-        deadline and never cancelled: stateless cleanup goes on deleting when shutdown ends its run, and the
-        call its delete submits is accepted and waited for too. A crash, a call outliving the grace, and a
-        delete that commits after the grace ends still lose their call.
+        deadline and never cancelled: stateless cleanup whose run has ended goes on deleting, and the call
+        its delete submits is accepted and waited for too. Cleanup still waiting on a running run is not
+        waited for. A crash, a call outliving the grace, a delete that commits after the grace ends, and a
+        thread whose run was still running when shutdown checked it lose their call.
         """
         loop = asyncio.get_running_loop()
         deadline = loop.time() + SHUTDOWN_DRAIN_SECONDS
         while (remaining := deadline - loop.time()) > 0:
             waiting: list[asyncio.Task[Any]] = [task for task in self._tasks if not task.done()]
             if self._hook is not None and self._pending_deletes is not None:
-                waiting.extend(task for task in self._pending_deletes() if not task.done())
+                try:
+                    deletes = await asyncio.wait_for(self._pending_deletes(), timeout=remaining)
+                except TimeoutError:
+                    break
+                waiting.extend(task for task in deletes if not task.done())
             if not waiting:
                 break
             await asyncio.wait(waiting, timeout=remaining, return_when=asyncio.FIRST_COMPLETED)

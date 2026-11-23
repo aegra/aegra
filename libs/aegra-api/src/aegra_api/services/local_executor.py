@@ -50,6 +50,10 @@ class LocalExecutor(BaseExecutor):
         with contextlib.suppress(asyncio.CancelledError):
             await asyncio.wait_for(asyncio.shield(task), timeout=timeout)
 
+    async def is_finished(self, run_id: str) -> bool:
+        task = active_runs.get(run_id)
+        return task is None or task.done()
+
     async def start(self) -> None:
         logger.info("Local executor started (in-process asyncio tasks)")
 

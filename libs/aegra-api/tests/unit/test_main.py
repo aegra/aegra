@@ -537,7 +537,7 @@ async def test_lifespan_configures_and_drains_the_thread_deleted_hook(
         async with main_module.lifespan(MagicMock()):
             hook = dispatcher.configure.call_args.args[0]
             assert hook.__qualname__ == "on_deleted"
-            assert dispatcher.configure.call_args.kwargs["pending_deletes"] is run_cleanup.pending_cleanup_tasks
+            assert dispatcher.configure.call_args.kwargs["pending_deletes"] is run_cleanup.cleanup_tasks_for_shutdown
             dispatcher.stop.assert_not_awaited()
 
         dispatcher.stop.assert_awaited_once()
@@ -560,4 +560,4 @@ async def test_lifespan_without_hooks_key_configures_no_hook(monkeypatch: pytest
     ):
         dispatcher.stop = AsyncMock()
         async with main_module.lifespan(MagicMock()):
-            dispatcher.configure.assert_called_once_with(None, pending_deletes=run_cleanup.pending_cleanup_tasks)
+            dispatcher.configure.assert_called_once_with(None, pending_deletes=run_cleanup.cleanup_tasks_for_shutdown)

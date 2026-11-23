@@ -25,6 +25,10 @@ class BaseExecutor(ABC):
         """
 
     @abstractmethod
+    async def is_finished(self, run_id: str) -> bool:
+        """Whether the run has reached a terminal state, by the same check ``wait_for_completion`` waits on."""
+
+    @abstractmethod
     async def start(self) -> None:
         """Initialize resources (called during app startup)."""
 

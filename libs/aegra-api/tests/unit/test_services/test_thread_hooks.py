@@ -1,6 +1,7 @@
 """Thread-deleted hook: loading from aegra.json and running in the background."""
 
 import asyncio
+import contextlib
 import importlib
 import json
 import sys
@@ -10,6 +11,7 @@ from typing import Any
 
 import pytest
 import structlog
+from redis import RedisError
 from structlog.testing import capture_logs
 
 from aegra_api.services import run_cleanup, thread_hooks
@@ -263,74 +265,168 @@ class TestThreadHookDispatcher:
         assert "t-after" in _text(logs)
 
 
+class _FakeRuns:
+    """The executor the cleanup waits on: its run ends when ``ended`` is set, and shutdown's finished checks."""
+
+    def __init__(self) -> None:
+        self.ended = asyncio.Event()
+        self.checks: list[str] = []
+        self.check_error: Exception | None = None
+        self.delete_released = asyncio.Event()
+        self.delete_released.set()
+
+    async def wait_for_completion(self, run_id: str, timeout: float) -> None:
+        await self.ended.wait()
+
+    async def is_finished(self, run_id: str) -> bool:
+        self.checks.append(run_id)
+        if self.check_error is not None:
+            raise self.check_error
+        return self.ended.is_set()
+
+
+async def _cancel(task: asyncio.Task[Any]) -> None:
+    task.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await task
+
+
 class TestShutdownWithDeletesInFlight:
-    """A stateless run's cleanup goes on deleting when shutdown ends the run; its thread still reaches the hook."""
+    """Shutdown waits for stateless cleanup past its run, or whose run has ended, and not for one on a live run."""
 
     @pytest.fixture
-    def run_ended(self, monkeypatch: pytest.MonkeyPatch) -> Iterator[asyncio.Event]:
-        ended = asyncio.Event()
-
-        class Executor:
-            async def wait_for_completion(self, run_id: str, timeout: float) -> None:
-                await ended.wait()
+    def runs(self, monkeypatch: pytest.MonkeyPatch) -> Iterator[_FakeRuns]:
+        fake = _FakeRuns()
 
         async def delete_thread_by_id(thread_id: str, user_id: str) -> None:
+            await fake.delete_released.wait()
             await asyncio.sleep(0.01)
             notify_threads_deleted([thread_deleted_event(thread_id, user_id, {"k": "v"})])
 
-        monkeypatch.setattr(run_cleanup, "executor", Executor())
+        monkeypatch.setattr(run_cleanup, "executor", fake)
         monkeypatch.setattr(run_cleanup, "delete_thread_by_id", delete_thread_by_id)
-        yield ended
+        yield fake
         thread_hook_dispatcher.configure(None)
 
     @pytest.mark.asyncio
-    async def test_thread_deleted_by_cleanup_during_shutdown_reaches_the_hook(self, run_ended: asyncio.Event) -> None:
+    async def test_thread_deleted_by_cleanup_during_shutdown_reaches_the_hook(self, runs: _FakeRuns) -> None:
         received: list[ThreadDeletedEvent] = []
 
         async def hook(event: ThreadDeletedEvent) -> None:
             received.append(event)
 
-        thread_hook_dispatcher.configure(hook, pending_deletes=run_cleanup.pending_cleanup_tasks)
+        thread_hook_dispatcher.configure(hook, pending_deletes=run_cleanup.cleanup_tasks_for_shutdown)
         cleanup = run_cleanup.schedule_background_cleanup("r-1", "t-1", "owner-1")
         await asyncio.sleep(0)
-        # The executor stops before the dispatcher: the run ends and its cleanup moves on to the delete.
-        run_ended.set()
+        # The executor stops before the dispatcher: the run has ended while its cleanup still waits on it.
+        runs.ended.set()
         await thread_hook_dispatcher.stop()
 
         assert received == [{"thread_id": "t-1", "user_id": "owner-1", "metadata": {"k": "v"}}]
         assert cleanup.done()
 
     @pytest.mark.asyncio
-    async def test_without_a_hook_stop_does_not_wait_for_cleanup(self) -> None:
-        cleanup = asyncio.create_task(asyncio.Event().wait())
-        dispatcher = ThreadHookDispatcher()
-        dispatcher.configure(None, pending_deletes=lambda: [cleanup])
+    async def test_cleanup_on_a_live_run_does_not_hold_shutdown(self, runs: _FakeRuns) -> None:
+        calls: list[str] = []
 
-        await asyncio.wait_for(dispatcher.stop(), timeout=1)
+        async def hook(event: ThreadDeletedEvent) -> None:
+            await asyncio.sleep(0.05)
+            calls.append(event["thread_id"])
 
+        thread_hook_dispatcher.configure(hook, pending_deletes=run_cleanup.cleanup_tasks_for_shutdown)
+        cleanup = run_cleanup.schedule_background_cleanup("r-live", "t-live", "owner-1")
+        await asyncio.sleep(0)
+        # A call still running makes stop look at the cleanup more than once.
+        thread_hook_dispatcher.submit(_event("t-call"))
+
+        await asyncio.wait_for(thread_hook_dispatcher.stop(), timeout=1)
+
+        assert calls == ["t-call"]
+        assert runs.checks == ["r-live"]
         assert not cleanup.done()
-        cleanup.cancel()
+        await _cancel(cleanup)
 
     @pytest.mark.asyncio
-    async def test_cleanup_still_running_after_the_grace_is_not_cancelled(
-        self, monkeypatch: pytest.MonkeyPatch
+    async def test_cleanup_deleting_when_the_period_ends_is_not_cancelled(
+        self, runs: _FakeRuns, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        monkeypatch.setattr(thread_hooks, "SHUTDOWN_DRAIN_SECONDS", 0.01)
+        monkeypatch.setattr(thread_hooks, "SHUTDOWN_DRAIN_SECONDS", 0.05)
         calls: list[str] = []
 
         async def hook(event: ThreadDeletedEvent) -> None:
             calls.append(event["thread_id"])
 
-        cleanup = asyncio.create_task(asyncio.Event().wait())
-        dispatcher = ThreadHookDispatcher()
-        dispatcher.configure(hook, pending_deletes=lambda: [cleanup])
+        runs.ended.set()
+        runs.delete_released.clear()
+        thread_hook_dispatcher.configure(hook, pending_deletes=run_cleanup.cleanup_tasks_for_shutdown)
+        cleanup = run_cleanup.schedule_background_cleanup("r-1", "t-1", "owner-1")
+        await asyncio.sleep(0.01)
 
-        await asyncio.wait_for(dispatcher.stop(), timeout=1)
+        await asyncio.wait_for(thread_hook_dispatcher.stop(), timeout=1)
         await asyncio.sleep(0)
 
         assert not cleanup.done()
         assert calls == []
-        cleanup.cancel()
+        assert runs.checks == []
+        await _cancel(cleanup)
+
+    @pytest.mark.asyncio
+    async def test_failed_run_check_waits_for_the_cleanup(
+        self, runs: _FakeRuns, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(thread_hooks, "SHUTDOWN_DRAIN_SECONDS", 1.0)
+        received: list[str] = []
+
+        async def hook(event: ThreadDeletedEvent) -> None:
+            received.append(event["thread_id"])
+
+        runs.check_error = RedisError("redis down")
+        thread_hook_dispatcher.configure(hook, pending_deletes=run_cleanup.cleanup_tasks_for_shutdown)
+        cleanup = run_cleanup.schedule_background_cleanup("r-1", "t-1", "owner-1")
+        await asyncio.sleep(0)
+        asyncio.get_running_loop().call_later(0.05, runs.ended.set)
+
+        with capture_logs() as captured:
+            monkeypatch.setattr(run_cleanup, "logger", structlog.get_logger(run_cleanup.__name__))
+            await asyncio.wait_for(thread_hook_dispatcher.stop(), timeout=2)
+
+        assert received == ["t-1"]
+        assert cleanup.done()
+        assert any(entry.get("run_id") == "r-1" and entry["log_level"] == "error" for entry in captured)
+
+    @pytest.mark.asyncio
+    async def test_thread_deleted_after_shutdown_gets_no_call(
+        self, runs: _FakeRuns, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        calls: list[str] = []
+
+        async def hook(event: ThreadDeletedEvent) -> None:
+            calls.append(event["thread_id"])
+
+        thread_hook_dispatcher.configure(hook, pending_deletes=run_cleanup.cleanup_tasks_for_shutdown)
+        cleanup = run_cleanup.schedule_background_cleanup("r-late", "t-late", "owner-1")
+        await asyncio.sleep(0)
+
+        with capture_logs() as captured:
+            monkeypatch.setattr(thread_hooks, "logger", structlog.get_logger(thread_hooks.__name__))
+            await asyncio.wait_for(thread_hook_dispatcher.stop(), timeout=1)
+            runs.ended.set()
+            await asyncio.wait_for(cleanup, timeout=1)
+
+        assert calls == []
+        assert any(entry.get("thread_id") == "t-late" and entry["log_level"] == "warning" for entry in captured)
+
+    @pytest.mark.asyncio
+    async def test_without_a_hook_no_run_is_checked(self, runs: _FakeRuns) -> None:
+        thread_hook_dispatcher.configure(None, pending_deletes=run_cleanup.cleanup_tasks_for_shutdown)
+        cleanup = run_cleanup.schedule_background_cleanup("r-1", "t-1", "owner-1")
+        await asyncio.sleep(0)
+
+        await asyncio.wait_for(thread_hook_dispatcher.stop(), timeout=1)
+
+        assert runs.checks == []
+        assert not cleanup.done()
+        await _cancel(cleanup)
 
 
 class TestNotifyThreadsDeleted:

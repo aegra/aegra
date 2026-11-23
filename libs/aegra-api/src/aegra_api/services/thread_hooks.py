@@ -200,9 +200,6 @@ thread_hook_dispatcher = ThreadHookDispatcher()
 
 
 def notify_threads_deleted(events: Iterable[ThreadDeletedEvent]) -> None:
-    """Start the hook for each committed delete. Synchronous and never raises, so it is safe in ``finally``."""
+    """Start the hook for each committed delete; called from the deleting coroutine, which never waits on it."""
     for event in events:
-        try:
-            thread_hook_dispatcher.submit(event)
-        except RuntimeError:
-            logger.exception("Could not schedule thread-deleted hook", thread_id=event["thread_id"])
+        thread_hook_dispatcher.submit(event)

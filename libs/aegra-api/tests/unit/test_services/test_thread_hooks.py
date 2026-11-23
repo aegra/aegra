@@ -525,21 +525,6 @@ class TestShutdownWithDeletesInFlight:
 
 
 class TestNotifyThreadsDeleted:
-    def test_never_raises_without_a_running_loop(
-        self, monkeypatch: pytest.MonkeyPatch, logs: list[MutableMapping[str, Any]]
-    ) -> None:
-        async def hook(event: ThreadDeletedEvent) -> None:
-            pass
-
-        dispatcher = ThreadHookDispatcher()
-        dispatcher.configure(hook)
-        monkeypatch.setattr(thread_hooks, "thread_hook_dispatcher", dispatcher)
-
-        notify_threads_deleted([_event("t-no-loop")])
-
-        assert "Could not schedule thread-deleted hook" in _text(logs)
-        assert "t-no-loop" in _text(logs)
-
     @pytest.mark.asyncio
     async def test_submits_every_event(self, monkeypatch: pytest.MonkeyPatch) -> None:
         received: list[str] = []

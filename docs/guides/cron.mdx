@@ -129,10 +129,12 @@ from langchain_core.runnables import RunnableConfig
 def send_report(state: State, config: RunnableConfig) -> dict[str, Any]:
     configurable = config["configurable"]
     occurrence = f"{configurable['cron_id']}:{configurable['cron_scheduled_time']}"
-    if already_sent(occurrence):
+    if not record_once(occurrence):
         return {}
     ...
 ```
+
+Here `record_once` stands for one atomic write keyed on the occurrence, such as an insert on a unique column; it returns `False` when that row already exists. Two firings of the same occurrence can overlap, so a separate check followed by the work would let both through.
 
 The same two keys, together with a copy of the cron's `metadata`, are set as the run's metadata, so the traces of scheduled runs carry the cron's tags (see [Observability](/guides/observability#run-metadata)) and so does the `metadata` field of each run's [webhook](/guides/webhooks) payload. The cron's metadata cannot override the two server keys. Only string, number, and boolean values of the cron's metadata become trace attributes; other JSON values stay in the run's metadata and its webhook payload, and the traces leave them out with a warning. Cron metadata is not held to the key and value limits of a run's `metadata`.
 

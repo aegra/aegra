@@ -160,16 +160,18 @@ class ThreadHookDispatcher:
         loop = asyncio.get_running_loop()
         deadline = loop.time() + SHUTDOWN_DRAIN_SECONDS
         while (remaining := deadline - loop.time()) > 0:
-            waiting: list[asyncio.Task[Any]] = [task for task in self._tasks if not task.done()]
+            deletes: Iterable[asyncio.Task[Any]] = ()
             if self._hook is not None and self._pending_deletes is not None:
                 try:
                     deletes = await asyncio.wait_for(self._pending_deletes(), timeout=remaining)
                 except TimeoutError:
                     break
-                waiting.extend(task for task in deletes if not task.done())
+            # Read after the check, which can suspend: a delete that commits meanwhile has submitted its call.
+            waiting = [task for task in self._tasks if not task.done()]
+            waiting.extend(task for task in deletes if not task.done())
             if not waiting:
                 break
-            await asyncio.wait(waiting, timeout=remaining, return_when=asyncio.FIRST_COMPLETED)
+            await asyncio.wait(waiting, timeout=deadline - loop.time(), return_when=asyncio.FIRST_COMPLETED)
         self._stopped = True
         pending = [task for task in self._tasks if not task.done()]
         if not pending:

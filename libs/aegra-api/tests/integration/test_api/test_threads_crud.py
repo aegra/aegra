@@ -13,6 +13,7 @@ from fastapi.testclient import TestClient
 from langgraph.types import StateSnapshot
 from psycopg import Error as PsycopgError
 from sqlalchemy.dialects import postgresql
+from sqlalchemy.sql.dml import Delete
 
 from aegra_api.api import threads as threads_module
 from aegra_api.core.orm import get_session as core_get_session
@@ -1412,6 +1413,27 @@ class TestDeleteThreadHook:
 
         assert resp.status_code == 200
         assert hook_calls == [([{"thread_id": "test-123", "user_id": "test-user", "metadata": {"box": "1"}}], True)]
+
+    def test_delete_that_removed_no_row_notifies_nothing(
+        self, mock_checkpointer: AsyncMock, committed: list[bool], hook_calls: list[tuple[list[Any], bool]]
+    ) -> None:
+        """A concurrent delete that committed first already reported the thread; this one matched no row."""
+        thread = _thread_row("test-123")
+        app = create_test_app(include_runs=False, include_threads=True)
+
+        class Session(DummySessionBase):
+            async def scalar(self, stmt: object) -> object:
+                return None if isinstance(stmt, Delete) else thread
+
+            async def commit(self) -> None:
+                committed.append(True)
+
+        app.dependency_overrides[core_get_session] = override_get_session_dep(Session)
+        resp = TestClient(app, raise_server_exceptions=False).delete("/threads/test-123")
+
+        assert resp.status_code == 200
+        assert committed == [True]
+        assert hook_calls == []
 
     def test_unknown_thread_notifies_nothing(
         self, mock_checkpointer: AsyncMock, committed: list[bool], hook_calls: list[tuple[list[Any], bool]]

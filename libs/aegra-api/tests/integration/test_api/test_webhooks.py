@@ -6,6 +6,7 @@ from unittest.mock import AsyncMock, MagicMock, Mock, patch
 
 import pytest
 from fastapi.testclient import TestClient
+from sqlalchemy.sql.dml import Delete
 
 from aegra_api.api import crons as crons_module
 from aegra_api.api import threads as threads_module
@@ -276,14 +277,13 @@ class TestDeletedRunWebhook:
         events: list[str] = []
 
         class Session(DummySessionBase):
-            async def scalar(self, _stmt: Any) -> Any:
+            async def scalar(self, stmt: Any) -> Any:
+                if isinstance(stmt, Delete):
+                    events.append("delete thread")
                 return thread
 
             async def scalars(self, _stmt: Any = None) -> DummyScalarResult:
                 return DummyScalarResult([run])
-
-            async def delete(self, _obj: Any) -> None:
-                events.append("delete thread")
 
         db = MagicMock()
         db.get_checkpointer.return_value = AsyncMock()

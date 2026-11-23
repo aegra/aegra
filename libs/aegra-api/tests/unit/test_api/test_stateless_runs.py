@@ -11,6 +11,8 @@ import pytest
 from fastapi.responses import StreamingResponse
 from psycopg import Error as PsycopgError
 from redis import RedisError
+from sqlalchemy.dialects import postgresql
+from sqlalchemy.sql.dml import Delete
 from sse_starlette import EventSourceResponse
 
 from aegra_api.api.stateless_runs import (
@@ -125,7 +127,8 @@ class TestDeleteThreadById:
             await _delete_thread_by_id(thread_id, user_id)
 
         mock_checkpointer.adelete_thread.assert_awaited_once_with(thread_id)
-        mock_session.delete.assert_called_once_with(thread_orm)
+        delete_sql = str(mock_session.scalar.await_args_list[-1].args[0].compile(dialect=postgresql.dialect()))
+        assert delete_sql.startswith("DELETE FROM thread")
         mock_session.commit.assert_called_once()
 
     @pytest.mark.asyncio
@@ -208,7 +211,7 @@ class TestDeleteThreadById:
         ):
             await _delete_thread_by_id(thread_id, user_id)
 
-        mock_session.delete.assert_not_called()
+        assert not any(isinstance(call.args[0], Delete) for call in mock_session.scalar.await_args_list)
         mock_session.commit.assert_not_called()
 
     @pytest.mark.asyncio
@@ -236,7 +239,7 @@ class TestDeleteThreadById:
             await _delete_thread_by_id("nonexistent", "user")
 
         mock_checkpointer.adelete_thread.assert_not_called()
-        mock_session.delete.assert_not_called()
+        assert not any(isinstance(call.args[0], Delete) for call in mock_session.scalar.await_args_list)
 
     @pytest.mark.asyncio
     async def test_cancels_active_runs_before_delete(self, mock_session: AsyncMock) -> None:
@@ -303,7 +306,7 @@ class TestDeleteThreadById:
         with patch("aegra_api.services.run_cleanup._get_session_maker", return_value=mock_maker):
             await _delete_thread_by_id("nonexistent", "user")
 
-        mock_session.delete.assert_not_called()
+        assert not any(isinstance(call.args[0], Delete) for call in mock_session.scalar.await_args_list)
 
     @pytest.mark.asyncio
     async def test_handles_cancelled_error_on_task_await(self, mock_session: AsyncMock) -> None:
@@ -1172,6 +1175,31 @@ class TestDeleteThreadByIdHook:
             await _delete_thread_by_id(thread_id, "owner-a")
 
         assert calls == [([{"thread_id": thread_id, "user_id": "owner-a", "metadata": {"box": "1"}}], 1)]
+
+    @pytest.mark.asyncio
+    async def test_delete_that_removed_no_row_notifies_nothing(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A concurrent delete that committed first already reported the thread; this one matched no row."""
+        thread_id = str(uuid4())
+        thread = ThreadORM(thread_id=thread_id, user_id="owner-a", status="idle", metadata_json={})
+        session = self._session(thread)
+        session.scalar.side_effect = [thread, None]
+        calls: list[list[ThreadDeletedEvent]] = []
+
+        def record(events: Iterable[ThreadDeletedEvent]) -> None:
+            calls.append(list(events))
+
+        monkeypatch.setattr("aegra_api.services.run_cleanup.notify_threads_deleted", record)
+        db = MagicMock()
+        db.get_checkpointer.return_value = AsyncMock()
+
+        with (
+            patch("aegra_api.services.run_cleanup._get_session_maker", return_value=self._session_maker(session)),
+            patch("aegra_api.services.run_cleanup.db_manager", db),
+        ):
+            await _delete_thread_by_id(thread_id, "owner-a")
+
+        assert calls == []
+        session.commit.assert_awaited_once()
 
     @pytest.mark.asyncio
     async def test_thread_already_gone_notifies_nothing(self, monkeypatch: pytest.MonkeyPatch) -> None:

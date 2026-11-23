@@ -10,7 +10,7 @@ from uuid import uuid4
 
 import structlog
 from fastapi import APIRouter, Body, Depends, HTTPException, Query
-from sqlalchemy import select, update
+from sqlalchemy import delete, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -920,9 +920,15 @@ async def delete_thread(
 
     # Captured before the commit: the deleted row's attributes cannot be loaded after it.
     event = thread_deleted_event(thread.thread_id, thread.user_id, thread.metadata_json)
-    await session.delete(thread)
+    removed = await session.scalar(
+        delete(ThreadORM)
+        .where(ThreadORM.thread_id == thread.thread_id, ThreadORM.user_id == thread.user_id)
+        .returning(ThreadORM.thread_id)
+    )
     await session.commit()
-    notify_threads_deleted([event])
+    # No row back means a concurrent delete committed first and has already reported the thread.
+    if removed is not None:
+        notify_threads_deleted([event])
 
     return {"status": "deleted"}
 

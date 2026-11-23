@@ -1,5 +1,9 @@
 """Unit tests for _extract_thread_name helper in run_preparation.py."""
 
+from typing import Any
+
+import pytest
+
 from aegra_api.services.run_preparation import _extract_thread_name
 
 
@@ -141,3 +145,8 @@ class TestExtractThreadName:
             }
         )
         assert result == "Fallback"
+
+    @pytest.mark.parametrize("input_data", [["hello"], "hello", 7, True, None])
+    def test_returns_empty_for_non_dict_input(self, input_data: Any) -> None:
+        """Run input may be any JSON value; only an object can carry messages."""
+        assert _extract_thread_name(input_data) == ""

@@ -599,6 +599,14 @@ class TestBuildPayloadExtended:
     def test_cron_update_stores_durability(self) -> None:
         assert _build_payload(CronUpdate(durability="sync")) == {"durability": "sync"}
 
+    def test_stores_stream_resumable(self) -> None:
+        req = CronCreate(assistant_id="a", schedule="* * * * *", input={"x": 1}, stream_resumable=True)
+
+        assert _build_payload(req)["stream_resumable"] is True
+
+    def test_cron_update_stores_stream_resumable(self) -> None:
+        assert _build_payload(CronUpdate(stream_resumable=False)) == {"stream_resumable": False}
+
 
 # ---------------------------------------------------------------------------
 # _compute_next_run — additional coverage

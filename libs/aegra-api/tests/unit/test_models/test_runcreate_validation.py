@@ -6,6 +6,7 @@ from uuid import UUID
 import pytest
 from pydantic import ValidationError
 
+from aegra_api.models import runs as runs_models
 from aegra_api.models.runs import RunCreate
 
 _CHECKPOINT_ID = "1ef4f797-8335-6428-8001-8a1503f9b875"
@@ -180,3 +181,127 @@ class TestRunCreateWebhook:
         body = {"assistant_id": "agent", "input": {"x": 1}, "webhook": "https://hooks.example.com/runs"}
 
         assert RunCreate.model_validate(body).model_dump()["webhook"] == "https://hooks.example.com/runs"
+
+
+class TestRunCreateInput:
+    """``input`` is any JSON value, as on LangGraph Platform; null still means no input."""
+
+    @pytest.mark.parametrize("value", [["a", "b"], "hello", 7, 1.5, True, {"x": 1}, [], "", 0, False])
+    def test_accepts_any_json_value(self, value: Any) -> None:
+        run_create = RunCreate(assistant_id="agent", input=value)
+
+        assert run_create.input == value
+        assert type(run_create.input) is type(value)
+
+    def test_non_dict_input_is_still_exclusive_with_command(self) -> None:
+        with pytest.raises(ValidationError, match="mutually exclusive"):
+            RunCreate(assistant_id="agent", input=["a"], command={"resume": "ok"})
+
+
+class TestRunCreateIfNotExists:
+    def test_defaults_to_unset(self) -> None:
+        assert RunCreate(assistant_id="agent", input={"x": 1}).if_not_exists is None
+
+    @pytest.mark.parametrize("value", ["create", "reject"])
+    def test_accepts_both_sdk_values(self, value: str) -> None:
+        assert RunCreate(assistant_id="agent", input={"x": 1}, if_not_exists=value).if_not_exists == value
+
+    @pytest.mark.parametrize("value", ["ignore", "", True])
+    def test_rejects_any_other_value(self, value: Any) -> None:
+        with pytest.raises(ValidationError, match="if_not_exists"):
+            RunCreate(assistant_id="agent", input={"x": 1}, if_not_exists=value)
+
+
+class TestRunCreateAfterSeconds:
+    """Delayed start is not implemented, so a delay is an error rather than an immediate run."""
+
+    @pytest.mark.parametrize("value", [None, 0])
+    def test_accepts_an_immediate_start(self, value: int | None) -> None:
+        assert RunCreate(assistant_id="agent", input={"x": 1}, after_seconds=value).after_seconds == value
+
+    @pytest.mark.parametrize("value", [1, 3600])
+    def test_rejects_a_delayed_start(self, value: int) -> None:
+        with pytest.raises(ValidationError, match="after_seconds is not supported"):
+            RunCreate(assistant_id="agent", input={"x": 1}, after_seconds=value)
+
+    def test_rejects_a_negative_delay(self) -> None:
+        with pytest.raises(ValidationError, match="after_seconds"):
+            RunCreate(assistant_id="agent", input={"x": 1}, after_seconds=-1)
+
+
+class TestRunCreateInertSdkFields:
+    """SDK fields that change nothing here; docs/feature-support.mdx lists each with the reason."""
+
+    @pytest.mark.parametrize("value", [True, False])
+    def test_accepts_stream_resumable(self, value: bool) -> None:
+        assert RunCreate(assistant_id="agent", input={"x": 1}, stream_resumable=value).stream_resumable is value
+
+    def test_rejects_non_bool_stream_resumable(self) -> None:
+        with pytest.raises(ValidationError, match="stream_resumable"):
+            RunCreate(assistant_id="agent", input={"x": 1}, stream_resumable="always")
+
+    def test_accepts_the_langsmith_fields(self) -> None:
+        run_create = RunCreate(
+            assistant_id="agent",
+            input={"x": 1},
+            feedback_keys=["quality"],
+            langsmith_tracer={"project_name": "p", "example_id": "e"},
+        )
+
+        assert run_create.feedback_keys == ["quality"]
+        assert run_create.langsmith_tracer == {"project_name": "p", "example_id": "e"}
+
+
+@pytest.fixture
+def logged_warnings(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, Any]]:
+    """Warnings the models log; structlog output does not reach caplog."""
+    recorded: list[dict[str, Any]] = []
+
+    def record(event: str, **fields: Any) -> None:
+        recorded.append({"event": event, **fields})
+
+    monkeypatch.setattr(runs_models.logger, "warning", record)
+    return recorded
+
+
+class TestRunCreateUnknownKeys:
+    """An undeclared key is still dropped, but the drop is logged with its name."""
+
+    def test_logs_the_unknown_key_names(self, logged_warnings: list[dict[str, Any]]) -> None:
+        RunCreate.model_validate({"assistant_id": "agent", "input": {"x": 1}, "zeta": 1, "alpha": 2})
+
+        assert logged_warnings == [
+            {"event": "Ignoring unknown request fields", "model": "RunCreate", "keys": ["alpha", "zeta"], "count": 2}
+        ]
+
+    def test_drops_the_unknown_key_without_an_error(self, logged_warnings: list[dict[str, Any]]) -> None:
+        run_create = RunCreate.model_validate({"assistant_id": "agent", "input": {"x": 1}, "not_a_real_field": True})
+
+        assert "not_a_real_field" not in run_create.model_dump()
+
+    def test_default_python_sdk_body_logs_nothing(self, logged_warnings: list[dict[str, Any]]) -> None:
+        """The Python SDK sends these default-valued keys on every create and stream call."""
+        body = {
+            "assistant_id": "agent",
+            "input": {"x": 1},
+            "stream_mode": "values",
+            "stream_subgraphs": False,
+            "stream_resumable": False,
+        }
+
+        RunCreate.model_validate(body)
+
+        assert logged_warnings == []
+
+    def test_logs_at_most_twenty_names_with_the_full_count(self, logged_warnings: list[dict[str, Any]]) -> None:
+        body = {"assistant_id": "agent", "input": {"x": 1}, **{f"k{i:03d}": i for i in range(50)}}
+
+        RunCreate.model_validate(body)
+
+        assert logged_warnings[0]["count"] == 50
+        assert logged_warnings[0]["keys"] == [f"k{i:03d}" for i in range(20)]
+
+    def test_truncates_a_long_key_name(self, logged_warnings: list[dict[str, Any]]) -> None:
+        RunCreate.model_validate({"assistant_id": "agent", "input": {"x": 1}, "k" * 500: 1})
+
+        assert logged_warnings[0]["keys"] == ["k" * 64]

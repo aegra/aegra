@@ -828,3 +828,40 @@ class TestCronDurability:
 
         assert resp.status_code == 422
         mock_cron_service.update_cron.assert_not_called()
+
+
+class TestCronStreamResumable:
+    """The SDK sends ``stream_resumable`` on cron create and update; it is declared, not dropped."""
+
+    def test_create_passes_stream_resumable_to_service(self, client: TestClient, mock_cron_service: AsyncMock) -> None:
+        mock_cron_service.create_cron.return_value = AsyncMock()
+
+        resp = client.post(
+            "/runs/crons",
+            json={"input": {"q": 1}, "assistant_id": "asst-001", "schedule": "*/5 * * * *", "stream_resumable": True},
+        )
+
+        assert resp.status_code == 200
+        assert mock_cron_service.create_cron.call_args.args[0].stream_resumable is True
+
+    def test_update_passes_stream_resumable_to_service(self, client: TestClient, mock_cron_service: AsyncMock) -> None:
+        mock_cron_service.update_cron.return_value = _cron_response()
+
+        resp = client.patch("/runs/crons/cron-001", json={"stream_resumable": False})
+
+        assert resp.status_code == 200
+        assert mock_cron_service.update_cron.call_args.args[1].stream_resumable is False
+
+    def test_create_rejects_non_bool_stream_resumable(self, client: TestClient, mock_cron_service: AsyncMock) -> None:
+        resp = client.post(
+            "/runs/crons",
+            json={
+                "input": {"q": 1},
+                "assistant_id": "asst-001",
+                "schedule": "*/5 * * * *",
+                "stream_resumable": "always",
+            },
+        )
+
+        assert resp.status_code == 422
+        mock_cron_service.create_cron.assert_not_called()

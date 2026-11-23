@@ -160,12 +160,12 @@ class Run(Base):
     thread_id: Mapped[str] = mapped_column(Text, ForeignKey("thread.thread_id", ondelete="CASCADE"), nullable=False)
     assistant_id: Mapped[str | None] = mapped_column(Text, ForeignKey("assistant.assistant_id", ondelete="CASCADE"))
     status: Mapped[str] = mapped_column(Text, server_default=text("'pending'"))
-    input: Mapped[dict | None] = mapped_column(JsonbSafe, server_default=text("'{}'::jsonb"))
+    input: Mapped[Any | None] = mapped_column(JsonbSafe, server_default=text("'{}'::jsonb"))
     # Some environments may not yet have a 'config' column; make it nullable without default to match existing DB.
     # If migrations add this column later, it's already represented here.
     config: Mapped[dict | None] = mapped_column(JsonbSafe, nullable=True)
     context: Mapped[dict | None] = mapped_column(JsonbSafe, nullable=True)
-    output: Mapped[dict | None] = mapped_column(JsonbSafe)
+    output: Mapped[Any | None] = mapped_column(JsonbSafe)
     error_message: Mapped[str | None] = mapped_column(Text)
     user_id: Mapped[str] = mapped_column(Text, nullable=False)
     created_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), server_default=text("now()"))

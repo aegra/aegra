@@ -37,6 +37,23 @@ asyncio.run(main())
   A client-provided `thread_id` must be 1–255 non-blank characters. Omit the field (or send `null`) to let the server generate a UUID. Longer or blank values are rejected with 422 before they hit PostgreSQL's btree key limit (~2704 bytes).
 </Note>
 
+### Threads created by a run
+
+A run on a thread ID that does not exist creates the thread. To get an error instead, set `if_not_exists="reject"` on the run; a missing thread then returns `404` and nothing is created:
+
+```python
+await client.runs.create(
+    "my-thread-123",
+    "agent",
+    input={"messages": [{"type": "human", "content": "Hello"}]},
+    if_not_exists="reject",
+)
+```
+
+<Note>
+  LangGraph Platform defaults `if_not_exists` to `reject`. Aegra defaults to `create`, so send `reject` explicitly if your client relies on the error. Stateless runs always get their own thread and ignore the field.
+</Note>
+
 ## Thread status
 
 Threads have a status that reflects their current state:

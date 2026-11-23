@@ -41,7 +41,7 @@ class RunExecution(BaseModel):
 
     model_config = ConfigDict(frozen=True)
 
-    input_data: dict[str, Any] | None = None
+    input_data: Any = None
     config: dict[str, Any] = Field(default_factory=dict)
     context: dict[str, Any] = Field(default_factory=dict)
     stream_mode: str | list[str] | None = None

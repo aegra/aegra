@@ -135,6 +135,7 @@ async def stateless_wait_for_run(
     (unless ``on_completion="keep"``).
     """
     thread_id = str(uuid4())
+    request.if_not_exists = None  # the thread is brand new, so 'reject' has nothing to reject
     should_delete = request.on_completion != "keep"
 
     try:
@@ -203,6 +204,7 @@ async def stateless_stream_run(
     stream finishes (unless ``on_completion="keep"``).
     """
     thread_id = str(uuid4())
+    request.if_not_exists = None  # the thread is brand new, so 'reject' has nothing to reject
     should_delete = request.on_completion != "keep"
 
     try:
@@ -285,6 +287,7 @@ async def stateless_create_run(
     ``on_completion="keep"``).
     """
     thread_id = str(uuid4())
+    request.if_not_exists = None  # the thread is brand new, so 'reject' has nothing to reject
     should_delete = request.on_completion != "keep"
 
     try:

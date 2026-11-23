@@ -6,7 +6,7 @@ from urllib.parse import urlparse
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from aegra_api.models.runs import Durability
+from aegra_api.models.runs import Durability, warn_unknown_keys
 from aegra_api.settings import settings
 
 # Field length caps. Keep these conservative; cron metadata is small by nature.
@@ -66,10 +66,16 @@ class CronCreate(BaseModel):
     timezone: str | None = Field(None, max_length=_TIMEZONE_MAX_LEN)
     durability: Durability | None = None
     checkpoint_during: bool | None = None
-    # NOTE: stream_resumable is NOT exposed here because RunCreate has no matching
-    # field yet. Accepting it silently drops the value at firing time.
+    # Changes nothing: stream replay is always on. See RunCreate.stream_resumable.
+    stream_resumable: bool | None = None
 
     _check_webhook = field_validator("webhook")(_validate_webhook_url)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _warn_on_unknown_keys(cls, data: Any) -> Any:
+        warn_unknown_keys(cls, data)
+        return data
 
     @model_validator(mode="after")
     def _check(self) -> "CronCreate":
@@ -123,11 +129,17 @@ class CronUpdate(BaseModel):
     stream_subgraphs: bool | None = None
     timezone: str | None = Field(None, max_length=_TIMEZONE_MAX_LEN)
     durability: Durability | None = None
-    # See CronCreate: stream_resumable omitted until RunCreate gains a matching field.
+    stream_resumable: bool | None = None
 
     # A field validator, unlike assigning in _check, keeps "webhook" out of model_fields_set when it
     # was omitted, so update_cron can tell an omitted webhook from an explicit null that removes it.
     _check_webhook = field_validator("webhook")(_validate_webhook_url)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _warn_on_unknown_keys(cls, data: Any) -> Any:
+        warn_unknown_keys(cls, data)
+        return data
 
     @model_validator(mode="after")
     def _check(self) -> "CronUpdate":

@@ -4197,6 +4197,17 @@
               }
             ],
             "title": "Checkpoint During"
+          },
+          "stream_resumable": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Stream Resumable"
           }
         },
         "type": "object",
@@ -4622,6 +4633,17 @@
               }
             ],
             "title": "Durability"
+          },
+          "stream_resumable": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Stream Resumable"
           }
         },
         "type": "object",
@@ -4800,30 +4822,12 @@
             "default": "pending"
           },
           "input": {
-            "anyOf": [
-              {
-                "additionalProperties": true,
-                "type": "object"
-              },
-              {
-                "type": "null"
-              }
-            ],
             "title": "Input",
-            "description": "Input data provided to the run. None for checkpoint-only resume."
+            "description": "Input provided to the run: any JSON value. None for checkpoint-only resume."
           },
           "output": {
-            "anyOf": [
-              {
-                "additionalProperties": true,
-                "type": "object"
-              },
-              {
-                "type": "null"
-              }
-            ],
             "title": "Output",
-            "description": "Final output produced by the run, or null if not yet complete."
+            "description": "Final output produced by the run: any JSON value, or null if not yet complete."
           },
           "error_message": {
             "anyOf": [
@@ -4901,17 +4905,8 @@
             "description": "Assistant to execute"
           },
           "input": {
-            "anyOf": [
-              {
-                "additionalProperties": true,
-                "type": "object"
-              },
-              {
-                "type": "null"
-              }
-            ],
             "title": "Input",
-            "description": "Input data for the run. Optional when resuming from a checkpoint."
+            "description": "Input for the graph: any JSON value. Optional when resuming from a checkpoint."
           },
           "config": {
             "anyOf": [
@@ -5069,6 +5064,75 @@
             ],
             "title": "Webhook",
             "description": "Absolute http(s) URL that receives a POST with the run, its final values and any error once the run reaches a terminal status. Must pass the server's webhooks.url policy; a URL the server will not call returns 422."
+          },
+          "if_not_exists": {
+            "anyOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "create",
+                  "reject"
+                ]
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "If Not Exists",
+            "description": "What to do when the thread does not exist: 'create' (default) creates it, 'reject' returns 404. LangGraph Platform defaults to 'reject'. A stateless run always gets its own thread, so the field has no effect there."
+          },
+          "after_seconds": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "After Seconds",
+            "description": "Delayed start is not supported yet: runs start at once, and a value above 0 returns 422."
+          },
+          "stream_resumable": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Stream Resumable",
+            "description": "Accepted for SDK compatibility and changes nothing: every stream can be rejoined with Last-Event-ID while the server keeps the run's replay buffer."
+          },
+          "feedback_keys": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Feedback Keys",
+            "description": "Accepted and ignored: LangSmith feedback keys. Aegra traces through OpenTelemetry."
+          },
+          "langsmith_tracer": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Langsmith Tracer",
+            "description": "Accepted and ignored: LangSmith project routing. Aegra traces through OpenTelemetry."
           },
           "command": {
             "anyOf": [

@@ -124,8 +124,6 @@ async def cleanup_tasks_for_shutdown() -> list[asyncio.Task[None]]:
     """
     tasks: list[asyncio.Task[None]] = []
     for task in list(_background_cleanup_tasks):
-        if task.done():
-            continue
         run_id = _waiting_for_run.get(task)
         if run_id is None or await _run_ended(task, run_id):
             tasks.append(task)

@@ -4,8 +4,10 @@ from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from fastapi import HTTPException
 
 from aegra_api.models import User
+from aegra_api.services import run_preparation
 from aegra_api.services.event_streaming import commands as cmd
 
 _CHECKPOINT_ID = "1ef4f797-8335-6428-8001-8a1503f9b875"
@@ -503,3 +505,36 @@ class TestErrors:
         assert resp["type"] == "error"
         assert resp["error"] == "invalid_argument"
         assert run_id is None
+
+
+class TestCommandAuthorization:
+    async def test_run_start_dispatches_create_run_with_the_run_fields(
+        self, prepared_run: AsyncMock, user: User, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        handle_event = AsyncMock(return_value=None)
+        monkeypatch.setattr(run_preparation, "handle_event", handle_event)
+
+        await _dispatch({"id": 1, "method": "run.start", "params": {"assistant_id": "agent", "input": {}}}, user)
+
+        create_ctx, create_value = handle_event.await_args_list[0].args
+        assert (create_ctx.resource, create_ctx.action) == ("threads", "create_run")
+        assert create_value["assistant_id"] == "agent"
+        assert create_value["thread_id"] == "t1"
+        read_ctx, read_value = handle_event.await_args_list[1].args
+        assert (read_ctx.resource, read_ctx.action) == ("assistants", "read")
+        assert read_value == {"assistant_id": "agent"}
+
+    @pytest.mark.parametrize("method", ["run.start", "input.respond"])
+    async def test_denied_command_returns_permission_denied_and_prepares_no_run(
+        self, prepared_run: AsyncMock, user: User, monkeypatch: pytest.MonkeyPatch, method: str
+    ) -> None:
+        monkeypatch.setattr(run_preparation, "handle_event", AsyncMock(side_effect=HTTPException(403, "Forbidden")))
+        params = {"assistant_id": "agent", "input": {}} if method == "run.start" else {"response": "ok"}
+        monkeypatch.setattr(cmd, "_thread_assistant_id", AsyncMock(return_value="agent"))
+
+        resp, run_id = await _dispatch({"id": 1, "method": method, "params": params}, user)
+
+        assert resp["type"] == "error"
+        assert resp["error"] == "permission_denied"
+        assert run_id is None
+        prepared_run.assert_not_awaited()

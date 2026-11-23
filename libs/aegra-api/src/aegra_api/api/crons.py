@@ -160,9 +160,10 @@ async def update_cron(
     """
     ctx = build_auth_context(user, "crons", "update")
     value = {"cron_id": cron_id, **request.model_dump(exclude_none=True)}
-    # An explicit null clears the end time, so a handler guarding end_time must see it.
-    if "end_time" in request.model_fields_set:
-        value["end_time"] = request.end_time
+    # An explicit null clears these fields, so a handler guarding them must see it.
+    for field in ("end_time", "webhook"):
+        if field in request.model_fields_set:
+            value[field] = getattr(request, field)
     filters = await handle_event(ctx, value)
     merge_fields = apply_handler_edits(request, filters, value, _HANDLER_EDITABLE_FIELDS)
 
@@ -285,6 +286,7 @@ async def _trigger_first_run(
             run_request,
             user,
             initial_status="pending",
+            validate_webhook=False,
         )
     except Exception:
         if should_delete_thread:

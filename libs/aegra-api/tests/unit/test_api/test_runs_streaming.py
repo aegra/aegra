@@ -255,7 +255,7 @@ class TestRunsStreamingEndpoints:
         request = RunCreate(assistant_id="test-assistant", input={})
 
         with (
-            patch("aegra_api.api.runs.handle_event", new_callable=AsyncMock) as mock_handle,
+            patch("aegra_api.services.run_preparation.handle_event", new_callable=AsyncMock) as mock_handle,
             patch("aegra_api.api.runs._prepare_run", new_callable=AsyncMock) as mock_prepare,
             patch("aegra_api.api.runs.streaming_service.stream_run_execution", return_value=_single_event_stream()),
             patch("aegra_api.api.runs._get_session_maker", return_value=_make_session_maker(mock_session)),
@@ -290,7 +290,7 @@ class TestRunsStreamingEndpoints:
         request = RunCreate(assistant_id="test-assistant", input={})
 
         with (
-            patch("aegra_api.api.runs.handle_event", new_callable=AsyncMock) as mock_handle,
+            patch("aegra_api.services.run_preparation.handle_event", new_callable=AsyncMock) as mock_handle,
             patch("aegra_api.api.runs._prepare_run", new_callable=AsyncMock) as mock_prepare,
             patch("aegra_api.api.runs._get_session_maker", return_value=_make_session_maker(mock_session)),
             pytest.raises(HTTPException) as exc,
@@ -321,7 +321,7 @@ class TestRunsStreamingEndpoints:
         )
 
         with (
-            patch("aegra_api.api.runs.handle_event", new_callable=AsyncMock) as mock_handle,
+            patch("aegra_api.services.run_preparation.handle_event", new_callable=AsyncMock) as mock_handle,
             patch("aegra_api.api.runs._prepare_run", new_callable=AsyncMock) as mock_prepare,
             patch("aegra_api.api.runs.streaming_service.stream_run_execution", return_value=_single_event_stream()),
             patch("aegra_api.api.runs._get_session_maker", return_value=_make_session_maker(mock_session)),

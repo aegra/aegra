@@ -1,10 +1,10 @@
 """The Agent Protocol v2 ``input.inject`` command: a user or system message for a running run.
 
 The message is stored for the thread and reaches the graph through its injected-input
-reader (``aegra_api.services.injected_input``); no run is started. The route's
-``threads.create_run`` handler result is honored as on v1 run creation: a returned
-dict wins, else the value it may have mutated, and its ``params.message`` fields
-merge over the client's message.
+reader (``aegra_api.services.injected_input``); no run is started. The command
+authorizes ``threads.create_run`` with the command body as ``value``, and the result
+is honored as on run creation: a returned dict wins, else the value the handler may
+have mutated, and its ``params.message`` fields merge over the client's message.
 """
 
 from __future__ import annotations
@@ -14,12 +14,24 @@ from uuid import uuid4
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from aegra_api.core.auth_handlers import build_auth_context, handle_event
 from aegra_api.models import User
 from aegra_api.services.event_streaming.protocol import ErrorCode, build_error, build_success
 from aegra_api.services.injected_input import store_message, thread_admission
 
 _ROLES = frozenset({"user", "system"})
 _MESSAGE_FIELDS = frozenset({"role", "content", "name", "id"})
+
+
+async def authorize_inject(user: User, thread_id: str, command: dict[str, Any]) -> dict[str, Any]:
+    """Dispatch ``threads.create_run`` for an inject; returns what the handler allowed.
+
+    The URL's ``thread_id`` overrides one in the body, so a crafted body cannot swap
+    the thread a handler authorizes. A denying handler raises 403.
+    """
+    value = {**command, "thread_id": thread_id}
+    filters = await handle_event(build_auth_context(user, "threads", "create_run"), value)
+    return filters if filters is not None else value
 
 
 async def input_inject(

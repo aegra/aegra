@@ -1,4 +1,4 @@
-"""``input.inject`` over ``POST /threads/{id}/commands``: the route's ``@auth.on`` result is honored."""
+"""``input.inject`` over ``POST /threads/{id}/commands``: the command's ``@auth.on`` result is honored."""
 
 from __future__ import annotations
 
@@ -133,7 +133,9 @@ def test_denying_handler_refuses_the_inject(monkeypatch: pytest.MonkeyPatch, sto
 
     resp = _client(monkeypatch, auth).post("/threads/t1/commands", json=_BODY)
 
-    assert resp.status_code == 403
+    assert resp.status_code == 200
+    assert resp.json()["type"] == "error"
+    assert resp.json()["error"] == "permission_denied"
     stored.assert_not_awaited()
 
 

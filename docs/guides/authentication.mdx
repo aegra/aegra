@@ -229,8 +229,6 @@ as their parent, so one rule covers a whole family of endpoints:
 There is no `runs` resource: the Agent Protocol authorizes run operations under
 the thread that owns them, and the SDK's `@auth.on` has no `runs` attribute.
 
-On `/threads/{id}/commands` the handler's `value` is the command body plus the `thread_id` from the URL. For `input.inject`, the handler's result shapes the message the run receives, as it shapes `config` and `context` on run creation: a returned dict wins over an edited `value`, and its `params.message` fields merge over the client's message. Returning `False` refuses the inject with 403.
-
 Stateless runs create an ephemeral thread, so they authorize as
 `threads.create_run`. Omitting the `thread_id` does not bypass your thread rules.
 
@@ -248,6 +246,13 @@ The v2 `run.start` and `input.respond` commands authorize the same way: the
 `config`, `context`) at the top level of `value`, not the command envelope, and
 any `config` or `context` it returns is applied to the run. A denied command
 returns a `permission_denied` error envelope.
+
+The v2 `input.inject` command starts no run, so its `threads.create_run` handler
+gets the command body (`id`, `method`, `params`) plus the `thread_id` from the URL
+as `value`. The handler's result shapes the message the run receives: a returned
+dict wins over an edited `value`, and its `params.message` fields merge over the
+client's message. A denied inject also returns a `permission_denied` error
+envelope, and no message is stored.
 
 Handlers may also inject data by mutating `value` in place. Setting
 `value["metadata"]["team_id"]` in an `@auth.on.threads.create` handler stores

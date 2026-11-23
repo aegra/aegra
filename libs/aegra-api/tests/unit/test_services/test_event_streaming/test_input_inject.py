@@ -4,6 +4,7 @@ from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from fastapi import HTTPException
 
 from aegra_api.models import User
 from aegra_api.services.event_streaming import commands as cmd
@@ -36,8 +37,11 @@ def _inject(params: dict[str, Any]) -> dict[str, Any]:
 async def _dispatch(
     payload: dict[str, Any], user: User, *, authorized: dict[str, Any] | None = None
 ) -> tuple[dict[str, Any], str | None]:
+    """Dispatch with ``threads.create_run`` answering ``authorized`` (``None``: no handler result)."""
     session = AsyncMock()
-    return await cmd.handle_command(payload, session=session, thread_id="t1", user=user, authorized=authorized)
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(inject, "handle_event", AsyncMock(return_value=authorized))
+        return await cmd.handle_command(payload, session=session, thread_id="t1", user=user)
 
 
 def _stored_message(stored: AsyncMock) -> dict[str, Any]:
@@ -290,3 +294,38 @@ class TestInjectValidation:
         assert resp["type"] == "success"
         warning.assert_called_once()
         assert warning.call_args.kwargs == {"method": "input.inject", "keys": ["priority"]}
+
+
+class TestInjectAuthorization:
+    async def test_inject_dispatches_create_run_with_the_command_and_url_thread(
+        self, admission: AsyncMock, stored: AsyncMock, user: User, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        handle_event = AsyncMock(return_value=None)
+        monkeypatch.setattr(inject, "handle_event", handle_event)
+        payload = {**_inject({"namespace": [], "message": {"role": "user", "content": "hi"}}), "thread_id": "elsewhere"}
+
+        await cmd.handle_command(payload, session=AsyncMock(), thread_id="t1", user=user)
+
+        ctx, value = handle_event.await_args.args
+        assert (ctx.resource, ctx.action) == ("threads", "create_run")
+        assert value["method"] == "input.inject"
+        assert value["params"]["message"]["content"] == "hi"
+        assert value["thread_id"] == "t1"
+
+    async def test_denied_inject_returns_permission_denied_and_stores_nothing(
+        self, admission: AsyncMock, stored: AsyncMock, user: User, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(inject, "handle_event", AsyncMock(side_effect=HTTPException(403, "Forbidden")))
+
+        resp, run_id = await cmd.handle_command(
+            _inject({"namespace": [], "message": {"role": "user", "content": "hi"}}),
+            session=AsyncMock(),
+            thread_id="t1",
+            user=user,
+        )
+
+        assert resp["type"] == "error"
+        assert resp["error"] == "permission_denied"
+        assert run_id is None
+        stored.assert_not_awaited()
+        admission.assert_not_awaited()

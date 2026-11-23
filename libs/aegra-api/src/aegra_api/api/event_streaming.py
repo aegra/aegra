@@ -16,14 +16,13 @@ from collections.abc import AsyncGenerator
 
 import anyio
 import structlog
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import JSONResponse
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sse_starlette import EventSourceResponse
 
 from aegra_api.core.auth_deps import auth_dependency, get_current_user
-from aegra_api.core.auth_enforcement import authorized_value
 from aegra_api.core.orm import Assistant as AssistantORM
 from aegra_api.core.orm import Run as RunORM
 from aegra_api.core.orm import Thread as ThreadORM
@@ -151,7 +150,6 @@ async def stream_thread_events(
 async def post_thread_command(
     thread_id: str,
     body: ThreadCommand,
-    request: Request,
     user: User = Depends(get_current_user),
 ) -> JSONResponse:
     """Run a single v2 command on the thread and return its response envelope.
@@ -166,13 +164,7 @@ async def post_thread_command(
         # run.start may target a not-yet-created thread (the SDK mints the id and
         # expects run preparation to create it); other ownership is enforced there.
         await _verify_thread_owned_or_new(session, thread_id, user)
-        response, _run_id = await handle_command(
-            body.model_dump(),
-            session=session,
-            thread_id=thread_id,
-            user=user,
-            authorized=authorized_value(request),
-        )
+        response, _run_id = await handle_command(body.model_dump(), session=session, thread_id=thread_id, user=user)
 
     # Protocol error envelopes ride HTTP 200 — a client treating non-2xx as a
     # transport failure would throw before parsing the envelope's error code.

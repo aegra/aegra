@@ -24,7 +24,7 @@ from aegra_api.core.orm import Run as RunORM
 from aegra_api.core.orm import Thread as ThreadORM
 from aegra_api.models import User
 from aegra_api.models.runs import RunCreate
-from aegra_api.services.event_streaming.inject import input_inject
+from aegra_api.services.event_streaming.inject import authorize_inject, input_inject
 from aegra_api.services.event_streaming.protocol import ErrorCode, build_error, build_success
 from aegra_api.services.run_preparation import _apply_create_run_auth, _prepare_run
 
@@ -46,14 +46,11 @@ async def handle_command(
     session: AsyncSession,
     thread_id: str,
     user: User,
-    authorized: dict[str, Any] | None = None,
 ) -> tuple[dict[str, Any], str | None]:
     """Dispatch one command. Returns ``(response_envelope, started_run_id)``.
 
     ``started_run_id`` is the run a ``run.start`` / ``input.respond`` created,
     so the caller can open a stream for it; ``None`` for other commands.
-    ``authorized`` is what the route's ``@auth.on`` handler allowed, which
-    ``input.inject`` honors.
     """
     command_id = payload.get("id")
     method = payload.get("method")
@@ -80,6 +77,7 @@ async def handle_command(
             return await _input_respond(command_id, params, session=session, thread_id=thread_id, user=user)
         if method == "input.inject":
             _warn_unknown_keys("input.inject", params, INPUT_INJECT_KEYS)
+            authorized = await authorize_inject(user, thread_id, payload)
             response = await input_inject(
                 command_id, params, session=session, thread_id=thread_id, user=user, authorized=authorized
             )

@@ -111,6 +111,25 @@ def test_create_run_handler_returned_dict_merges_into_the_message(
     assert stored.call_args.kwargs["message"]["additional_kwargs"] == {"tenant": "acme", "injected_by": _USER}
 
 
+def test_create_run_handler_returned_dict_wins_over_an_in_place_edit(
+    monkeypatch: pytest.MonkeyPatch, stored: AsyncMock
+) -> None:
+    auth = Auth()
+
+    @auth.on.threads.create_run
+    async def edit_and_filter(ctx: Any, value: Any) -> dict[str, Any]:
+        value["params"]["message"]["content"] = "[edited]"
+        value["params"]["message"]["team"] = "support"
+        return {"owner": ctx.user.identity}
+
+    resp = _client(monkeypatch, auth).post("/threads/t1/commands", json=_BODY)
+
+    assert resp.json()["type"] == "success"
+    message = stored.call_args.kwargs["message"]
+    assert message["content"] == "also check the tests"
+    assert message["additional_kwargs"] == {"injected_by": _USER}
+
+
 def test_handler_sees_the_inject_with_the_url_thread(monkeypatch: pytest.MonkeyPatch, stored: AsyncMock) -> None:
     auth = Auth()
     seen: list[tuple[str, str, Any, Any]] = []

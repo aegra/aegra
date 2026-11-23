@@ -9,6 +9,7 @@ have mutated, and its ``params.message`` fields merge over the client's message.
 
 from __future__ import annotations
 
+from copy import deepcopy
 from typing import Any
 from uuid import uuid4
 
@@ -27,9 +28,11 @@ async def authorize_inject(user: User, thread_id: str, command: dict[str, Any]) 
     """Dispatch ``threads.create_run`` for an inject; returns what the handler allowed.
 
     The URL's ``thread_id`` overrides one in the body, so a crafted body cannot swap
-    the thread a handler authorizes. A denying handler raises 403.
+    the thread a handler authorizes. The handler edits its own copy of the command,
+    so an edit reaches the message only when no dict is returned. A denying handler
+    raises 403.
     """
-    value = {**command, "thread_id": thread_id}
+    value = {**deepcopy(command), "thread_id": thread_id}
     filters = await handle_event(build_auth_context(user, "threads", "create_run"), value)
     return filters if filters is not None else value
 

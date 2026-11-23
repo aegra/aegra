@@ -233,7 +233,8 @@ class TestClaimQuery:
         stmt = _expired_claim_stmt(now=datetime.now(UTC), limit=10, user_id="user-1")
         sql = str(stmt.compile(dialect=postgresql.dialect()))
 
-        assert "thread.user_id" in sql
+        assert stmt.whereclause is not None
+        assert "thread.user_id = " in str(stmt.whereclause.compile(dialect=postgresql.dialect()))
         assert "FOR UPDATE OF thread_ttl, thread SKIP LOCKED" in sql
 
 
@@ -507,8 +508,9 @@ class TestPruneForUser:
 
         assert (deleted, pruned) == (2, 1)
         assert mock_batch.await_count == 3
-        claim_sql = str(mock_batch.await_args_list[0].args[1].compile(dialect=postgresql.dialect()))
-        assert "thread.user_id" in claim_sql
+        claim = mock_batch.await_args_list[0].args[1]
+        claim_sql = str(claim.compile(dialect=postgresql.dialect()))
+        assert "thread.user_id = " in str(claim.whereclause.compile(dialect=postgresql.dialect()))
         assert "FOR UPDATE OF thread_ttl, thread SKIP LOCKED" in claim_sql
 
 

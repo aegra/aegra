@@ -175,8 +175,9 @@ class TestThreadHookDispatcher:
         await dispatcher.stop()
 
         assert received == ["t-good"]
-        assert "Thread-deleted hook failed" in _text(logs)
-        assert "t-bad" in _text(logs)
+        failure = next(entry for entry in logs if entry["event"] == "Thread-deleted hook failed")
+        assert failure["thread_id"] == "t-bad"
+        assert failure["user_id"] == "owner-1"
         assert "'k'" not in _text(logs)
 
     @pytest.mark.asyncio

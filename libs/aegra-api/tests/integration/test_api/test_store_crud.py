@@ -45,6 +45,7 @@ class TestStoreRequestValidation:
     )
     def test_rejects_invalid_namespace_labels(
         self,
+        *,
         client: TestClient,
         mock_store: AsyncMock,
         label: str,

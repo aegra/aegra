@@ -988,6 +988,7 @@ class TestStreamGraphResult:
         with (
             patch.object(run_executor_module, "get_langgraph_service", return_value=mock_service),
             patch.object(run_executor_module, "stream_graph_events", _events),
+            patch.object(run_executor_module, "mark_delivered", new_callable=AsyncMock),
             patch.object(run_executor_module, "with_auth_ctx") as mock_auth,
             patch.object(run_executor_module, "broker_manager") as bm,
             patch.object(run_executor_module, "streaming_service") as ss,

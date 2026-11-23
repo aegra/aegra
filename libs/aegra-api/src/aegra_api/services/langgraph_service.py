@@ -47,7 +47,7 @@ from aegra_api.services.graph_factory import (
     invoke_factory,
     is_factory,
 )
-from aegra_api.utils.run_utils import SERVER_PINNED_CONFIG_KEYS, strip_pinned_config_keys
+from aegra_api.utils.run_utils import CRON_PINNED_CONFIG_KEYS, SERVER_PINNED_CONFIG_KEYS, strip_pinned_config_keys
 
 State = TypeVar("State")
 logger = structlog.get_logger(__name__)
@@ -805,6 +805,9 @@ def create_run_config(
     # Server-authoritative — overwrite, never honor a client override.
     for key in SERVER_PINNED_CONFIG_KEYS:
         cfg["configurable"].pop(key, None)
+    # A root-level copy of either key would reach configurable, whatever the trigger set there.
+    for key in CRON_PINNED_CONFIG_KEYS:
+        cfg.pop(key, None)
     cfg["configurable"]["thread_id"] = thread_id
     cfg["configurable"]["run_id"] = run_id
     if trigger is not None:

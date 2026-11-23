@@ -8,7 +8,8 @@ logger = structlog.getLogger(__name__)
 
 # A body-supplied thread_id overrides the route-verified one (the checkpointer
 # keys on thread_id alone), so the server pins these instead of trusting them.
-SERVER_PINNED_CONFIG_KEYS: frozenset[str] = frozenset({"thread_id", "run_id", "cron_id", "cron_scheduled_time"})
+CRON_PINNED_CONFIG_KEYS: frozenset[str] = frozenset({"cron_id", "cron_scheduled_time"})
+SERVER_PINNED_CONFIG_KEYS: frozenset[str] = frozenset({"thread_id", "run_id"}) | CRON_PINNED_CONFIG_KEYS
 
 
 def strip_pinned_config_keys(client_config: dict[str, Any]) -> dict[str, Any]:

@@ -4,11 +4,12 @@ import json
 import sys
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, TypedDict
 from unittest.mock import Mock, mock_open, patch
 
 import pytest
 from langchain_core.callbacks import BaseCallbackHandler, CallbackManager
+from langchain_core.runnables import RunnableConfig
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.graph import START, MessagesState, StateGraph
 from langgraph.pregel import Pregel
@@ -25,6 +26,10 @@ from aegra_api.services.langgraph_service import (
     inject_user_context,
 )
 from aegra_api.settings import settings
+
+
+class _SeenState(TypedDict):
+    seen: dict[str, Any]
 
 
 class TestLangGraphServiceInit:
@@ -891,6 +896,34 @@ class TestLangGraphServiceConfigs:
         assert result["configurable"]["cron_id"] == "cron-1"
         assert result["configurable"]["cron_scheduled_time"] == "2026-01-01T09:00:00+00:00"
         assert result["configurable"]["checkpoint_id"] == "cp-9"
+
+    @pytest.mark.parametrize(
+        ("trigger", "expected"),
+        [
+            (None, {"cron_id": None, "cron_scheduled_time": None}),
+            (
+                CronTrigger(cron_id="cron-1", scheduled_time=datetime(2026, 1, 1, 9, 0, tzinfo=UTC)),
+                {"cron_id": "cron-1", "cron_scheduled_time": "2026-01-01T09:00:00+00:00"},
+            ),
+        ],
+    )
+    def test_root_level_client_cron_keys_never_reach_the_graph(
+        self, trigger: CronTrigger | None, expected: dict[str, str | None]
+    ) -> None:
+        """Forged cron keys at the root of a run's config must not reach the graph's configurable."""
+        forged = {"cron_id": "forged", "cron_scheduled_time": "1999-01-01T00:00:00+00:00"}
+
+        def capture(state: _SeenState, config: RunnableConfig) -> dict[str, Any]:
+            return {"seen": {key: config["configurable"].get(key) for key in forged}}
+
+        graph = StateGraph(_SeenState).add_node("capture", capture).add_edge(START, "capture").compile()
+
+        with patch("aegra_api.services.langgraph_service.get_tracing_callbacks", return_value=[]):
+            run_config = create_run_config(
+                "run-789", "thread-456", None, additional_config=dict(forged), trigger=trigger
+            )
+
+        assert graph.invoke({"seen": {}}, run_config)["seen"] == expected
 
     def test_create_run_config_existing_callbacks(self):
         """Test creating run config with existing callbacks"""

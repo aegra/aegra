@@ -18,6 +18,7 @@ from sqlalchemy import ColumnElement, case, func, literal_column, or_, select, u
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from aegra_api.config import load_checkpointer_config
+from aegra_api.core.auth_handlers import build_auth_context, handle_event
 from aegra_api.core.orm import Assistant as AssistantORM
 from aegra_api.core.orm import Run as RunORM
 from aegra_api.core.orm import Thread as ThreadORM
@@ -28,6 +29,7 @@ from aegra_api.models.runs import Durability
 from aegra_api.services.executor import executor
 from aegra_api.services.langgraph_service import get_langgraph_service
 from aegra_api.services.run_status import set_thread_status
+from aegra_api.services.webhook_policy import ensure_webhook_allowed
 from aegra_api.settings import settings
 from aegra_api.utils.assistants import resolve_assistant_id
 from aegra_api.utils.jsonb import jsonb_patch, jsonb_shallow_merge
@@ -246,6 +248,31 @@ def _resolve_durability(request: RunCreate) -> Durability | None:
     return get_default_durability()
 
 
+async def _apply_create_run_auth(user: User, thread_id: str, request: RunCreate) -> None:
+    """Authorize threads.create_run and merge config/context overrides into request.
+
+    Handler-returned filter dict wins; otherwise fall back to in-place value mutations.
+    """
+    ctx = build_auth_context(user, "threads", "create_run")
+    value = {**request.model_dump(), "thread_id": thread_id}
+    filters = await handle_event(ctx, value)
+
+    source = filters if filters is not None else value
+    config_overrides = source.get("config")
+    if isinstance(config_overrides, dict):
+        request.config = {**(request.config or {}), **config_overrides}
+    context_overrides = source.get("context")
+    if isinstance(context_overrides, dict):
+        request.context = {**(request.context or {}), **context_overrides}
+
+    # Creating a run also reads its assistant, so per-assistant handler rules
+    # apply here exactly as they do in the cron-create chain.
+    await handle_event(
+        build_auth_context(user, "assistants", "read"),
+        {"assistant_id": request.assistant_id},
+    )
+
+
 async def _prepare_run(
     session: AsyncSession,
     thread_id: str,
@@ -254,13 +281,18 @@ async def _prepare_run(
     *,
     initial_status: str,
     event_streaming_v2: bool = False,
+    validate_webhook: bool = True,
 ) -> tuple[str, Run, RunJob]:
     """Shared run-creation logic used by create, stream, and wait endpoints.
 
     Validates inputs, resolves the assistant, persists the RunORM record,
     builds a RunJob, submits it to the executor, and returns the triple
-    ``(run_id, run_model, job)``.
+    ``(run_id, run_model, job)``. Cron fires pass ``validate_webhook=False``:
+    their webhook passed at cron create/update and is re-checked before each call,
+    so a later policy change skips the call instead of blocking the run.
     """
+    if validate_webhook:
+        await ensure_webhook_allowed(request.webhook)
     await _validate_resume_command(session, thread_id, request.command)
 
     run_id = str(uuid4())
@@ -311,8 +343,15 @@ async def _prepare_run(
     await set_thread_status(session, thread_id, "busy")
 
     # Build the RunJob before persisting so we can store execution_params
+    now = datetime.now(UTC)
     job = RunJob(
-        identity=RunIdentity(run_id=run_id, thread_id=thread_id, graph_id=assistant.graph_id),
+        identity=RunIdentity(
+            run_id=run_id,
+            thread_id=thread_id,
+            graph_id=assistant.graph_id,
+            assistant_id=resolved_assistant_id,
+            created_at=now,
+        ),
         user=user,
         execution=RunExecution(
             input_data=request.input,  # preserve None so LangGraph resumes from checkpoint
@@ -329,6 +368,7 @@ async def _prepare_run(
             interrupt_after=request.interrupt_after,
             multitask_strategy=request.multitask_strategy,
             subgraphs=request.stream_subgraphs or False,
+            webhook=request.webhook or None,
         ),
         run_metadata=request.metadata or {},
     )
@@ -344,7 +384,6 @@ async def _prepare_run(
         "graph_id": assistant.graph_id,
     }
 
-    now = datetime.now(UTC)
     run_orm = RunORM(
         run_id=run_id,
         thread_id=thread_id,

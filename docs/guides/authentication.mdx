@@ -243,6 +243,12 @@ several resources still checks each one: creating a cron authorizes
 layer. Creating a run likewise authorizes `threads.create_run`, then
 `assistants.read` for the assistant it uses.
 
+The v2 `run.start` and `input.respond` commands authorize the same way: the
+`threads.create_run` handler gets the run fields (`assistant_id`, `input`,
+`config`, `context`) at the top level of `value`, not the command envelope, and
+any `config` or `context` it returns is applied to the run. A denied command
+returns a `permission_denied` error envelope.
+
 Handlers may also inject data by mutating `value` in place. Setting
 `value["metadata"]["team_id"]` in an `@auth.on.threads.create` handler stores
 that metadata on the new thread.
@@ -526,6 +532,8 @@ If no auth is configured, Aegra runs in no-auth mode:
 - Authorization handlers are not called
 
 This is the default for local development and testing. Every caller shares the `anonymous` user and its data, so don't expose a server without auth to the internet.
+
+No-auth mode applies only when `auth.path` is not set. If `auth.path` is set and the module cannot be loaded (the file is missing, the import raises, or the variable is not an `Auth` instance), the server stops at startup with the error instead of serving requests as `anonymous`.
 
 ## Configuration options
 

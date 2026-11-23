@@ -77,6 +77,14 @@ class RunCreate(BaseModel):
         None,
         description="Strategy for handling concurrent runs on same thread: 'reject', 'interrupt', 'rollback', or 'enqueue'.",
     )
+    webhook: str | None = Field(
+        None,
+        description=(
+            "Absolute http(s) URL that receives a POST with the run, its final values and any error once the run "
+            "reaches a terminal status. Must pass the server's webhooks.url policy; a URL the server will not call "
+            "returns 422."
+        ),
+    )
 
     # Human-in-the-loop fields (core HITL functionality)
     command: dict[str, Any] | None = Field(
@@ -222,6 +230,23 @@ class Run(BaseModel):
         if not isinstance(v, str):
             raise ValueError(f"Status must be a string, got {type(v)}")
         return validate_run_status(v)
+
+
+# Every Run field; a drift test keeps this in step with the model.
+RunSelectField = Literal[
+    "run_id",
+    "thread_id",
+    "assistant_id",
+    "status",
+    "input",
+    "output",
+    "error_message",
+    "config",
+    "context",
+    "user_id",
+    "created_at",
+    "updated_at",
+]
 
 
 class RunStatus(BaseModel):

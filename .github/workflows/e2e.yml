@@ -63,9 +63,15 @@ jobs:
           POSTGRES_DB: "aegra"
         run: uv run alembic upgrade head
 
+      # The webhook E2E tests run their receiver on 127.0.0.1, which the shipped
+      # aegra.json rightly refuses to call. Allow loopback for this server only.
+      - name: Write E2E config (loopback webhooks allowed)
+        run: |
+          jq '.webhooks = {"url": {"require_https": false, "disable_loopback": false}}' aegra.json > aegra.e2e.json
+
       - name: Start Aegra server (dev mode — no Redis)
         env:
-          AEGRA_CONFIG: ${{ github.workspace }}/aegra.json
+          AEGRA_CONFIG: ${{ github.workspace }}/aegra.e2e.json
           POSTGRES_USER: "user"
           POSTGRES_PASSWORD: "password"
           POSTGRES_HOST: "localhost"
@@ -173,9 +179,13 @@ jobs:
           POSTGRES_DB: "aegra"
         run: uv run alembic upgrade head
 
+      - name: Write E2E config (loopback webhooks allowed)
+        run: |
+          jq '.webhooks = {"url": {"require_https": false, "disable_loopback": false}}' aegra.json > aegra.e2e.json
+
       - name: Start Aegra server (prod mode — Redis workers)
         env:
-          AEGRA_CONFIG: ${{ github.workspace }}/aegra.json
+          AEGRA_CONFIG: ${{ github.workspace }}/aegra.e2e.json
           POSTGRES_USER: "user"
           POSTGRES_PASSWORD: "password"
           POSTGRES_HOST: "localhost"

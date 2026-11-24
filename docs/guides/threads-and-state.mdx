@@ -225,7 +225,7 @@ the checkpoint history stored in the graph backend:
 await client.threads.delete(thread_id)
 ```
 
-A thread is also deleted by the TTL sweep and `POST /threads/prune` (below) and after a stateless run. To clean up resources of your own that belong to a thread, configure [`hooks.thread_deleted`](/reference/configuration#hooks): Aegra calls it once per deleted thread, after the delete commits, on each of these paths.
+A thread is also deleted by the TTL sweep and `POST /threads/prune` (below) and after a stateless run. To clean up resources of your own that belong to a thread, configure [`hooks.thread_deleted`](/reference/configuration#hooks): after the delete commits on each of these paths, Aegra calls it at most once per deleted thread, and a crash or a shutdown can lose the call.
 
 ## Thread TTL
 

@@ -88,7 +88,7 @@ class DummySessionBase:
             return DummyScalarResult([echo_inserted_row(stmt)])
         return DummyScalarResult()
 
-    async def execute(self, stmt, /, *args, **kwargs):
+    async def execute(self, stmt: Any, /, *args: Any, **kwargs: Any) -> "DummyRows":
         """Answer a ``DELETE ... RETURNING`` with the returned columns of the row ``scalar`` gives for it.
 
         A fake whose ``scalar`` returns the row a delete removes, or None when it matched nothing,

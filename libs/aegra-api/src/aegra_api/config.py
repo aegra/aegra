@@ -299,7 +299,8 @@ def load_auth_config() -> AuthConfig | None:
 def load_hooks_config() -> HooksConfig | None:
     """Load the hooks block from aegra.json or langgraph.json, unvalidated.
 
-    Any value other than a missing key is returned as written, so the hook loader can reject it.
+    A missing key and an explicit null both read as None, which the hook loader takes as no hooks;
+    any other value is returned as written, so the loader can reject it.
     """
     config = load_config()
     if config is None:

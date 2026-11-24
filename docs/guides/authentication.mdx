@@ -229,6 +229,8 @@ as their parent, so one rule covers a whole family of endpoints:
 There is no `runs` resource: the Agent Protocol authorizes run operations under
 the thread that owns them, and the SDK's `@auth.on` has no `runs` attribute.
 
+`@auth.on.threads.delete` decides whether a caller may delete a thread. `POST /threads/prune` is a client route too, and the same handler authorizes it. The TTL sweep and the cleanup of a stateless run's thread run no handler. To run code after a thread is gone, on any of these paths, use [`hooks.thread_deleted`](/reference/configuration#hooks).
+
 Stateless runs create an ephemeral thread, so they authorize as
 `threads.create_run`. Omitting the `thread_id` does not bypass your thread rules.
 

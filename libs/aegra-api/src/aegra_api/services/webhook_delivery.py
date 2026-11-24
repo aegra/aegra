@@ -39,7 +39,8 @@ logger = structlog.getLogger(__name__)
 _MAX_ATTEMPTS = 3
 _CONNECT_TIMEOUT_SECONDS = 5.0
 _REQUEST_TIMEOUT_SECONDS = 30.0
-_DRAIN_TIMEOUT_SECONDS = 5.0
+# Shared by every background dispatcher that drains at shutdown.
+SHUTDOWN_DRAIN_SECONDS = 5.0
 _MAX_PENDING_DELIVERIES = 1000
 
 _serializer = GeneralSerializer()
@@ -201,7 +202,7 @@ class WebhookDispatcher:
     async def stop(self) -> None:
         """Give in-flight deliveries a short grace period, then cancel the rest."""
         if self._tasks:
-            _done, pending = await asyncio.wait(set(self._tasks), timeout=_DRAIN_TIMEOUT_SECONDS)
+            _done, pending = await asyncio.wait(set(self._tasks), timeout=SHUTDOWN_DRAIN_SECONDS)
             if pending:
                 logger.warning("Cancelling undelivered webhooks at shutdown", count=len(pending))
                 for task in pending:

@@ -9,7 +9,7 @@ import pytest
 import aegra_api.main as main_module
 from aegra_api.core import auth_middleware
 from aegra_api.observability.base import get_observability_manager
-from aegra_api.services import run_preparation, webhook_policy
+from aegra_api.services import run_cleanup, run_preparation, thread_hooks, webhook_policy
 
 
 @pytest.mark.unit
@@ -296,6 +296,9 @@ def lifespan_events(monkeypatch: pytest.MonkeyPatch) -> list[str]:
     dispatcher = MagicMock()
     dispatcher.stop = _recording(events, "webhooks.stop")
     monkeypatch.setattr(main_module, "webhook_dispatcher", dispatcher)
+    hooks = MagicMock()
+    hooks.stop = _recording(events, "hooks.stop")
+    monkeypatch.setattr(main_module, "thread_hook_dispatcher", hooks)
 
     graph_service = MagicMock()
     graph_service.initialize = _recording(events, "graphs.initialize")
@@ -403,6 +406,7 @@ async def test_stops_components_in_reverse_start_order_on_shutdown(lifespan_even
         "cron.stop",
         "reaper.stop",
         "executor.stop",
+        "hooks.stop",
         "webhooks.stop",
         "broker.stop",
         "redis.close",
@@ -431,6 +435,7 @@ async def test_unwinds_started_components_when_executor_start_fails(
         "redis.initialize",
         "broker.start",
         "executor.start",
+        "hooks.stop",
         "webhooks.stop",
         "broker.stop",
         "redis.close",
@@ -466,8 +471,93 @@ async def test_keeps_stopping_remaining_components_when_one_stop_fails(
         "cron.stop",
         "reaper.stop",
         "executor.stop",
+        "hooks.stop",
         "webhooks.stop",
         "broker.stop",
         "redis.close",
         "db.close",
     ]
+
+
+def _patched_startup() -> tuple[MagicMock, MagicMock]:
+    db = MagicMock()
+    db.initialize = AsyncMock()
+    db.close = AsyncMock()
+    langgraph_service = MagicMock()
+    langgraph_service.initialize = AsyncMock()
+    return db, langgraph_service
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_lifespan_fails_when_configured_thread_deleted_hook_cannot_load(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A broken hooks.thread_deleted stops the boot instead of serving without the cleanup it exists for."""
+    importlib.reload(main_module)
+    monkeypatch.setattr(thread_hooks, "load_hooks_config", lambda: {"thread_deleted": "./missing.py:on_deleted"})
+    monkeypatch.setattr(thread_hooks, "get_config_dir", lambda: tmp_path)
+    db, langgraph_service = _patched_startup()
+
+    with (
+        patch("aegra_api.main.run_migrations_async", new_callable=AsyncMock),
+        patch("aegra_api.main.db_manager", db),
+        patch("aegra_api.main.get_langgraph_service", return_value=langgraph_service),
+        patch("aegra_api.main.setup_observability"),
+        pytest.raises(thread_hooks.HookLoadError, match="Hook file not found"),
+    ):
+        async with main_module.lifespan(MagicMock()):
+            pass
+
+    # The graphs load first, so a module path under `dependencies` can resolve.
+    langgraph_service.initialize.assert_awaited_once()
+    db.close.assert_awaited_once()
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_lifespan_configures_and_drains_the_thread_deleted_hook(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A loadable hook is handed to the dispatcher at startup and drained at shutdown."""
+    importlib.reload(main_module)
+    (tmp_path / "hooks.py").write_text("async def on_deleted(event):\n    pass\n")
+    monkeypatch.setattr(thread_hooks, "load_hooks_config", lambda: {"thread_deleted": "./hooks.py:on_deleted"})
+    monkeypatch.setattr(thread_hooks, "get_config_dir", lambda: tmp_path)
+    db, langgraph_service = _patched_startup()
+
+    with (
+        patch("aegra_api.main.run_migrations_async", new_callable=AsyncMock),
+        patch("aegra_api.main.db_manager", db),
+        patch("aegra_api.main.get_langgraph_service", return_value=langgraph_service),
+        patch("aegra_api.main.setup_observability"),
+        patch("aegra_api.main.thread_hook_dispatcher") as dispatcher,
+    ):
+        dispatcher.stop = AsyncMock()
+        async with main_module.lifespan(MagicMock()):
+            hook = dispatcher.configure.call_args.args[0]
+            assert hook.__qualname__ == "on_deleted"
+            assert dispatcher.configure.call_args.kwargs["pending_deletes"] is run_cleanup.cleanup_tasks_for_shutdown
+            dispatcher.stop.assert_not_awaited()
+
+        dispatcher.stop.assert_awaited_once()
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_lifespan_without_hooks_key_configures_no_hook(monkeypatch: pytest.MonkeyPatch) -> None:
+    """No hooks block means no hook and no change in behavior."""
+    importlib.reload(main_module)
+    monkeypatch.setattr(thread_hooks, "load_hooks_config", lambda: None)
+    db, langgraph_service = _patched_startup()
+
+    with (
+        patch("aegra_api.main.run_migrations_async", new_callable=AsyncMock),
+        patch("aegra_api.main.db_manager", db),
+        patch("aegra_api.main.get_langgraph_service", return_value=langgraph_service),
+        patch("aegra_api.main.setup_observability"),
+        patch("aegra_api.main.thread_hook_dispatcher") as dispatcher,
+    ):
+        dispatcher.stop = AsyncMock()
+        async with main_module.lifespan(MagicMock()):
+            dispatcher.configure.assert_called_once_with(None, pending_deletes=run_cleanup.cleanup_tasks_for_shutdown)

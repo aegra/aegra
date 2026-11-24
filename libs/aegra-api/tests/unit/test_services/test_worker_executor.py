@@ -531,6 +531,60 @@ class TestWorkerExecutorWaitForCompletion:
         mock_client.exists.assert_awaited_once_with("aegra:agent-foo:run:done:run-1")
 
 
+class TestWorkerExecutorIsFinished:
+    """The check shutdown makes for a stateless run: the run's done key, else its row."""
+
+    @staticmethod
+    async def _is_finished(client: AsyncMock, status: str | None) -> bool:
+        run_orm = None
+        if status is not None:
+            run_orm = MagicMock()
+            run_orm.status = status
+        session = AsyncMock()
+        session.scalar = AsyncMock(return_value=run_orm)
+        with (
+            patch(f"{MODULE}.redis_manager") as mock_redis,
+            patch(f"{MODULE}.settings") as mock_settings,
+            patch(f"{MODULE}._get_session_maker", return_value=_make_session_maker(session)),
+        ):
+            mock_redis.get_client.return_value = client
+            mock_settings.redis.REDIS_CHANNEL_PREFIX = "aegra:agent-foo:run:"
+            return await WorkerExecutor().is_finished("run-1")
+
+    @staticmethod
+    def _client(*, key_set: bool) -> AsyncMock:
+        client = AsyncMock()
+        client.exists = AsyncMock(return_value=int(key_set))
+        return client
+
+    @pytest.mark.asyncio
+    async def test_done_key_set_is_finished(self) -> None:
+        client = self._client(key_set=True)
+
+        assert await self._is_finished(client, "running") is True
+        client.exists.assert_awaited_once_with("aegra:agent-foo:run:done:run-1")
+
+    @pytest.mark.asyncio
+    async def test_terminal_row_is_finished_without_the_key(self) -> None:
+        assert await self._is_finished(self._client(key_set=False), "success") is True
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("status", ["running", "pending"])
+    async def test_active_row_is_not_finished(self, status: str) -> None:
+        assert await self._is_finished(self._client(key_set=False), status) is False
+
+    @pytest.mark.asyncio
+    async def test_missing_row_is_finished(self) -> None:
+        assert await self._is_finished(self._client(key_set=False), None) is True
+
+    @pytest.mark.asyncio
+    async def test_redis_error_falls_back_to_the_row(self) -> None:
+        client = AsyncMock()
+        client.exists = AsyncMock(side_effect=RedisConnectionError("redis down"))
+
+        assert await self._is_finished(client, "running") is False
+
+
 # ------------------------------------------------------------------
 # WorkerExecutor.start / stop
 # ------------------------------------------------------------------

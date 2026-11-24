@@ -10,7 +10,7 @@ from uuid import uuid4
 
 import structlog
 from fastapi import APIRouter, Body, Depends, HTTPException, Query
-from sqlalchemy import select, update
+from sqlalchemy import delete, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -44,6 +44,7 @@ from aegra_api.models.errors import CONFLICT, NOT_FOUND, AgentProtocolError
 from aegra_api.models.search_limit import effective_search_limit
 from aegra_api.services.run_status import interrupt_run_before_delete
 from aegra_api.services.streaming_service import streaming_service
+from aegra_api.services.thread_hooks import notify_threads_deleted, thread_deleted_event
 from aegra_api.services.thread_state_service import ThreadStateService
 from aegra_api.services.thread_ttl import get_thread_ttl_config, prune_expired_threads_for_user, prune_threads_by_id
 from aegra_api.utils.jsonb import jsonb_patch, jsonb_shallow_merge
@@ -917,8 +918,18 @@ async def delete_thread(
     # can retry; the reverse order would orphan LangGraph checkpoint rows.
     await db_manager.get_checkpointer().adelete_thread(thread_id)
 
-    await session.delete(thread)
+    # The event comes from the deleted row, so metadata written after the read above reaches the hook.
+    removed = (
+        await session.execute(
+            delete(ThreadORM)
+            .where(ThreadORM.thread_id == thread.thread_id, ThreadORM.user_id == thread.user_id)
+            .returning(ThreadORM.thread_id, ThreadORM.user_id, ThreadORM.metadata_json)
+        )
+    ).first()
     await session.commit()
+    # No row back means a concurrent delete committed first and has already reported the thread.
+    if removed is not None:
+        notify_threads_deleted([thread_deleted_event(*removed)])
 
     return {"status": "deleted"}
 

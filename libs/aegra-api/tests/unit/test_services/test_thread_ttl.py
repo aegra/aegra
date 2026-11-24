@@ -1,7 +1,7 @@
 """Unit tests for thread TTL config resolution and the expiry sweep."""
 
 import json
-from collections.abc import Iterator
+from collections.abc import Iterable, Iterator
 from datetime import UTC, datetime
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -10,8 +10,10 @@ import pytest
 from psycopg import Error as PsycopgError
 from pydantic import ValidationError
 from sqlalchemy.dialects import postgresql
+from sqlalchemy.exc import SQLAlchemyError
 
 from aegra_api.observability.metrics import THREAD_TTL_SWEPT
+from aegra_api.services.thread_hooks import ThreadDeletedEvent
 from aegra_api.services.thread_ttl import (
     ThreadTTLConfig,
     ThreadTTLSweeper,
@@ -221,6 +223,17 @@ class TestClaimQuery:
         assert "LIMIT" in sql
         assert "runs" in sql  # active-run guard subquery
 
+    def test_claim_selects_the_columns_the_batch_unpacks(self) -> None:
+        stmt = _expired_claim_stmt(now=datetime.now(UTC), limit=10)
+
+        assert [str(column) for column in stmt.selected_columns] == [
+            "thread_ttl.thread_id",
+            "thread_ttl.strategy",
+            "thread_ttl.ttl_minutes",
+            "thread.user_id",
+            "thread.metadata_json",
+        ]
+
     def test_exclude_ids_renders_not_in(self) -> None:
         stmt = _expired_claim_stmt(now=datetime.now(UTC), limit=10, exclude_ids={"failed-1"})
         sql = str(stmt.compile(dialect=postgresql.dialect()))
@@ -231,7 +244,8 @@ class TestClaimQuery:
         stmt = _expired_claim_stmt(now=datetime.now(UTC), limit=10, user_id="user-1")
         sql = str(stmt.compile(dialect=postgresql.dialect()))
 
-        assert "thread.user_id" in sql
+        assert stmt.whereclause is not None
+        assert "thread.user_id = " in str(stmt.whereclause.compile(dialect=postgresql.dialect()))
         assert "FOR UPDATE OF thread_ttl, thread SKIP LOCKED" in sql
 
 
@@ -331,7 +345,7 @@ class TestFailureIsolation:
         db.get_checkpointer.return_value = checkpointer
 
         claim_result = MagicMock()
-        claim_result.all.return_value = [("t-1", "delete", 5.0), ("t-2", "delete", 5.0)]
+        claim_result.all.return_value = [("t-1", "delete", 5.0, "u-1", {}), ("t-2", "delete", 5.0, "u-1", {})]
         session = AsyncMock()
         session.execute.side_effect = [claim_result, MagicMock()]
 
@@ -505,8 +519,9 @@ class TestPruneForUser:
 
         assert (deleted, pruned) == (2, 1)
         assert mock_batch.await_count == 3
-        claim_sql = str(mock_batch.await_args_list[0].args[1].compile(dialect=postgresql.dialect()))
-        assert "thread.user_id" in claim_sql
+        claim = mock_batch.await_args_list[0].args[1]
+        claim_sql = str(claim.compile(dialect=postgresql.dialect()))
+        assert "thread.user_id = " in str(claim.whereclause.compile(dialect=postgresql.dialect()))
         assert "FOR UPDATE OF thread_ttl, thread SKIP LOCKED" in claim_sql
 
 
@@ -517,8 +532,8 @@ class TestPruneById:
     def _session(owned: list[str]) -> AsyncMock:
         session = AsyncMock()
         result = MagicMock()
-        result.all.return_value = owned
-        session.scalars.return_value = result
+        result.all.return_value = [(thread_id, "u-1", {}) for thread_id in owned]
+        session.execute.return_value = result
         return session
 
     @pytest.mark.asyncio
@@ -529,7 +544,14 @@ class TestPruneById:
         ):
             await prune_threads_by_id(session, thread_ids=["t-1"], strategy="delete", user_id="u-1")
 
-        sql = str(session.scalars.await_args.args[0].compile(dialect=postgresql.dialect()))
+        claim = session.execute.await_args_list[0].args[0]
+        sql = str(claim.compile(dialect=postgresql.dialect()))
+        # The rows are unpacked as (thread_id, owner, metadata) into the hook payload.
+        assert [str(column) for column in claim.selected_columns] == [
+            "thread.thread_id",
+            "thread.user_id",
+            "thread.metadata_json",
+        ]
         assert "thread.user_id = " in sql
         assert "NOT (EXISTS" in sql
         assert "FOR UPDATE OF thread SKIP LOCKED" in sql
@@ -566,5 +588,123 @@ class TestPruneById:
             )
 
         assert count == 1
-        session.execute.assert_not_awaited()
+        # The claim select is the only statement: keep_latest deletes no row.
+        assert session.execute.await_count == 1
         session.commit.assert_awaited_once()
+
+
+class _HookRecorder:
+    """Stands in for notify_threads_deleted; records each call and how many commits preceded it."""
+
+    def __init__(self, session: AsyncMock) -> None:
+        self._session = session
+        self.calls: list[tuple[list[ThreadDeletedEvent], int]] = []
+
+    def __call__(self, events: Iterable[ThreadDeletedEvent]) -> None:
+        self.calls.append((list(events), self._session.commit.await_count))
+
+
+def _db_with(checkpointer: AsyncMock) -> MagicMock:
+    return MagicMock(get_checkpointer=MagicMock(return_value=checkpointer))
+
+
+class TestThreadDeletedHook:
+    """Every committed TTL or prune delete reaches the thread-deleted hook, and nothing else does."""
+
+    @pytest.mark.asyncio
+    async def test_batch_notifies_deleted_threads_after_commit(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        checkpointer = AsyncMock()
+        checkpointer.adelete_thread.side_effect = [None, PsycopgError("backend down"), None]
+        claim_result = MagicMock()
+        claim_result.all.return_value = [
+            ("t-1", "delete", 5.0, "owner-a", {"box": "1"}),
+            ("t-fail", "delete", 5.0, "owner-a", {}),
+            ("t-keep", "keep_latest", 5.0, "owner-b", {}),
+            ("t-2", "delete", 5.0, "owner-b", {"box": "2"}),
+        ]
+        session = AsyncMock()
+        session.execute.side_effect = [claim_result, MagicMock(), MagicMock(), MagicMock()]
+        recorder = _HookRecorder(session)
+        monkeypatch.setattr("aegra_api.services.thread_ttl.notify_threads_deleted", recorder)
+
+        with patch("aegra_api.services.thread_ttl.db_manager", _db_with(checkpointer)):
+            _claimed, deleted, _pruned, _failed = await _process_expired_batch(session, MagicMock(), datetime.now(UTC))
+
+        assert deleted == 2
+        assert recorder.calls == [
+            (
+                [
+                    {"thread_id": "t-1", "user_id": "owner-a", "metadata": {"box": "1"}},
+                    {"thread_id": "t-2", "user_id": "owner-b", "metadata": {"box": "2"}},
+                ],
+                1,
+            )
+        ]
+
+    @pytest.mark.asyncio
+    async def test_batch_with_failed_commit_notifies_nothing(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        claim_result = MagicMock()
+        claim_result.all.return_value = [("t-1", "delete", 5.0, "owner-a", {})]
+        session = AsyncMock()
+        session.execute.side_effect = [claim_result, MagicMock()]
+        session.commit.side_effect = SQLAlchemyError("commit failed")
+        recorder = _HookRecorder(session)
+        monkeypatch.setattr("aegra_api.services.thread_ttl.notify_threads_deleted", recorder)
+
+        with patch("aegra_api.services.thread_ttl.db_manager", _db_with(AsyncMock())), pytest.raises(SQLAlchemyError):
+            await _process_expired_batch(session, MagicMock(), datetime.now(UTC))
+
+        assert recorder.calls == []
+
+    @pytest.mark.asyncio
+    async def test_batch_of_only_keep_latest_notifies_nothing(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        claim_result = MagicMock()
+        claim_result.all.return_value = [("t-keep", "keep_latest", 5.0, "owner-a", {})]
+        session = AsyncMock()
+        session.execute.side_effect = [claim_result, MagicMock()]
+        recorder = _HookRecorder(session)
+        monkeypatch.setattr("aegra_api.services.thread_ttl.notify_threads_deleted", recorder)
+
+        with patch("aegra_api.services.thread_ttl.db_manager", _db_with(AsyncMock())):
+            await _process_expired_batch(session, MagicMock(), datetime.now(UTC))
+
+        assert [events for events, _ in recorder.calls if events] == []
+
+    @pytest.mark.asyncio
+    async def test_prune_by_id_notifies_the_deleted_threads_after_commit(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        selected = MagicMock()
+        selected.all.return_value = [("t-1", "owner-a", {"box": "1"}), ("t-2", "owner-a", {})]
+        session = AsyncMock()
+        session.execute.side_effect = [selected, MagicMock()]
+        recorder = _HookRecorder(session)
+        monkeypatch.setattr("aegra_api.services.thread_ttl.notify_threads_deleted", recorder)
+
+        with patch("aegra_api.services.thread_ttl.db_manager", _db_with(AsyncMock())):
+            count = await prune_threads_by_id(
+                session, thread_ids=["t-1", "t-2", "t-missing", "t-other-owner"], strategy="delete", user_id="owner-a"
+            )
+
+        assert count == 2
+        assert recorder.calls == [
+            (
+                [
+                    {"thread_id": "t-1", "user_id": "owner-a", "metadata": {"box": "1"}},
+                    {"thread_id": "t-2", "user_id": "owner-a", "metadata": {}},
+                ],
+                1,
+            )
+        ]
+
+    @pytest.mark.asyncio
+    async def test_prune_by_id_keep_latest_notifies_nothing(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        selected = MagicMock()
+        selected.all.return_value = [("t-1", "owner-a", {})]
+        session = AsyncMock()
+        session.execute.return_value = selected
+        recorder = _HookRecorder(session)
+        monkeypatch.setattr("aegra_api.services.thread_ttl.notify_threads_deleted", recorder)
+
+        with patch("aegra_api.services.thread_ttl.db_manager", _db_with(AsyncMock())):
+            await prune_threads_by_id(session, thread_ids=["t-1"], strategy="keep_latest", user_id="owner-a")
+
+        assert recorder.calls == []

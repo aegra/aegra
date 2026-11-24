@@ -535,7 +535,7 @@ class TestDispatcher:
         assert finished == ["run-1"]
 
     async def test_stop_cancels_deliveries_that_outlive_the_grace_period(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setattr(webhook_delivery, "_DRAIN_TIMEOUT_SECONDS", 0.01)
+        monkeypatch.setattr(webhook_delivery, "SHUTDOWN_DRAIN_SECONDS", 0.01)
         dispatcher = WebhookDispatcher()
         cancelled = asyncio.Event()
 

@@ -15,6 +15,7 @@ import os
 import re
 import socket
 from datetime import UTC, datetime, timedelta
+from typing import Any
 
 import structlog
 from asgi_correlation_id import correlation_id
@@ -120,18 +121,15 @@ class WorkerExecutor(BaseExecutor):
 
     async def wait_for_completion(self, run_id: str, *, timeout: float = 300.0) -> None:
         """Wait for a run to finish by polling a Redis done-key with DB fallback."""
-        done_key = f"{settings.redis.REDIS_CHANNEL_PREFIX}done:{run_id}"
+        done_key = _done_key(run_id)
         client = redis_manager.get_client()
         loop = asyncio.get_running_loop()
         deadline = loop.time() + timeout
         poll_count = 0
 
         while loop.time() < deadline:
-            try:
-                if await client.exists(done_key):
-                    return
-            except RedisError:
-                pass
+            if await _done_key_set(client, done_key):
+                return
 
             poll_count += 1
             if poll_count % 2 == 0 and await _is_run_terminal(run_id):
@@ -140,6 +138,11 @@ class WorkerExecutor(BaseExecutor):
             await asyncio.sleep(2.0)
 
         raise TimeoutError(f"Run {run_id} did not complete within {timeout}s")
+
+    async def is_finished(self, run_id: str) -> bool:
+        """The check ``wait_for_completion`` polls: the run's done key, else its row in a terminal state."""
+        done_key = _done_key(run_id)
+        return await _done_key_set(redis_manager.get_client(), done_key) or await _is_run_terminal(run_id)
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -592,6 +595,19 @@ async def _heartbeat_loop(
             logger.debug("Lease extended", run_id=run_id, worker=worker_name)
         except Exception:
             logger.warning("Heartbeat lease extension failed", run_id=run_id, worker=worker_name)
+
+
+def _done_key(run_id: str) -> str:
+    """The Redis key the worker sets once the run has finished."""
+    return f"{settings.redis.REDIS_CHANNEL_PREFIX}done:{run_id}"
+
+
+async def _done_key_set(client: Any, done_key: str) -> bool:
+    """Whether the worker has set the run's done key; a Redis error reads as not yet."""
+    try:
+        return bool(await client.exists(done_key))
+    except RedisError:
+        return False
 
 
 async def _is_run_terminal(run_id: str) -> bool:

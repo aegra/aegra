@@ -1,6 +1,7 @@
 """Integration tests for threads CRUD operations"""
 
 import secrets
+from collections.abc import Iterable
 from contextlib import asynccontextmanager
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, Mock, patch
@@ -12,6 +13,7 @@ from fastapi.testclient import TestClient
 from langgraph.types import StateSnapshot
 from psycopg import Error as PsycopgError
 from sqlalchemy.dialects import postgresql
+from sqlalchemy.sql.dml import Delete
 
 from aegra_api.api import threads as threads_module
 from aegra_api.core.orm import get_session as core_get_session
@@ -1359,3 +1361,126 @@ class TestUpdateThread:
         data = resp.json()
         # Data should not have changed
         assert data["metadata"]["initial"] is True
+
+
+class TestDeleteThreadHook:
+    """DELETE /threads/{thread_id} reaches the thread-deleted hook only once its delete commits."""
+
+    @pytest.fixture
+    def mock_checkpointer(self, monkeypatch: pytest.MonkeyPatch) -> AsyncMock:
+        checkpointer = AsyncMock()
+        db = MagicMock()
+        db.get_checkpointer.return_value = checkpointer
+        monkeypatch.setattr(threads_module, "db_manager", db)
+        return checkpointer
+
+    @pytest.fixture
+    def committed(self) -> list[bool]:
+        return []
+
+    @pytest.fixture
+    def hook_calls(self, monkeypatch: pytest.MonkeyPatch, committed: list[bool]) -> list[tuple[list[Any], bool]]:
+        calls: list[tuple[list[Any], bool]] = []
+
+        def record(events: Iterable[Any]) -> None:
+            calls.append((list(events), bool(committed)))
+
+        monkeypatch.setattr(threads_module, "notify_threads_deleted", record)
+        return calls
+
+    def _client(self, thread: object, committed: list[bool], statements: list[object] | None = None) -> TestClient:
+        app = create_test_app(include_runs=False, include_threads=True)
+
+        class Session(DummySessionBase):
+            async def scalar(self, stmt: object) -> object:
+                if statements is not None:
+                    statements.append(stmt)
+                return thread
+
+            async def delete(self, obj: object) -> None:
+                pass
+
+            async def commit(self) -> None:
+                committed.append(True)
+
+        app.dependency_overrides[core_get_session] = override_get_session_dep(Session)
+        return TestClient(app, raise_server_exceptions=False)
+
+    def test_notifies_hook_with_owner_and_metadata_after_commit(
+        self, mock_checkpointer: AsyncMock, committed: list[bool], hook_calls: list[tuple[list[Any], bool]]
+    ) -> None:
+        thread = _thread_row("test-123", metadata={"box": "1"}, user_id="test-user")
+        statements: list[object] = []
+
+        resp = self._client(thread, committed, statements).delete("/threads/test-123")
+
+        assert resp.status_code == 200
+        assert hook_calls == [([{"thread_id": "test-123", "user_id": "test-user", "metadata": {"box": "1"}}], True)]
+        deletes = [stmt for stmt in statements if isinstance(stmt, Delete)]
+        assert len(deletes) == 1
+        # Only a returned row tells this delete from a concurrent one that committed first.
+        # The event comes from the row the DELETE returns, not from the read before it.
+        assert str(deletes[0].compile(dialect=postgresql.dialect())).endswith(
+            "RETURNING thread.thread_id, thread.user_id, thread.metadata_json"
+        )
+
+    def test_event_carries_the_metadata_the_delete_returned(
+        self, mock_checkpointer: AsyncMock, committed: list[bool], hook_calls: list[tuple[list[Any], bool]]
+    ) -> None:
+        """Metadata written while the delete waited on runs and checkpoints reaches the hook."""
+        read = _thread_row("test-123", metadata={"box": "1"}, user_id="test-user")
+        deleted = _thread_row("test-123", metadata={"box": "2"}, user_id="test-user")
+        app = create_test_app(include_runs=False, include_threads=True)
+
+        class Session(DummySessionBase):
+            async def scalar(self, stmt: object) -> object:
+                return deleted if isinstance(stmt, Delete) else read
+
+            async def commit(self) -> None:
+                committed.append(True)
+
+        app.dependency_overrides[core_get_session] = override_get_session_dep(Session)
+        resp = TestClient(app, raise_server_exceptions=False).delete("/threads/test-123")
+
+        assert resp.status_code == 200
+        assert hook_calls == [([{"thread_id": "test-123", "user_id": "test-user", "metadata": {"box": "2"}}], True)]
+
+    def test_delete_that_removed_no_row_notifies_nothing(
+        self, mock_checkpointer: AsyncMock, committed: list[bool], hook_calls: list[tuple[list[Any], bool]]
+    ) -> None:
+        """A concurrent delete that committed first already reported the thread; this one matched no row."""
+        thread = _thread_row("test-123")
+        app = create_test_app(include_runs=False, include_threads=True)
+
+        class Session(DummySessionBase):
+            async def scalar(self, stmt: object) -> object:
+                return None if isinstance(stmt, Delete) else thread
+
+            async def commit(self) -> None:
+                committed.append(True)
+
+        app.dependency_overrides[core_get_session] = override_get_session_dep(Session)
+        resp = TestClient(app, raise_server_exceptions=False).delete("/threads/test-123")
+
+        assert resp.status_code == 200
+        assert committed == [True]
+        assert hook_calls == []
+
+    def test_unknown_thread_notifies_nothing(
+        self, mock_checkpointer: AsyncMock, committed: list[bool], hook_calls: list[tuple[list[Any], bool]]
+    ) -> None:
+        resp = self._client(None, committed).delete("/threads/missing")
+
+        assert resp.status_code == 404
+        assert hook_calls == []
+
+    def test_failed_checkpoint_delete_notifies_nothing(
+        self, mock_checkpointer: AsyncMock, committed: list[bool], hook_calls: list[tuple[list[Any], bool]]
+    ) -> None:
+        mock_checkpointer.adelete_thread.side_effect = PsycopgError("checkpoint backend down")
+        thread = _thread_row("test-123")
+
+        resp = self._client(thread, committed).delete("/threads/test-123")
+
+        assert resp.status_code == 500
+        assert hook_calls == []

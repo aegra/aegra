@@ -45,7 +45,7 @@ class HookLoadError(RuntimeError):
 
 
 def thread_deleted_event(thread_id: str, user_id: str, metadata: Mapping[str, Any] | None) -> ThreadDeletedEvent:
-    """The hook payload, captured before the delete commits: the row is gone after it."""
+    """The hook payload for one deleted thread, with a copy of its metadata."""
     return {"thread_id": thread_id, "user_id": user_id, "metadata": dict(metadata or {})}
 
 

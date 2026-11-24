@@ -918,17 +918,18 @@ async def delete_thread(
     # can retry; the reverse order would orphan LangGraph checkpoint rows.
     await db_manager.get_checkpointer().adelete_thread(thread_id)
 
-    # Captured before the commit: the deleted row's attributes cannot be loaded after it.
-    event = thread_deleted_event(thread.thread_id, thread.user_id, thread.metadata_json)
-    removed = await session.scalar(
-        delete(ThreadORM)
-        .where(ThreadORM.thread_id == thread.thread_id, ThreadORM.user_id == thread.user_id)
-        .returning(ThreadORM.thread_id)
-    )
+    # The event comes from the deleted row, so metadata written after the read above reaches the hook.
+    removed = (
+        await session.execute(
+            delete(ThreadORM)
+            .where(ThreadORM.thread_id == thread.thread_id, ThreadORM.user_id == thread.user_id)
+            .returning(ThreadORM.thread_id, ThreadORM.user_id, ThreadORM.metadata_json)
+        )
+    ).first()
     await session.commit()
     # No row back means a concurrent delete committed first and has already reported the thread.
     if removed is not None:
-        notify_threads_deleted([event])
+        notify_threads_deleted([thread_deleted_event(*removed)])
 
     return {"status": "deleted"}
 

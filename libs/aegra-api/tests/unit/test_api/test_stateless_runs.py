@@ -80,6 +80,9 @@ class TestDeleteThreadById:
     def mock_session(self) -> AsyncMock:
         session = AsyncMock()
         session.delete = AsyncMock()
+        # Result.first() is synchronous.
+        session.execute.return_value = MagicMock()
+        session.execute.return_value.first.return_value = None
         return session
 
     @pytest.fixture
@@ -127,10 +130,10 @@ class TestDeleteThreadById:
             await _delete_thread_by_id(thread_id, user_id)
 
         mock_checkpointer.adelete_thread.assert_awaited_once_with(thread_id)
-        delete_sql = str(mock_session.scalar.await_args_list[-1].args[0].compile(dialect=postgresql.dialect()))
+        delete_sql = str(mock_session.execute.await_args_list[-1].args[0].compile(dialect=postgresql.dialect()))
         assert delete_sql.startswith("DELETE FROM thread")
         # Only a returned row tells this delete from a concurrent one that committed first.
-        assert delete_sql.endswith("RETURNING thread.thread_id")
+        assert delete_sql.endswith("RETURNING thread.thread_id, thread.user_id, thread.metadata_json")
         mock_session.commit.assert_called_once()
 
     @pytest.mark.asyncio
@@ -213,7 +216,7 @@ class TestDeleteThreadById:
         ):
             await _delete_thread_by_id(thread_id, user_id)
 
-        assert not any(isinstance(call.args[0], Delete) for call in mock_session.scalar.await_args_list)
+        assert not any(isinstance(call.args[0], Delete) for call in mock_session.execute.await_args_list)
         mock_session.commit.assert_not_called()
 
     @pytest.mark.asyncio
@@ -241,7 +244,7 @@ class TestDeleteThreadById:
             await _delete_thread_by_id("nonexistent", "user")
 
         mock_checkpointer.adelete_thread.assert_not_called()
-        assert not any(isinstance(call.args[0], Delete) for call in mock_session.scalar.await_args_list)
+        assert not any(isinstance(call.args[0], Delete) for call in mock_session.execute.await_args_list)
 
     @pytest.mark.asyncio
     async def test_cancels_active_runs_before_delete(self, mock_session: AsyncMock) -> None:
@@ -308,7 +311,7 @@ class TestDeleteThreadById:
         with patch("aegra_api.services.run_cleanup._get_session_maker", return_value=mock_maker):
             await _delete_thread_by_id("nonexistent", "user")
 
-        assert not any(isinstance(call.args[0], Delete) for call in mock_session.scalar.await_args_list)
+        assert not any(isinstance(call.args[0], Delete) for call in mock_session.execute.await_args_list)
 
     @pytest.mark.asyncio
     async def test_handles_cancelled_error_on_task_await(self, mock_session: AsyncMock) -> None:
@@ -1153,6 +1156,11 @@ class TestDeleteThreadByIdHook:
         no_runs.all.return_value = []
         session.scalars.return_value = no_runs
         session.scalar.return_value = thread
+        # Result.first() is synchronous.
+        session.execute.return_value = MagicMock()
+        session.execute.return_value.first.return_value = (
+            None if thread is None else (thread.thread_id, thread.user_id, thread.metadata_json)
+        )
         session.delete = AsyncMock()
         return session
 
@@ -1184,7 +1192,7 @@ class TestDeleteThreadByIdHook:
         thread_id = str(uuid4())
         thread = ThreadORM(thread_id=thread_id, user_id="owner-a", status="idle", metadata_json={})
         session = self._session(thread)
-        session.scalar.side_effect = [thread, None]
+        session.execute.return_value.first.return_value = None
         calls: list[list[ThreadDeletedEvent]] = []
 
         def record(events: Iterable[ThreadDeletedEvent]) -> None:
@@ -1202,6 +1210,30 @@ class TestDeleteThreadByIdHook:
 
         assert calls == []
         session.commit.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_event_carries_the_metadata_the_delete_returned(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Metadata written while the cleanup waited on runs and checkpoints reaches the hook."""
+        thread_id = str(uuid4())
+        thread = ThreadORM(thread_id=thread_id, user_id="owner-a", status="idle", metadata_json={"box": "1"})
+        session = self._session(thread)
+        session.execute.return_value.first.return_value = (thread_id, "owner-a", {"box": "2"})
+        calls: list[list[ThreadDeletedEvent]] = []
+
+        def record(events: Iterable[ThreadDeletedEvent]) -> None:
+            calls.append(list(events))
+
+        monkeypatch.setattr("aegra_api.services.run_cleanup.notify_threads_deleted", record)
+        db = MagicMock()
+        db.get_checkpointer.return_value = AsyncMock()
+
+        with (
+            patch("aegra_api.services.run_cleanup._get_session_maker", return_value=self._session_maker(session)),
+            patch("aegra_api.services.run_cleanup.db_manager", db),
+        ):
+            await _delete_thread_by_id(thread_id, "owner-a")
+
+        assert calls == [[{"thread_id": thread_id, "user_id": "owner-a", "metadata": {"box": "2"}}]]
 
     @pytest.mark.asyncio
     async def test_thread_already_gone_notifies_nothing(self, monkeypatch: pytest.MonkeyPatch) -> None:

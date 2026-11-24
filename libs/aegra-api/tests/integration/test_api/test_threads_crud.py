@@ -1419,7 +1419,31 @@ class TestDeleteThreadHook:
         deletes = [stmt for stmt in statements if isinstance(stmt, Delete)]
         assert len(deletes) == 1
         # Only a returned row tells this delete from a concurrent one that committed first.
-        assert str(deletes[0].compile(dialect=postgresql.dialect())).endswith("RETURNING thread.thread_id")
+        # The event comes from the row the DELETE returns, not from the read before it.
+        assert str(deletes[0].compile(dialect=postgresql.dialect())).endswith(
+            "RETURNING thread.thread_id, thread.user_id, thread.metadata_json"
+        )
+
+    def test_event_carries_the_metadata_the_delete_returned(
+        self, mock_checkpointer: AsyncMock, committed: list[bool], hook_calls: list[tuple[list[Any], bool]]
+    ) -> None:
+        """Metadata written while the delete waited on runs and checkpoints reaches the hook."""
+        read = _thread_row("test-123", metadata={"box": "1"}, user_id="test-user")
+        deleted = _thread_row("test-123", metadata={"box": "2"}, user_id="test-user")
+        app = create_test_app(include_runs=False, include_threads=True)
+
+        class Session(DummySessionBase):
+            async def scalar(self, stmt: object) -> object:
+                return deleted if isinstance(stmt, Delete) else read
+
+            async def commit(self) -> None:
+                committed.append(True)
+
+        app.dependency_overrides[core_get_session] = override_get_session_dep(Session)
+        resp = TestClient(app, raise_server_exceptions=False).delete("/threads/test-123")
+
+        assert resp.status_code == 200
+        assert hook_calls == [([{"thread_id": "test-123", "user_id": "test-user", "metadata": {"box": "2"}}], True)]
 
     def test_delete_that_removed_no_row_notifies_nothing(
         self, mock_checkpointer: AsyncMock, committed: list[bool], hook_calls: list[tuple[list[Any], bool]]

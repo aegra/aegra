@@ -75,16 +75,18 @@ async def delete_thread_by_id(thread_id: str, user_id: str) -> None:
         if thread:
             # Checkpoints first — same ordering rationale as the delete_thread route.
             await db_manager.get_checkpointer().adelete_thread(thread_id)
-            event = thread_deleted_event(thread.thread_id, thread.user_id, thread.metadata_json)
-            removed = await session.scalar(
-                delete(ThreadORM)
-                .where(ThreadORM.thread_id == thread.thread_id, ThreadORM.user_id == thread.user_id)
-                .returning(ThreadORM.thread_id)
-            )
+            # The event comes from the deleted row, so metadata written after the read above reaches the hook.
+            removed = (
+                await session.execute(
+                    delete(ThreadORM)
+                    .where(ThreadORM.thread_id == thread.thread_id, ThreadORM.user_id == thread.user_id)
+                    .returning(ThreadORM.thread_id, ThreadORM.user_id, ThreadORM.metadata_json)
+                )
+            ).first()
             await session.commit()
             # No row back means a concurrent delete committed first and has already reported the thread.
             if removed is not None:
-                notify_threads_deleted([event])
+                notify_threads_deleted([thread_deleted_event(*removed)])
 
 
 async def cleanup_after_background_run(run_id: str, thread_id: str, user_id: str) -> None:

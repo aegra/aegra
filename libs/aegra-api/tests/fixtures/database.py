@@ -5,7 +5,7 @@ from datetime import UTC, datetime
 from types import SimpleNamespace
 from typing import Any
 
-from sqlalchemy import DateTime, Insert, Update, inspect
+from sqlalchemy import DateTime, Delete, Insert, Update, inspect
 from sqlalchemy.dialects import postgresql
 from sqlalchemy.exc import NoInspectionAvailable
 
@@ -87,6 +87,31 @@ class DummySessionBase:
         if isinstance(stmt, Insert):
             return DummyScalarResult([echo_inserted_row(stmt)])
         return DummyScalarResult()
+
+    async def execute(self, stmt, /, *args, **kwargs):
+        """Answer a ``DELETE ... RETURNING`` with the returned columns of the row ``scalar`` gives for it.
+
+        A fake whose ``scalar`` returns the row a delete removes, or None when it matched nothing,
+        then gets back that row's columns the way Postgres returns them.
+        """
+        if isinstance(stmt, Delete):
+            row = await self.scalar(stmt)
+            if row is not None:
+                return DummyRows([tuple(getattr(row, column.key) for column in stmt.exported_columns)])
+        return DummyRows([])
+
+
+class DummyRows:
+    """The rows of a statement run through ``execute``."""
+
+    def __init__(self, rows: list[tuple[Any, ...]]) -> None:
+        self._rows = rows
+
+    def first(self) -> tuple[Any, ...] | None:
+        return self._rows[0] if self._rows else None
+
+    def all(self) -> list[tuple[Any, ...]]:
+        return list(self._rows)
 
 
 def override_get_session_dep(

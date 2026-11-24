@@ -12,6 +12,7 @@ from pydantic import (
     field_validator,
     model_validator,
 )
+from pydantic.config import JsonDict
 
 from aegra_api.utils.status_compat import validate_run_status
 
@@ -230,6 +231,17 @@ class Run(BaseModel):
         if not isinstance(v, str):
             raise ValueError(f"Status must be a string, got {type(v)}")
         return validate_run_status(v)
+
+
+def _drop_required(schema: JsonDict) -> None:
+    schema.pop("required", None)
+
+
+class RunListItem(Run):
+    """A run in the thread runs list. With `select`, only the selected fields are present."""
+
+    # Schema only: a `select` row omits fields Run requires, so strict generated clients would reject it.
+    model_config = ConfigDict(from_attributes=True, json_schema_extra=_drop_required)
 
 
 # Every Run field; a drift test keeps this in step with the model.

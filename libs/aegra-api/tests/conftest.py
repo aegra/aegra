@@ -11,6 +11,7 @@ from unittest.mock import AsyncMock
 import pytest
 from httpx import HTTPStatusError
 
+from aegra_api.core import auth_middleware
 from aegra_api.services import webhook_policy
 from tests.fixtures.auth import DummyUser
 from tests.fixtures.clients import (
@@ -136,6 +137,16 @@ def clear_auth_cache():
     get_auth_backend.cache_clear()
     yield
     get_auth_backend.cache_clear()
+
+
+@pytest.fixture(autouse=True)
+def explicit_noop_auth(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Run every test with an explicit ``AUTH_TYPE=noop``, whatever the shell exports.
+
+    An unset AUTH_TYPE refuses to boot, so tests of that path or of other modes override this.
+    """
+    monkeypatch.delenv("AUTH_TYPE", raising=False)
+    monkeypatch.setattr(auth_middleware.settings.app, "AUTH_TYPE", "noop")
 
 
 # Public and outside every blocked range; what the offline resolver answers for any host.

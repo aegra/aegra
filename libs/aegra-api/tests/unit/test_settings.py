@@ -85,6 +85,36 @@ class TestAppSettingsServerURL:
         assert app.PORT == 2026
 
 
+class TestAppSettingsAuthType:
+    """AUTH_TYPE has no default: anonymous mode needs an explicit ``noop``."""
+
+    def test_defaults_to_none_when_unset(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv("AUTH_TYPE", raising=False)
+
+        app = AppSettings(_env_file=None)
+
+        assert app.AUTH_TYPE is None
+
+    @pytest.mark.parametrize("env_value", ["", "   ", "\t\n"])
+    def test_blank_value_parses_to_none(self, monkeypatch: pytest.MonkeyPatch, env_value: str) -> None:
+        """`AUTH_TYPE=` in a .env means unset, not an unknown auth type."""
+        monkeypatch.setenv("AUTH_TYPE", env_value)
+
+        app = AppSettings(_env_file=None)
+
+        assert app.AUTH_TYPE is None
+
+    @pytest.mark.parametrize(("env_value", "expected"), [(" NoOp ", "noop"), ("CUSTOM", "custom"), ("other", "other")])
+    def test_non_blank_value_is_stripped_and_lowercased(
+        self, monkeypatch: pytest.MonkeyPatch, env_value: str, expected: str
+    ) -> None:
+        monkeypatch.setenv("AUTH_TYPE", env_value)
+
+        app = AppSettings(_env_file=None)
+
+        assert expected == app.AUTH_TYPE
+
+
 class TestSsePingIntervalSecs:
     """``sse_ping_interval_secs`` derives an int ping value from the float setting."""
 

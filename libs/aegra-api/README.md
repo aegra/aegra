@@ -55,6 +55,7 @@ export POSTGRES_USER=aegra
 export POSTGRES_PASSWORD=aegra_secret
 export POSTGRES_HOST=localhost
 export POSTGRES_DB=aegra
+export AUTH_TYPE=noop  # no-auth mode; required unless auth.path is set
 
 # Run migrations
 alembic upgrade head
@@ -97,7 +98,7 @@ POSTGRES_HOST=localhost
 POSTGRES_DB=aegra
 
 # Authentication
-AUTH_TYPE=noop  # Options: noop, custom
+AUTH_TYPE=noop  # noop (anonymous unless auth.path is set) or custom (require auth.path); remove it and the server won't start unless auth.path is set
 
 # Server
 HOST=0.0.0.0

@@ -102,7 +102,7 @@ Aegra uses two connection pools: one for SQLAlchemy (metadata) and one for LangG
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `AUTH_TYPE` | `noop` | Authentication mode: `noop` (no auth) or `custom` |
+| `AUTH_TYPE` | None (required unless `auth.path` is set) | `custom` requires a loaded `auth.path` and refuses to start without one (recommended for production). `noop` is anonymous when no `auth.path` is set, and a configured `auth.path` is still loaded. Unset or empty refuses to start unless `auth.path` is set. Unknown values always refuse to start. Case-insensitive |
 
 ## Logging
 

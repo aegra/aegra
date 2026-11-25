@@ -150,6 +150,13 @@ class TestDockerGenerators:
         assert '"${POSTGRES_PORT:-5432}:5432"' in compose
         assert "- POSTGRES_PORT=5432" in compose
 
+    def test_docker_compose_passes_auth_type_without_noop_fallback(
+        self: TestDockerGenerators,
+    ) -> None:
+        compose = get_docker_compose("myapp")
+        assert "- AUTH_TYPE=${AUTH_TYPE:-}" in compose
+        assert "AUTH_TYPE:-noop" not in compose
+
     def test_docker_compose_has_api_service(self: TestDockerGenerators) -> None:
         compose = get_docker_compose("myapp")
         assert "myapp:" in compose
@@ -529,6 +536,17 @@ class TestInitFileContents:
 
         content = (project_dir / "docker-compose.yml").read_text()
         assert "curl -sf http://localhost:${PORT:-2026}/health || exit 1" in content
+
+    def test_docker_compose_does_not_default_auth_type_to_noop(
+        self: TestInitFileContents, cli_runner: CliRunner, tmp_path: Path
+    ) -> None:
+        project_dir = tmp_path / "test-auth-type"
+        result = cli_runner.invoke(cli, ["init", str(project_dir), "-t", "1"])
+        assert result.exit_code == 0
+
+        content = (project_dir / "docker-compose.yml").read_text()
+        assert "- AUTH_TYPE=${AUTH_TYPE:-}" in content
+        assert "AUTH_TYPE:-noop" not in content
 
     def test_no_prod_compose_generated(
         self: TestInitFileContents, cli_runner: CliRunner, tmp_path: Path

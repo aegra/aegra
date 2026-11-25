@@ -9,6 +9,7 @@ import pytest
 from aegra_api.api.crons import _authorize_cron_create, _trigger_first_run
 from aegra_api.models import Run, User
 from aegra_api.models.crons import CronCreate
+from aegra_api.models.run_job import CronTrigger
 
 
 def _make_cron(
@@ -17,9 +18,13 @@ def _make_cron(
     thread_id: str | None = None,
     on_run_completed: str | None = None,
     payload: dict | None = None,
+    metadata: dict | None = None,
+    created_at: datetime | None = None,
 ) -> SimpleNamespace:
     return SimpleNamespace(
         cron_id="cron-001",
+        metadata_dict=metadata or {},
+        created_at=created_at or datetime(2026, 1, 1, 8, 30, tzinfo=UTC),
         assistant_id=assistant_id,
         thread_id=thread_id,
         on_run_completed=on_run_completed,
@@ -74,6 +79,24 @@ class TestTriggerFirstRun:
         mock_prepare.assert_awaited_once()
         assert mock_prepare.await_args.args[1] == "eph-thread-1"
         mock_schedule.assert_called_once_with("run-001", "eph-thread-1", mock_user.identity)
+
+    @pytest.mark.asyncio
+    async def test_first_run_trigger_carries_created_at_not_an_occurrence(
+        self, mock_user: User, mock_session: AsyncMock, mock_run: Run
+    ) -> None:
+        created_at = datetime(2026, 1, 1, 8, 30, tzinfo=UTC)
+        cron = _make_cron(thread_id="thread-bound-1", metadata={"team": "ops"}, created_at=created_at)
+
+        with patch(
+            "aegra_api.api.crons._prepare_run",
+            new_callable=AsyncMock,
+            return_value=("run-001", mock_run, Mock()),
+        ) as mock_prepare:
+            await _trigger_first_run(mock_session, cron, mock_user)
+
+        assert mock_prepare.await_args.kwargs["trigger"] == CronTrigger(
+            cron_id="cron-001", scheduled_time=created_at, cron_metadata={"team": "ops"}
+        )
 
     @pytest.mark.asyncio
     async def test_skips_cleanup_for_thread_bound_cron(

@@ -36,6 +36,20 @@ class RunIdentity(BaseModel):
     created_at: datetime | None = None
 
 
+class CronTrigger(BaseModel):
+    """The cron firing a run serves: which cron, and which occurrence of its schedule."""
+
+    model_config = ConfigDict(frozen=True)
+
+    cron_id: str
+    scheduled_time: datetime
+    cron_metadata: dict[str, Any] = Field(default_factory=dict)
+
+    def pinned_keys(self) -> dict[str, str]:
+        """Server-owned keys a fired run carries in ``config.configurable`` and in its run metadata."""
+        return {"cron_id": self.cron_id, "cron_scheduled_time": self.scheduled_time.isoformat()}
+
+
 class RunExecution(BaseModel):
     """What to execute and how to execute it."""
 
@@ -82,6 +96,8 @@ class RunJob(BaseModel):
     # JSONB-persisted; deliberately ``dict[str, Any]`` so legacy/drifted rows stay readable via
     # ``from_run_orm``. OTEL boundary in ``merge_run_metadata`` filters at emit. Do not narrow.
     run_metadata: dict[str, Any] = Field(default_factory=dict)
+    # Set only on runs a cron created; a request-created run has none.
+    trigger: CronTrigger | None = None
 
     def to_execution_params(self) -> dict[str, Any]:
         """Serialize for the ``execution_params`` JSONB column.
@@ -96,6 +112,7 @@ class RunJob(BaseModel):
             "execution": self.execution.model_dump(),
             "behavior": self.behavior.model_dump(),
             "run_metadata": self.run_metadata,
+            "trigger": self.trigger.model_dump(mode="json") if self.trigger is not None else None,
         }
 
     @classmethod
@@ -135,4 +152,5 @@ class RunJob(BaseModel):
             execution=RunExecution.model_validate(params["execution"]),
             behavior=RunBehavior.model_validate(params["behavior"]),
             run_metadata=params.get("run_metadata") or {},
+            trigger=CronTrigger.model_validate(params["trigger"]) if params.get("trigger") else None,
         )

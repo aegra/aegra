@@ -16,6 +16,14 @@ class TestStripPinnedConfigKeys:
         assert "thread_id" not in cleaned
         assert "run_id" not in cleaned
 
+    def test_strips_cron_id_and_cron_scheduled_time(self) -> None:
+        """A checkpoint cannot make a run pose as a cron firing, or as another occurrence."""
+        cleaned = strip_pinned_config_keys(
+            {"cron_id": "forged", "cron_scheduled_time": "2026-01-01T09:00:00+00:00", "checkpoint_id": "cp-1"}
+        )
+
+        assert cleaned == {"checkpoint_id": "cp-1"}
+
     def test_preserves_legitimate_checkpoint_keys(self) -> None:
         cleaned = strip_pinned_config_keys({"checkpoint_id": "cp-1", "checkpoint_ns": "ns"})
 

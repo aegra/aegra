@@ -30,9 +30,14 @@ from aegra_api.settings import settings
 
 logger = structlog.getLogger(__name__)
 
+_AUTH_TYPES: tuple[str, ...] = ("noop", "custom")
+
 
 class AuthLoadError(RuntimeError):
-    """``auth.path`` is set but cannot be loaded. Serving as anonymous would drop all access control."""
+    """Auth was requested (``auth.path`` or ``AUTH_TYPE=custom``) but is not loaded.
+
+    Serving as anonymous would drop all access control.
+    """
 
 
 class LangGraphUser(BaseUser):
@@ -178,9 +183,7 @@ class LangGraphAuthBackend(AuthenticationBackend):
         Raises:
             AuthenticationError: If authentication fails
         """
-        # Handle noop auth when no auth instance is configured
-        # Default to noop (anonymous) authentication when no auth file is found,
-        # regardless of AUTH_TYPE setting. This ensures the server works out-of-the-box.
+        # get_auth_backend() only serves an instance-less backend for AUTH_TYPE=noop with no auth.path.
         if self.auth_instance is None:
             # The no-auth warning is emitted once at startup in __init__;
             # logging here would repeat it on every request.
@@ -246,15 +249,22 @@ def get_auth_backend() -> AuthenticationBackend:
 
     Returns:
         AuthenticationBackend instance
+
+    Raises:
+        AuthLoadError: AUTH_TYPE is unknown, or is ``custom`` with no ``auth.path`` configured
     """
     auth_type = settings.app.AUTH_TYPE
+    if auth_type not in _AUTH_TYPES:
+        raise AuthLoadError(f"Unknown AUTH_TYPE {auth_type!r}; expected one of: {', '.join(_AUTH_TYPES)}")
 
-    if auth_type in ["noop", "custom"]:
-        logger.debug(f"Using auth backend with type: {auth_type}")
-        return LangGraphAuthBackend()
-    else:
-        logger.warning(f"Unknown AUTH_TYPE: {auth_type}, using noop")
-        return LangGraphAuthBackend()
+    logger.debug(f"Using auth backend with type: {auth_type}")
+    backend = LangGraphAuthBackend()
+    if auth_type == "custom" and backend.auth_instance is None:
+        raise AuthLoadError(
+            "AUTH_TYPE=custom but no auth.path is set in the Aegra config (aegra.json or the file AEGRA_CONFIG names). "
+            "Set auth.path to your auth module, or use AUTH_TYPE=noop to run without auth."
+        )
+    return backend
 
 
 def on_auth_error(conn: HTTPConnection, exc: AuthenticationError) -> JSONResponse:

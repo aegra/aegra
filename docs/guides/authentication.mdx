@@ -533,6 +533,18 @@ This is the default for local development and testing. Every caller shares the `
 
 No-auth mode applies only when `auth.path` is not set. If `auth.path` is set and the module cannot be loaded (the file is missing, the import raises, or the variable is not an `Auth` instance), the server stops at startup with the error instead of serving requests as `anonymous`.
 
+### Require auth with `AUTH_TYPE`
+
+Set `AUTH_TYPE=custom` to guarantee that auth is loaded. With `AUTH_TYPE=custom` and no `auth.path` in your config, the server refuses to start instead of serving every request as `anonymous`. This is recommended for production.
+
+| `AUTH_TYPE` | `auth.path` set | `auth.path` not set |
+|-------------|-----------------|---------------------|
+| `custom` | Auth module is loaded and enforced | Server refuses to start |
+| `noop` (default) | Auth module is loaded and enforced | No-auth mode (`anonymous`) |
+| Any other value | Server refuses to start | Server refuses to start |
+
+`noop` does not disable a configured auth module. The value is case-insensitive, so `Custom` is the same as `custom`. An unknown value, such as a typo, stops the server at startup.
+
 ## Configuration options
 
 | Option | Type | Default | Description |

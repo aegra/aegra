@@ -10,7 +10,7 @@ These tests validate:
 import json
 from pathlib import Path
 from typing import Annotated
-from unittest.mock import Mock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
 from fastapi import Depends, FastAPI, Request
@@ -18,8 +18,10 @@ from fastapi.testclient import TestClient
 from starlette.authentication import AuthCredentials, AuthenticationError
 from starlette.requests import HTTPConnection
 
+from aegra_api.core import auth_middleware
 from aegra_api.core.auth_deps import require_auth
-from aegra_api.core.auth_middleware import LangGraphAuthBackend, LangGraphUser
+from aegra_api.core.auth_middleware import AuthLoadError, LangGraphAuthBackend, LangGraphUser
+from aegra_api.main import lifespan
 from aegra_api.models.auth import User
 
 
@@ -374,3 +376,24 @@ class TestBrokenAuthModule:
 
         assert response.status_code == 500
         assert "anonymous" not in response.text
+
+
+class TestAuthTypeCustomWithoutAuthPath:
+    """AUTH_TYPE=custom with no auth.path must refuse to boot, not serve everyone as anonymous."""
+
+    def test_app_startup_raises_before_any_db_work(self) -> None:
+        app = FastAPI(lifespan=lifespan)
+
+        with (
+            patch.object(auth_middleware.settings.app, "AUTH_TYPE", "custom"),
+            patch("aegra_api.core.auth_middleware.load_auth_config", return_value=None),
+            patch("aegra_api.main.run_migrations_async", new_callable=AsyncMock) as mock_migrations,
+            patch("aegra_api.main.db_manager") as mock_db_manager,
+        ):
+            mock_db_manager.initialize = AsyncMock()
+
+            with pytest.raises(AuthLoadError, match="AUTH_TYPE=custom but no auth.path"), TestClient(app):
+                pass
+
+        mock_migrations.assert_not_called()
+        mock_db_manager.initialize.assert_not_called()

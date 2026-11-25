@@ -267,7 +267,7 @@ POSTGRES_HOST=localhost
 POSTGRES_DB=aegra
 
 # Authentication
-AUTH_TYPE=noop  # Options: noop, custom
+AUTH_TYPE=noop  # noop (anonymous unless auth.path is set), custom (require auth.path; recommended for production)
 
 # Server (for aegra dev)
 HOST=0.0.0.0

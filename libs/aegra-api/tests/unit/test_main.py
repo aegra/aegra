@@ -382,6 +382,31 @@ async def test_lifespan_fails_before_any_db_work_when_configured_auth_cannot_loa
 
 @pytest.mark.unit
 @pytest.mark.asyncio
+async def test_lifespan_fails_before_any_db_work_when_auth_type_custom_has_no_auth_path(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """AUTH_TYPE=custom without auth.path stops the boot, so the server never serves every caller as anonymous."""
+    importlib.reload(main_module)
+    # Patch auth_middleware's own settings reference: an earlier test in this file reloads aegra_api.settings.
+    monkeypatch.setattr(auth_middleware.settings.app, "AUTH_TYPE", "custom")
+    monkeypatch.setattr(auth_middleware, "load_auth_config", lambda: None)
+
+    with (
+        patch("aegra_api.main.run_migrations_async", new_callable=AsyncMock) as mock_migrations,
+        patch("aegra_api.main.db_manager") as mock_db_manager,
+    ):
+        mock_db_manager.initialize = AsyncMock()
+
+        with pytest.raises(auth_middleware.AuthLoadError, match="AUTH_TYPE=custom but no auth.path"):
+            async with main_module.lifespan(MagicMock()):
+                pass
+
+        mock_migrations.assert_not_called()
+        mock_db_manager.initialize.assert_not_called()
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
 async def test_stops_components_in_reverse_start_order_on_shutdown(lifespan_events: list[str]) -> None:
     """Shutdown must drain the executor before closing the broker, Redis and DB it depends on.
 

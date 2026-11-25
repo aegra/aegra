@@ -233,7 +233,7 @@ The `path` supports multiple formats:
 - `./src/auth/jwt.py:auth` — Nested path
 - `mypackage.auth:auth` — Load from an installed package
 
-If `auth` is not configured, Aegra runs in no-auth mode where all requests are allowed.
+If `auth` is not configured, Aegra runs in no-auth mode where all requests are allowed. Set `AUTH_TYPE=custom` to refuse to start without it.
 
 See [authentication guide](/guides/authentication) for details.
 

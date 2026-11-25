@@ -99,8 +99,10 @@ This runs uvicorn directly without starting PostgreSQL. You provide a running da
     REDIS_BROKER_ENABLED=true
     REDIS_URL=redis://your-redis-host:6379/0
     OPENAI_API_KEY=sk-...
-    AUTH_TYPE=noop  # or custom
+    AUTH_TYPE=custom
     ```
+
+    Use `AUTH_TYPE=custom` in production. The server then refuses to start if no `auth.path` is configured, instead of serving every request as `anonymous`.
   </Step>
   <Step title="Set the start command">
     ```text

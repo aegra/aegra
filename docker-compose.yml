@@ -29,6 +29,8 @@ services:
       - POSTGRES_HOST=postgres
       - POSTGRES_PORT=5432
       - PYTHONPATH=/app/src
+      # Contributor/test stack: defaults to no-auth mode. Not for production.
+      - AUTH_TYPE=${AUTH_TYPE:-noop}
       - REDIS_BROKER_ENABLED=true
       - REDIS_URL=redis://redis:6379/0
       - WORKER_COUNT=3

@@ -46,6 +46,11 @@ def parse_lower(v: str) -> str:
     return v.strip().lower() if isinstance(v, str) else v
 
 
+def parse_optional_lower(v: str | None) -> str | None:
+    """Like parse_lower, but a blank value (``AUTH_TYPE=`` in a .env) means unset."""
+    return (v.strip().lower() or None) if isinstance(v, str) else v
+
+
 def parse_upper(v: str) -> str:
     """Converts to uppercase and strips whitespace."""
     return v.strip().upper() if isinstance(v, str) else v
@@ -53,6 +58,7 @@ def parse_upper(v: str) -> str:
 
 # Custom types for automatic formatting
 LowerStr = Annotated[str, BeforeValidator(parse_lower)]
+OptionalLowerStr = Annotated[str | None, BeforeValidator(parse_optional_lower)]
 UpperStr = Annotated[str, BeforeValidator(parse_upper)]
 
 
@@ -93,7 +99,7 @@ class AppSettings(EnvBase):
     # App logic
     AEGRA_CONFIG: str = "aegra.json"  # Default config file path
     KEEPALIVE_INTERVAL_SECS: float = 5  # Heartbeat interval for join/wait endpoints
-    AUTH_TYPE: LowerStr = "noop"
+    AUTH_TYPE: OptionalLowerStr = None
     ENV_MODE: UpperStr = "LOCAL"
     DEBUG: bool = False
     # Default 1000 matches LangGraph Platform threads.search (Agent Server OpenAPI max).

@@ -102,7 +102,7 @@ This runs uvicorn directly without starting PostgreSQL. You provide a running da
     AUTH_TYPE=custom
     ```
 
-    Use `AUTH_TYPE=custom` in production. The server then refuses to start if no `auth.path` is configured, instead of serving every request as `anonymous`.
+    Use `AUTH_TYPE=custom` in production. The server then refuses to start if no `auth.path` is configured, instead of serving every request as `anonymous`. `AUTH_TYPE` has no default: without it, the server only starts when `auth.path` is set.
   </Step>
   <Step title="Set the start command">
     ```text

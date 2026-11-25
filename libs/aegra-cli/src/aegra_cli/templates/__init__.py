@@ -221,7 +221,7 @@ services:
       - POSTGRES_PORT=5432
       - POSTGRES_DB=${{POSTGRES_DB:-{slug}}}
       - AEGRA_CONFIG=aegra.json
-      - AUTH_TYPE=${{AUTH_TYPE:-noop}}
+      - AUTH_TYPE=${{AUTH_TYPE:-}}
       - PORT=${{PORT:-2026}}
       - REDIS_BROKER_ENABLED=true
       - REDIS_URL=redis://redis:6379/0

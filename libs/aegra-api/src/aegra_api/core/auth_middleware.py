@@ -34,9 +34,9 @@ _AUTH_TYPES: tuple[str, ...] = ("noop", "custom")
 
 
 class AuthLoadError(RuntimeError):
-    """Auth was requested (``auth.path`` or ``AUTH_TYPE=custom``) but is not loaded.
+    """Auth was requested (``auth.path`` or ``AUTH_TYPE=custom``) but is not loaded, or none is configured.
 
-    Serving as anonymous would drop all access control.
+    Serving as anonymous would drop all access control; that mode needs an explicit ``AUTH_TYPE=noop``.
     """
 
 
@@ -251,10 +251,10 @@ def get_auth_backend() -> AuthenticationBackend:
         AuthenticationBackend instance
 
     Raises:
-        AuthLoadError: AUTH_TYPE is unknown, or is ``custom`` with no ``auth.path`` configured
+        AuthLoadError: AUTH_TYPE is unknown, or is ``custom`` or unset with no ``auth.path`` configured
     """
     auth_type = settings.app.AUTH_TYPE
-    if auth_type not in _AUTH_TYPES:
+    if auth_type is not None and auth_type not in _AUTH_TYPES:
         raise AuthLoadError(f"Unknown AUTH_TYPE {auth_type!r}; expected one of: {', '.join(_AUTH_TYPES)}")
 
     logger.debug(f"Using auth backend with type: {auth_type}")
@@ -263,6 +263,11 @@ def get_auth_backend() -> AuthenticationBackend:
         raise AuthLoadError(
             "AUTH_TYPE=custom but no auth.path is set in the Aegra config (aegra.json or the file AEGRA_CONFIG names). "
             "Set auth.path to your auth module, or use AUTH_TYPE=noop to run without auth."
+        )
+    if auth_type is None and backend.auth_instance is None:
+        raise AuthLoadError(
+            "No auth is configured: set auth.path in the Aegra config (aegra.json or the file AEGRA_CONFIG names), "
+            "or set AUTH_TYPE=noop to serve all requests as one anonymous user."
         )
     return backend
 

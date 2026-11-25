@@ -83,6 +83,9 @@ Your existing investment carries over:
     POSTGRES_USER=aegra
     POSTGRES_PASSWORD=aegra
     POSTGRES_DB=aegra
+
+    # Run without auth for local development, or set auth.path in aegra.json
+    AUTH_TYPE=noop
     ```
 
     If you already have a PostgreSQL instance, set `DATABASE_URL` directly:

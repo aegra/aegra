@@ -23,6 +23,7 @@ from aegra_api.core.auth_deps import require_auth
 from aegra_api.core.auth_middleware import AuthLoadError, LangGraphAuthBackend, LangGraphUser
 from aegra_api.main import lifespan
 from aegra_api.models.auth import User
+from aegra_api.settings import AppSettings
 
 
 class TestAuthLoadingFromConfig:
@@ -397,3 +398,63 @@ class TestAuthTypeCustomWithoutAuthPath:
 
         mock_migrations.assert_not_called()
         mock_db_manager.initialize.assert_not_called()
+
+
+class TestNoAuthConfigured:
+    """With no AUTH_TYPE and no auth.path the server refuses to boot; anonymous mode is opt-in."""
+
+    def test_app_startup_raises_before_any_db_work(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Builds AppSettings from an env without AUTH_TYPE, so a restored default would boot instead."""
+        monkeypatch.delenv("AUTH_TYPE", raising=False)
+        monkeypatch.setattr(auth_middleware.settings, "app", AppSettings(_env_file=None))
+        app = FastAPI(lifespan=lifespan)
+
+        with (
+            patch("aegra_api.core.auth_middleware.load_auth_config", return_value=None),
+            patch("aegra_api.main.run_migrations_async", new_callable=AsyncMock) as mock_migrations,
+            patch("aegra_api.main.db_manager") as mock_db_manager,
+        ):
+            mock_db_manager.initialize = AsyncMock()
+
+            with pytest.raises(AuthLoadError, match="No auth is configured") as exc_info, TestClient(app):
+                pass
+
+        assert "AUTH_TYPE=noop" in str(exc_info.value)
+        mock_migrations.assert_not_called()
+        mock_db_manager.initialize.assert_not_called()
+
+    def test_protected_route_errors_instead_of_serving_anonymous(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Under the old ``noop`` default this request returned 200 as ``anonymous``."""
+        monkeypatch.delenv("AUTH_TYPE", raising=False)
+        monkeypatch.setattr(auth_middleware.settings, "app", AppSettings(_env_file=None))
+        app = FastAPI()
+
+        @app.post("/threads")
+        async def create_thread(user: Annotated[User, Depends(require_auth)]) -> dict[str, str]:
+            return {"owner": user.identity}
+
+        with patch("aegra_api.core.auth_middleware.load_auth_config", return_value=None):
+            response = TestClient(app, raise_server_exceptions=False).post("/threads")
+
+        assert response.status_code == 500
+        assert "anonymous" not in response.text
+
+
+class TestExplicitNoopAuth:
+    """AUTH_TYPE=noop with no auth.path still serves requests, all as one anonymous user."""
+
+    def test_protected_route_serves_anonymous_user(self) -> None:
+        app = FastAPI()
+
+        @app.post("/threads")
+        async def create_thread(user: Annotated[User, Depends(require_auth)]) -> dict[str, str | bool]:
+            return {"owner": user.identity, "is_authenticated": user.is_authenticated}
+
+        with (
+            patch.object(auth_middleware.settings.app, "AUTH_TYPE", "noop"),
+            patch("aegra_api.core.auth_middleware.load_auth_config", return_value=None),
+        ):
+            response = TestClient(app).post("/threads", headers={"Authorization": "Bearer ignored"})
+
+        assert response.status_code == 200
+        assert response.json() == {"owner": "anonymous", "is_authenticated": False}

@@ -404,7 +404,7 @@ class TestLangGraphAuthBackend:
 
 
 def _configure_auth(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, *, auth_type: str, auth_config: AuthConfig | None
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, *, auth_type: str | None, auth_config: AuthConfig | None
 ) -> None:
     """Point get_auth_backend() at an AUTH_TYPE and an auth config block; the autouse fixture clears its cache."""
     (tmp_path / "my_auth.py").write_text("from langgraph_sdk import Auth; auth = Auth()")
@@ -414,7 +414,7 @@ def _configure_auth(
 
 
 class TestGetAuthBackend:
-    """get_auth_backend() refuses to boot when AUTH_TYPE asks for auth that is not configured."""
+    """get_auth_backend() refuses to boot when auth is asked for but not loaded, or nothing is configured."""
 
     @pytest.mark.parametrize("auth_config", [None, {"disable_studio_auth": True}])
     def test_custom_without_auth_path_raises(
@@ -448,6 +448,52 @@ class TestGetAuthBackend:
             get_auth_backend()
 
         assert "noop, custom" in str(exc_info.value)
+
+    @pytest.mark.parametrize("auth_config", [None, {"disable_studio_auth": True}])
+    def test_unset_without_auth_path_raises(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, auth_config: AuthConfig | None
+    ) -> None:
+        """Anonymous mode is opt-in: with nothing configured the server must not serve everyone as one user."""
+        _configure_auth(monkeypatch, tmp_path, auth_type=None, auth_config=auth_config)
+
+        with pytest.raises(AuthLoadError, match="No auth is configured") as exc_info:
+            get_auth_backend()
+
+        message = str(exc_info.value)
+        assert "auth.path" in message
+        assert "AEGRA_CONFIG" in message
+        assert "AUTH_TYPE=noop" in message
+
+    def test_unset_without_auth_path_raises_on_every_call(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        _configure_auth(monkeypatch, tmp_path, auth_type=None, auth_config=None)
+
+        for _ in range(2):
+            with pytest.raises(AuthLoadError, match="No auth is configured"):
+                get_auth_backend()
+
+    def test_unset_with_loadable_auth_path_returns_backend_with_instance(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        _configure_auth(monkeypatch, tmp_path, auth_type=None, auth_config={"path": "./my_auth.py:auth"})
+
+        backend = get_auth_backend()
+
+        assert isinstance(backend, LangGraphAuthBackend)
+        assert isinstance(backend.auth_instance, Auth)
+
+    @pytest.mark.parametrize("env_value", ["", "   "])
+    def test_blank_auth_type_from_env_counts_as_unset(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, env_value: str
+    ) -> None:
+        """`AUTH_TYPE=` in a .env must hit the unset refusal, not the unknown-value one or noop."""
+        _configure_auth(monkeypatch, tmp_path, auth_type="noop", auth_config=None)
+        monkeypatch.setenv("AUTH_TYPE", env_value)
+        monkeypatch.setattr(auth_middleware.settings, "app", AppSettings(_env_file=None))
+
+        with pytest.raises(AuthLoadError, match="No auth is configured"):
+            get_auth_backend()
 
     @pytest.mark.asyncio
     async def test_noop_without_auth_path_returns_anonymous_backend(

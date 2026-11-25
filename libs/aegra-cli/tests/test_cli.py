@@ -1209,6 +1209,20 @@ class TestUpCommandExtended:
                 assert Path("docker-compose.yml").exists()
                 assert Path("Dockerfile").exists()
 
+    def test_up_generated_compose_has_no_noop_auth_fallback(
+        self, cli_runner: CliRunner, tmp_path: Path
+    ) -> None:
+        """A missing AUTH_TYPE must reach the server unset, not become noop in compose."""
+        with cli_runner.isolated_filesystem(temp_dir=tmp_path):
+            with patch("aegra_cli.cli.subprocess.run") as mock_run:
+                mock_run.return_value.returncode = 0
+                result = cli_runner.invoke(cli, ["up"])
+
+                assert result.exit_code == 0
+                compose = Path("docker-compose.yml").read_text(encoding="utf-8")
+                assert "- AUTH_TYPE=${AUTH_TYPE:-}" in compose
+                assert "AUTH_TYPE:-noop" not in compose
+
     def test_up_nonexistent_custom_file(self, cli_runner: CliRunner, tmp_path: Path) -> None:
         """Test that up fails with nonexistent custom compose file."""
         with cli_runner.isolated_filesystem(temp_dir=tmp_path):

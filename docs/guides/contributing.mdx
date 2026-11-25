@@ -127,7 +127,8 @@ git commit -m "feat: add feature"
     docker compose up postgres -d
 
     # Start server (migrations run automatically on startup)
-    uv run --package aegra-api uvicorn aegra_api.main:app --port 2026 --reload
+    # uvicorn reads only the file you pass, so create .env first: cp .env.example .env
+    uv run --package aegra-api uvicorn aegra_api.main:app --port 2026 --reload --env-file .env
     ```
   </Tab>
 </Tabs>

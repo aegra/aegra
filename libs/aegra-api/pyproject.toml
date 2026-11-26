@@ -131,6 +131,8 @@ dev = [
     "pytest-asyncio>=1.3.0",
     "pytest-mock>=3.15.1",
     "pytest-cov>=6.0.0",
+    # The broker's replay/live join is only testable against real list + pub/sub semantics.
+    "fakeredis>=2.32",
     "ruff>=0.16.0",
     "ty>=0.0.17,<0.1.0",
     "bandit>=1.8.0",

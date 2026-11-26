@@ -1,7 +1,7 @@
 """Abstract base classes for the broker system"""
 
 from abc import ABC, abstractmethod
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator, AsyncIterator
 from typing import Any
 
 from aegra_api.models.enums import RunCancellationAction
@@ -9,6 +9,18 @@ from aegra_api.models.enums import RunCancellationAction
 # How long a finished run's events stay replayable, both backends. Reconnects
 # happen in seconds; this is the documented window in docs/guides/streaming.mdx.
 REPLAY_RETENTION_SECONDS = 600
+
+
+class ReplayGapError(Exception):
+    """``BaseRunBroker.events`` cannot deliver the run's next stored event.
+
+    The buffer read failed, or the buffer no longer holds the event after the last one
+    delivered (trimmed past the reader, or expired). Events already yielded are valid.
+    """
+
+
+def _is_terminal_payload(payload: Any) -> bool:
+    return isinstance(payload, tuple) and len(payload) >= 1 and payload[0] in ("end", "error")
 
 
 class BaseRunBroker(ABC):
@@ -29,7 +41,10 @@ class BaseRunBroker(ABC):
 
     @abstractmethod
     def aiter(self) -> AsyncIterator[tuple[str, Any]]:
-        """Async iterator yielding (event_id, payload) pairs."""
+        """Async iterator yielding (event_id, payload) pairs.
+
+        ``events`` joins this to the stored events; prefer it.
+        """
         ...
 
     @abstractmethod
@@ -43,6 +58,31 @@ class BaseRunBroker(ABC):
         Returns:
             List of (event_id, payload) tuples in order.
         """
+
+    async def events(self, *, follow: bool) -> AsyncGenerator[tuple[str, Any], None]:
+        """Yield the run's events in order, each once, ending after its ``end`` or ``error``.
+
+        ``follow=False`` yields the stored events; ``follow=True`` goes on with the live ones.
+        Raises ``ReplayGapError`` when the next stored event cannot be delivered.
+
+        This default is the replay-then-aiter join: it holds the whole replay and keeps any gap
+        between ``replay`` and ``aiter``. The Redis broker overrides it to read a page at a
+        time and join the live events without a gap.
+        """
+        replayed = await self.replay(None)
+        seen = {event_id for event_id, _ in replayed}
+        for event_id, payload in replayed:
+            yield event_id, payload
+            if _is_terminal_payload(payload):
+                return
+        if not follow:
+            return
+        async for event_id, payload in self.aiter():
+            if event_id in seen:
+                continue
+            yield event_id, payload
+            if _is_terminal_payload(payload):
+                return
 
     @abstractmethod
     def mark_finished(self) -> None:

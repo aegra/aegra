@@ -113,6 +113,17 @@ zero events. Fix: the run lister returns `(run_id, status, graph_name)` and
 `_drain_run` uses the persisted status as a backstop — terminal status + empty
 replay = silent skip; terminal + partial replay = synthesized terminal.
 
+**Replay–live join:** `_drain_run` reads `broker.events(follow=not finished)`.
+`RedisRunBroker.events` reads the replay list 16 elements per LRANGE; its place
+is the last raw element read, found again with LPOS when LTRIM at the cap shifts
+the list (event ids step by two and writers interleave, so ids are never
+positions). A follower reads the backlog, subscribes, then re-reads the list on
+every pub/sub message and every 5 s: pub/sub only wakes it. Nothing written
+between the stored and the live part is lost, `end` included (subscribing after
+one whole-buffer read used to drop such events), and an open stream holds about
+a page, not the run. Brokers that do not override `events` keep the
+replay-then-`aiter` join.
+
 ---
 
 ## 6. HITL flow (the hardest path)
@@ -234,7 +245,9 @@ clients ignore it; it exists purely to keep the socket alive.
 ## 12. Test map
 
 - Unit — `tests/unit/test_services/test_event_streaming/` (session, normalizers,
-  commands, protocol, capabilities, broker).
+  commands, protocol, capabilities, broker), plus
+  `tests/unit/test_services/test_redis_broker_events.py` (paged read, join, cap
+  trims, failed publishes; fakeredis) and `test_broker_events.py` (default join).
 - Integration — `tests/integration/test_api/test_event_streaming.py` (routes,
   validation, ownership 404, SSE frames; DB + broker faked).
 - E2E — `tests/e2e/test_event_streaming/test_sdk_v2_e2e.py` (stock langgraph SDK

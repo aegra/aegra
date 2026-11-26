@@ -352,6 +352,8 @@ Params outside the documented set are logged at warning level with their key nam
 
 The SSE filter is a POST body listing the channels you want — no run id. Pass `since` (the last `seq` you saw) to resume after a dropped connection.
 
+Opening the stream while a run is in progress replays the run's stored events, then continues with its live events without dropping or repeating any. With `REDIS_BROKER_ENABLED=true` the stored events are read a page at a time, so an open stream holds a few events in memory rather than the run's whole replay buffer.
+
 ```bash
 curl -N -X POST http://localhost:8000/threads/$THREAD/stream/events \
   -H "Content-Type: application/json" \

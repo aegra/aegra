@@ -1,17 +1,25 @@
 """Tests for ThreadEventSession: native-event forwarding, seq, filter, since, HITL, lifecycle."""
 
 import asyncio
-from collections.abc import Iterator
+import random
+import tracemalloc
+from collections.abc import Awaitable, Callable, Iterator
 from typing import Any
+from unittest.mock import MagicMock
 
+import fakeredis
 import pytest
+from redis import RedisError
 
+from aegra_api.core.redis_manager import redis_manager
+from aegra_api.services import redis_broker
 from aegra_api.services.broker import BrokerManager
 from aegra_api.services.event_streaming import session as session_module
 from aegra_api.services.event_streaming.session import (
     ThreadEventSession,
     validate_channels,
 )
+from aegra_api.services.redis_broker import RedisBrokerManager
 
 
 @pytest.fixture
@@ -754,3 +762,185 @@ class TestValidateChannels:
     def test_non_list_is_error(self) -> None:
         valid, invalid = validate_channels("messages")
         assert invalid
+
+
+class TestLiveRunJoin:
+    async def test_running_run_seed_arrives_before_its_first_event(self, manager: BrokerManager) -> None:
+        stream = _make_session("t1", channels={"messages", "lifecycle"}, run_ids=("run-1",)).stream()
+
+        first = await asyncio.wait_for(anext(stream), 1)
+        await _seed(manager, "run-1", [_msg_event("message-start", role="ai", id="m1"), ("end", {"status": "success"})])
+        rest = [e async for e in stream]
+
+        assert first["params"]["data"]["event"] == "running"
+        assert [(e["method"], e["params"]["data"].get("event")) for e in rest] == [
+            ("messages", "message-start"),
+            ("lifecycle", "completed"),
+        ]
+
+
+@pytest.fixture
+def redis_writer(monkeypatch: pytest.MonkeyPatch) -> RedisBrokerManager:
+    """fakeredis behind a fresh Redis manager for the session; the returned one writes, as a worker would."""
+    client = fakeredis.FakeAsyncRedis(decode_responses=True)
+    monkeypatch.setattr(redis_manager, "get_client", lambda: client)
+    monkeypatch.setattr(redis_broker, "_backoff_delay", lambda attempt: 0.0)
+    monkeypatch.setattr(session_module, "broker_manager", RedisBrokerManager())
+    return RedisBrokerManager()
+
+
+def _wrap_lrange(monkeypatch: pytest.MonkeyPatch, wrapper: Callable[[int, int, list[str]], Awaitable[None]]) -> None:
+    """Call ``wrapper(start, end, page)`` after every LRANGE; it may raise or write."""
+    client = redis_manager.get_client()
+    lrange = client.lrange
+
+    async def wrapped(key: str, start: int, end: int) -> list[str]:
+        page = await lrange(key, start, end)
+        await wrapper(start, end, page)
+        return page
+
+    monkeypatch.setattr(client, "lrange", wrapped)
+
+
+def _kinds(events: list[dict[str, Any]]) -> list[tuple[str, Any]]:
+    return [(e["method"], e["params"]["data"].get("event")) for e in events]
+
+
+class TestRedisBackedSession:
+    async def test_run_reopened_mid_run_gets_the_rest_and_its_terminal_lifecycle(
+        self, redis_writer: RedisBrokerManager, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Regression: an `end` written between the stored read and the subscription left the run open."""
+        await _seed(redis_writer, "run-1", [_msg_event(f"m{i}") for i in range(3)])
+        wrote = False
+
+        async def end_after_the_tail_read(start: int, end: int, page: list[str]) -> None:
+            nonlocal wrote
+            if not wrote and len(page) < end - start + 1:
+                wrote = True
+                await redis_writer.get_or_create_broker("run-1").put("run-1_end", ("end", {"status": "success"}))
+
+        _wrap_lrange(monkeypatch, end_after_the_tail_read)
+
+        events = await asyncio.wait_for(
+            _collect(_make_session("t1", channels={"messages", "lifecycle"}, run_ids=("run-1",))), 2
+        )
+
+        assert _kinds(events) == [
+            ("lifecycle", "running"),
+            ("messages", "m0"),
+            ("messages", "m1"),
+            ("messages", "m2"),
+            ("lifecycle", "completed"),
+        ]
+
+    async def test_finished_run_whose_buffer_fails_midway_closes_with_its_status(
+        self, redis_writer: RedisBrokerManager, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        page = redis_broker._REPLAY_PAGE_EVENTS
+        await _seed(
+            redis_writer, "run-1", [*[_msg_event(f"m{i}") for i in range(2 * page)], ("end", {"status": "success"})]
+        )
+        warning = MagicMock()
+        monkeypatch.setattr(session_module.logger, "warning", warning)
+
+        async def fail_after_the_first_page(start: int, end: int, page: list[str]) -> None:
+            if start > 0:
+                raise RedisError("connection reset")
+
+        _wrap_lrange(monkeypatch, fail_after_the_first_page)
+
+        events = await _collect(
+            _make_session("t1", channels={"messages", "lifecycle"}, run_ids=("run-1",), statuses={"run-1": "success"})
+        )
+
+        assert _kinds(events) == [
+            ("lifecycle", "running"),
+            *[("messages", f"m{i}") for i in range(page)],
+            ("lifecycle", "completed"),
+        ]
+        warning.assert_called_once()
+
+    async def test_finished_run_whose_first_page_fails_drains_silently(
+        self, redis_writer: RedisBrokerManager, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """As 0.12.0, whose replay() returned [] on a RedisError."""
+        await _seed(redis_writer, "run-1", [_msg_event("m0"), ("end", {"status": "success"})])
+
+        async def fail(start: int, end: int, page: list[str]) -> None:
+            raise RedisError("connection reset")
+
+        _wrap_lrange(monkeypatch, fail)
+
+        events = await _collect(
+            _make_session("t1", channels={"messages", "lifecycle"}, run_ids=("run-1",), statuses={"run-1": "success"})
+        )
+
+        assert events == []
+
+    @pytest.mark.parametrize("seed", range(10))
+    async def test_frames_match_the_in_memory_broker(
+        self, redis_writer: RedisBrokerManager, monkeypatch: pytest.MonkeyPatch, seed: int
+    ) -> None:
+        """The in-memory broker keeps 0.12.0's replay-then-aiter join, so its frames are the reference."""
+        rng = random.Random(seed)
+        monkeypatch.setattr(
+            "aegra_api.services.event_streaming.protocol.time.time_ns", lambda: 1_700_000_000_000_000_000
+        )
+        status = rng.choice(["success", "running"])
+        raws: list[tuple[str, Any]] = [
+            _msg_event(f"m{i}") for i in range(rng.randint(0, 3 * redis_broker._REPLAY_PAGE_EVENTS))
+        ]
+        if status == "running" or rng.random() < 0.7:
+            raws.append(("end", {"status": "success"}))
+        channels = rng.choice([{"messages", "lifecycle"}, {"lifecycle"}])
+        await _seed(redis_writer, "run-1", raws)
+        in_memory = BrokerManager()
+        await _seed(in_memory, "run-1", raws)
+
+        over_redis = await _collect(
+            _make_session("t1", channels=channels, run_ids=("run-1",), statuses={"run-1": status})
+        )
+        monkeypatch.setattr(session_module, "broker_manager", in_memory)
+        reference = await _collect(
+            _make_session("t1", channels=channels, run_ids=("run-1",), statuses={"run-1": status})
+        )
+
+        assert over_redis == reference
+
+    @pytest.mark.parametrize("status", ["success", "running"])
+    async def test_draining_a_run_holds_a_page_not_the_run(self, redis_writer: RedisBrokerManager, status: str) -> None:
+        """The OOM shape: a worker's 50 kB state resent each step. A running run ends once the stream is live."""
+        big = _protocol_event("values", {"messages": [{"content": "x" * 50_000}]}, namespace=["worker:1"])
+        client = redis_manager.get_client()
+
+        async def peak(steps: int) -> int:
+            run_id = f"run-{steps}"
+            broker = redis_writer.get_or_create_broker(run_id)
+            for i in range(steps):
+                await broker.put(f"{run_id}_event_{2 * i + 1}", ("values", big))
+            if status == "success":
+                await broker.put(f"{run_id}_end", ("end", {"status": "success"}))
+            session = _make_session(
+                "t1", channels={"values", "lifecycle"}, run_ids=(run_id,), statuses={run_id: status}
+            )
+
+            async def drain() -> None:
+                async for _ in session.stream():
+                    pass
+
+            tracemalloc.start()
+            try:
+                task = asyncio.create_task(drain())
+                while status == "running" and not (await client.pubsub_numsub(broker._channel))[0][1]:
+                    await asyncio.sleep(0.005)
+                if status == "running":
+                    await broker.put(f"{run_id}_end", ("end", {"status": "success"}))
+                await asyncio.wait_for(task, 5)
+                return tracemalloc.get_traced_memory()[1]
+            finally:
+                tracemalloc.stop()
+
+        short, long = await peak(40), await peak(160)
+
+        assert long < short * 1.5, (short, long)

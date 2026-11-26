@@ -352,8 +352,9 @@ class TestFollowEvents:
                 await writer.put(END_ID, ("end", {"status": "success"}))
 
         _wrap_lrange(client, monkeypatch, after=end_after_the_tail_read)
+        monkeypatch.setattr(redis_broker, "_LIVE_RECHECK_SECONDS", 60.0)
 
-        # Well under _LIVE_RECHECK_SECONDS: the read right after subscribing finds it.
+        # Far under the recheck: only the read right after subscribing can find it.
         assert await asyncio.wait_for(_collect(_broker().events(follow=True)), 2) == _ids(5, end=True)
 
     async def test_follow_sends_an_event_both_stored_and_published_during_the_join_once(

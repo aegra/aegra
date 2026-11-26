@@ -63,7 +63,8 @@ class BaseRunBroker(ABC):
         """Yield the run's events in order, each once, ending after its ``end`` or ``error``.
 
         ``follow=False`` yields the stored events; ``follow=True`` goes on with the live ones.
-        Raises ``ReplayGapError`` when the next stored event cannot be delivered.
+        An override raises ``ReplayGapError`` when it cannot deliver the next stored event; this
+        default never does.
 
         This default is the replay-then-aiter join: it holds the whole replay and keeps any gap
         between ``replay`` and ``aiter``. The Redis broker overrides it to read a page at a

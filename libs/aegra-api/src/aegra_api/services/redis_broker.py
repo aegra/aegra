@@ -92,10 +92,13 @@ class _ReplayPlace:
     ``anchor`` is the raw element consumed last and ``index`` the list index just past it as
     of the last read. LTRIM at the cap shifts both left, so a read finds ``anchor`` before
     trusting ``index``. Event ids are never positions: they step by two and writers interleave.
+    Once the cap has trimmed under this reader, every read also covers ``slack`` elements before
+    the anchor's expected index, so a follower at the cap finds it without an LPOS per wake-up.
     """
 
     index: int = 0
     anchor: str | None = None
+    slack: int = 0
     delivered: deque[str] = field(default_factory=lambda: deque(maxlen=_DELIVERED_EVENT_IDS))
     ended: bool = False
 
@@ -385,23 +388,25 @@ class RedisRunBroker(BaseRunBroker):
                         attempt=attempt,
                     )
                     if pubsub is not None:
-                        await pubsub.aclose()
+                        with contextlib.suppress(RedisError):
+                            await pubsub.aclose()
                         pubsub = None
                     await asyncio.sleep(delay)
         finally:
             if pubsub is not None:
-                await pubsub.aclose()
+                with contextlib.suppress(RedisError):
+                    await pubsub.aclose()
 
     async def _stored(self, place: _ReplayPlace, *, follow: bool) -> AsyncIterator[tuple[str, Any]]:
         """Yield the stored events after ``place`` up to the buffer's tail, one page in memory.
 
         A lost place (anchor trimmed away, or the buffer expired) raises ``ReplayGapError``, or
         with ``follow`` restarts at the head: everything still stored is newer than the anchor.
+        A server that rejects LPOS (Redis < 6.0.6) cannot find the place, so it raises either way.
         """
         client = redis_manager.get_client()
-        slack = 0
         while True:
-            first = max(place.index - 1 - slack, 0) if place.anchor is not None else place.index
+            first = max(place.index - 1 - place.slack, 0) if place.anchor is not None else place.index
             last = place.index + _REPLAY_PAGE_EVENTS - 1
             raws = await client.lrange(self._cache_key, first, last)  # type: ignore[invalid-await]
             skip = 0
@@ -412,10 +417,11 @@ class RedisRunBroker(BaseRunBroker):
                     try:
                         found = await client.lpos(self._cache_key, place.anchor)  # type: ignore[invalid-await]
                     except ResponseError as e:
-                        logger.warning(f"Redis LPOS failed for run {self.run_id} (needs Redis >= 6.0.6): {e}")
-                        found = None
+                        raise ReplayGapError(
+                            f"Redis cannot find run {self.run_id}'s place (LPOS needs Redis >= 6.0.6): {e}"
+                        ) from e
                     if found is not None:
-                        place.index, slack = found + 1, _REALIGN_SLACK
+                        place.index, place.slack = found + 1, _REALIGN_SLACK
                         continue
                     how = "trimmed past the reader" if raws else "expired"
                     if not follow:
@@ -424,7 +430,6 @@ class RedisRunBroker(BaseRunBroker):
                     place.index, place.anchor = 0, None
                     continue
                 skip = at + 1
-            slack = 0
             for index, raw in enumerate(raws[skip:], start=first + skip + 1):
                 place.anchor, place.index = raw, index
                 data = json.loads(raw)

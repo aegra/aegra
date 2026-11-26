@@ -137,7 +137,7 @@ class ThreadEventSession:
 
         ``broker.events`` reads the stored events (a page at a time on Redis)
         and, for a run still going, joins its live events without a gap, so
-        the drain holds one event rather than the run.
+        the drain holds about a page of events rather than the run.
 
         The persisted run status backstops runs whose broker events expired
         (replay TTL / cleanup): a terminal run is read stored-only, because

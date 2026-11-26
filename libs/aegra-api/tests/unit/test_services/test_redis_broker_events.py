@@ -18,6 +18,7 @@ import fakeredis
 import pytest
 from redis import RedisError
 from redis.asyncio.client import PubSub
+from redis.exceptions import ResponseError
 
 from aegra_api.core.redis_manager import redis_manager
 from aegra_api.services import redis_broker
@@ -82,6 +83,23 @@ async def _subscribed(client: fakeredis.FakeAsyncRedis, run_id: str = RUN_ID) ->
 
 async def _failing_publish(message: str) -> None:
     raise RedisError("publish dropped")
+
+
+async def _rejected_lpos(key: str, element: str) -> int | None:
+    raise ResponseError("ERR unknown command 'LPOS'")
+
+
+def _counting_lpos(client: fakeredis.FakeAsyncRedis, monkeypatch: pytest.MonkeyPatch) -> list[int]:
+    """Count LPOS calls: each is a full scan of the buffer on the server."""
+    calls: list[int] = []
+    lpos = client.lpos
+
+    async def counted(key: str, element: str) -> int | None:
+        calls.append(1)
+        return await lpos(key, element)
+
+    monkeypatch.setattr(client, "lpos", counted)
+    return calls
 
 
 def _wrap_lrange(
@@ -246,6 +264,22 @@ class TestStoredEvents:
         await _write(writer, range(8, 20), end=True)
 
         with pytest.raises(ReplayGapError, match="trimmed"):
+            async for _ in events:
+                pass
+
+    async def test_stored_events_raise_replay_gap_when_the_server_rejects_lpos(
+        self, client: fakeredis.FakeAsyncRedis, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(redis_broker, "_REPLAY_MAX_EVENTS", 8)
+        monkeypatch.setattr(redis_broker, "_REPLAY_PAGE_EVENTS", 3)
+        monkeypatch.setattr(client, "lpos", _rejected_lpos)
+        writer = _broker()
+        await _write(writer, range(8))
+        events = _broker().events(follow=False)
+        await anext(events)
+        await _write(writer, range(8, 12))
+
+        with pytest.raises(ReplayGapError, match="LPOS"):
             async for _ in events:
                 pass
 
@@ -552,3 +586,67 @@ class TestFollowEvents:
 
         assert len(closed) == 1
         assert closed[0].connection is None
+
+    async def test_follow_raises_instead_of_resending_from_the_head_when_the_server_rejects_lpos(
+        self, client: fakeredis.FakeAsyncRedis, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Without LPOS no read can find the place again; restarting at the head would resend the run."""
+        monkeypatch.setattr(redis_broker, "_REPLAY_MAX_EVENTS", 8)
+        monkeypatch.setattr(redis_broker, "_REPLAY_PAGE_EVENTS", 3)
+        monkeypatch.setattr(client, "lpos", _rejected_lpos)
+        writer = _broker()
+        await _write(writer, range(8))
+        events = _broker().events(follow=True)
+        await anext(events)
+        await _write(writer, range(8, 12))
+
+        with pytest.raises(ReplayGapError, match="LPOS"):
+            await asyncio.wait_for(_collect(events), 2)
+
+    async def test_follow_at_the_cap_finds_its_place_without_an_lpos_per_live_event(
+        self, client: fakeredis.FakeAsyncRedis, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """At the cap every append moves the place left; LPOS scans the whole buffer on the server."""
+        monkeypatch.setattr(redis_broker, "_REPLAY_MAX_EVENTS", 12)
+        monkeypatch.setattr(redis_broker, "_REPLAY_PAGE_EVENTS", 3)
+        writer = _broker()
+        await _write(writer, range(12))
+        lpos_calls = _counting_lpos(client, monkeypatch)
+        received: list[str] = []
+
+        async def consume() -> None:
+            async with aclosing(_broker().events(follow=True)) as events:
+                async for event_id, _ in events:
+                    received.append(event_id)
+
+        async def caught_up(count: int) -> bool:
+            return len(received) == count
+
+        consumer = asyncio.create_task(consume())
+        await _until(lambda: _subscribed(client))
+        for i in range(12, 30):
+            await writer.put(_event_id(i), _event(i))
+            await _until(lambda i=i: caught_up(i + 1))
+        await writer.put(END_ID, ("end", {"status": "success"}))
+        await asyncio.wait_for(consumer, 2)
+
+        assert received == _ids(30, end=True)
+        assert len(lpos_calls) <= 1, lpos_calls
+
+    async def test_follow_survives_a_subscription_that_fails_to_close(
+        self, client: fakeredis.FakeAsyncRedis, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Closing is cleanup: a failure there must not end the thread stream that is reading."""
+
+        async def failing_aclose(self: PubSub) -> None:
+            raise RedisError("close timed out")
+
+        monkeypatch.setattr(PubSub, "aclose", failing_aclose)
+        writer = _broker()
+        events = _broker().events(follow=True)
+        rest = asyncio.create_task(_collect(events))
+        await _until(lambda: _subscribed(client))
+
+        await _write(writer, range(3), end=True)
+
+        assert await asyncio.wait_for(rest, 2) == _ids(3, end=True)

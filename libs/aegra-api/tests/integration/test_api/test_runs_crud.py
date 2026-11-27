@@ -1,12 +1,13 @@
 """Integration tests for runs CRUD operations"""
 
-from typing import Any
+from typing import Any, get_args
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from fastapi.testclient import TestClient
 
 from aegra_api.core.orm import Run as RunORM
+from aegra_api.models.runs import RunSelectField
 from tests.fixtures.clients import create_test_app, make_client
 from tests.fixtures.database import DummyScalarResult, DummySessionBase
 from tests.fixtures.session_fixtures import BasicSession, override_session_dependency
@@ -627,6 +628,16 @@ class TestListRunsSelect:
         resp = self._client().get(f"/threads/test-thread-123/runs?select=run_id&select={field}")
 
         assert resp.status_code == 422
+
+    def test_list_schema_requires_no_field_but_run_keeps_its_required_fields(self) -> None:
+        schema = self._client().get("/openapi.json").json()
+
+        ok = schema["paths"]["/threads/{thread_id}/runs"]["get"]["responses"]["200"]
+        item_ref = ok["content"]["application/json"]["schema"]["items"]["$ref"]
+        item = schema["components"]["schemas"][item_ref.rsplit("/", 1)[-1]]
+        assert "required" not in item
+        assert set(item["properties"]) == set(get_args(RunSelectField))
+        assert {"run_id", "thread_id"} <= set(schema["components"]["schemas"]["Run"]["required"])
 
 
 class TestRunStatuses:

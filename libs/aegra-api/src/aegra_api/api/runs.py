@@ -25,7 +25,7 @@ from aegra_api.core.sse import create_end_event, get_sse_headers, make_sse_respo
 from aegra_api.models import Run, RunCreate, RunsCancel, RunStatus, User
 from aegra_api.models.enums import RunCancellationAction
 from aegra_api.models.errors import CONFLICT, NOT_FOUND, SSE_RESPONSE
-from aegra_api.models.runs import RunSelectField
+from aegra_api.models.runs import RunListItem, RunSelectField
 from aegra_api.services.broker import broker_manager
 from aegra_api.services.run_preparation import _apply_create_run_auth, _prepare_run
 from aegra_api.services.run_status import interrupt_run_before_delete, interrupt_unowned_run
@@ -209,7 +209,7 @@ async def get_run(
     return Run.model_validate(run_orm)
 
 
-@router.get("/threads/{thread_id}/runs", response_model=list[Run])
+@router.get("/threads/{thread_id}/runs", response_model=list[RunListItem])
 async def list_runs(
     thread_id: str,
     limit: int = Query(10, ge=1, description="Maximum number of runs to return"),

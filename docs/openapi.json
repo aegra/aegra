@@ -1818,7 +1818,7 @@
                 "schema": {
                   "type": "array",
                   "items": {
-                    "$ref": "#/components/schemas/Run"
+                    "$ref": "#/components/schemas/RunListItem"
                   },
                   "title": "Response List Runs Threads  Thread Id  Runs Get"
                 }
@@ -5152,6 +5152,115 @@
         ],
         "title": "RunCreate",
         "description": "Request model for creating runs"
+      },
+      "RunListItem": {
+        "properties": {
+          "run_id": {
+            "type": "string",
+            "title": "Run Id",
+            "description": "Unique identifier for the run."
+          },
+          "thread_id": {
+            "type": "string",
+            "title": "Thread Id",
+            "description": "Thread this run belongs to."
+          },
+          "assistant_id": {
+            "type": "string",
+            "title": "Assistant Id",
+            "description": "Assistant that is executing this run."
+          },
+          "status": {
+            "type": "string",
+            "title": "Status",
+            "description": "Current run status: pending, running, error, success, timeout, or interrupted.",
+            "default": "pending"
+          },
+          "input": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Input",
+            "description": "Input data provided to the run. None for checkpoint-only resume."
+          },
+          "output": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Output",
+            "description": "Final output produced by the run, or null if not yet complete."
+          },
+          "error_message": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error Message",
+            "description": "Error message if the run failed."
+          },
+          "config": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Config",
+            "description": "Configuration passed to the graph at runtime."
+          },
+          "context": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Context",
+            "description": "Context variables available during execution."
+          },
+          "user_id": {
+            "type": "string",
+            "title": "User Id",
+            "description": "Identifier of the user who owns this run."
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Created At",
+            "description": "Timestamp when the run was created."
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Updated At",
+            "description": "Timestamp when the run was last updated."
+          }
+        },
+        "type": "object",
+        "title": "RunListItem",
+        "description": "A run in the thread runs list. With `select`, only the selected fields are present."
       },
       "RunStatus": {
         "properties": {

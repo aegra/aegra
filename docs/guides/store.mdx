@@ -95,6 +95,10 @@ All store operations are automatically scoped to the authenticated user's namesp
 
 This ensures users can never access each other's data, even if they craft a request with another user's namespace.
 
+### Auth handler filters
+
+Store isolation is namespace-based. An [`@auth.on`](/guides/authentication) handler scopes a store request by returning the route's own keys — `namespace` (put/get/delete), `namespace_prefix` (search), `prefix`/`suffix` (list namespaces); any other key, such as `{"owner": "alice"}`, is ignored with a warning rather than matched against item values — put and get neither stamp nor check those keys. To narrow search results, send `filter` in the search request itself; it matches against each item's `value`.
+
 ### Configurable scoping
 
 Beyond the default per-user scope, you can define **configurable scopes**: a map of **namespace prefix → list of User attributes** under `store.scopes` in `aegra.json`. A namespace starting with a configured prefix is isolated under `[prefix, *<user attribute values>]`, where the values come from the authenticated user populated by [your auth handler](/guides/authentication).

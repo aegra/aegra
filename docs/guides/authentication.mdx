@@ -249,6 +249,13 @@ An `assistants.read` filter also applies when a run or a cron uses the
 assistant, and a `crons` handler's filter applies to cron search, count and
 delete.
 
+Store handlers are the exception: store isolation is namespace-based, so a
+`store` handler scopes requests only through `namespace`/`key`/`value` (put, get,
+delete), `namespace_prefix` (search) or `prefix`/`suffix` (list namespaces).
+Other keys are ignored with a warning instead of being matched against item
+values, which put and get never stamp or check — see the
+[store guide](/guides/store#auth-handler-filters).
+
 Your handler runs **once per event**. A request that legitimately touches
 several resources still checks each one: creating a cron authorizes
 `crons.create`, then `assistants.read`, then the thread, then `threads.create_run`

@@ -160,14 +160,14 @@ async def search_store_items(
     value = request.model_dump()
     filters = await handle_event(ctx, value)
 
-    # Merge handler filters with request filters
+    # Store isolation is namespace-based: handler value filters would match
+    # item values that put/get/delete neither stamp nor check (#761).
     if filters:
         if "namespace_prefix" in filters:
             request.namespace_prefix = filters["namespace_prefix"]
-
-        handler_filters = {k: v for k, v in filters.items() if k != "namespace_prefix"}
-        if handler_filters:
-            request.filter = {**(request.filter or {}), **handler_filters}
+        ignored = sorted(k for k in filters if k != "namespace_prefix")
+        if ignored:
+            logger.warning("store search ignored auth handler filter keys", keys=ignored)
 
     # Apply user namespace scoping
     scoped_prefix = apply_namespace_scoping(request.namespace_prefix, user)

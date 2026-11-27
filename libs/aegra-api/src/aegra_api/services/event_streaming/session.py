@@ -18,8 +18,12 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import AsyncIterator, Awaitable, Callable
+from contextlib import aclosing
 from typing import Any
 
+import structlog
+
+from aegra_api.services.base_broker import ReplayGapError
 from aegra_api.services.broker import broker_manager
 from aegra_api.services.event_streaming.channels import is_supported_channel
 from aegra_api.services.event_streaming.normalizers import (
@@ -32,6 +36,8 @@ from aegra_api.services.event_streaming.normalizers import (
 from aegra_api.services.event_streaming.protocol import build_event
 
 __all__ = ["RunLister", "ThreadEventSession", "validate_channels"]
+
+logger = structlog.getLogger(__name__)
 
 # Grace window covering the SDK gap between stream open and run.start landing.
 _IDLE_GRACE_SECONDS = 30.0
@@ -129,45 +135,47 @@ class ThreadEventSession:
         terminal closes any still-open subgraph namespaces before the root
         status (a cancel mid-subgraph otherwise leaves them started forever).
 
+        ``broker.events`` reads the stored events (a page at a time on Redis)
+        and, for a run still going, joins its live events without a gap, so
+        the drain holds about a page of events rather than the run.
+
         The persisted run status backstops runs whose broker events expired
-        (replay TTL / cleanup): without it, ``aiter`` on a recreated empty
-        broker waits forever for an end event nobody will publish — wedging
-        the whole thread stream on its first historical run. A terminal run
-        with no surviving events drains silently; one whose events survived
-        but whose end frame was lost gets a synthesized terminal.
+        (replay TTL / cleanup): a terminal run is read stored-only, because
+        following a recreated empty broker would wait forever for an end event
+        nobody will publish — wedging the whole thread stream on its first
+        historical run. A terminal run with no surviving events drains
+        silently; one whose events survived but whose end frame was lost, or
+        whose buffer stopped being readable partway, gets a synthesized terminal.
         """
         broker = broker_manager.get_or_create_broker(run_id)
-        seen: set[str] = set()
         self._sent_interrupts = set()
         self._current_graph = graph_name
         self._open_namespaces = {}
 
-        replayed = await broker.replay(None)
-        if run_status in _TERMINAL_RUN_STATUSES and not replayed:
-            return
-
-        for envelope in self._emit([("lifecycle", self._root_lifecycle("running"), [])], f"{run_id}:running"):
-            yield envelope
-
-        for event_id, raw_event in replayed:
-            seen.add(event_id)
-            for envelope in self._project(event_id, raw_event):
+        finished = run_status in _TERMINAL_RUN_STATUSES
+        seed: list[_ChannelEvent] = [("lifecycle", self._root_lifecycle("running"), [])]
+        seed_id = f"{run_id}:running"
+        # A running run opens at once; a finished one only if some of its events survived.
+        opened = not finished
+        if opened:
+            for envelope in self._emit(seed, seed_id):
                 yield envelope
-            if _is_terminal(raw_event):
-                return
-
-        if run_status in _TERMINAL_RUN_STATUSES:
+        try:
+            async with aclosing(broker.events(follow=not finished)) as events:
+                async for event_id, raw_event in events:
+                    if not opened:
+                        opened = True
+                        for envelope in self._emit(seed, seed_id):
+                            yield envelope
+                    for envelope in self._project(event_id, raw_event):
+                        yield envelope
+                    if _is_terminal(raw_event):
+                        return
+        except ReplayGapError as e:
+            logger.warning("Run replay ended before its terminal event", run_id=run_id, status=run_status, error=str(e))
+        if finished and opened:
             for envelope in self._project(f"{run_id}:status-end", ("end", {"status": run_status})):
                 yield envelope
-            return
-
-        async for event_id, raw_event in broker.aiter():
-            if event_id in seen:
-                continue
-            for envelope in self._project(event_id, raw_event):
-                yield envelope
-            if _is_terminal(raw_event):
-                return
 
     def _project(self, event_id: str, raw_event: Any) -> list[dict[str, Any]]:
         """Re-envelope one raw broker event into filtered, seq'd envelopes."""

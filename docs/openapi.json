@@ -5731,6 +5731,11 @@
             ],
             "title": "Checkpoint Ns",
             "default": ""
+          },
+          "checkpoint_map": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Checkpoint Map"
           }
         },
         "type": "object",

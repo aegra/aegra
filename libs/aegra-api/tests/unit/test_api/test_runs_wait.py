@@ -469,7 +469,9 @@ class TestWaitForRunAuthHandlers:
             patch("aegra_api.api.runs.heartbeat_wait_body", return_value=_single_event_stream()),
             patch("aegra_api.api.runs._get_session_maker", return_value=_make_session_maker(session)),
         ):
-            mock_handle.return_value = {"config": {"injected": True}, "context": {"injected_ctx": 2}}
+            mock_handle.side_effect = lambda ctx, _v: (
+                {"config": {"injected": True}, "context": {"injected_ctx": 2}} if ctx.action == "create_run" else None
+            )
             mock_prepare.return_value = (run_id, MagicMock(), MagicMock())
 
             await wait_for_run(thread_id, request, user)

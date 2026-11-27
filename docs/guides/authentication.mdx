@@ -220,7 +220,7 @@ as their parent, so one rule covers a whole family of endpoints:
 
 | Handler | Also covers |
 |---------|-------------|
-| `@auth.on.threads.read` | `GET /threads/{id}`, `/state`, `/state/{checkpoint_id}`, `/history`, `GET` a run, its `/join` and `/stream` |
+| `@auth.on.threads.read` | `GET /threads/{id}`, `/state`, `/state/{checkpoint_id}`, `/history`, `GET` a run, its `/join` and `/stream`, and a run started on an existing thread |
 | `@auth.on.threads.update` | `PATCH /threads/{id}`, `POST /threads/{id}/state`, `PATCH` a run, `POST .../runs/{id}/cancel`, `POST /runs/cancel` |
 | `@auth.on.threads.delete` | `DELETE /threads/{id}`, `DELETE` a run |
 | `@auth.on.threads.create_run` | `POST /threads/{id}/runs`, `/runs/stream`, `/runs/wait`, `/threads/{id}/commands`, and the stateless `POST /runs`, `/runs/stream`, `/runs/wait` |
@@ -233,7 +233,21 @@ Stateless runs create an ephemeral thread, so they authorize as
 `threads.create_run`. Omitting the `thread_id` does not bypass your thread rules.
 
 A filter dict returned from a `threads` handler is applied to thread queries,
-including by-id reads and deletes, not only to search.
+including by-id reads and deletes, not only to search. On `threads.read`,
+`threads.search` and `threads.delete` it also applies to every route under a
+thread: state, history, the run list, a run, its `/join` and `/stream`, run
+deletes and the v2 event stream. Starting a run on an existing thread also
+checks `threads.read`, because a run returns and streams the thread's state. A
+thread the filter excludes is a `404` there, the same answer `GET /threads/{id}`
+gives.
+
+A dict returned from `threads.update` or `crons.update` is not a filter.
+`PATCH /threads/{id}` merges its `metadata` into the request, and the other
+update routes ignore it. To block an update, return `False`.
+
+An `assistants.read` filter also applies when a run or a cron uses the
+assistant, and a `crons` handler's filter applies to cron search, count and
+delete.
 
 Your handler runs **once per event**. A request that legitimately touches
 several resources still checks each one: creating a cron authorizes

@@ -336,7 +336,8 @@ async def _thread_assistant_id(session: AsyncSession, thread_id: str, user: User
 
 async def _start(session: AsyncSession, thread_id: str, request: RunCreate, user: User) -> str:
     """Persist + enqueue a run via the shared preparation path (native v3 stream)."""
-    await _apply_create_run_auth(user, thread_id, request)
+    thread_exists = await session.scalar(select(ThreadORM.thread_id).where(ThreadORM.thread_id == thread_id))
+    await _apply_create_run_auth(user, thread_id, request, session=session, thread_exists=thread_exists is not None)
     run_id, _run, _job = await _prepare_run(
         session, thread_id, request, user, initial_status="pending", event_streaming_v2=True
     )

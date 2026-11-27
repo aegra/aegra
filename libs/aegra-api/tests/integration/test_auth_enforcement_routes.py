@@ -11,7 +11,7 @@ correctly returned 403.
 from __future__ import annotations
 
 import inspect
-from collections.abc import AsyncIterator, Iterator
+from collections.abc import AsyncIterator, Callable, Iterator
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
 from typing import Any
@@ -30,6 +30,7 @@ from aegra_api.core.auth_enforcement import (
     reset_dispatch_state,
 )
 from aegra_api.core.database import db_manager
+from aegra_api.core.orm import get_session
 from aegra_api.models.auth import User
 from aegra_api.services.cron_service import CronService
 from aegra_api.services.event_streaming import commands as v2_commands
@@ -602,7 +603,11 @@ def test_v2_run_start_authorizes_like_v1_run_create(
         response = client.post("/threads/t-1/commands", json=_run_start("restricted-agent"))
 
     assert response.json()["type"] == "success"
-    assert seen == [("threads", "create_run", "restricted-agent"), ("assistants", "read", "restricted-agent")]
+    assert seen == [
+        ("threads", "create_run", "restricted-agent"),
+        ("assistants", "read", "restricted-agent"),
+        ("threads", "read", None),
+    ]
 
 
 def test_v2_run_start_denied_by_create_run_handler_starts_no_run(
@@ -677,4 +682,210 @@ def test_v2_input_respond_authorizes_the_resumed_assistant(
     with TestClient(app) as client:
         client.post("/threads/t-1/commands", json={"id": 2, "method": "input.respond", "params": {"response": "ok"}})
 
-    assert seen == [("threads", "create_run", "agent"), ("assistants", "read", "agent")]
+    assert seen == [("threads", "create_run", "agent"), ("assistants", "read", "agent"), ("threads", "read", None)]
+
+
+# --- a returned filter must hide the thread on every by-id read, search and delete --------------
+
+
+def _filter_auth() -> Auth:
+    """Every handler returns a filter no stored thread or assistant matches."""
+    auth = Auth()
+
+    @auth.on
+    async def scope(ctx: Any, value: Any) -> dict[str, Any]:
+        return {"team": "blue"}
+
+    return auth
+
+
+def _recording_session(seen: list[Any], rows: list[Any] | None = None) -> Callable[[], AsyncIterator[AsyncMock]]:
+    """A session that records each scalar() statement and answers from ``rows``, then None."""
+    answers = list(rows or [])
+
+    async def session() -> AsyncIterator[AsyncMock]:
+        mock = AsyncMock()
+
+        async def scalar(stmt: Any) -> Any:
+            seen.append(stmt)
+            return answers.pop(0) if answers else None
+
+        mock.scalar.side_effect = scalar
+        yield mock
+
+    return session
+
+
+def _hidden_rows(app: FastAPI, monkeypatch: pytest.MonkeyPatch, *targets: tuple[Any, str]) -> list[Any]:
+    """Every session the request opens (route dependency or module maker) finds nothing; returns the statements."""
+    seen: list[Any] = []
+    session = _recording_session(seen)
+    app.dependency_overrides[get_session] = session
+    for target, name in targets:
+        monkeypatch.setattr(target, name, lambda: asynccontextmanager(session))
+    return seen
+
+
+FILTERED_THREAD_ROUTES = [
+    ("GET", "/threads/t-1/state", None),
+    ("GET", "/threads/t-1/state/ckpt-1", None),
+    ("POST", "/threads/t-1/state/checkpoint", {}),
+    ("GET", "/threads/t-1/history", None),
+    ("POST", "/threads/t-1/history", {}),
+    ("GET", "/threads/t-1/runs", None),
+    ("GET", "/threads/t-1/runs/r-1", None),
+    ("GET", "/threads/t-1/runs/r-1/join", None),
+    ("GET", "/threads/t-1/runs/r-1/stream", None),
+    ("POST", "/threads/t-1/stream/events", {}),
+    ("DELETE", "/threads/t-1/runs/r-1", None),
+]
+
+
+@pytest.mark.parametrize(("method", "path", "body"), FILTERED_THREAD_ROUTES)
+def test_thread_the_filter_hides_is_a_404_on_every_by_id_route(
+    method: str, path: str, body: dict[str, Any] | None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from aegra_api.core import auth_scope
+
+    app = _build_app(_filter_auth(), monkeypatch)
+    seen = _hidden_rows(app, monkeypatch, (auth_scope, "get_session_maker"))
+
+    with TestClient(app) as client:
+        response = client.request(method, path, json=body)
+
+    assert response.status_code == 404, f"{method} {path} returned {response.status_code} for a filtered-out thread"
+    assert "Thread 't-1' not found" in response.text
+    assert len(seen) == 1
+
+
+@pytest.mark.parametrize(
+    ("method", "path", "body"),
+    [
+        ("POST", "/threads/t-1/state", {"values": {}}),
+        ("PATCH", "/threads/t-1/runs/r-1", {}),
+        ("POST", "/threads/t-1/runs/r-1/cancel", None),
+    ],
+)
+def test_update_routes_do_not_read_the_returned_dict_as_a_filter(
+    method: str, path: str, body: dict[str, Any] | None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """On threads.update a returned dict edits the request (PATCH /threads merges its metadata)."""
+    from aegra_api.core import auth_scope
+
+    app = _build_app(_filter_auth(), monkeypatch)
+    seen = _hidden_rows(app, monkeypatch, (auth_scope, "get_session_maker"))
+
+    with TestClient(app, raise_server_exceptions=False) as client:
+        client.request(method, path, json=body)
+
+    assert not any("thread.metadata" in str(stmt) for stmt in seen)
+
+
+def test_run_on_an_assistant_the_filter_hides_is_a_404(monkeypatch: pytest.MonkeyPatch) -> None:
+    from aegra_api.core import auth_scope
+
+    auth = Auth()
+
+    @auth.on.assistants.read
+    async def scope(ctx: Any, value: Any) -> dict[str, Any]:
+        return {"team": "blue"}
+
+    app = _build_app(auth, monkeypatch)
+    seen = _hidden_rows(app, monkeypatch, (auth_scope, "get_session_maker"))
+
+    with TestClient(app) as client:
+        response = client.post("/threads/t-1/runs", json={"assistant_id": "agent", "input": {}})
+
+    assert response.status_code == 404
+    assert "Assistant 'agent' not found" in response.text
+    assert "assistant" in str(seen[-1])
+
+
+def _read_filter_auth() -> Auth:
+    """threads.read hides every thread; every other event is allowed."""
+    auth = Auth()
+
+    @auth.on.threads.read
+    async def scope(ctx: Any, value: Any) -> dict[str, Any]:
+        return {"team": "blue"}
+
+    return auth
+
+
+@pytest.mark.parametrize("path", ["/threads/t-1/runs", "/threads/t-1/runs/wait", "/threads/t-1/runs/stream"])
+def test_run_on_an_existing_thread_the_read_filter_hides_is_a_404(path: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    from aegra_api.api import runs
+    from aegra_api.core import auth_scope
+
+    app = _build_app(_read_filter_auth(), monkeypatch)
+    seen: list[Any] = []
+    # The owned thread exists; the filtered lookup then finds nothing.
+    session = _recording_session(seen, [SimpleNamespace(user_id="test-user")])
+    app.dependency_overrides[get_session] = session
+    monkeypatch.setattr(runs, "_get_session_maker", lambda: asynccontextmanager(session))
+    own_maker = AsyncMock()
+    monkeypatch.setattr(auth_scope, "get_session_maker", own_maker)
+
+    with TestClient(app) as client:
+        response = client.post(path, json={"assistant_id": "agent", "input": {}})
+
+    assert response.status_code == 404
+    assert "Thread 't-1' not found" in response.text
+    assert "thread.metadata" in str(seen[-1])
+    own_maker.assert_not_called()
+
+
+@pytest.mark.parametrize("path", ["/runs", "/runs/wait", "/runs/stream"])
+def test_stateless_run_skips_the_threads_read_filter(path: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    from aegra_api.api import runs
+
+    app = _build_app(_read_filter_auth(), monkeypatch)
+    app.dependency_overrides[get_session] = _recording_session([])
+    monkeypatch.setattr(runs, "_get_session_maker", lambda: asynccontextmanager(_recording_session([])))
+    prepare = AsyncMock(side_effect=RuntimeError("stop after auth"))
+    monkeypatch.setattr(runs, "_prepare_run", prepare)
+
+    with TestClient(app, raise_server_exceptions=False) as client:
+        response = client.post(path, json={"assistant_id": "agent", "input": {}})
+
+    assert response.status_code != 404
+    prepare.assert_awaited_once()
+
+
+def test_v2_run_start_on_a_thread_the_read_filter_hides_is_an_error(
+    monkeypatch: pytest.MonkeyPatch, v2_command_route: AsyncMock
+) -> None:
+    from aegra_api.api import event_streaming
+
+    seen: list[Any] = []
+    session = _recording_session(seen, ["t-1"])
+    monkeypatch.setattr(event_streaming, "_get_session_maker", lambda: asynccontextmanager(session))
+    app = _build_app(_read_filter_auth(), monkeypatch)
+
+    with TestClient(app) as client:
+        response = client.post("/threads/t-1/commands", json=_run_start("agent"))
+
+    assert response.json()["type"] == "error"
+    assert "Thread 't-1' not found" in response.json()["message"]
+    v2_command_route.assert_not_awaited()
+
+
+@pytest.mark.parametrize(
+    ("method", "path", "body", "service_method"),
+    [
+        ("POST", "/runs/crons/search", {}, "search_crons"),
+        ("POST", "/runs/crons/count", {}, "count_crons"),
+        ("DELETE", "/runs/crons/cron-1", None, "delete_cron"),
+    ],
+)
+def test_cron_read_and_delete_pass_the_handler_filter_to_the_query(
+    method: str, path: str, body: dict[str, Any] | None, service_method: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    service_call = AsyncMock(return_value=[] if service_method == "search_crons" else 0)
+    monkeypatch.setattr(CronService, service_method, service_call)
+    app = _build_app(_filter_auth(), monkeypatch)
+
+    with TestClient(app, raise_server_exceptions=False) as client:
+        client.request(method, path, json=body)
+
+    assert service_call.await_args.kwargs["filters"] == {"team": "blue"}

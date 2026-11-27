@@ -21,6 +21,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from aegra_api.core.auth_deps import auth_dependency, get_current_user
 from aegra_api.core.auth_handlers import build_auth_context, handle_event
+from aegra_api.core.auth_scope import ensure_thread_visible
 from aegra_api.core.orm import Cron as CronORM
 from aegra_api.core.orm import Thread as ThreadORM
 from aegra_api.core.orm import get_session
@@ -42,7 +43,7 @@ from aegra_api.services.cron_service import (
     should_delete_stateless_thread,
 )
 from aegra_api.services.run_cleanup import delete_thread_by_id, schedule_background_cleanup
-from aegra_api.services.run_preparation import _authorize_create_run, _prepare_run
+from aegra_api.services.run_preparation import _authorize_assistant_read, _authorize_create_run, _prepare_run
 
 router = APIRouter(tags=["Crons"], dependencies=auth_dependency)
 logger = structlog.getLogger(__name__)
@@ -53,6 +54,7 @@ async def _authorize_cron_create(
     request: CronCreate,
     *,
     thread_id: str | None,
+    session: AsyncSession,
 ) -> None:
     """Fire the multi-resource auth chain expected by cron creation.
 
@@ -68,16 +70,14 @@ async def _authorize_cron_create(
         cron_value["thread_id"] = thread_id
     await handle_event(build_auth_context(user, "crons", "create"), cron_value)
 
-    await handle_event(
-        build_auth_context(user, "assistants", "read"),
-        {"assistant_id": request.assistant_id},
-    )
+    await _authorize_assistant_read(user, request.assistant_id, session=session)
 
     if thread_id is not None:
-        await handle_event(
+        filters = await handle_event(
             build_auth_context(user, "threads", "read"),
             {"thread_id": thread_id},
         )
+        await ensure_thread_visible(thread_id, user, filters, session=session)
     else:
         await handle_event(build_auth_context(user, "threads", "search"), {})
 
@@ -126,7 +126,7 @@ async def create_cron(
     When the caller passes ``enabled=False`` the first run is suppressed and
     the response is the persisted ``Cron`` instead.
     """
-    await _authorize_cron_create(user, request, thread_id=None)
+    await _authorize_cron_create(user, request, thread_id=None, session=session)
     return await _create_cron_atomic(request, user, service, session)
 
 
@@ -158,7 +158,7 @@ async def create_cron_for_thread(
     if existing_thread is None or existing_thread.user_id != user.identity:
         raise HTTPException(404, f"Thread '{thread_id}' not found")
 
-    await _authorize_cron_create(user, request, thread_id=thread_id)
+    await _authorize_cron_create(user, request, thread_id=thread_id, session=session)
     return await _create_cron_atomic(request, user, service, session, thread_id=thread_id)
 
 
@@ -217,9 +217,9 @@ async def delete_cron(
     """Delete a cron job."""
     ctx = build_auth_context(user, "crons", "delete")
     value = {"cron_id": cron_id}
-    await handle_event(ctx, value)
+    filters = await handle_event(ctx, value)
 
-    await service.delete_cron(cron_id, user.identity)
+    await service.delete_cron(cron_id, user.identity, filters=filters)
     return Response(status_code=204)
 
 
@@ -237,9 +237,9 @@ async def search_crons(
     """Search cron jobs with filters and pagination."""
     ctx = build_auth_context(user, "crons", "search")
     value = request.model_dump(exclude_none=True)
-    await handle_event(ctx, value)
+    filters = await handle_event(ctx, value)
 
-    return await service.search_crons(request, user.identity)
+    return await service.search_crons(request, user.identity, filters=filters)
 
 
 # ---------------------------------------------------------------------------
@@ -256,9 +256,9 @@ async def count_crons(
     """Count cron jobs matching filters."""
     ctx = build_auth_context(user, "crons", "search")
     value = request.model_dump(exclude_none=True)
-    await handle_event(ctx, value)
+    filters = await handle_event(ctx, value)
 
-    return await service.count_crons(request, user.identity)
+    return await service.count_crons(request, user.identity, filters=filters)
 
 
 # ---------------------------------------------------------------------------

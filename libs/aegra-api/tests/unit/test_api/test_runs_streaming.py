@@ -327,7 +327,9 @@ class TestRunsStreamingEndpoints:
             patch("aegra_api.api.runs._get_session_maker", return_value=_make_session_maker(mock_session)),
         ):
             mock_session.scalar.return_value = None
-            mock_handle.return_value = {"config": {"injected": True}, "context": {"injected_ctx": 2}}
+            mock_handle.side_effect = lambda ctx, _v: (
+                {"config": {"injected": True}, "context": {"injected_ctx": 2}} if ctx.action == "create_run" else None
+            )
             mock_prepare.return_value = (run_id, MagicMock(), MagicMock())
 
             response = await create_and_stream_run(thread_id, request, mock_user)

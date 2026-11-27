@@ -1,7 +1,10 @@
 """Unit tests for cron API helpers."""
 
+from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import UTC, datetime
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
@@ -133,6 +136,17 @@ class TestTriggerFirstRun:
         mock_delete.assert_awaited_once_with("eph-thread-fail", mock_user.identity)
 
 
+@contextmanager
+def _patch_handle_event(**kwargs: Any) -> Iterator[AsyncMock]:
+    """One mock for both modules the cron-create chain dispatches from."""
+    mock = AsyncMock(**{"return_value": None, **kwargs})
+    with (
+        patch("aegra_api.api.crons.handle_event", mock),
+        patch("aegra_api.services.run_preparation.handle_event", mock),
+    ):
+        yield mock
+
+
 class TestAuthorizeCronCreate:
     """Regression tests for the multi-resource auth chain on cron creation.
 
@@ -151,11 +165,11 @@ class TestAuthorizeCronCreate:
 
     @pytest.mark.asyncio
     async def test_stateless_create_fires_full_chain(self, user: User, request_body: CronCreate) -> None:
-        with patch("aegra_api.api.crons.handle_event", new_callable=AsyncMock) as mock_handle:
-            await _authorize_cron_create(user, request_body, thread_id=None)
+        with _patch_handle_event() as mock_handle:
+            await _authorize_cron_create(user, request_body, thread_id=None, session=AsyncMock())
 
-        # Three events: crons.create, assistants.read, threads.search.
-        assert mock_handle.await_count == 3
+        # crons.create, assistants.read, threads.search, then the run the cron fires.
+        assert mock_handle.await_count == 4
         contexts = [call.args[0] for call in mock_handle.await_args_list]
         values = [call.args[1] for call in mock_handle.await_args_list]
 
@@ -163,17 +177,20 @@ class TestAuthorizeCronCreate:
         assert (contexts[1].resource, contexts[1].action) == ("assistants", "read")
         assert (contexts[2].resource, contexts[2].action) == ("threads", "search")
 
+        assert (contexts[3].resource, contexts[3].action) == ("threads", "create_run")
+
         assert values[1] == {"assistant_id": "agent-1"}
         assert values[2] == {}
+        assert values[3]["thread_id"] is None
 
     @pytest.mark.asyncio
     async def test_thread_bound_create_fires_threads_read_instead_of_search(
         self, user: User, request_body: CronCreate
     ) -> None:
-        with patch("aegra_api.api.crons.handle_event", new_callable=AsyncMock) as mock_handle:
-            await _authorize_cron_create(user, request_body, thread_id="t-42")
+        with _patch_handle_event() as mock_handle:
+            await _authorize_cron_create(user, request_body, thread_id="t-42", session=AsyncMock())
 
-        assert mock_handle.await_count == 3
+        assert mock_handle.await_count == 4
         contexts = [call.args[0] for call in mock_handle.await_args_list]
         values = [call.args[1] for call in mock_handle.await_args_list]
 
@@ -184,6 +201,8 @@ class TestAuthorizeCronCreate:
         # Crons.create value carries thread_id; threads.read value targets that thread.
         assert values[0]["thread_id"] == "t-42"
         assert values[2] == {"thread_id": "t-42"}
+        assert (contexts[3].resource, contexts[3].action) == ("threads", "create_run")
+        assert values[3]["thread_id"] == "t-42"
 
     @pytest.mark.asyncio
     async def test_chain_stops_when_assistants_read_denies(self, user: User, request_body: CronCreate) -> None:
@@ -195,10 +214,10 @@ class TestAuthorizeCronCreate:
                 raise HTTPException(status_code=403, detail="denied")
 
         with (
-            patch("aegra_api.api.crons.handle_event", side_effect=fake_handle) as mock_handle,
+            _patch_handle_event(side_effect=fake_handle) as mock_handle,
             pytest.raises(HTTPException) as exc_info,
         ):
-            await _authorize_cron_create(user, request_body, thread_id="t-42")
+            await _authorize_cron_create(user, request_body, thread_id="t-42", session=AsyncMock())
 
         assert exc_info.value.status_code == 403
         # Only crons.create and assistants.read should have run.

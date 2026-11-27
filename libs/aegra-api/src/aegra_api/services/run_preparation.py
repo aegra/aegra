@@ -18,7 +18,9 @@ from sqlalchemy import ColumnElement, case, func, literal_column, or_, select, u
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from aegra_api.config import load_checkpointer_config
+from aegra_api.core.auth_filters import build_metadata_filter
 from aegra_api.core.auth_handlers import build_auth_context, handle_event
+from aegra_api.core.auth_scope import ensure_thread_visible, scalar_in_session
 from aegra_api.core.orm import Assistant as AssistantORM
 from aegra_api.core.orm import Run as RunORM
 from aegra_api.core.orm import Thread as ThreadORM
@@ -267,16 +269,38 @@ async def _authorize_create_run(user: User, thread_id: str | None, request: RunC
         request.context = {**(request.context or {}), **context_overrides}
 
 
-async def _apply_create_run_auth(user: User, thread_id: str, request: RunCreate) -> None:
-    """Authorize threads.create_run, merge its overrides into request, then authorize assistants.read."""
+async def _apply_create_run_auth(
+    user: User, thread_id: str, request: RunCreate, *, session: AsyncSession, thread_exists: bool
+) -> None:
+    """Authorize threads.create_run (merging its overrides), assistants.read, and threads.read on an existing thread."""
     await _authorize_create_run(user, thread_id, request)
 
     # Creating a run also reads its assistant, so per-assistant handler rules
     # apply here exactly as they do in the cron-create chain.
-    await handle_event(
-        build_auth_context(user, "assistants", "read"),
-        {"assistant_id": request.assistant_id},
+    await _authorize_assistant_read(user, request.assistant_id, session=session)
+
+    # A run returns and streams its thread's state, so a threads.read filter hiding the thread must stop it.
+    # A new thread (stateless runs, first run on an id) has nothing to hide.
+    if not thread_exists:
+        return
+    filters = await handle_event(build_auth_context(user, "threads", "read"), {"thread_id": thread_id})
+    await ensure_thread_visible(thread_id, user, filters, session=session)
+
+
+async def _authorize_assistant_read(user: User, assistant_id: str, *, session: AsyncSession | None = None) -> None:
+    """Dispatch assistants.read and 404 when its filter hides the assistant, as GET /assistants/{id} does."""
+    filters = await handle_event(build_auth_context(user, "assistants", "read"), {"assistant_id": assistant_id})
+    auth_filter = build_metadata_filter(AssistantORM.metadata_dict, filters)
+    if auth_filter is None:
+        return
+    resolved_id = resolve_assistant_id(str(assistant_id), get_langgraph_service().list_graphs())
+    stmt = select(AssistantORM.assistant_id).where(
+        AssistantORM.assistant_id == resolved_id,
+        or_(AssistantORM.user_id == user.identity, AssistantORM.user_id == "system"),
+        auth_filter,
     )
+    if await scalar_in_session(stmt, session) is None:
+        raise HTTPException(404, f"Assistant '{assistant_id}' not found")
 
 
 async def _prepare_run(

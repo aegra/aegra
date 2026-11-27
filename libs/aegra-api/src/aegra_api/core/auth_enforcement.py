@@ -27,7 +27,12 @@ from fastapi.routing import APIRoute
 from aegra_api.core.auth_deps import require_auth
 from aegra_api.core.auth_handlers import build_auth_context, handle_event
 from aegra_api.core.auth_registry import is_self_dispatching, lookup_route_auth
+from aegra_api.core.auth_scope import ensure_thread_visible
 from aegra_api.models.auth import User
+
+# A returned dict filters these. On threads.update it edits the request instead (PATCH /threads
+# merges its metadata), so applying it as a filter there would 404 handlers written for that.
+FILTERED_THREAD_ACTIONS: frozenset[str] = frozenset({"read", "search", "delete"})
 
 logger = structlog.getLogger(__name__)
 
@@ -83,8 +88,10 @@ def build_auth_enforcer(resource: str, action: str) -> Callable[..., Awaitable[N
         # resource, so a crafted body must not swap the id a handler authorizes.
         value: dict[str, Any] = {**await _read_json_body(request), **request.path_params}
         ctx = build_auth_context(user, resource, action)
-        await handle_event(ctx, value)
+        filters = await handle_event(ctx, value)
         mark_dispatched(resource, action)
+        if resource == "threads" and action in FILTERED_THREAD_ACTIONS and "thread_id" in request.path_params:
+            await ensure_thread_visible(request.path_params["thread_id"], user, filters)
 
     return enforce
 

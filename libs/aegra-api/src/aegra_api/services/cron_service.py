@@ -16,6 +16,7 @@ from fastapi import Depends, HTTPException
 from sqlalchemy import CursorResult, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from aegra_api.core.auth_filters import build_metadata_filter
 from aegra_api.core.orm import Assistant as AssistantORM
 from aegra_api.core.orm import Cron as CronORM
 from aegra_api.core.orm import get_session
@@ -387,9 +388,9 @@ class CronService:
         logger.info("Updated cron job", cron_id=cron_id)
         return _cron_to_response(updated)
 
-    async def delete_cron(self, cron_id: str, user_identity: str) -> None:
-        """Delete a cron job."""
-        cron = await self._get_cron_or_404(cron_id, user_identity, lock=True)
+    async def delete_cron(self, cron_id: str, user_identity: str, *, filters: dict[str, Any] | None = None) -> None:
+        """Delete a cron job. A crons.delete handler filter that excludes it makes it a 404."""
+        cron = await self._get_cron_or_404(cron_id, user_identity, lock=True, filters=filters)
         await self.session.delete(cron)
         await self.session.commit()
         logger.info("Deleted cron job", cron_id=cron_id)
@@ -398,9 +399,13 @@ class CronService:
         self,
         request: CronSearchRequest,
         user_identity: str,
+        *,
+        filters: dict[str, Any] | None = None,
     ) -> list[CronResponse]:
         """Search cron jobs with filters, pagination, and sorting."""
         stmt = select(CronORM).where(CronORM.user_id == user_identity)
+        if (auth_filter := build_metadata_filter(CronORM.metadata_dict, filters)) is not None:
+            stmt = stmt.where(auth_filter)
 
         if request.assistant_id is not None:
             resolved_assistant_id = self._resolve_assistant_identifier(request.assistant_id)
@@ -433,9 +438,13 @@ class CronService:
         self,
         request: CronCountRequest,
         user_identity: str,
+        *,
+        filters: dict[str, Any] | None = None,
     ) -> int:
         """Count cron jobs matching filters."""
         stmt = select(func.count()).select_from(CronORM).where(CronORM.user_id == user_identity)
+        if (auth_filter := build_metadata_filter(CronORM.metadata_dict, filters)) is not None:
+            stmt = stmt.where(auth_filter)
 
         if request.assistant_id is not None:
             resolved_assistant_id = self._resolve_assistant_identifier(request.assistant_id)
@@ -537,13 +546,16 @@ class CronService:
         user_identity: str,
         *,
         lock: bool = False,
+        filters: dict[str, Any] | None = None,
     ) -> CronORM:
-        """Return the user's cron row or raise a 404 when it does not exist.
+        """Return the user's cron row or raise a 404 when it does not exist or *filters* excludes it.
 
         When *lock* is True the row is selected ``FOR UPDATE`` so concurrent
         scheduler ticks cannot race the API write.
         """
         stmt = select(CronORM).where(CronORM.cron_id == cron_id, CronORM.user_id == user_identity)
+        if (auth_filter := build_metadata_filter(CronORM.metadata_dict, filters)) is not None:
+            stmt = stmt.where(auth_filter)
         if lock:
             stmt = stmt.with_for_update()
         cron = await self.session.scalar(stmt)

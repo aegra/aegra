@@ -18,6 +18,7 @@ from sse_starlette import EventSourceResponse
 from aegra_api.core.active_runs import active_runs
 from aegra_api.core.auth_deps import auth_dependency, get_current_user
 from aegra_api.core.auth_handlers import build_auth_context, handle_event
+from aegra_api.core.auth_scope import ensure_thread_visible
 from aegra_api.core.orm import Run as RunORM
 from aegra_api.core.orm import Thread as ThreadORM
 from aegra_api.core.orm import _get_session_maker, get_session
@@ -106,7 +107,7 @@ async def create_run(
     if existing_thread and existing_thread.user_id != user.identity:
         raise HTTPException(404, f"Thread '{thread_id}' not found")
 
-    await _apply_create_run_auth(user, thread_id, request)
+    await _apply_create_run_auth(user, thread_id, request, session=session, thread_exists=existing_thread is not None)
 
     _run_id, run, _job = await _prepare_run(session, thread_id, request, user, initial_status="pending")
 
@@ -139,7 +140,9 @@ async def create_and_stream_run(
         if existing_thread and existing_thread.user_id != user.identity:
             raise HTTPException(404, f"Thread '{thread_id}' not found")
 
-        await _apply_create_run_auth(user, thread_id, request)
+        await _apply_create_run_auth(
+            user, thread_id, request, session=session, thread_exists=existing_thread is not None
+        )
 
         run_id, run, _job = await _prepare_run(session, thread_id, request, user, initial_status="pending")
 
@@ -187,7 +190,7 @@ async def get_run(
     # resource); @auth.on.threads.read covers it.
     ctx = build_auth_context(user, "threads", "read")
     value = {"run_id": run_id, "thread_id": thread_id}
-    await handle_event(ctx, value)
+    await ensure_thread_visible(thread_id, user, await handle_event(ctx, value), session=session)
 
     stmt = select(RunORM).where(
         RunORM.run_id == str(run_id),
@@ -384,7 +387,9 @@ async def wait_for_run(
         if existing_thread and existing_thread.user_id != user.identity:
             raise HTTPException(404, f"Thread '{thread_id}' not found")
 
-        await _apply_create_run_auth(user, thread_id, request)
+        await _apply_create_run_auth(
+            user, thread_id, request, session=session, thread_exists=existing_thread is not None
+        )
 
         run_id, _run, _job = await _prepare_run(session, thread_id, request, user, initial_status="pending")
 
@@ -601,7 +606,7 @@ async def delete_run(
     # resource); @auth.on.threads.delete covers it.
     ctx = build_auth_context(user, "threads", "delete")
     value = {"run_id": run_id, "thread_id": thread_id}
-    await handle_event(ctx, value)
+    await ensure_thread_visible(thread_id, user, await handle_event(ctx, value), session=session)
     logger.info(f"[delete_run] fetch run run_id={run_id} thread_id={thread_id} user={user.identity}")
     run_orm = await session.scalar(
         select(RunORM).where(

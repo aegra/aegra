@@ -238,6 +238,7 @@ Aegra runs against user-managed Postgres including multi-host HA (PR #299). DB c
   - Linear `down_revision` chain. Idempotent + resumable.
   - Lifespan uses `run_migrations_if_needed()` (lock-free precheck). `run_migrations()` is for `aegra db upgrade` only. Don't regress the precheck.
   - Multi-pod path: `RUN_MIGRATIONS_ON_STARTUP=false` + `aegra db upgrade` out-of-band. Changing startup behavior needs both `.env.example` files + `docs/guides/deployment.mdx` updated.
+  - LangGraph `setup()` runs on every boot under `_langgraph_setup_lock()`. Keep it a polled transaction lock with literal SQL: a blocking call or a bound parameter leaves an xmin that stalls `CREATE INDEX CONCURRENTLY`, and a session lock breaks under PgBouncer transaction pooling.
 
 - **SQL-layer authorization.** Every tenant-scoped read/write needs `user_id == user.identity` in the WHERE, even with `@auth.on` registered (default-allow when no handler — see GHSA-m98r-6667-4wq7). Routes taking `thread_id`/`assistant_id`/`cron_id` path params verify ownership + 404 at handler entry, not deeper.
 

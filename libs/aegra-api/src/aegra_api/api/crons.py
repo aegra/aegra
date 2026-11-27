@@ -10,6 +10,8 @@ Implements the six endpoints consumed by the LangGraph SDK ``CronsClient``:
 * ``POST  /runs/crons/count``             → count (returns int)
 """
 
+from collections.abc import Mapping
+from typing import Any
 from uuid import uuid4
 
 import structlog
@@ -31,15 +33,16 @@ from aegra_api.models.crons import (
     CronUpdate,
 )
 from aegra_api.models.errors import NOT_FOUND
-from aegra_api.services.cron_scheduler import _build_run_create
+from aegra_api.services.cron_scheduler import _build_run_create, run_create_from_payload
 from aegra_api.services.cron_service import (
     CronService,
+    _build_payload,
     _cron_to_response,
     get_cron_service,
     should_delete_stateless_thread,
 )
 from aegra_api.services.run_cleanup import delete_thread_by_id, schedule_background_cleanup
-from aegra_api.services.run_preparation import _prepare_run
+from aegra_api.services.run_preparation import _authorize_create_run, _prepare_run
 
 router = APIRouter(tags=["Crons"], dependencies=auth_dependency)
 logger = structlog.getLogger(__name__)
@@ -57,8 +60,8 @@ async def _authorize_cron_create(
     at any layer (caller may have crons access but not the underlying assistant
     or thread). Chain mirrors the LangGraph SDK reference.
 
-    * thread-scoped create: ``crons.create`` → ``assistants.read`` → ``threads.read``
-    * stateless create:     ``crons.create`` → ``assistants.read`` → ``threads.search``
+    * thread-scoped create: ``crons.create`` → ``assistants.read`` → ``threads.read`` → ``threads.create_run``
+    * stateless create:     ``crons.create`` → ``assistants.read`` → ``threads.search`` → ``threads.create_run``
     """
     cron_value: dict[str, object] = request.model_dump()
     if thread_id is not None:
@@ -77,6 +80,31 @@ async def _authorize_cron_create(
         )
     else:
         await handle_event(build_auth_context(user, "threads", "search"), {})
+
+    await _authorize_scheduled_run(
+        user, request, assistant_id=request.assistant_id, payload=_build_payload(request), thread_id=thread_id
+    )
+
+
+async def _authorize_scheduled_run(
+    user: User,
+    request: CronCreate | CronUpdate,
+    *,
+    assistant_id: str,
+    payload: Mapping[str, Any],
+    thread_id: str | None,
+) -> None:
+    """Authorize threads.create_run for the run the cron fires, and keep the config/context the handler adds.
+
+    Firings run without a request and skip handlers, so this check at create and update is the one
+    that stops a caller who may not create runs from scheduling them.
+    """
+    run_request = run_create_from_payload(assistant_id, payload)
+    await _authorize_create_run(user, thread_id, run_request)
+    if run_request.config != payload.get("config"):
+        request.config = run_request.config
+    if run_request.context != payload.get("context"):
+        request.context = run_request.context
 
 
 # ---------------------------------------------------------------------------
@@ -158,6 +186,19 @@ async def update_cron(
         if field in request.model_fields_set:
             value[field] = getattr(request, field)
     await handle_event(ctx, value)
+
+    cron = await service.get_owned_cron(cron_id, user.identity)
+    patch_payload = _build_payload(request)
+    enabled_after = request.enabled if request.enabled is not None else cron.enabled
+    # Check a changed run even when disabling: a concurrent enable would otherwise fire a run no one authorized.
+    if enabled_after or patch_payload:
+        await _authorize_scheduled_run(
+            user,
+            request,
+            assistant_id=cron.assistant_id,
+            payload={**(cron.payload or {}), **patch_payload},
+            thread_id=cron.thread_id,
+        )
 
     return await service.update_cron(cron_id, request, user.identity)
 

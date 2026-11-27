@@ -14,7 +14,9 @@ Follows the same ``start()/stop()`` lifecycle pattern used by
 
 import asyncio
 import contextlib
+from collections.abc import Mapping
 from datetime import UTC, datetime
+from typing import Any
 from uuid import uuid4
 
 import structlog
@@ -50,9 +52,13 @@ def _build_run_create(cron: CronORM) -> RunCreate:
     Shared between :func:`_fire_cron` and the API's first-run trigger so the
     two code paths can never drift.
     """
-    payload = cron.payload or {}
+    return run_create_from_payload(cron.assistant_id, cron.payload or {})
+
+
+def run_create_from_payload(assistant_id: str, payload: Mapping[str, Any]) -> RunCreate:
+    """The run a cron with this payload fires. Cron create and update authorize exactly this run."""
     return RunCreate(
-        assistant_id=cron.assistant_id,
+        assistant_id=assistant_id,
         input=payload.get("input"),
         config=payload.get("config"),
         context=payload.get("context"),

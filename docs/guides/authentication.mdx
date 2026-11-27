@@ -237,8 +237,12 @@ including by-id reads and deletes, not only to search.
 
 Your handler runs **once per event**. A request that legitimately touches
 several resources still checks each one: creating a cron authorizes
-`crons.create`, then `assistants.read`, then the thread, so you can deny at any
-layer. Creating a run likewise authorizes `threads.create_run`, then
+`crons.create`, then `assistants.read`, then the thread, then `threads.create_run`
+with the run the cron fires, so you can deny at any layer. A cron update authorizes
+`threads.create_run` again with the updated run when the cron is enabled after the
+update or the update changes the run (`input`, `config`, `context` and the like).
+A `config` or `context` the `create_run` handler returns is stored on the cron and
+applies to every firing. Creating a run likewise authorizes `threads.create_run`, then
 `assistants.read` for the assistant it uses.
 
 The v2 `run.start` and `input.respond` commands authorize the same way: the

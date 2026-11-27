@@ -13,6 +13,7 @@ from __future__ import annotations
 import inspect
 from collections.abc import AsyncIterator, Iterator
 from contextlib import asynccontextmanager
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock
 
@@ -30,6 +31,7 @@ from aegra_api.core.auth_enforcement import (
 )
 from aegra_api.core.database import db_manager
 from aegra_api.models.auth import User
+from aegra_api.services.cron_service import CronService
 from aegra_api.services.event_streaming import commands as v2_commands
 from tests.fixtures.session_fixtures import ThreadSession, override_session_dependency
 
@@ -247,6 +249,118 @@ def test_cron_create_authorizes_every_layer_of_its_chain(monkeypatch: pytest.Mon
     assert ("crons", "create") in seen
     assert ("assistants", "read") in seen, "cron create stopped authorizing the assistant"
     assert ("threads", "search") in seen, "cron create stopped authorizing the thread layer"
+    assert ("threads", "create_run") in seen, "cron create stopped authorizing the runs it schedules"
+
+
+def _deny_create_run_auth() -> Auth:
+    auth = Auth()
+
+    @auth.on.threads.create_run
+    async def deny(ctx: Any, value: Any) -> bool:
+        return False
+
+    return auth
+
+
+def test_cron_create_denied_by_create_run_handler_schedules_nothing(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Every firing creates a run, so a caller who may not create runs may not schedule them."""
+    create_cron = AsyncMock()
+    monkeypatch.setattr(CronService, "create_cron", create_cron)
+    app = _build_app(_deny_create_run_auth(), monkeypatch)
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/runs/crons", json={"assistant_id": "agent", "schedule": "0 0 * * *", "input": {"q": 1}}
+        )
+
+    assert response.status_code == 403
+    create_cron.assert_not_awaited()
+
+
+def test_cron_create_run_handler_sees_the_scheduled_run_and_its_overrides_are_stored(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    auth = Auth()
+    seen: list[dict[str, Any]] = []
+
+    @auth.on.threads.create_run
+    async def stamp(ctx: Any, value: Any) -> dict[str, Any]:
+        seen.append(dict(value))
+        return {"config": {"tags": ["tenant-a"]}}
+
+    create_cron = AsyncMock(side_effect=RuntimeError("stop after create"))
+    monkeypatch.setattr(CronService, "create_cron", create_cron)
+    app = _build_app(auth, monkeypatch)
+
+    with TestClient(app, raise_server_exceptions=False) as client:
+        client.post(
+            "/runs/crons",
+            json={
+                "assistant_id": "agent",
+                "schedule": "0 0 * * *",
+                "input": {"q": 1},
+                "config": {"recursion_limit": 5},
+            },
+        )
+
+    assert seen[0]["assistant_id"] == "agent"
+    assert seen[0]["input"] == {"q": 1}
+    assert seen[0]["thread_id"] is None
+    stored = create_cron.await_args.args[0]
+    assert stored.config == {"recursion_limit": 5, "tags": ["tenant-a"]}
+
+
+@pytest.mark.parametrize(
+    ("stored_enabled", "body", "authorized"),
+    [
+        (True, {"input": {"q": 2}}, True),
+        (False, {"enabled": True}, True),
+        (True, {"schedule": "0 1 * * *"}, True),
+        (True, {"enabled": False}, False),
+        (False, {"schedule": "0 1 * * *"}, False),
+        (False, {"input": {"q": 2}}, True),
+        (True, {"input": {"q": 2}, "enabled": False}, True),
+    ],
+)
+def test_cron_update_authorizes_create_run_when_the_cron_will_fire_or_its_run_changes(
+    monkeypatch: pytest.MonkeyPatch, stored_enabled: bool, body: dict[str, Any], authorized: bool
+) -> None:
+    stored = SimpleNamespace(assistant_id="agent", thread_id=None, payload={"input": {"q": 1}}, enabled=stored_enabled)
+    monkeypatch.setattr(CronService, "get_owned_cron", AsyncMock(return_value=stored))
+    update_cron = AsyncMock(side_effect=RuntimeError("stop after update"))
+    monkeypatch.setattr(CronService, "update_cron", update_cron)
+    app = _build_app(_deny_create_run_auth(), monkeypatch)
+
+    with TestClient(app, raise_server_exceptions=False) as client:
+        response = client.patch("/runs/crons/cron-1", json=body)
+
+    if authorized:
+        assert response.status_code == 403
+        update_cron.assert_not_awaited()
+    else:
+        update_cron.assert_awaited_once()
+
+
+def test_cron_update_create_run_handler_sees_the_merged_run(monkeypatch: pytest.MonkeyPatch) -> None:
+    auth = Auth()
+    seen: list[dict[str, Any]] = []
+
+    @auth.on.threads.create_run
+    async def record(ctx: Any, value: Any) -> bool:
+        seen.append(dict(value))
+        return True
+
+    stored = SimpleNamespace(
+        assistant_id="agent", thread_id="t-1", payload={"input": {"q": 1}, "context": {"a": 1}}, enabled=True
+    )
+    monkeypatch.setattr(CronService, "get_owned_cron", AsyncMock(return_value=stored))
+    monkeypatch.setattr(CronService, "update_cron", AsyncMock(side_effect=RuntimeError("stop after update")))
+    app = _build_app(auth, monkeypatch)
+
+    with TestClient(app, raise_server_exceptions=False) as client:
+        client.patch("/runs/crons/cron-1", json={"input": {"q": 2}})
+
+    assert seen == [{**seen[0], "assistant_id": "agent", "input": {"q": 2}, "context": {"a": 1}, "thread_id": "t-1"}]
 
 
 def test_store_get_handler_receives_parsed_namespace(monkeypatch: pytest.MonkeyPatch) -> None:

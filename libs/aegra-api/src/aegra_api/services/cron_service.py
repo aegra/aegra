@@ -523,6 +523,10 @@ class CronService:
             )
         await self.session.commit()
 
+    async def get_owned_cron(self, cron_id: str, user_identity: str) -> CronORM:
+        """The caller's cron, or 404."""
+        return await self._get_cron_or_404(cron_id, user_identity)
+
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------

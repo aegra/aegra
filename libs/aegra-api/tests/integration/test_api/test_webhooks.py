@@ -378,7 +378,8 @@ class TestCronWebhook:
         app = create_test_app(include_runs=False, include_threads=False)
         app.include_router(crons_module.router)
         session = AsyncMock()
-        owned_thread = Mock()
+        # One row stands in for the owned thread on create and the stored cron on update.
+        owned_thread = Mock(assistant_id="agent", thread_id=None, payload={"input": {"q": 1}}, enabled=True)
         owned_thread.user_id = "test-user"
         session.scalar.return_value = owned_thread
         langgraph_service = MagicMock()

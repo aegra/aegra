@@ -248,10 +248,11 @@ def _resolve_durability(request: RunCreate) -> Durability | None:
     return get_default_durability()
 
 
-async def _apply_create_run_auth(user: User, thread_id: str, request: RunCreate) -> None:
+async def _authorize_create_run(user: User, thread_id: str | None, request: RunCreate) -> None:
     """Authorize threads.create_run and merge config/context overrides into request.
 
     Handler-returned filter dict wins; otherwise fall back to in-place value mutations.
+    ``thread_id`` is None for a stateless cron, whose thread is minted at each firing.
     """
     ctx = build_auth_context(user, "threads", "create_run")
     value = {**request.model_dump(), "thread_id": thread_id}
@@ -264,6 +265,11 @@ async def _apply_create_run_auth(user: User, thread_id: str, request: RunCreate)
     context_overrides = source.get("context")
     if isinstance(context_overrides, dict):
         request.context = {**(request.context or {}), **context_overrides}
+
+
+async def _apply_create_run_auth(user: User, thread_id: str, request: RunCreate) -> None:
+    """Authorize threads.create_run, merge its overrides into request, then authorize assistants.read."""
+    await _authorize_create_run(user, thread_id, request)
 
     # Creating a run also reads its assistant, so per-assistant handler rules
     # apply here exactly as they do in the cron-create chain.

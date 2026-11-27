@@ -4,6 +4,7 @@ Uses the same test-client + mocked-service pattern as test_assistants_crud.py.
 """
 
 from collections.abc import AsyncIterator, Iterator
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, Mock, patch
 
@@ -51,7 +52,12 @@ def _cron_response(**overrides: Any) -> CronResponse:
 
 @pytest.fixture
 def mock_cron_service() -> AsyncMock:
-    return AsyncMock()
+    service = AsyncMock()
+    # PATCH reads the stored cron to authorize the run it will fire.
+    service.get_owned_cron.return_value = SimpleNamespace(
+        assistant_id="asst-001", thread_id=None, payload={"input": {"x": 1}}, enabled=True
+    )
+    return service
 
 
 @pytest.fixture

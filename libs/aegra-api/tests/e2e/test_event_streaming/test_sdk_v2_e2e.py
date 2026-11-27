@@ -162,6 +162,62 @@ async def test_run_start_persists_request_context() -> None:
     await client.runs.join(thread_id, run_id)
 
 
+async def _history_after_v2_run(durability: str) -> list[dict[str, Any]]:
+    assistant_id = await _ensure_assistant()
+    client = get_client(url=_base_url())
+    thread = await client.threads.create()
+    thread_id = thread["thread_id"]
+
+    async with httpx.AsyncClient(base_url=_base_url(), timeout=10.0) as http:
+        response = await http.post(
+            f"/threads/{thread_id}/commands",
+            json={
+                "id": 1,
+                "method": "run.start",
+                "params": {
+                    "assistant_id": assistant_id,
+                    "input": {"messages": [{"role": "user", "content": json.dumps({"delay": 0, "steps": 2})}]},
+                    "durability": durability,
+                },
+            },
+        )
+
+    body = response.json()
+    assert body["type"] == "success", body
+    run_id = body["result"]["run_id"]
+    await client.runs.join(thread_id, run_id)
+    run = await client.runs.get(thread_id, run_id)
+    assert run["status"] == "success"
+    history = await client.threads.get_history(thread_id)
+    elog("v2 durability history", {"durability": durability, "checkpoints": len(history)})
+    return history
+
+
+@pytest.mark.e2e
+@pytest.mark.asyncio
+async def test_run_start_exit_durability_persists_only_the_final_state() -> None:
+    if not await _v2_enabled():
+        pytest.skip("FF_V2_EVENT_STREAMING is disabled on the server under test")
+
+    history = await _history_after_v2_run("exit")
+
+    assert len(history) == 1
+    assert history[0]["values"]["step_count"] == 2
+    assert history[0]["next"] == []
+
+
+@pytest.mark.e2e
+@pytest.mark.asyncio
+async def test_run_start_async_durability_checkpoints_every_step() -> None:
+    # Explicit mode: the control holds even when the server under test sets a default.
+    if not await _v2_enabled():
+        pytest.skip("FF_V2_EVENT_STREAMING is disabled on the server under test")
+
+    history = await _history_after_v2_run("async")
+
+    assert len(history) > 1
+
+
 @pytest.mark.e2e
 @pytest.mark.asyncio
 async def test_run_start_forks_from_checkpoint_without_input() -> None:

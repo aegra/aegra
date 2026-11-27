@@ -23,19 +23,13 @@ from aegra_api.core.active_runs import active_runs, explicit_run_cancellations
 from aegra_api.core.redis_manager import redis_manager
 from aegra_api.core.serializers import GeneralSerializer
 from aegra_api.models.enums import RunCancellationAction
-from aegra_api.services.base_broker import REPLAY_RETENTION_SECONDS, BaseBrokerManager, BaseRunBroker
+from aegra_api.services.base_broker import BaseBrokerManager, BaseRunBroker
 from aegra_api.settings import settings
 from aegra_api.utils import generate_event_id
 
 logger = structlog.getLogger(__name__)
 
 _serializer = GeneralSerializer()
-
-# Every write refreshes the TTL, so the buffer expires this long after the last
-# event, matching the in-memory post-completion window.
-_REPLAY_TTL_SECONDS = REPLAY_RETENTION_SECONDS
-# Max events in the replay buffer (prevents unbounded growth)
-_REPLAY_MAX_EVENTS = 10_000
 
 # Reconnect backoff for Redis pub/sub listeners
 _BACKOFF_BASE = 0.5
@@ -71,6 +65,12 @@ def _backoff_delay(attempt: int) -> float:
     delay = min(_BACKOFF_BASE * (_BACKOFF_FACTOR**attempt), _BACKOFF_MAX)
     jitter = random.uniform(0, delay * 0.25)  # noqa: S311  # nosec B311
     return delay + jitter
+
+
+def _counter_ttl_seconds() -> int:
+    # The counter must outlive the run: expiring on the replay TTL could restart
+    # event ids after a silent gap, and live dedup would drop the rest of the run.
+    return max(settings.redis.REDIS_REPLAY_TTL_SECONDS, settings.worker.BG_JOB_TIMEOUT_SECS)
 
 
 class RedisRunBroker(BaseRunBroker):
@@ -142,10 +142,10 @@ class RedisRunBroker(BaseRunBroker):
         client = redis_manager.get_client()
         pipe = client.pipeline()
         pipe.rpush(self._cache_key, message)
-        pipe.ltrim(self._cache_key, -_REPLAY_MAX_EVENTS, -1)
-        pipe.expire(self._cache_key, _REPLAY_TTL_SECONDS)
+        pipe.ltrim(self._cache_key, -settings.redis.REDIS_REPLAY_MAX_EVENTS, -1)
+        pipe.expire(self._cache_key, settings.redis.REDIS_REPLAY_TTL_SECONDS)
         pipe.incr(self._counter_key)
-        pipe.expire(self._counter_key, _REPLAY_TTL_SECONDS)
+        pipe.expire(self._counter_key, _counter_ttl_seconds())
         await pipe.execute()
 
     async def _publish_event(self, message: str) -> None:
@@ -264,7 +264,9 @@ class RedisRunBroker(BaseRunBroker):
     async def replay(self, last_event_id: str | None) -> list[tuple[str, Any]]:
         try:
             client = redis_manager.get_client()
-            raw_messages = await client.lrange(self._cache_key, 0, _REPLAY_MAX_EVENTS - 1)  # type: ignore[invalid-await]
+            # Newest N: a list written under a higher cap still yields its end
+            # event after the cap is lowered (oldest-first reads would drop it).
+            raw_messages = await client.lrange(self._cache_key, -settings.redis.REDIS_REPLAY_MAX_EVENTS, -1)  # type: ignore[invalid-await]
         except RedisError as e:
             logger.error(f"Redis replay failed for run {self.run_id}: {e}")
             return []
@@ -422,7 +424,7 @@ class RedisBrokerManager(BaseBrokerManager):
         try:
             client = redis_manager.get_client()
             seq = await client.incr(counter_key)
-            await client.expire(counter_key, _REPLAY_TTL_SECONDS)
+            await client.expire(counter_key, _counter_ttl_seconds())
             return generate_event_id(run_id, int(seq))
         except RedisError as e:
             logger.warning(f"Failed to allocate event_id for run {run_id}: {e}")

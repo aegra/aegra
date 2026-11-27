@@ -14,6 +14,7 @@ from aegra_api.services.redis_broker import (
     _deserialize_payload,
     _serialize_payload,
 )
+from aegra_api.settings import settings
 
 
 class TestSerializationHelpers:
@@ -561,6 +562,85 @@ class TestRedisRunBroker:
     def test_is_finished_default_false(self) -> None:
         broker = self._make_broker()
         assert not broker.is_finished()
+
+
+class TestReplayBoundsConfigurable:
+    """Replay buffer TTL and event cap come from settings (#763)."""
+
+    def _make_broker(self, run_id: str = "run-123") -> RedisRunBroker:
+        return RedisRunBroker(
+            run_id,
+            f"aegra:run:{run_id}",
+            f"aegra:run:cache:{run_id}",
+            f"aegra:run:counter:{run_id}",
+        )
+
+    @pytest.mark.asyncio
+    async def test_cache_event_uses_configured_bounds(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(settings.redis, "REDIS_REPLAY_MAX_EVENTS", 3)
+        monkeypatch.setattr(settings.redis, "REDIS_REPLAY_TTL_SECONDS", 120)
+        monkeypatch.setattr(settings.worker, "BG_JOB_TIMEOUT_SECS", 3600)
+        broker = self._make_broker()
+        mock_pipe = MagicMock()
+        mock_pipe.execute = AsyncMock()
+        mock_client = MagicMock()
+        mock_client.publish = AsyncMock()
+        mock_client.pipeline.return_value = mock_pipe
+
+        with patch("aegra_api.services.redis_broker.redis_manager") as mock_rm:
+            mock_rm.get_client.return_value = mock_client
+
+            await broker.put("evt-1", ("values", {"msg": "hello"}))
+
+        mock_pipe.ltrim.assert_called_once_with("aegra:run:cache:run-123", -3, -1)
+        mock_pipe.expire.assert_any_call("aegra:run:cache:run-123", 120)
+        # Counter outlives the run, decoupled from the replay TTL.
+        mock_pipe.expire.assert_any_call("aegra:run:counter:run-123", 3600)
+
+    @pytest.mark.asyncio
+    async def test_replay_reads_newest_configured_events(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(settings.redis, "REDIS_REPLAY_MAX_EVENTS", 7)
+        broker = self._make_broker()
+        mock_client = AsyncMock()
+        mock_client.lrange.return_value = []
+
+        with patch("aegra_api.services.redis_broker.redis_manager") as mock_rm:
+            mock_rm.get_client.return_value = mock_client
+
+            await broker.replay(None)
+
+        mock_client.lrange.assert_awaited_once_with("aegra:run:cache:run-123", -7, -1)
+
+    @pytest.mark.asyncio
+    async def test_counter_survives_silent_gap_longer_than_replay_ttl(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(settings.redis, "REDIS_REPLAY_TTL_SECONDS", 120)
+        monkeypatch.setattr(settings.worker, "BG_JOB_TIMEOUT_SECS", 3600)
+        manager = RedisBrokerManager()
+        mock_client = AsyncMock()
+        mock_client.incr.return_value = 1
+
+        with patch("aegra_api.services.redis_broker.redis_manager") as mock_rm:
+            mock_rm.get_client.return_value = mock_client
+
+            event_id = await manager.allocate_event_id("run-123")
+
+        assert event_id == "run-123_event_1"
+        mock_client.expire.assert_awaited_once_with("aegra:run:counter:run-123", 3600)
+
+    @pytest.mark.asyncio
+    async def test_counter_ttl_uses_replay_ttl_when_it_outlives_the_run(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(settings.redis, "REDIS_REPLAY_TTL_SECONDS", 7200)
+        monkeypatch.setattr(settings.worker, "BG_JOB_TIMEOUT_SECS", 3600)
+        manager = RedisBrokerManager()
+        mock_client = AsyncMock()
+        mock_client.incr.return_value = 1
+
+        with patch("aegra_api.services.redis_broker.redis_manager") as mock_rm:
+            mock_rm.get_client.return_value = mock_client
+
+            await manager.allocate_event_id("run-123")
+
+        mock_client.expire.assert_awaited_once_with("aegra:run:counter:run-123", 7200)
 
 
 class TestRedisBrokerManager:

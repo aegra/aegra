@@ -580,6 +580,25 @@ class TestRedisSettingsValidation:
         assert redis.REDIS_HEALTH_CHECK_INTERVAL == 0
         assert redis.REDIS_RETRY_ATTEMPTS == 0
 
+    def test_replay_bounds_default_to_documented_window(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv("REDIS_REPLAY_TTL_SECONDS", raising=False)
+        monkeypatch.delenv("REDIS_REPLAY_MAX_EVENTS", raising=False)
+
+        redis = RedisSettings(_env_file=None)
+
+        assert redis.REDIS_REPLAY_TTL_SECONDS == 600
+        assert redis.REDIS_REPLAY_MAX_EVENTS == 10_000
+
+    @pytest.mark.parametrize(
+        "setting_name",
+        ("REDIS_REPLAY_TTL_SECONDS", "REDIS_REPLAY_MAX_EVENTS"),
+    )
+    def test_replay_bounds_reject_non_positive_values(self, monkeypatch: pytest.MonkeyPatch, setting_name: str) -> None:
+        monkeypatch.setenv(setting_name, "0")
+
+        with pytest.raises(ValidationError, match=setting_name):
+            RedisSettings(_env_file=None)
+
 
 class TestWorkerSettingsLeaseValidation:
     """Test that lease timing invariants are enforced at startup."""

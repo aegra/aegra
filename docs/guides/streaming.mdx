@@ -283,7 +283,7 @@ Aegra stores streaming events in a replay buffer (Redis Lists when `REDIS_BROKER
 2. Reconnect to `GET /threads/{thread_id}/runs/{run_id}/stream` with `Last-Event-ID` header
 3. You'll receive all events from where you left off
 
-Events are retained for 10 minutes after the run completes, in both dev and production.
+In dev, events are retained for 10 minutes after the run completes. In production, Redis keeps a run's replay buffer for `REDIS_REPLAY_TTL_SECONDS` after the most recent event, and each new event restarts that window — a run idle longer than this TTL loses its earlier events before it completes. `REDIS_REPLAY_MAX_EVENTS` caps how many events one run's buffer holds, so if your cursor has fallen out of the buffer you receive only the retained events, not everything you missed. With `values` stream mode each event carries the whole graph state, so size both bounds for your Redis memory budget.
 
 <Note>
   In production deployments, SSE events are delivered via Redis pub/sub from workers — the client's SSE connection and the worker executing the run can be on different instances. See the [worker architecture guide](/guides/worker-architecture) for details on how this works.

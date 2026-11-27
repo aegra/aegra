@@ -351,6 +351,11 @@ class RedisSettings(EnvBase):
     # connection and timeout errors, with exponential backoff 50ms..1s.
     REDIS_RETRY_ATTEMPTS: int = Field(default=3, ge=0)
 
+    # Values-mode events hold the whole graph state, so deployments need
+    # control over replay bounds to fit their Redis memory budget.
+    REDIS_REPLAY_TTL_SECONDS: int = Field(default=600, gt=0)
+    REDIS_REPLAY_MAX_EVENTS: int = Field(default=10_000, gt=0)
+
 
 class WorkerSettings(EnvBase):
     """Worker configuration for background graph execution.

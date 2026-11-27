@@ -302,6 +302,8 @@ sequenceDiagram
 | `aegra:run:cancel` | Cancel commands | API (PUBLISH) | Worker (SUBSCRIBE) |
 | `aegra:run:done:{run_id}` | Completion signal (TTL 1h) | Worker (SET) | API (EXISTS) |
 
+The replay buffer is bounded per run by `REDIS_REPLAY_MAX_EVENTS` (default 10,000 events) and expires `REDIS_REPLAY_TTL_SECONDS` (default 600) after the run's last event. Both share Redis memory with the job queue, so size them for the largest graph state you stream with `values` mode. The event counter expires only after `max(REDIS_REPLAY_TTL_SECONDS, BG_JOB_TIMEOUT_SECS)`, so it survives silent gaps inside an active run.
+
 ## Configuration
 
 All worker settings are configured via environment variables. See the [environment variables reference](/reference/environment-variables) for the full list.

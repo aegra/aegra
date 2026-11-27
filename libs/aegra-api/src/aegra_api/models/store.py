@@ -1,8 +1,8 @@
 """Store-related Pydantic models for Agent Protocol"""
 
-from typing import Any
+from typing import Annotated, Any
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import AfterValidator, BaseModel, Field, field_validator
 
 from aegra_api.models.search_limit import (
     resolve_search_limit,
@@ -10,10 +10,19 @@ from aegra_api.models.search_limit import (
 )
 
 
+def _validate_namespace_label(label: str) -> str:
+    if not label or "." in label:
+        raise ValueError(f"Namespace label {label!r} must be non-empty and cannot contain periods")
+    return label
+
+
+NamespaceLabel = Annotated[str, AfterValidator(_validate_namespace_label)]
+
+
 class StorePutRequest(BaseModel):
     """Request model for storing items"""
 
-    namespace: list[str] = Field(..., description="Storage namespace")
+    namespace: list[NamespaceLabel] = Field(..., description="Storage namespace")
     key: str = Field(..., description="Item key")
     value: dict[str, Any] = Field(..., description="Item value (must be a JSON object)")
 
@@ -41,7 +50,7 @@ class StoreGetResponse(BaseModel):
 class StoreSearchRequest(BaseModel):
     """Request model for searching store items"""
 
-    namespace_prefix: list[str] = Field(..., description="Namespace prefix to search")
+    namespace_prefix: list[NamespaceLabel] = Field(..., description="Namespace prefix to search")
     filter: dict[str, Any] | None = Field(None, description="Optional dictionary of key-value pairs to filter results.")
     query: str | None = Field(None, description="Search query")
     # None default + validate_default so omitted and JSON null share one resolver.
@@ -53,6 +62,17 @@ class StoreSearchRequest(BaseModel):
         json_schema_extra=search_limit_json_schema_extra,
     )
     offset: int | None = Field(0, ge=0, description="Results offset")
+
+    @field_validator("filter")
+    @classmethod
+    def validate_filter(cls, value: dict[str, Any] | None) -> dict[str, Any] | None:
+        if value is not None:
+            for condition in value.values():
+                if isinstance(condition, dict):
+                    for operator in condition:
+                        if operator not in {"$eq", "$ne", "$gt", "$gte", "$lt", "$lte"}:
+                            raise ValueError(f"Unsupported filter operator: {operator}")
+        return value
 
     @field_validator("limit")
     @classmethod
@@ -87,8 +107,8 @@ class StoreDeleteRequest(BaseModel):
 class StoreListNamespacesRequest(BaseModel):
     """Request model for listing store namespaces"""
 
-    prefix: list[str] | None = Field(None, description="Filter by namespace prefix")
-    suffix: list[str] | None = Field(None, description="Filter by namespace suffix")
+    prefix: list[NamespaceLabel] | None = Field(None, description="Filter by namespace prefix")
+    suffix: list[NamespaceLabel] | None = Field(None, description="Filter by namespace suffix")
     max_depth: int | None = Field(None, le=100, ge=1, description="Maximum namespace depth to return")
     limit: int = Field(100, le=1000, ge=1, description="Maximum results")
     offset: int = Field(0, ge=0, description="Results offset")

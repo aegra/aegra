@@ -32,6 +32,86 @@ def client(mock_store):
     return make_client(app)
 
 
+class TestStoreRequestValidation:
+    @pytest.mark.parametrize("label", ["", "notes.2026"])
+    @pytest.mark.parametrize(
+        ("method", "path", "field", "extra"),
+        [
+            ("PUT", "/store/items", "namespace", {"key": "k", "value": {"a": 1}}),
+            ("POST", "/store/items/search", "namespace_prefix", {}),
+            ("POST", "/store/namespaces", "prefix", {}),
+            ("POST", "/store/namespaces", "suffix", {}),
+        ],
+    )
+    def test_rejects_invalid_namespace_labels(
+        self,
+        *,
+        client: TestClient,
+        mock_store: AsyncMock,
+        label: str,
+        method: str,
+        path: str,
+        field: str,
+        extra: dict[str, object],
+    ) -> None:
+        resp = client.request(method, path, json={field: ["notes", label], **extra})
+
+        assert resp.status_code == 422
+        assert field in resp.text
+        assert repr(label) in resp.json()["detail"][0]["msg"]
+        mock_store.aput.assert_not_called()
+        mock_store.asearch.assert_not_called()
+        mock_store.alist_namespaces.assert_not_called()
+
+    @pytest.mark.parametrize("operator", ["$in", "name"])
+    def test_rejects_unsupported_filter_operators(
+        self,
+        client: TestClient,
+        mock_store: AsyncMock,
+        operator: str,
+    ) -> None:
+        resp = client.post(
+            "/store/items/search",
+            json={"namespace_prefix": ["notes"], "filter": {"profile": {operator: "alice"}}},
+        )
+
+        assert resp.status_code == 422
+        assert operator in resp.text
+        mock_store.asearch.assert_not_called()
+
+    @pytest.mark.parametrize(
+        "filter_payload",
+        [None, {}, {"tag": "note"}, {"tags": ["a", "b"]}]
+        + [{"score": {op: 3}} for op in ("$eq", "$ne", "$gt", "$gte", "$lt", "$lte")]
+        + [{"profile": {"$eq": {"name": "alice"}}}, {"score": {"$gte": 1, "$lt": 5}}],
+    )
+    def test_preserves_supported_filters(
+        self,
+        client: TestClient,
+        mock_store: AsyncMock,
+        filter_payload: dict[str, object] | None,
+    ) -> None:
+        mock_store.asearch.return_value = []
+        resp = client.post(
+            "/store/items/search",
+            json={"namespace_prefix": [], "filter": filter_payload},
+        )
+
+        assert resp.status_code == 200
+        assert mock_store.asearch.call_args.kwargs["filter"] == filter_payload
+
+    @pytest.mark.parametrize("labels", [[], ["notes", "2026"]])
+    def test_preserves_valid_namespace_lists(
+        self,
+        client: TestClient,
+        mock_store: AsyncMock,
+        labels: list[str],
+    ) -> None:
+        mock_store.alist_namespaces.return_value = []
+        assert client.put("/store/items", json={"namespace": labels, "key": "k", "value": {}}).status_code == 204
+        assert client.post("/store/namespaces", json={"prefix": labels, "suffix": labels}).status_code == 200
+
+
 class TestPutStoreItem:
     """Test PUT /store/items"""
 

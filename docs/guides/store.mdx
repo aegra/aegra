@@ -65,9 +65,13 @@ for item in results["items"]:
     print(f"{item['namespace']}/{item['key']}: {item['value']}")
 ```
 
+Search `filter` conditions whose values are objects support only `$eq`, `$ne`, `$gt`, `$gte`, `$lt`, and `$lte`. Unsupported operators return **422 Unprocessable Entity**.
+
 `limit` uses the same `MAX_SEARCH_LIMIT` cap as thread search (default 1000). Omitted or null `limit` uses `min(20, MAX_SEARCH_LIMIT)`.
 
 ## Namespaces
+
+For PUT `/store/items`, POST `/store/items/search`, and POST `/store/namespaces`, client-supplied namespace labels must be non-empty and must not contain periods (`.`); invalid labels return **422 Unprocessable Entity**. An empty namespace list (`[]`) remains valid. These restrictions apply to the `namespace`, `namespace_prefix`, `prefix`, and `suffix` request fields on those endpoints. GET and DELETE `/store/items` instead split periods and remove empty namespace parts.
 
 Namespaces organize your data hierarchically. They work like directory paths:
 

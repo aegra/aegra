@@ -13,7 +13,8 @@ import contextlib
 import json
 import random
 import time
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncGenerator, Awaitable, Callable
+from contextlib import aclosing
 from typing import Any
 
 import structlog
@@ -177,13 +178,14 @@ class RedisRunBroker(BaseRunBroker):
                 )
                 await asyncio.sleep(delay)
 
-    async def aiter(self) -> AsyncIterator[tuple[str, Any]]:
+    async def aiter(self) -> AsyncGenerator[tuple[str, Any], None]:
         attempt = 0
         while not self._finished:
             try:
-                async for event_id, payload in self._subscribe_and_listen():
-                    attempt = 0
-                    yield event_id, payload
+                async with aclosing(self._subscribe_and_listen()) as events:
+                    async for event_id, payload in events:
+                        attempt = 0
+                        yield event_id, payload
                 # Clean exit from _subscribe_and_listen (end event or finished)
                 break
             except RedisError as e:
@@ -195,18 +197,15 @@ class RedisRunBroker(BaseRunBroker):
                 )
                 await asyncio.sleep(delay)
 
-    async def _subscribe_and_listen(self) -> AsyncIterator[tuple[str, Any]]:
+    async def _subscribe_and_listen(self) -> AsyncGenerator[tuple[str, Any], None]:
         """Subscribe to the channel and yield events until end or disconnect."""
         client = redis_manager.get_client()
         pubsub = client.pubsub()
-        await pubsub.subscribe(self._channel)
-
-        # After subscribing, check if the run already ended (closes the race where
-        # the end event was published before we subscribed on this instance).
-        end_already_in_buffer = await self._check_end_in_buffer()
-
         last_yielded_event_id: str | None = None
         try:
+            await pubsub.subscribe(self._channel)
+            # Subscribing before checking the buffer closes the publication handoff gap.
+            end_already_in_buffer = await self._check_end_in_buffer()
             while True:
                 message = await pubsub.get_message(
                     ignore_subscribe_messages=True,
@@ -239,8 +238,10 @@ class RedisRunBroker(BaseRunBroker):
                     self._finished = True
                     break
         finally:
-            await pubsub.unsubscribe(self._channel)
-            await pubsub.aclose()
+            try:
+                await pubsub.unsubscribe(self._channel)
+            finally:
+                await pubsub.aclose()
 
     async def _check_end_in_buffer(self) -> bool:
         """Check if an 'end' event is already in the replay buffer.
@@ -343,9 +344,12 @@ class RedisBrokerManager(BaseBrokerManager):
             logger.debug(f"Created Redis broker for run {run_id}")
         return self._brokers[run_id]
 
-    def get_broker(self, run_id: str) -> RedisRunBroker | None:
-        """Get an existing broker from the local cache, or None."""
-        return self._brokers.get(run_id)
+    def get_broker(self, run_id: str, *, for_replay: bool = False) -> RedisRunBroker | None:
+        """Read remote replay data without retaining a new local broker."""
+        broker = self._brokers.get(run_id)
+        if broker is None and for_replay:
+            return self._make_broker(run_id)
+        return broker
 
     def cleanup_broker(self, run_id: str) -> None:
         broker = self._brokers.pop(run_id, None)

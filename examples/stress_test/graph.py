@@ -15,7 +15,7 @@ import asyncio
 import json
 from collections.abc import Sequence
 from dataclasses import dataclass, field
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
 from langchain_core.messages import AIMessage, AnyMessage
 from langgraph.graph import StateGraph, add_messages
@@ -81,7 +81,7 @@ async def respond(state: State) -> dict[str, Any]:
     }
 
 
-def should_continue(state: State) -> str:
+def should_continue(state: State) -> Literal["process", "respond"]:
     """Loop through process_step until reaching the configured step count."""
     config = _parse_config(state)
     target_steps = int(config.get("steps", 2))

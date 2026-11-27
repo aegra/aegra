@@ -535,7 +535,12 @@ If no auth is configured, Aegra runs in no-auth mode:
 
 This is the default for local development and testing. Every caller shares the `anonymous` user and its data, so don't expose a server without auth to the internet.
 
-No-auth mode applies only when `auth.path` is not set. If `auth.path` is set and the module cannot be loaded (the file is missing, the import raises, or the variable is not an `Auth` instance), the server stops at startup with the error instead of serving requests as `anonymous`.
+No-auth mode applies only when `auth.path` is not set and `AUTH_TYPE` is `noop`. The server stops at startup with the error instead of serving requests as `anonymous` when:
+
+- `auth.path` is set and the module cannot be loaded (the file is missing, the import raises, or the variable is not an `Auth` instance)
+- `auth` is not an object, has a key other than `path` and `disable_studio_auth`, or `auth.path` is not a string. LangGraph's `openapi` and `cache` keys are accepted and have no effect
+- `AUTH_TYPE` is `custom` and `auth.path` is not set, or `AUTH_TYPE` is not `noop` or `custom`
+- `AEGRA_CONFIG` names a file that does not exist. Only the default `aegra.json` falls back to `langgraph.json`
 
 ## Configuration options
 

@@ -131,22 +131,34 @@ class AuthConfig(TypedDict, total=False):
     """Disable authentication for LangGraph Studio connections"""
 
 
+# LangGraph accepts these in `auth`; Aegra does not implement them, and neither affects who gets in.
+_UNSUPPORTED_AUTH_KEYS = frozenset({"openapi", "cache"})
+DEFAULT_CONFIG_NAME = "aegra.json"
+
+
+class ConfigError(ValueError):
+    """The config names a file or an auth setting that cannot be used as written."""
+
+
 def _resolve_config_path() -> Path | None:
     """Resolve config file path using standard resolution order.
 
     Resolution order:
-    1) AEGRA_CONFIG env var (if set and file exists)
+    1) AEGRA_CONFIG env var (must exist unless it is the default name)
     2) aegra.json in CWD
     3) langgraph.json in CWD (fallback for compatibility)
 
     Returns:
         Path to config file or None if not found
     """
-    # 1) Env var override - only use if file actually exists
     if env_path := settings.app.AEGRA_CONFIG:
         path = Path(env_path)
         if path.exists():
             return path
+        # A named config that is gone must not be swapped for whatever else is in CWD:
+        # that file may have no auth. Only the default name keeps the langgraph.json fallback.
+        if env_path != DEFAULT_CONFIG_NAME:
+            raise ConfigError(f"AEGRA_CONFIG={env_path!r} not found")
         logger.warning(f"AEGRA_CONFIG={env_path!r} not found, falling back to config discovery")
 
     # 2) aegra.json if present
@@ -275,18 +287,33 @@ def load_auth_config() -> AuthConfig | None:
 
     Returns:
         Auth configuration dict or None if not found
+
+    Raises:
+        ConfigError: ``auth`` is set but malformed. Reading it as "no auth" would serve every caller as anonymous.
     """
     config = load_config()
     if config is None:
         return None
 
     auth_config = config.get("auth")
-    if auth_config:
-        config_path = _resolve_config_path()
-        logger.info(f"Loaded auth config from {config_path}")
-        return auth_config
+    if auth_config is None or auth_config == {}:
+        return None
+    if not isinstance(auth_config, dict):
+        raise ConfigError(
+            f'\'auth\' must be an object such as {{"path": "./auth.py:auth"}}, not {type(auth_config).__name__}'
+        )
+    unknown = set(auth_config) - set(AuthConfig.__annotations__) - _UNSUPPORTED_AUTH_KEYS
+    if unknown:
+        raise ConfigError(
+            f"Unknown key(s) in 'auth': {sorted(unknown)}. Supported: {sorted(AuthConfig.__annotations__)}"
+        )
+    if "path" in auth_config and not isinstance(auth_config["path"], str):
+        raise ConfigError("'auth.path' must be a string such as './auth.py:auth'")
+    if ignored := sorted(_UNSUPPORTED_AUTH_KEYS & set(auth_config)):
+        logger.warning(f"auth keys {ignored} are not supported by Aegra and have no effect")
 
-    return None
+    logger.info(f"Loaded auth config from {_resolve_config_path()}")
+    return auth_config
 
 
 def get_config_dir() -> Path | None:

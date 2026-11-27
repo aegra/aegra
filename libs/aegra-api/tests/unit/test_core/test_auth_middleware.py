@@ -1,6 +1,5 @@
 """Unit tests for auth middleware"""
 
-import os
 import sys
 from pathlib import Path
 from unittest.mock import AsyncMock, Mock, patch
@@ -238,27 +237,6 @@ class TestLangGraphAuthBackend:
             assert isinstance(credentials, AuthCredentials)
 
     @pytest.mark.asyncio
-    async def test_authenticate_no_auth_instance_defaults_to_noop(self):
-        """Test that no auth instance defaults to noop (anonymous) regardless of AUTH_TYPE"""
-        backend = LangGraphAuthBackend()
-        backend.auth_instance = None
-
-        mock_conn = Mock(spec=HTTPConnection)
-        mock_conn.headers = {}
-
-        # Test with AUTH_TYPE=custom - should still default to noop
-        with patch("aegra_api.core.auth_middleware.settings") as mock_settings:
-            mock_settings.app.AUTH_TYPE = "custom"
-            result = await backend.authenticate(mock_conn)
-
-            # Should return anonymous user even when AUTH_TYPE=custom
-            assert result is not None
-            credentials, user = result
-            assert user.identity == "anonymous"
-            assert user.display_name == "Anonymous User"
-            assert user.is_authenticated is False
-
-    @pytest.mark.asyncio
     async def test_authenticate_no_handler(self):
         """Test authentication when no handler is configured"""
         mock_auth_instance = Mock()
@@ -401,31 +379,43 @@ class TestLangGraphAuthBackend:
 
 
 class TestGetAuthBackend:
-    """Test get_auth_backend function"""
+    @pytest.mark.parametrize("auth_type", ["noop", ""])
+    def test_noop_without_auth_path_serves_anonymous(self, monkeypatch: pytest.MonkeyPatch, auth_type: str) -> None:
+        monkeypatch.setattr("aegra_api.core.auth_middleware.settings.app.AUTH_TYPE", auth_type)
 
-    def test_get_auth_backend_noop(self):
-        """Test getting auth backend with noop type"""
-        with patch.dict(os.environ, {"AUTH_TYPE": "noop"}):
+        with patch("aegra_api.core.auth_middleware.load_auth_config", return_value=None):
             backend = get_auth_backend()
-            assert isinstance(backend, LangGraphAuthBackend)
 
-    def test_get_auth_backend_custom(self):
-        """Test getting auth backend with custom type"""
-        with patch.dict(os.environ, {"AUTH_TYPE": "custom"}):
-            backend = get_auth_backend()
-            assert isinstance(backend, LangGraphAuthBackend)
+        assert isinstance(backend, LangGraphAuthBackend)
+        assert backend.auth_instance is None
 
-    def test_get_auth_backend_unknown(self):
-        """Test getting auth backend with unknown type"""
-        with patch.dict(os.environ, {"AUTH_TYPE": "unknown"}):
-            backend = get_auth_backend()
-            assert isinstance(backend, LangGraphAuthBackend)
+    def test_custom_without_auth_path_refuses_to_start(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr("aegra_api.core.auth_middleware.settings.app.AUTH_TYPE", "custom")
 
-    def test_get_auth_backend_default(self):
-        """Test getting auth backend with no AUTH_TYPE set"""
-        with patch.dict(os.environ, {}, clear=True):
+        with (
+            patch("aegra_api.core.auth_middleware.load_auth_config", return_value=None),
+            pytest.raises(AuthLoadError, match="AUTH_TYPE=custom"),
+        ):
+            get_auth_backend()
+
+    def test_custom_with_auth_path_loads_it(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+        monkeypatch.setattr("aegra_api.core.auth_middleware.settings.app.AUTH_TYPE", "custom")
+        (tmp_path / "my_auth.py").write_text("from langgraph_sdk import Auth; auth = Auth()")
+
+        with (
+            patch("aegra_api.core.auth_middleware.load_auth_config", return_value={"path": "./my_auth.py:auth"}),
+            patch("aegra_api.core.auth_middleware.get_config_dir", return_value=tmp_path),
+        ):
             backend = get_auth_backend()
-            assert isinstance(backend, LangGraphAuthBackend)
+
+        assert isinstance(backend.auth_instance, Auth)
+
+    @pytest.mark.parametrize("auth_type", ["unknown", "costum", "jwt"])
+    def test_unknown_auth_type_refuses_to_start(self, monkeypatch: pytest.MonkeyPatch, auth_type: str) -> None:
+        monkeypatch.setattr("aegra_api.core.auth_middleware.settings.app.AUTH_TYPE", auth_type)
+
+        with pytest.raises(AuthLoadError, match="Unknown AUTH_TYPE"):
+            get_auth_backend()
 
 
 class TestOnAuthError:

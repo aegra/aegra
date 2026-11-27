@@ -9,7 +9,7 @@ Aegra uses a JSON configuration file (`aegra.json`) to define graphs, authentica
 
 Aegra resolves configuration files in this order:
 
-1. **`AEGRA_CONFIG` environment variable** — absolute or relative path
+1. **`AEGRA_CONFIG` environment variable** — absolute or relative path. A file it names must exist, or the server does not start; only the default `aegra.json` falls through to the next steps
 2. **`aegra.json`** in the current working directory
 3. **`langgraph.json`** in the current working directory (compatibility fallback)
 

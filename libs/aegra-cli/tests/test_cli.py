@@ -1245,6 +1245,11 @@ class TestDownCommandExtended:
 class TestServeCommand:
     """Tests for the serve command."""
 
+    @pytest.fixture(autouse=True)
+    def _no_inherited_config(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # serve honors AEGRA_CONFIG wherever it points; other commands leave it set in os.environ.
+        monkeypatch.delenv("AEGRA_CONFIG", raising=False)
+
     def test_serve_help(self, cli_runner: CliRunner) -> None:
         """Test that serve --help shows all options."""
         result = cli_runner.invoke(cli, ["serve", "--help"])
@@ -1259,6 +1264,60 @@ class TestServeCommand:
             result = cli_runner.invoke(cli, ["serve"])
             assert result.exit_code == 1
             assert "Could not find aegra.json" in result.output
+
+    def test_serve_refuses_a_named_config_that_is_missing(
+        self,
+        cli_runner: CliRunner,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        serve_launch: ServeLaunch,
+    ) -> None:
+        """A local aegra.json without auth must not stand in for the config the deployment named."""
+        with cli_runner.isolated_filesystem(temp_dir=tmp_path):
+            Path("aegra.json").write_text('{"graphs": {}}')
+            monkeypatch.setenv("AEGRA_CONFIG", "prod.json")
+
+            result = cli_runner.invoke(cli, ["serve"])
+
+            assert result.exit_code != 0
+            assert "AEGRA_CONFIG='prod.json' not found" in result.output
+            assert not serve_launch.execvp.called
+            assert not serve_launch.run.called
+
+    def test_serve_uses_a_named_config_outside_cwd(
+        self,
+        cli_runner: CliRunner,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        serve_launch: ServeLaunch,
+    ) -> None:
+        mounted = tmp_path / "mounted" / "prod.json"
+        mounted.parent.mkdir()
+        mounted.write_text('{"graphs": {}}')
+        with cli_runner.isolated_filesystem(temp_dir=tmp_path):
+            Path("aegra.json").write_text('{"graphs": {}}')
+            monkeypatch.setenv("AEGRA_CONFIG", str(mounted))
+
+            result = cli_runner.invoke(cli, ["serve"])
+
+            assert result.exit_code == 0
+            assert os.environ["AEGRA_CONFIG"] == str(mounted.resolve())
+
+    def test_serve_default_config_name_still_falls_back_to_langgraph_json(
+        self,
+        cli_runner: CliRunner,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        serve_launch: ServeLaunch,
+    ) -> None:
+        with cli_runner.isolated_filesystem(temp_dir=tmp_path):
+            Path("langgraph.json").write_text('{"graphs": {}}')
+            monkeypatch.setenv("AEGRA_CONFIG", "aegra.json")
+
+            result = cli_runner.invoke(cli, ["serve"])
+
+            assert result.exit_code == 0
+            assert os.environ["AEGRA_CONFIG"].endswith("langgraph.json")
 
     def test_serve_runs_uvicorn(
         self, cli_runner: CliRunner, tmp_path: Path, serve_launch: ServeLaunch

@@ -31,6 +31,9 @@ from aegra_api.settings import settings
 logger = structlog.getLogger(__name__)
 
 
+_AUTH_TYPES = ("noop", "custom")
+
+
 class AuthLoadError(RuntimeError):
     """``auth.path`` is set but cannot be loaded. Serving as anonymous would drop all access control."""
 
@@ -178,9 +181,8 @@ class LangGraphAuthBackend(AuthenticationBackend):
         Raises:
             AuthenticationError: If authentication fails
         """
-        # Handle noop auth when no auth instance is configured
-        # Default to noop (anonymous) authentication when no auth file is found,
-        # regardless of AUTH_TYPE setting. This ensures the server works out-of-the-box.
+        # No auth module and AUTH_TYPE=noop: anonymous, so the server works out of the box.
+        # AUTH_TYPE=custom without a module never gets here; get_auth_backend refuses it.
         if self.auth_instance is None:
             # The no-auth warning is emitted once at startup in __init__;
             # logging here would repeat it on every request.
@@ -246,15 +248,21 @@ def get_auth_backend() -> AuthenticationBackend:
 
     Returns:
         AuthenticationBackend instance
-    """
-    auth_type = settings.app.AUTH_TYPE
 
-    if auth_type in ["noop", "custom"]:
-        logger.debug(f"Using auth backend with type: {auth_type}")
-        return LangGraphAuthBackend()
-    else:
-        logger.warning(f"Unknown AUTH_TYPE: {auth_type}, using noop")
-        return LangGraphAuthBackend()
+    Raises:
+        AuthLoadError: AUTH_TYPE is unknown, or is ``custom`` with no auth module to load.
+    """
+    auth_type = settings.app.AUTH_TYPE or "noop"
+    if auth_type not in _AUTH_TYPES:
+        raise AuthLoadError(f"Unknown AUTH_TYPE={auth_type!r}. Use one of: {', '.join(_AUTH_TYPES)}")
+
+    backend = LangGraphAuthBackend()
+    if auth_type == "custom" and backend.auth_instance is None:
+        raise AuthLoadError(
+            "AUTH_TYPE=custom but 'auth.path' is not set, so every request would be served as anonymous"
+        )
+    logger.debug(f"Using auth backend with type: {auth_type}")
+    return backend
 
 
 def on_auth_error(conn: HTTPConnection, exc: AuthenticationError) -> JSONResponse:

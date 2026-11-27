@@ -1,12 +1,15 @@
 """Tests for application lifespan and startup logic"""
 
 import importlib
+import json
 from pathlib import Path
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 import aegra_api.main as main_module
+from aegra_api.config import ConfigError
 from aegra_api.core import auth_middleware
 from aegra_api.observability.base import get_observability_manager
 from aegra_api.services import run_preparation, webhook_policy
@@ -348,6 +351,45 @@ async def test_lifespan_fails_before_any_db_work_on_invalid_webhooks_config(
         mock_db_manager.initialize = AsyncMock()
 
         with pytest.raises(ValueError, match="LG_WEBHOOK_TOKEN"):
+            async with main_module.lifespan(MagicMock()):
+                pass
+
+        mock_migrations.assert_not_called()
+        mock_db_manager.initialize.assert_not_called()
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("auth_type", "config", "error", "match"),
+    [
+        ("custom", {"graphs": {}}, auth_middleware.AuthLoadError, "AUTH_TYPE=custom"),
+        ("costum", {"graphs": {}}, auth_middleware.AuthLoadError, "Unknown AUTH_TYPE"),
+        ("noop", {"graphs": {}, "auth": "./my_auth.py:auth"}, ConfigError, "must be an object"),
+        ("noop", {"graphs": {}, "auth": {"paht": "./my_auth.py:auth"}}, ConfigError, "Unknown key"),
+    ],
+)
+async def test_lifespan_fails_before_any_db_work_when_auth_settings_would_serve_anonymous(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    auth_type: str,
+    config: dict[str, Any],
+    error: type[Exception],
+    match: str,
+) -> None:
+    importlib.reload(main_module)
+    (tmp_path / "aegra.json").write_text(json.dumps(config))
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(auth_middleware.settings.app, "AEGRA_CONFIG", None)
+    monkeypatch.setattr(auth_middleware.settings.app, "AUTH_TYPE", auth_type)
+
+    with (
+        patch("aegra_api.main.run_migrations_async", new_callable=AsyncMock) as mock_migrations,
+        patch("aegra_api.main.db_manager") as mock_db_manager,
+    ):
+        mock_db_manager.initialize = AsyncMock()
+
+        with pytest.raises(error, match=match):
             async with main_module.lifespan(MagicMock()):
                 pass
 

@@ -72,10 +72,11 @@ aegra serve
 ```
 
 What it does:
-1. Loads your `.env` file
-2. Replaces itself with uvicorn in production mode (no reload), so as a container's PID 1 the server receives `SIGTERM` directly and drains in-flight runs; on Windows, which has no exec, uvicorn runs as a child process
-3. Applies database migrations automatically
-4. Connects to the database configured via `DATABASE_URL` or `POSTGRES_*` variables
+1. Finds the config: `--config`, else `AEGRA_CONFIG` wherever it points, else `aegra.json` or `langgraph.json` in the current directory. If `AEGRA_CONFIG` names a file that does not exist, `serve` stops instead of using another config (the default `aegra.json` is the exception)
+2. Loads your `.env` file
+3. Replaces itself with uvicorn in production mode (no reload), so as a container's PID 1 the server receives `SIGTERM` directly and drains in-flight runs; on Windows, which has no exec, uvicorn runs as a child process
+4. Applies database migrations automatically
+5. Connects to the database configured via `DATABASE_URL` or `POSTGRES_*` variables
 
 | Option | Default | Description |
 |--------|---------|-------------|

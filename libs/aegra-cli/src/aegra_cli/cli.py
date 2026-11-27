@@ -159,6 +159,24 @@ def find_config_file() -> Path | None:
     return None
 
 
+def find_serve_config_file() -> Path | None:
+    """Like find_config_file, but AEGRA_CONFIG is used wherever it points and must exist.
+
+    Raises:
+        click.ClickException: AEGRA_CONFIG names a file that is missing.
+    """
+    env_config = os.environ.get("AEGRA_CONFIG", "").strip()
+    if env_config:
+        resolved = Path(env_config).expanduser().resolve()
+        if resolved.is_file():
+            return resolved
+        # Serving a different config than the one named could drop its auth. The default
+        # name stays optional so a langgraph.json project still starts.
+        if env_config != "aegra.json":
+            raise click.ClickException(f"AEGRA_CONFIG={env_config!r} not found")
+    return find_config_file()
+
+
 def get_project_slug(config_path: Path | None) -> str:
     """Get project slug from config file or directory name.
 
@@ -576,7 +594,7 @@ def serve(ctx: click.Context, host: str, port: int, app: str, config_file: Path 
     if config_file is not None:
         resolved_config = config_file.resolve()
     else:
-        resolved_config = find_config_file()
+        resolved_config = find_serve_config_file()
 
     if resolved_config is None:
         console.print(

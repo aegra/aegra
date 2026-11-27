@@ -86,15 +86,36 @@ def test_ready_preserves_missing_engine_response(ready_backend: MagicMock, ready
     }
 
 
-@pytest.mark.parametrize("probe_failure", [False, True])
-def test_ready_preserves_success_response(
-    ready_backend: MagicMock, ready_client: TestClient, probe_failure: bool
-) -> None:
-    if probe_failure:
-        ready_backend.get_checkpointer.return_value.aget_tuple.side_effect = RuntimeError("synthetic probe failure")
-        ready_backend.get_store.return_value.aget.side_effect = RuntimeError("synthetic probe failure")
-
+def test_ready_preserves_success_response(ready_backend: MagicMock, ready_client: TestClient) -> None:
     response = ready_client.get("/ready")
 
     assert response.status_code == 200
     assert response.json() == {"status": "ready"}
+
+
+@pytest.mark.parametrize("component", ["checkpointer", "store"])
+def test_ready_reports_persistence_probe_failure(
+    ready_backend: MagicMock,
+    ready_client: TestClient,
+    component: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    warning = MagicMock()
+    monkeypatch.setattr(health.logger, "warning", warning)
+    marker = f"{component} probe failed with internal details"
+    error = RuntimeError(marker)
+    if component == "checkpointer":
+        ready_backend.get_checkpointer.return_value.aget_tuple.side_effect = error
+    else:
+        ready_backend.get_store.return_value.aget.side_effect = error
+
+    response = ready_client.get("/ready")
+
+    assert response.status_code == 503
+    assert response.json() == {
+        "error": "service_unavailable",
+        "message": "Service not ready - components unavailable",
+        "details": None,
+    }
+    assert marker not in response.text
+    warning.assert_called_once_with("readiness check failed: components", exc_info=True)

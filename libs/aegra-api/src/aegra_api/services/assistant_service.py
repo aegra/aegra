@@ -410,10 +410,11 @@ class AssistantService(Authenticated):
         filters = await self._dispatch("update", value)
         request.metadata = _injected_metadata(request.metadata, value)
 
-        stmt = select(AssistantORM).where(
+        owned_stmt = select(AssistantORM).where(
             AssistantORM.assistant_id == assistant_id,
             AssistantORM.user_id == self.user.identity,
         )
+        stmt = owned_stmt
         auth_filter = build_metadata_filter(AssistantORM.metadata_dict, filters)
         if auth_filter is not None:
             stmt = stmt.where(auth_filter)
@@ -496,7 +497,9 @@ class AssistantService(Authenticated):
         )
         await self.session.execute(assistant_update)
         await self.session.commit()
-        updated_assistant = await self.session.scalar(stmt)
+        # The handler filter authorized the stored row above. The saved row may no
+        # longer match it (a rename away from a filtered name), so read it by owner.
+        updated_assistant = await self.session.scalar(owned_stmt)
         return to_pydantic(updated_assistant)
 
     async def delete_assistant(self, assistant_id: str) -> dict:
@@ -524,10 +527,11 @@ class AssistantService(Authenticated):
         """Set the given version as the latest version of an assistant"""
         filters = await self._dispatch("update", {"assistant_id": assistant_id, "version": version})
 
-        stmt = select(AssistantORM).where(
+        owned_stmt = select(AssistantORM).where(
             AssistantORM.assistant_id == assistant_id,
             AssistantORM.user_id == self.user.identity,
         )
+        stmt = owned_stmt
         auth_filter = build_metadata_filter(AssistantORM.metadata_dict, filters)
         if auth_filter is not None:
             stmt = stmt.where(auth_filter)
@@ -562,7 +566,9 @@ class AssistantService(Authenticated):
         )
         await self.session.execute(assistant_update)
         await self.session.commit()
-        updated_assistant = await self.session.scalar(stmt)
+        # The handler filter authorized the stored row above. The saved row may no
+        # longer match it (a rename away from a filtered name), so read it by owner.
+        updated_assistant = await self.session.scalar(owned_stmt)
         return to_pydantic(updated_assistant)
 
     async def list_assistant_versions(self, assistant_id: str) -> list[Assistant]:

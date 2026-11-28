@@ -1,5 +1,5 @@
 version = 1
-revision = 5
+revision = 3
 requires-python = ">=3.12"
 resolution-markers = [
     "python_full_version >= '3.14' and sys_platform == 'win32'",
@@ -18,7 +18,7 @@ members = [
 
 [[package]]
 name = "aegra-api"
-version = "0.12.0"
+version = "0.13.0"
 source = { editable = "libs/aegra-api" }
 dependencies = [
     { name = "alembic" },
@@ -107,7 +107,7 @@ dev = [
 
 [[package]]
 name = "aegra-cli"
-version = "0.12.0"
+version = "0.13.0"
 source = { editable = "libs/aegra-cli" }
 dependencies = [
     { name = "aegra-api" },

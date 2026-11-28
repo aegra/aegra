@@ -22,8 +22,8 @@ security backports, upgrade to the latest patch on each minor.
 
 | Version | Supported |
 | ------- | --------- |
-| 0.9.x   | Yes       |
-| < 0.9   | No        |
+| 0.13.x  | Yes       |
+| < 0.13  | No        |
 
 ## Scope
 

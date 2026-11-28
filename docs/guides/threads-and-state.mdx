@@ -262,6 +262,8 @@ Threads with pending or running runs are never expired mid-run — they are
 picked up on a later sweep once their runs settle. TTL applies to threads
 created after it is enabled; pre-existing threads are not backfilled.
 
+The server default also covers threads that runs create: stateless runs kept with `on_completion="keep"`, stateless crons kept with `on_run_completed="keep"`, and runs started on a thread ID that does not exist yet.
+
 ### Pruning threads by ID
 
 To prune specific threads now, with or without a TTL, pass their IDs. The

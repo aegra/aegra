@@ -358,7 +358,7 @@ curl -N -X POST http://localhost:8000/threads/$THREAD/stream/events \
   -d '{"channels": ["messages", "values", "lifecycle"]}'
 ```
 
-The client reads each frame's `data:` line — a protocol event envelope. `seq` is the cursor you echo back as `since`; `event_id` dedups across reconnects; `params.data` is the payload and `params.namespace` the subgraph path:
+The client reads each frame's `data:` line — a protocol event envelope. `seq` is the cursor you echo back as `since`; it rises across runs and connections on a thread, and an event has the same `seq` on every connection. `event_id` dedups across reconnects, and a root `lifecycle` event's id names its run as `synth:<run_id>:…`. `params.data` is the payload, `params.namespace` the subgraph path, and `params.timestamp` the time the event was produced:
 
 ```
 data: {"type":"event","seq":1,"event_id":"...:1","method":"messages","params":{"data":{"event":"message-start","role":"ai","id":"msg_1"},"namespace":[]}}

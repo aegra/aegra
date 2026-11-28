@@ -54,10 +54,10 @@ class _Session:
         return self._owner
 
     async def execute(self, _stmt: Any) -> Any:
-        rows = [(run_id, "running", "test_graph") for run_id in self._run_ids]
+        rows = [(run_id, "running", "test_graph", None) for run_id in self._run_ids]
 
         class _Result:
-            def all(self) -> list[tuple[str, str, str]]:
+            def all(self) -> list[tuple[str, str, str, None]]:
                 return rows
 
         return _Result()

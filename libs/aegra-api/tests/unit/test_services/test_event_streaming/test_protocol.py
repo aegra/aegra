@@ -37,6 +37,10 @@ class TestBuildEvent:
         assert isinstance(ts, int)
         assert ts > 1_600_000_000_000  # sanity: after 2020, in milliseconds not seconds
 
+    def test_given_timestamp_is_kept(self) -> None:
+        evt = build_event("values", {"x": 1}, seq=1, timestamp=1_700_000_000_000)
+        assert evt["params"]["timestamp"] == 1_700_000_000_000
+
 
 class TestBuildSuccess:
     def test_success_without_meta(self) -> None:

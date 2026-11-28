@@ -19,12 +19,13 @@ from datetime import UTC, datetime, timedelta
 import structlog
 from asgi_correlation_id import correlation_id
 from redis import RedisError
-from sqlalchemy import select, update
+from sqlalchemy import exists, select, update
 
 from aegra_api.core.active_runs import active_runs, explicit_run_cancellations
 from aegra_api.core.orm import Run as RunORM
 from aegra_api.core.orm import _get_session_maker
 from aegra_api.core.redis_manager import redis_manager
+from aegra_api.models.enums import CancelReason
 from aegra_api.models.run_job import RunJob
 from aegra_api.observability.span_enrichment import merge_run_metadata, prepare_run_otel_trace, set_trace_context
 from aegra_api.services.base_executor import BaseExecutor
@@ -51,10 +52,31 @@ def _is_valid_run_id(value: str) -> bool:
     return bool(_RUN_ID_PATTERN.match(value))
 
 
+def _forced_cancel_reason(run_id: str) -> CancelReason:
+    """A drain survivor resumes on another instance; every other forced cancel ends the run here."""
+    if run_id in explicit_run_cancellations:
+        return "cancel"
+    if run_id in _shutdown_cancellations:
+        return "requeue"
+    return "cancel"
+
+
+def _lease_lost_reason(extended: bool, status: str | None) -> CancelReason | None:
+    """Name the reason to cancel a job whose lease extension touched no row, or ``None`` when it was extended.
+
+    A run that ended while this worker's lease was expired, or whose row is gone, ends here; an active one resumes.
+    """
+    if extended:
+        return None
+    if status is None or status in _TERMINAL_STATUSES:
+        return "cancel"
+    return "lease_lost"
+
+
 async def _cleanup_cancelled_execution(run_id: str, execution_task: asyncio.Task[None]) -> None:
     """Stop execution and persist an explicit cancellation when applicable."""
     if not execution_task.done():
-        execution_task.cancel()
+        execution_task.cancel(msg=_forced_cancel_reason(run_id))
     await asyncio.gather(execution_task, return_exceptions=True)
 
     if run_id not in explicit_run_cancellations:
@@ -289,7 +311,7 @@ class WorkerExecutor(BaseExecutor):
                     timeout_secs=settings.worker.BG_JOB_TIMEOUT_SECS,
                 )
                 _timeout_cancellations.add(run_id)
-                execution_task.cancel()
+                execution_task.cancel(msg="timeout")
                 await asyncio.gather(execution_task, return_exceptions=True)
 
                 identity = await _get_run_identity(run_id)
@@ -572,14 +594,21 @@ async def _heartbeat_loop(
         await asyncio.sleep(interval)
         try:
             new_expiry = datetime.now(UTC) + timedelta(seconds=duration)
+            # Read status with the lease update so a second query cannot delay cancellation
+            # and let the old job save its result over the worker that now owns the run.
+            extension = (
+                update(RunORM)
+                .where(RunORM.run_id == run_id, RunORM.claimed_by == worker_name)
+                .values(lease_expires_at=new_expiry)
+                .returning(RunORM.run_id)
+                .cte("extension")
+            )
+            status = select(RunORM.status).where(RunORM.run_id == run_id).scalar_subquery()
             async with maker() as session:
-                result = await session.execute(
-                    update(RunORM)
-                    .where(RunORM.run_id == run_id, RunORM.claimed_by == worker_name)
-                    .values(lease_expires_at=new_expiry)
-                )
+                extended, run_status = (await session.execute(select(exists(extension.select()), status))).one()
                 await session.commit()
-            if result.rowcount == 0:  # type: ignore[union-attr]
+            reason = _lease_lost_reason(extended, run_status)
+            if reason is not None:
                 logger.warning(
                     "Lease lost, cancelling job to prevent double execution",
                     run_id=run_id,
@@ -587,7 +616,7 @@ async def _heartbeat_loop(
                 )
                 if job_task is not None and not job_task.done():
                     _lease_loss_cancellations.add(run_id)
-                    job_task.cancel()
+                    job_task.cancel(msg=reason)
                 return
             logger.debug("Lease extended", run_id=run_id, worker=worker_name)
         except Exception:

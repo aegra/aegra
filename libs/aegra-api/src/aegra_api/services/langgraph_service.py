@@ -27,6 +27,7 @@ from langgraph.pregel import Pregel
 from langgraph_sdk.auth.types import BaseUser
 from sqlalchemy import func, select
 
+from aegra_api.config import add_dependency_paths
 from aegra_api.constants import ASSISTANT_NAMESPACE_UUID
 from aegra_api.core.orm import Assistant as AssistantORM
 from aegra_api.core.orm import AssistantVersion as AssistantVersionORM
@@ -238,29 +239,7 @@ class LangGraphService:
         """
         if self.config is None:
             raise ValueError("Configuration not loaded")
-        dependencies = self.config.get("dependencies", [])
-        if not dependencies:
-            return
-
-        config_dir = self.config_path.parent
-
-        # Iterate in reverse so first dependency in config has highest priority
-        for dep in reversed(dependencies):
-            dep_path = Path(dep)
-
-            # Resolve relative paths from config directory
-            if not dep_path.is_absolute():
-                dep_path = (config_dir / dep_path).resolve()
-            else:
-                dep_path = dep_path.resolve()
-
-            # Add to sys.path if exists and not already present
-            path_str = str(dep_path)
-            if dep_path.exists() and path_str not in sys.path:
-                sys.path.insert(0, path_str)
-                logger.info(f"Added dependency path to sys.path: {path_str}")
-            elif not dep_path.exists():
-                logger.warning(f"Dependency path does not exist: {path_str}")
+        add_dependency_paths(self.config.get("dependencies", []), config_dir=self.config_path.parent)
 
     async def _ensure_default_assistants(self) -> None:
         """Create default assistants and sync their configured descriptions.

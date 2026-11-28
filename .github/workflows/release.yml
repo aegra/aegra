@@ -52,6 +52,16 @@ jobs:
         working-directory: libs/aegra-api
         run: uv build --out-dir dist/
 
+      - name: Check the wheel ships py.typed
+        working-directory: libs/aegra-api
+        run: |
+          WHEEL=$(ls dist/*.whl)
+          if ! python3 -c 'import sys, zipfile; sys.exit("aegra_api/py.typed" not in zipfile.ZipFile(sys.argv[1]).namelist())' "$WHEEL"; then
+            echo "::error::$WHEEL has no aegra_api/py.typed, so type checkers would skip the package's annotations"
+            exit 1
+          fi
+          echo "$WHEEL contains aegra_api/py.typed"
+
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
         with:

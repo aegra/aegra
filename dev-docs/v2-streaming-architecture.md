@@ -31,6 +31,8 @@ Client choreography — every bug traces back to this sequence:
 1. open   stream/events          (SSE stays open for the whole session)
 2. post   commands {run.start}   (starts run A)
 3. run A's events flow down the step-1 stream
+   → [live input] post commands {input.inject} while run A runs → no new run;
+     the message waits in run_inputs until run A's graph takes it
 4. [HITL] interrupt surfaces on the stream as input.requested
    → post commands {input.respond} → starts run B on the SAME thread
    → run B's events flow down the SAME step-1 stream (never reopened)
@@ -69,6 +71,7 @@ Which file when X breaks:
 | event on wrong channel / missing lifecycle / seq off / interrupt not split | `session.py` |
 | one consumer gets events, another doesn't / HITL watcher blind | `broker.py` / `redis_broker.py` |
 | run won't start / resume rejected / auth | `commands.py` + `run_preparation.py` |
+| inject refused / injected message never reaches the graph | `inject.py` + `services/injected_input.py` (`runs.accepts_input_inject`, `run_inputs` claims) |
 | everything v2 dead / 503 | `capabilities.py` + `FF_V2_EVENT_STREAMING` |
 | old thread hangs on open | `_drain_run` status backstop (`session.py`) |
 
@@ -163,9 +166,12 @@ Three layers, all present + tested:
    `run_executor.py` (shared executor). Tests:
    `test_create_run_config_ignores_client_thread_id_override`,
    `test_create_run_config_checkpoint_cannot_override_thread_id`,
-   `test_thread_checkpoint_scoping.py`.
+   `test_thread_checkpoint_scoping.py`. The injected-input reader is pinned the
+   same way: `_build_run_config` (`run_executor.py`) overwrites
+   `configurable.aegra_injected_input` with one bound to the run, thread, and user.
 3. **SQL tenant filter** — every v2 DB query carries `user_id == user.identity`
-   (`_thread_assistant_id`, `_thread_is_interrupted`, the run lister); assistant
+   (`_thread_assistant_id`, `_thread_is_interrupted`, the run lister, every
+   `run_inputs` read and write); assistant
    resolution is `user.identity OR "system"`. Required because `@auth.on` is
    default-allow when no handler matches (GHSA-m98r-6667-4wq7).
 
@@ -240,6 +246,10 @@ clients ignore it; it exists purely to keep the socket alive.
 - E2E — `tests/e2e/test_event_streaming/test_sdk_v2_e2e.py` (stock langgraph SDK
   against a real server; the only layer that proves wire compat + the two-SSE
   fan-out + real HITL). MUST pass in both dev and prod: `make e2e-both`.
+- `input.inject` — unit `test_input_inject.py`, route `test_input_inject_route.py`,
+  storage against PostgreSQL `tests/integration/test_injected_input_db.py` (skips
+  without a database), e2e `test_input_inject_e2e.py` (raw command bodies: the
+  Python SDK has no `input.inject`).
 
 Integration canNOT replace e2e: it mocks the broker + DB + real SDK, so the two
 biggest historical bugs (broker fan-out, resume race, expired-broker wedge) are

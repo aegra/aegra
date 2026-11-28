@@ -3,7 +3,8 @@
 * ``POST /threads/{thread_id}/stream/events`` — SSE stream of a run's
   events, filtered by channel. Body is an ``EventStreamRequest``.
 * ``POST /threads/{thread_id}/commands`` — run a thread command
-  (``run.start``, ``input.respond``) and get a JSON response envelope.
+  (``run.start``, ``input.respond``, ``input.inject``) and get a JSON
+  response envelope.
 
 Both gate on the ``FF_V2_EVENT_STREAMING`` flag + runtime capability, and
 verify thread (and run) ownership before doing anything.

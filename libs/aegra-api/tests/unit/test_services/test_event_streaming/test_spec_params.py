@@ -11,12 +11,15 @@ import pytest
 
 from aegra_api.models import User
 from aegra_api.services.event_streaming import commands as cmd
+from aegra_api.services.event_streaming import inject
 
 SPEC_RUN_START_KEYS: frozenset[str] = frozenset({"assistant_id", "input", "config", "metadata", "langsmith_tracer"})
 SPEC_INPUT_RESPOND_ONE_KEYS: frozenset[str] = frozenset(
     {"namespace", "interrupt_id", "response", "update", "goto", "config", "metadata"}
 )
 SPEC_INPUT_RESPOND_MANY_KEYS: frozenset[str] = frozenset({"responses", "update", "goto", "config", "metadata"})
+SPEC_INPUT_INJECT_KEYS: frozenset[str] = frozenset({"namespace", "message"})
+SPEC_INPUT_MESSAGE_KEYS: frozenset[str] = frozenset({"role", "content", "name"})
 
 # Spec keys the server reads for validation only or has no backend for.
 # Each one is documented in docs/guides/streaming.mdx.
@@ -47,6 +50,9 @@ class TestDeclaredKeysCoverSpec:
 
     def test_input_respond_declares_every_spec_key(self) -> None:
         assert SPEC_INPUT_RESPOND_ONE_KEYS | SPEC_INPUT_RESPOND_MANY_KEYS <= cmd.INPUT_RESPOND_KEYS
+
+    def test_input_inject_declares_every_spec_key(self) -> None:
+        assert SPEC_INPUT_INJECT_KEYS <= cmd.INPUT_INJECT_KEYS
 
 
 class TestEverySpecKeyChangesTheRun:
@@ -116,6 +122,20 @@ class TestEverySpecKeyChangesTheRun:
         }
         assert request.config == {"recursion_limit": 7}
         assert request.metadata == {"source": "spec"}
+
+    async def test_input_inject_forwards_all_spec_keys(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(inject, "thread_admission", AsyncMock(return_value="accepting"))
+        stored = AsyncMock(return_value=True)
+        monkeypatch.setattr(inject, "store_message", stored)
+        params: dict[str, Any] = {"namespace": [], "message": {"role": "user", "content": "hi", "name": "alice"}}
+        assert set(params) == SPEC_INPUT_INJECT_KEYS
+        assert set(params["message"]) == SPEC_INPUT_MESSAGE_KEYS
+
+        resp, _ = await _dispatch("input.inject", params)
+
+        assert resp["type"] == "success"
+        message = stored.call_args.kwargs["message"]
+        assert {key: message[key] for key in SPEC_INPUT_MESSAGE_KEYS} == params["message"]
 
     def test_noop_keys_are_spec_keys(self) -> None:
         all_spec = SPEC_RUN_START_KEYS | SPEC_INPUT_RESPOND_ONE_KEYS | SPEC_INPUT_RESPOND_MANY_KEYS

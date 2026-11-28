@@ -4,7 +4,8 @@ Commands are JSON-RPC-style: ``{id, method, params}`` in, a success or
 error envelope out. They re-front the existing run machinery — ``run.start``
 and ``input.respond`` both build a ``RunCreate`` and go through the same
 ``_prepare_run`` path the legacy endpoints use, so execution semantics are
-identical; only the transport differs.
+identical; only the transport differs. ``input.inject`` starts no run: it
+hands a message to the thread's running run (see ``inject.py``).
 """
 
 from __future__ import annotations
@@ -23,6 +24,7 @@ from aegra_api.core.orm import Run as RunORM
 from aegra_api.core.orm import Thread as ThreadORM
 from aegra_api.models import User
 from aegra_api.models.runs import RunCreate
+from aegra_api.services.event_streaming.inject import authorize_inject, input_inject
 from aegra_api.services.event_streaming.protocol import ErrorCode, build_error, build_success
 from aegra_api.services.run_preparation import _apply_create_run_auth, _prepare_run
 
@@ -73,6 +75,13 @@ async def handle_command(
             return await _run_start(command_id, params, session=session, thread_id=thread_id, user=user)
         if method == "input.respond":
             return await _input_respond(command_id, params, session=session, thread_id=thread_id, user=user)
+        if method == "input.inject":
+            _warn_unknown_keys("input.inject", params, INPUT_INJECT_KEYS)
+            authorized = await authorize_inject(user, thread_id, payload)
+            response = await input_inject(
+                command_id, params, session=session, thread_id=thread_id, user=user, authorized=authorized
+            )
+            return response, None
     except HTTPException as exc:
         return build_error(command_id, _status_to_error_code(exc.status_code), str(exc.detail)), None
     except ValidationError as exc:
@@ -116,6 +125,7 @@ INPUT_RESPOND_KEYS: frozenset[str] = frozenset(
         "assistant_id",
     }
 )
+INPUT_INJECT_KEYS: frozenset[str] = frozenset({"namespace", "message"})
 
 
 def _warn_unknown_keys(method: str, params: dict[str, Any], known: frozenset[str]) -> None:

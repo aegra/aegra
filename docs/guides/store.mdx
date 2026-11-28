@@ -67,6 +67,53 @@ for item in results["items"]:
 
 `limit` uses the same `MAX_SEARCH_LIMIT` cap as thread search (default 1000). Omitted or null `limit` uses `min(20, MAX_SEARCH_LIMIT)`.
 
+## Expire items with a TTL
+
+Add a `store.ttl` block to `aegra.json` and Aegra deletes store items once their TTL runs out. A background sweeper does the deleting, so an expired item can stay readable until the next sweep (every 5 minutes by default).
+
+```json
+{
+  "store": {
+    "ttl": {
+      "default_ttl": 10080,
+      "sweep_interval_minutes": 5
+    }
+  }
+}
+```
+
+Items written without a `ttl` get `default_ttl` (in minutes). Pass `ttl` to set one for a single item:
+
+```python
+await client.store.put_item(
+    namespace=["users", "alice", "scratch"],
+    key="draft",
+    value={"text": "..."},
+    ttl=60,  # expires in an hour
+)
+```
+
+By default every read restarts the clock (`refresh_on_read`). Pass `refresh_ttl=False` to read without extending an item's life, or `True` to extend it when `refresh_on_read` is off:
+
+```python
+item = await client.store.get_item(
+    namespace=["users", "alice", "scratch"],
+    key="draft",
+    refresh_ttl=False,
+)
+
+results = await client.store.search_items(
+    ["users", "alice"],
+    refresh_ttl=False,
+)
+```
+
+<Note>
+  A request that sets `ttl` or `refresh_ttl` while `store.ttl` is not configured gets a `422`.
+  Omitting `ttl` (or sending `null`) uses `default_ttl`, so a request cannot opt a single item out of a configured default.
+  See the [configuration reference](/reference/configuration#store-ttl) for every option.
+</Note>
+
 ## Namespaces
 
 Namespaces organize your data hierarchically. They work like directory paths:
